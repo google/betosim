@@ -1,0 +1,89 @@
+[
+  {
+    "_index": "packets-2025-12-07",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame": {
+          "frame.encap_type": "1",
+          "frame.time": "Dec  7, 2025 02:10:03.000001000 UTC",
+          "frame.time_utc": "Dec  7, 2025 02:10:03.000001000 UTC",
+          "frame.time_epoch": "1765073403.000001000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "26",
+          "frame.cap_len": "26",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "eth:llc:ip"
+        },
+        "eth": {
+          "eth.dst": "00:00:00:00:00:00",
+          "eth.dst_tree": {
+            "eth.dst_resolved": "00:00:00_00:00:00",
+            "eth.dst.oui": "0",
+            "eth.dst.oui_resolved": "Officially Xerox, but 0:0:0:0:0:0 is more common",
+            "eth.dst.lg": "0",
+            "eth.dst.ig": "0",
+            "eth.addr": "00:00:00:00:00:00",
+            "eth.addr_resolved": "00:00:00_00:00:00",
+            "eth.addr.oui": "0",
+            "eth.addr.oui_resolved": "Officially Xerox, but 0:0:0:0:0:0 is more common",
+            "eth.lg": "0",
+            "eth.ig": "0"
+          },
+          "eth.src": "00:00:00:00:00:00",
+          "eth.src_tree": {
+            "eth.src_resolved": "00:00:00_00:00:00",
+            "eth.src.oui": "0",
+            "eth.src.oui_resolved": "Officially Xerox, but 0:0:0:0:0:0 is more common",
+            "eth.src.lg": "0",
+            "eth.src.ig": "0",
+            "eth.addr": "00:00:00:00:00:00",
+            "eth.addr_resolved": "00:00:00_00:00:00",
+            "eth.addr.oui": "0",
+            "eth.addr.oui_resolved": "Officially Xerox, but 0:0:0:0:0:0 is more common",
+            "eth.lg": "0",
+            "eth.ig": "0"
+          },
+          "eth.len": "12",
+          "eth.stream": "0"
+        },
+        "llc": {
+          "llc.dsap": "0xaa",
+          "llc.dsap_tree": {
+            "llc.dsap.sap": "85",
+            "llc.dsap.ig": "0"
+          },
+          "llc.ssap": "0xaa",
+          "llc.ssap_tree": {
+            "llc.ssap.sap": "85",
+            "llc.ssap.cr": "0"
+          },
+          "llc.control": "0x0003",
+          "llc.control_tree": {
+            "llc.control.u_modifier_cmd": "0x00",
+            "llc.control.ftype": "0x03"
+          },
+          "llc.oui": "0",
+          "llc.type": "0x0800"
+        },
+        "ip": {
+          "ip.version": "13",
+          "ip.version_tree": {
+            "_ws.expert": {
+              "ip.bogus_ip_version": "",
+              "_ws.expert.message": "Bogus IPv4 version",
+              "_ws.expert.severity": "8388608",
+              "_ws.expert.group": "150994944"
+            }
+          }
+        }
+      }
+    }
+  }
+]

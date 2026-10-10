@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,48 +30,45 @@ use crate::events::{
     ChipAdded, ChipRemoved, DeviceAdded, DevicePatched, DeviceRemoved, Event, Events, ShutDown,
 };
 use crate::http_server::server_response::ResponseWritable;
+use crate::links::link::{LinkManager, PhyKind};
+use crate::ranging;
 use crate::wireless;
 use http::Request;
 use log::{info, warn};
+use netsim_common::util::proto_print_options::JSON_PRINT_OPTION;
 use netsim_proto::common::ChipKind as ProtoChipKind;
-use netsim_proto::frontend::patch_device_request::PatchDeviceFields as ProtoPatchDeviceFields;
 use netsim_proto::frontend::CreateDeviceRequest;
 use netsim_proto::frontend::CreateDeviceResponse;
 use netsim_proto::frontend::DeleteChipRequest;
 use netsim_proto::frontend::ListDeviceResponse;
 use netsim_proto::frontend::PatchDeviceRequest;
 use netsim_proto::frontend::SubscribeDeviceRequest;
-use netsim_proto::model::chip_create::Chip as ProtoBuiltin;
+use netsim_proto::frontend::patch_device_request::PatchDeviceFields as ProtoPatchDeviceFields;
 use netsim_proto::model::Chip as ProtoChip;
 use netsim_proto::model::Device as ProtoDevice;
 use netsim_proto::model::Orientation as ProtoOrientation;
+use netsim_proto::model::PhyKind as ProtoPhyKind; // For ProtoPhyKind
 use netsim_proto::model::Position as ProtoPosition;
+use netsim_proto::model::chip_create::Chip as ProtoBuiltin;
 use netsim_proto::startup::DeviceInfo as ProtoDeviceInfo;
 use netsim_proto::stats::{NetsimDeviceStats as ProtoDeviceStats, NetsimRadioStats};
 use protobuf::well_known_types::timestamp::Timestamp;
-use protobuf::MessageField;
+use protobuf::{Enum, MessageField};
 use protobuf_json_mapping::merge_from_str;
 use protobuf_json_mapping::print_to_string;
 use protobuf_json_mapping::print_to_string_with_options;
-use protobuf_json_mapping::PrintOptions;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // The amount of seconds netsimd will wait until the first device has attached.
 static IDLE_SECS_FOR_SHUTDOWN: u64 = 15;
 
 const INITIAL_DEVICE_ID: u32 = 1;
-const JSON_PRINT_OPTION: PrintOptions = PrintOptions {
-    enum_values_int: false,
-    proto_field_name: false,
-    always_output_default_values: true,
-    _future_options: (),
-};
 
 static POSE_MANAGER: OnceLock<Arc<PoseManager>> = OnceLock::new();
 
@@ -135,18 +132,19 @@ pub struct DeviceManager {
     events: Arc<Events>,
     ids: AtomicU32,
     last_modified: RwLock<Duration>,
+    pub link_manager: Arc<LinkManager>,
 }
 
 impl DeviceManager {
-    pub fn init(events: Arc<Events>) -> Arc<DeviceManager> {
-        let manager = Arc::new(Self::new(events));
+    pub fn init(events: Arc<Events>, link_manager: Arc<LinkManager>) -> Arc<DeviceManager> {
+        let manager = Arc::new(Self::new(events, link_manager));
         if let Err(_e) = DEVICE_MANAGER.set(manager.clone()) {
             panic!("Error setting device manager");
         }
         manager
     }
 
-    fn new(events: Arc<Events>) -> Self {
+    fn new(events: Arc<Events>, link_manager: Arc<LinkManager>) -> Self {
         DeviceManager {
             devices: RwLock::new(BTreeMap::new()),
             events,
@@ -154,6 +152,7 @@ impl DeviceManager {
             last_modified: RwLock::new(
                 SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards"),
             ),
+            link_manager,
         }
     }
 
@@ -188,7 +187,7 @@ impl DeviceManager {
         }
         // A new device needs to be created and inserted
         let id = self.next_id();
-        let default = format!("device-{}", id);
+        let default = format!("device-{id}");
         let name = name.unwrap_or(&default);
         guard.insert(id, Device::new(id, guid.unwrap_or(&default), name, builtin));
         drop(guard);
@@ -245,7 +244,7 @@ pub fn add_chip(
         .write()
         .unwrap()
         .get_mut(&device_id)
-        .ok_or(format!("Device not found for device_id: {}", device_id))?
+        .ok_or(format!("Device not found for device_id: {device_id}"))?
         .add_chip(chip_create_params, chip_id, wireless_chip);
 
     // Update last modified timestamp for devices
@@ -270,6 +269,8 @@ pub fn remove_chip(device_id: DeviceIdentifier, chip_id: ChipIdentifier) -> Resu
     let mut guard = manager.devices.write().unwrap();
     let device =
         guard.get(&device_id).ok_or(format!("RemoveChip device id {device_id} not found"))?;
+    // Delete any links associated with this chip before removing it
+    manager.link_manager.delete_link_for_chip(chip_id);
     let radio_stats = device.remove_chip(&chip_id)?;
 
     let mut device_id_to_remove = None;
@@ -438,16 +439,16 @@ impl std::fmt::Display for PatchDeviceFieldsDisplay {
         let mut fields = Vec::<String>::new();
         fields.push(format!("id: {}", self.0));
         if let Some(name) = &self.1.name {
-            fields.push(format!("name: {}", name));
+            fields.push(format!("name: {name}"));
         }
         if let Some(visible) = &self.1.visible {
-            fields.push(format!("visible: {}", visible));
+            fields.push(format!("visible: {visible}"));
         }
         if let Some(position) = &self.1.position.0 {
-            fields.push(format!("position: {{ {} }}", position));
+            fields.push(format!("position: {{ {position} }}"));
         }
         if let Some(orientation) = &self.1.orientation.0 {
-            fields.push(format!("orientation: {{ {} }}", orientation));
+            fields.push(format!("orientation: {{ {orientation} }}"));
         }
         if !self.1.chips.is_empty() {
             let mut chip_field = Vec::<String>::new();
@@ -518,10 +519,7 @@ pub fn patch_device(patch_device_request: PatchDeviceRequest) -> Result<(), Stri
                 }
             }
             if multiple_matches {
-                return Err(format!(
-                    "Multiple ambiguous matches were found with substring {}",
-                    name
-                ));
+                return Err(format!("Multiple ambiguous matches were found with substring {name}"));
             }
             match target {
                 Some(device) => {
@@ -540,7 +538,7 @@ pub fn patch_device(patch_device_request: PatchDeviceRequest) -> Result<(), Stri
                     }
                     result
                 }
-                None => Err(format!("No such device with name {}", name)),
+                None => Err(format!("No such device with name {name}")),
             }
         }
         (_, _) => Err("Both id and name are not provided".to_string()),
@@ -556,7 +554,7 @@ fn patch_device_json(id_option: Option<DeviceIdentifier>, patch_json: &str) -> R
         }
         patch_device(patch_device_request)
     } else {
-        Err(format!("Incorrect format of patch json {}", patch_json))
+        Err(format!("Incorrect format of patch json {patch_json}"))
     }
 }
 
@@ -564,34 +562,32 @@ fn distance(a: &ProtoPosition, b: &ProtoPosition) -> f32 {
     ((b.x - a.x).powf(2.0) + (b.y - a.y).powf(2.0) + (b.z - a.z).powf(2.0)).sqrt()
 }
 
-#[allow(dead_code)]
-fn get_distance(id: &ChipIdentifier, other_id: &ChipIdentifier) -> Result<f32, String> {
-    let device_id = crate::devices::chip::get_chip(id)
-        .ok_or(format!("No such device with chip_id {id}"))?
-        .device_id;
-    let other_device_id = crate::devices::chip::get_chip(other_id)
-        .ok_or(format!("No such device with chip_id {other_id}"))?
-        .device_id;
+/// Gets the position of a chip identified by its ID.
+/// Returns None if the chip or its device/position cannot be found.
+fn get_position(chip_id: ChipIdentifier) -> Option<ProtoPosition> {
+    let chip = chip::get_chip(&chip_id).or_else(|| {
+        warn!("get_position error for chip {}: No such device", chip_id.0);
+        None
+    })?;
 
-    let pose_manager = get_pose_manager();
-    let a = pose_manager
-        .get_position(&device_id)
-        .ok_or(format!("no position for device {device_id}"))?;
-    let b = pose_manager
-        .get_position(&other_device_id)
-        .ok_or(format!("no position for device {other_device_id}"))?;
-    Ok(distance(&a, &b))
+    let pos = get_pose_manager().get_position(&chip.device_id).or_else(|| {
+        warn!(
+            "get_position error for chip {}: no position for device {}",
+            chip_id.0, chip.device_id
+        );
+        None
+    })?;
+
+    Some(pos)
 }
 
-/// A GetDistance function for Rust Device API.
-/// The backend gRPC code will be invoking this method.
-pub fn get_distance_cxx(a: u32, b: u32) -> f32 {
-    match get_distance(&ChipIdentifier(a), &ChipIdentifier(b)) {
-        Ok(distance) => distance,
-        Err(err) => {
-            warn!("get_distance Error: {err}");
-            0.0
-        }
+/// Calculates the distance between two chips identified by their IDs.
+/// Returns 0.0 if either chip or its device/position cannot be found.
+fn get_distance(a: u32, b: u32) -> f32 {
+    // Calculate distance only if both positions were successfully found.
+    match (get_position(ChipIdentifier(a)), get_position(ChipIdentifier(b))) {
+        (Some(pos_a), Some(pos_b)) => distance(&pos_a, &pos_b),
+        _ => 0.0, // Error already logged by get_position
     }
 }
 
@@ -622,6 +618,8 @@ pub fn reset_all() -> Result<(), String> {
     for device_id in device_ids {
         get_pose_manager().reset(device_id);
     }
+    // Reset all links
+    manager.link_manager.reset();
     // Update last modified timestamp for manager
     manager.update_timestamp();
     manager.events.publish(Event::DeviceReset);
@@ -634,7 +632,7 @@ fn handle_device_create(writer: ResponseWritable, create_json: &str) {
     let mut get_result = || {
         let mut create_device_request = CreateDeviceRequest::new();
         merge_from_str(&mut create_device_request, create_json)
-            .map_err(|_| format!("create device: invalid json: {}", create_json))?;
+            .map_err(|_| format!("create device: invalid json: {create_json}"))?;
         let device_proto = create_device(&create_device_request)?;
         response.device = MessageField::some(device_proto);
         print_to_string(&response).map_err(|_| String::from("failed to convert device to json"))
@@ -658,7 +656,7 @@ fn handle_chip_delete(writer: ResponseWritable, delete_json: &str) {
     let get_result = || {
         let mut delete_chip_request = DeleteChipRequest::new();
         merge_from_str(&mut delete_chip_request, delete_json)
-            .map_err(|_| format!("delete chip: invalid json: {}", delete_json))?;
+            .map_err(|_| format!("delete chip: invalid json: {delete_json}"))?;
         delete_chip(&delete_chip_request)
     };
 
@@ -878,6 +876,36 @@ pub fn get_radio_stats() -> Vec<NetsimRadioStats> {
     result
 }
 
+/// A GetRssi function for Rust Device API.
+/// Checks for RSSI override settings before calculating based on distance.
+/// The backend gRPC code will be invoking this method via FFI.
+pub fn get_rssi(sender_id: u32, receiver_id: u32, link_kind_i32: i32, tx_power: i8) -> i8 {
+    let proto_link_kind = ProtoPhyKind::from_i32(link_kind_i32).unwrap_or_default();
+    let link_kind = match PhyKind::try_from(proto_link_kind) {
+        Ok(kind) => kind,
+        Err(e) => {
+            warn!(
+                "FFI: Error converting ProtoPhyKind {proto_link_kind:?} to internal: {e}. Defaulting to None."
+            );
+            PhyKind::None
+        }
+    };
+    // Check for link RSSI setting first.
+    if let Some(override_rssi) = get_manager().link_manager.get_rssi(
+        ChipIdentifier(sender_id),
+        ChipIdentifier(receiver_id),
+        link_kind,
+    ) {
+        info!(
+            "Using RSSI override for sender {sender_id} and receiver {receiver_id}: {override_rssi}",
+        );
+        return override_rssi;
+    }
+
+    // Fallback to distance calculation
+    ranging::distance_to_rssi(tx_power, get_distance(sender_id, receiver_id))
+}
+
 #[cfg(test)]
 mod tests {
     use http::Version;
@@ -898,7 +926,7 @@ mod tests {
     fn module_setup() {
         INIT.call_once(|| {
             init_for_test();
-            DeviceManager::init(Events::new());
+            DeviceManager::init(Events::new(), LinkManager::new().into());
         });
     }
 
@@ -1259,7 +1287,7 @@ mod tests {
         assert!(patch_result.is_err());
         assert_eq!(
             patch_result.unwrap_err(),
-            format!("Incorrect format of patch json {}", error_json)
+            format!("Incorrect format of patch json {error_json}")
         );
 
         // Incorrect key
@@ -1271,7 +1299,7 @@ mod tests {
         assert!(patch_result.is_err());
         assert_eq!(
             patch_result.unwrap_err(),
-            format!("Incorrect format of patch json {}", error_json)
+            format!("Incorrect format of patch json {error_json}")
         );
 
         // Incorrect Id
@@ -1488,7 +1516,7 @@ mod tests {
 
         // Verify the get_distance performs the correct computation of
         // sqrt((1-1)**2 + (4-1)**2 + (5-1)**2)
-        assert_eq!(Ok(5.0), get_distance(&bt_chip_result.chip_id, &bt_chip_2_result.chip_id))
+        assert_eq!(5.0, get_distance(bt_chip_result.chip_id.0, bt_chip_2_result.chip_id.0))
     }
 
     #[allow(dead_code)]
@@ -1501,12 +1529,12 @@ mod tests {
             .unwrap()
     }
 
-    use netsim_proto::model::chip::{
-        ble_beacon::AdvertiseData, ble_beacon::AdvertiseSettings, BleBeacon, Chip,
-    };
-    use netsim_proto::model::chip_create::{BleBeaconCreate, Chip as BuiltChipProto};
     use netsim_proto::model::Chip as ChipProto;
     use netsim_proto::model::ChipCreate as ProtoChipCreate;
+    use netsim_proto::model::chip::{
+        BleBeacon, Chip, ble_beacon::AdvertiseData, ble_beacon::AdvertiseSettings,
+    };
+    use netsim_proto::model::chip_create::{BleBeaconCreate, Chip as BuiltChipProto};
     use protobuf::{EnumOrUnknown, MessageField};
 
     fn get_test_create_device_request(device_name: Option<String>) -> CreateDeviceRequest {

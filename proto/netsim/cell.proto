@@ -1,0 +1,176 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package netsim.cell;
+
+import "google/protobuf/empty.proto";
+
+service CellService {
+  // Get an existing Cell.
+  rpc Get(GetCellRequest) returns (Cell);
+
+  // List all Cells.
+  rpc List(ListCellsRequest) returns (ListCellsResponse);
+
+  // Execute an action on a Cell.
+  rpc Execute(ExecuteCellRequest) returns (google.protobuf.Empty);
+}
+
+message GetCellRequest {
+  // Matches the Chip ID of the cellular chip.
+  uint32 id = 1;
+}
+
+message ListCellsRequest {}
+
+message ListCellsResponse {
+  repeated Cell cells = 1;
+}
+
+message ExecuteCellRequest {
+  // Matches the Chip ID of the cellular chip.
+  uint32 id = 1;
+  oneof action {
+    IncomingCall incoming_call = 2;
+    UpdateCall update_call = 3;
+    EndCall end_call = 4;
+    ReceiveSms receive_sms = 5;
+    SetSignalStrength set_signal_strength = 6;
+    SetVoiceRegistration set_voice_registration = 7;
+    SetDataRegistration set_data_registration = 8;
+    RemoteAnswer remote_answer = 9;
+    RemoteHold remote_hold = 10;
+    SetSimStatus set_sim_status = 11;
+    SetNetworkTechnology set_network_technology = 12;
+    SetNetworkTimezone set_network_timezone = 13;
+    ReceivePdu receive_pdu = 14;
+    SetOperator set_operator = 15;
+  }
+}
+
+message IncomingCall {
+  string number = 1;
+}
+
+message UpdateCall {
+  // Placeholder for future updates
+}
+
+message EndCall {
+  // RemoteHangup
+}
+
+message RemoteAnswer {}
+
+message RemoteHold {
+  bool on_hold = 1;
+}
+
+message ReceiveSms {
+  string sender = 1;
+  string text = 2;
+}
+
+message ReceivePdu {
+  string pdu = 1;
+}
+
+message SetSignalStrength {
+  uint32 rssi = 1;
+  uint32 ber = 2;
+}
+
+message SetVoiceRegistration {
+  RegistrationStatus status = 1;
+}
+
+message SetDataRegistration {
+  RegistrationStatus status = 1;
+}
+
+// Mirroring netsim_model::cell::RegistrationStatus
+enum RegistrationStatus {
+  NOT_REGISTERED = 0;
+  REGISTERED_HOME = 1;
+  SEARCHING = 2;
+  DENIED = 3;
+  UNKNOWN = 4;
+  ROAMING = 5;
+  SMS_ONLY_HOME = 6;
+  SMS_ONLY_ROAMING = 7;
+  EMERGENCY = 8;
+}
+
+message Cell {
+  // Matches the Chip ID of the cellular chip.
+  uint32 id = 1;
+  string state = 2;  // "idle", "ringing", etc.
+  bool ringing = 3;  // NOTE: Consider deriving ringing directly from state to
+                     // reduce payload redundancy
+
+  uint32 sms_count = 4;
+  uint32 rssi = 5;
+  uint32 ber = 6;
+  repeated Call active_calls = 7;
+  RegistrationStatus voice_registration = 8;
+  RegistrationStatus data_registration = 9;
+}
+
+message Call {
+  string number = 1;
+  enum State {
+    UNKNOWN = 0;
+    ACTIVE = 1;
+    HOLDING = 2;
+    DIALING = 3;
+    ALERTING = 4;
+    INCOMING = 5;
+    WAITING = 6;
+  }
+  State state = 2;
+  enum Direction {
+    DIR_UNKNOWN = 0;
+    MOBILE_ORIGINATED = 1;
+    MOBILE_TERMINATED = 2;
+  }
+  Direction direction = 3;
+}
+
+message SetOperator {
+  string operator = 1;
+}
+
+message SetSimStatus {
+  enum SimState {
+    ABSENT = 0;
+    PRESENT = 1;
+  }
+  SimState state = 1;
+}
+
+message SetNetworkTechnology {
+  enum RadioTechnology {
+    UNKNOWN = 0;
+    GSM = 1;
+    LTE = 2;
+    NR = 3;
+  }
+  RadioTechnology tech = 1;
+}
+
+message SetNetworkTimezone {
+  string timezone = 1;
+}

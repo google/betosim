@@ -1,0 +1,130 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+openapi: 3.1.0
+info:
+  title: Widget test API
+  version: 0.1.0
+tags:
+  - name: WidgetService
+    description: Test widgets.
+paths:
+  /v1/widgets:
+    get:
+      operationId: ListWidgets
+      tags: [WidgetService]
+      summary: Lists widgets.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWidgetsResponse'
+    post:
+      operationId: CreateWidget
+      tags: [WidgetService]
+      summary: Creates a widget.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Widget'
+            example:
+              name: w1
+              color: GREEN
+              label: Kitchen
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+  /v1/widgets/{name}:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    get:
+      operationId: GetWidget
+      tags: [WidgetService]
+      summary: Gets a widget.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Widget'
+    delete:
+      operationId: DeleteWidget
+      tags: [WidgetService]
+      summary: Deletes a widget.
+      responses:
+        '200':
+          $ref: '#/components/responses/Empty'
+  /v1/widgets/{name}:reset:
+    parameters:
+      - $ref: '#/components/parameters/Name'
+    post:
+      operationId: ResetWidget
+      tags: [WidgetService]
+      summary: Resets a widget to its defaults.
+      responses:
+        '200':
+          $ref: '#/components/responses/Empty'
+components:
+  parameters:
+    Name:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Empty:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Empty'
+  schemas:
+    Color:
+      type: string
+      enum: [RED, GREEN]
+      description: Widget color.
+    Widget:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          $ref: '#/components/schemas/Color'
+        label:
+          type: [string, 'null']
+          description: Optional display label.
+      required: [name, color]
+      description: A widget.
+    ListWidgetsResponse:
+      type: object
+      properties:
+        widgets:
+          type: array
+          items:
+            $ref: '#/components/schemas/Widget'
+      required: [widgets]
+      description: Response body for `ListWidgets`.
+    Empty:
+      type: object
+      description: Empty response body.

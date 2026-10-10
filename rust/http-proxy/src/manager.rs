@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::util::{into_raw_descriptor, ProxyConfig};
-use crate::{Connector, DnsManager, Error};
+use crate::{
+    Connector, DnsManager, Result,
+    util::{ProxyConfig, into_raw_descriptor},
+};
 use bytes::Bytes;
 use libslirp_rs::libslirp::{ProxyConnect, ProxyManager};
 use log::{debug, warn};
 use std::net::SocketAddr;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use tokio::runtime::Runtime;
 
@@ -67,7 +69,7 @@ impl Manager {
     ///
     /// This function initializes the libslirp library and spawns the necessary threads
     /// for handling network traffic and polling.
-    pub fn new(proxy: &str, rx_proxy_bytes: mpsc::Receiver<Bytes>) -> Result<Self, Error> {
+    pub fn new(proxy: &str, rx_proxy_bytes: mpsc::Receiver<Bytes>) -> Result<Self> {
         let config = ProxyConfig::from_string(proxy)?;
         let dns_manager = Arc::new(DnsManager::new());
         let dns_manager_clone = dns_manager.clone();

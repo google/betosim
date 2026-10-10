@@ -1,0 +1,139 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# General Bazel settings
+common --enable_platform_specific_config
+common --registry=file:///%workspace%/registry
+common --registry=file:///%workspace%/../../build/bazel/registry
+common --registry=https://bcr.bazel.build
+
+# Credential helper for the GCS-hosted hermetic SDK archives (see
+# --config=hermetic below). scripts/credential_helper.* is a thin launcher
+# around build/bazel/utils/cred_helper.py; Bazel rejects '..' in this flag, so
+# it cannot point at the shared build/bazel copy directly.
+common:linux --credential_helper="*.googleapis.com=%workspace%/scripts/credential_helper.sh"
+common:macos --credential_helper="*.googleapis.com=%workspace%/scripts/credential_helper.sh"
+common:windows --credential_helper="*.googleapis.com=%workspace%/scripts/credential_helper.cmd"
+
+# Strict action environment and runfiles
+build --incompatible_strict_action_env
+build --nolegacy_external_runfiles
+build --incompatible_autoload_externally=+cc_library,+cc_binary,+cc_test,+proto_library,+objc_library,+cc_proto_library,+sh_binary,+sh_test,+sh_library
+# Hermetic C/C++ toolchain selection.
+#
+# BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN stops Bazel autodetecting the host compiler
+# (@local_config_cc). Without it, that toolchain matches every platform and wins
+# resolution, silently reverting the build to the host gcc/MSVC.
+#
+# The goldfish cc toolchains require `@bazel_tools//tools/cpp:clang` in their
+# exec_compatible_with, which Bazel's default host platform does not provide, so
+# --host_platform must point at @host_platform (declared in MODULE.bazel).
+# `info` is overridden because of https://github.com/bazelbuild/bazel/issues/25145.
+common --repo_env='BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1'
+build --incompatible_enable_cc_toolchain_resolution
+build --host_platform='@host_platform//:host'
+info --host_platform='@platforms//host'
+build --host_features='-thin_lto'
+
+build --@rules_rust//rust/settings:experimental_use_allocator_libraries_with_mangled_symbols
+build --@rules_rust//rust/settings:extra_rustc_env=RUSTC_BOOTSTRAP=1
+build --@rules_rust//rust/settings:extra_exec_rustc_env=RUSTC_BOOTSTRAP=1
+build --proto_compiler=@protobuf//:protoc
+build --proto_toolchain_for_cc=@protobuf//:cc_toolchain
+
+# Use the prebuilt protoc rather than building it from source, mirroring
+# build/bazel/tool.bazelrc. This is purely a build-time saving: it avoids
+# compiling protoc and its protobuf dependencies in the exec configuration.
+#
+# Deliberately not enabled on Windows, where the emulator notes it breaks gRPC.
+build:linux --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
+build:macos --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
+
+# Python launcher settings for @pdl-compiler//:pdl_cxx_generator, which
+# rootcanal's *_cxx_gen genrules run as a tool. Mirrors build/bazel/tool.bazelrc;
+# these are the settings under which the emulator builds the same py_binary on
+# Windows.
+build --@rules_python//python/config_settings:bootstrap_impl=script
+build:windows --@rules_python//python/config_settings:build_python_zip=false
+
+# C++ standard.
+# Deliberately NOT set here. The goldfish cc toolchains already pass
+# `-std=c++26` (`/std:c++latest` on Windows), which satisfies rootcanal's use of
+# <numbers>. Adding a global `--cxxopt=-std=...` would land last on the command
+# line and silently *downgrade* the standard, which breaks libc++ headers that
+# rely on C++2c behaviour (e.g. fmt's use of malloc/free via <cstdlib>).
+
+# gRPC & C++ definitions
+build --define grpc_no_xds=true
+build --define GRPC_ALLOW_EXCEPTIONS=0
+build --define absl=1
+
+# Hardening
+build --copt=-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST
+build --host_copt=-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST
+
+# Build configurations
+build:debug --compilation_mode=dbg --strip=never --copt=-fno-limit-debug-info
+build:release --compilation_mode=opt
+build:release-assert --config=release --copt=-UNDEBUG
+
+# Hermetic host SDKs, mirroring build/bazel/base.bazelrc.
+#
+# The goldfish toolchain extension defaults CC_ALLOW_HOST_SDK to 1, which points
+# @xcode_tools at whatever Xcode is installed on the machine. On the build bots
+# that is Xcode 14.3, whose libc++ is too old for the -std=c++26 the toolchain
+# passes: protobuf's PROTOBUF_CONSTINIT on fixed_address_empty_string fails to
+# constant-initialize because that libc++ heap-allocates std::string during
+# constant evaluation. Selecting the hermetic SDKs pins a modern libc++ and
+# makes the build independent of the machine's Xcode/MSVC install.
+#
+# The hermetic SDKs are fetched from GCS, so a credential helper is required
+# (see above) and scripts/utils.py runs `gcloud auth` for local --hermetic
+# builds.
+build:hermetic --@goldfish_build//toolchains/cc/mac_clang:hermetic_xcode
+build:hermetic --@goldfish_build//toolchains/cc/windows_clang:hermetic_msvc
+build:hermetic --repo_env=CC_ALLOW_HOST_SDK=0
+
+build:ci --config=release
+build:ci --config=hermetic
+
+# Sanitizers
+build:asan --features='asan'
+build:asan --dynamic_mode=off
+build:msan --features='msan'
+build:tsan --features='tsan'
+
+# macOS settings
+build:macos --macos_minimum_os=11.0
+build:macos --host_macos_minimum_os=11.0
+build:macos --action_env=MACOSX_DEPLOYMENT_TARGET=11.0
+build:macos --host_action_env=MACOSX_DEPLOYMENT_TARGET=11.0
+build:macos --copt=-D_LIBCPP_DISABLE_AVAILABILITY
+build:macos --host_copt=-D_LIBCPP_DISABLE_AVAILABILITY
+build:macos --copt=-mmacosx-version-min=11.0
+build:macos --host_copt=-mmacosx-version-min=11.0
+build:macos --linkopt=-mmacosx-version-min=11.0
+build:macos --host_linkopt=-mmacosx-version-min=11.0
+build:darwin --config=macos
+
+# Windows settings
+startup --windows_enable_symlinks
+build:windows --enable_runfiles
+
+build:linux --workspace_status_command="../../prebuilts/python/linux-x86/bin/python3 scripts/version_stamp.py"
+build:macos --workspace_status_command="../../prebuilts/python/darwin-x86/bin/python3 scripts/version_stamp.py"
+build:windows --workspace_status_command="../../prebuilts/python/windows-x86/python scripts/version_stamp.py"
+
+# User local overrides
+try-import %workspace%/user.bazelrc

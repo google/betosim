@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,22 +16,22 @@ use super::advertise_data::{AdvertiseData, AdvertiseDataBuilder};
 use super::advertise_settings::{
     AdvertiseMode, AdvertiseSettings, AdvertiseSettingsBuilder, TxPowerLevel,
 };
-use super::chip::{rust_bluetooth_add, RustBluetoothChipCallbacks};
+use super::chip::{RustBluetoothChipCallbacks, rust_bluetooth_add};
 use crate::devices::chip::{ChipIdentifier, FacadeIdentifier};
 use crate::devices::device::{AddChipResult, DeviceIdentifier};
 use crate::devices::devices_handler::add_chip;
 use crate::ffi::ffi_bluetooth;
 use crate::wireless;
-use cxx::{let_cxx_string, UniquePtr};
+use cxx::{UniquePtr, let_cxx_string};
 use log::{error, info, warn};
 use netsim_packets::link_layer::{
-    Address, AddressType, LeLegacyAdvertisingPduBuilder, LeScanResponseBuilder, PacketType,
+    Address, AddressType, LeLegacyAdvertisingPdu, LeScanResponse, PacketType,
 };
 use netsim_proto::common::ChipKind;
 use netsim_proto::model::chip::Bluetooth;
 use netsim_proto::model::chip::{
-    ble_beacon::AdvertiseData as AdvertiseDataProto,
-    ble_beacon::AdvertiseSettings as AdvertiseSettingsProto, BleBeacon as BleBeaconProto,
+    BleBeacon as BleBeaconProto, ble_beacon::AdvertiseData as AdvertiseDataProto,
+    ble_beacon::AdvertiseSettings as AdvertiseSettingsProto,
 };
 use netsim_proto::model::chip_create::{
     BleBeaconCreate as BleBeaconCreateProto, Chip as BuiltinProto,
@@ -56,8 +56,8 @@ static BT_CHIPS: OnceLock<
     RwLock<HashMap<ChipIdentifier, Mutex<UniquePtr<ffi_bluetooth::RustBluetoothChip>>>>,
 > = OnceLock::new();
 
-fn get_bt_chips(
-) -> &'static RwLock<HashMap<ChipIdentifier, Mutex<UniquePtr<ffi_bluetooth::RustBluetoothChip>>>> {
+fn get_bt_chips()
+-> &'static RwLock<HashMap<ChipIdentifier, Mutex<UniquePtr<ffi_bluetooth::RustBluetoothChip>>>> {
     BT_CHIPS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -191,7 +191,7 @@ impl RustBluetoothChipCallbacks for BeaconChipCallbacks {
 
         beacon.advertise_last = Some(Instant::now());
 
-        let packet = LeLegacyAdvertisingPduBuilder {
+        let packet = LeLegacyAdvertisingPdu {
             advertising_type: beacon.advertise_settings.get_packet_type(),
             advertising_data: beacon.advertise_data.to_bytes(),
             advertising_address_type: AddressType::Public,
@@ -199,7 +199,6 @@ impl RustBluetoothChipCallbacks for BeaconChipCallbacks {
             source_address: beacon.address,
             destination_address: *get_empty_address(),
         }
-        .build()
         .encode_to_vec()
         .unwrap();
         beacon.send_link_layer_le_packet(&packet, beacon.advertise_settings.tx_power_level.dbm);
@@ -224,13 +223,12 @@ impl RustBluetoothChipCallbacks for BeaconChipCallbacks {
             && destination_address == addr_to_str(beacon.address)
             && packet_type == u8::from(PacketType::LeScan)
         {
-            let packet = LeScanResponseBuilder {
+            let packet = LeScanResponse {
                 advertising_address_type: AddressType::Public,
                 source_address: beacon.address,
                 destination_address: beacon.address,
                 scan_response_data: beacon.scan_response_data.to_bytes(),
             }
-            .build()
             .encode_to_vec()
             .unwrap();
 
@@ -271,7 +269,7 @@ pub fn ble_beacon_add(
     );
     let rust_chip = add_rust_device_result.rust_chip;
     let facade_id = add_rust_device_result.facade_id;
-    info!("Creating HCI facade_id: {} for chip_id: {}", facade_id, chip_id);
+    info!("Creating HCI facade_id: {facade_id} for chip_id: {chip_id}");
     get_bt_chips().write().unwrap().insert(chip_id, Mutex::new(rust_chip));
     Ok(FacadeIdentifier(facade_id))
 }
@@ -385,7 +383,7 @@ fn addr_to_str(addr: Address) -> String {
     let bytes = u64::from(addr).to_le_bytes();
     bytes[..5]
         .iter()
-        .rfold(format!("{:02x}", bytes[5]), |addr, byte| addr + &format!(":{:02x}", byte))
+        .rfold(format!("{:02x}", bytes[5]), |addr, byte| addr + &format!(":{byte:02x}"))
 }
 
 fn str_to_addr(addr: &str) -> Result<Address, String> {
@@ -412,8 +410,8 @@ pub mod tests {
     use std::thread;
 
     use netsim_proto::model::chip::ble_beacon::{
-        advertise_settings::{AdvertiseTxPower as AdvertiseTxPowerProto, Tx_power as TxPowerProto},
         AdvertiseData as AdvertiseDataProto,
+        advertise_settings::{AdvertiseTxPower as AdvertiseTxPowerProto, Tx_power as TxPowerProto},
     };
 
     use super::*;

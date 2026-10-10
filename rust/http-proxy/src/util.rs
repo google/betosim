@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,7 +31,7 @@
 // with libraries that require raw file descriptors, such as
 // `libslirp_rs`.
 
-use crate::Error;
+use crate::{Error, Result};
 use regex::Regex;
 use std::net::{SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
@@ -74,7 +74,7 @@ impl ProxyConfig {
     ///
     /// # Limitations
     /// * Usernames and passwords cannot contain `@` or `:`.
-    pub fn from_string(config_string: &str) -> Result<ProxyConfig, Error> {
+    pub fn from_string(config_string: &str) -> Result<ProxyConfig> {
         let re = Regex::new(r"^(?:(?P<protocol>\w+)://)?(?:(?P<user>\w+):(?P<pass>\w+)@)?(?P<host>(?:[\w\.-]+|\[[^\]]+\])):(?P<port>\d+)$").unwrap();
         let caps = re.captures(config_string).ok_or(Error::MalformedConfigString)?;
 

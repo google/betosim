@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -83,7 +83,7 @@ pub fn read_h4_packet<R: Read>(reader: &mut R) -> Result<Packet, PacketError> {
         }
         H4_ISO_TYPE => {
             // 2 bytes for handle and flags, 12 bits for length (Volume 2, Part E, 5.4.5)
-            usize::from(packet[3] & 0x0f) << 8 | usize::from(packet[2])
+            (usize::from(packet[3] & 0x0f) << 8) | usize::from(packet[2])
         }
         _ => {
             // This case was handled above resulting in call to h4_recovery
@@ -111,7 +111,7 @@ pub fn read_h4_packet<R: Read>(reader: &mut R) -> Result<Packet, PacketError> {
 /// invalid IDC is received all incoming bytes are dropped until the
 /// HCI RESET command is recognized in the input stream
 ///
-/// Based on packages/modules/Bluetooth/tools/rootcanal/model/hci/h4_parser.cc
+/// Based on tools/rootcanal/model/hci/h4_parser.cc
 ///
 fn h4_recovery<R: Read>(mut reader: R) -> Result<Packet, PacketError> {
     const RESET_COMMAND: [u8; 4] = [0x01, 0x03, 0x0c, 0x00];
@@ -143,8 +143,8 @@ fn h4_recovery<R: Read>(mut reader: R) -> Result<Packet, PacketError> {
 #[cfg(test)]
 mod tests {
     use super::PacketError;
-    use super::{h4_recovery, read_h4_packet};
     use super::{H4_ACL_TYPE, H4_CMD_TYPE, H4_EVT_TYPE, H4_ISO_TYPE, H4_SCO_TYPE};
+    use super::{h4_recovery, read_h4_packet};
     use std::io::{BufReader, Cursor};
 
     // Validate packet types

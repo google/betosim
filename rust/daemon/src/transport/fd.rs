@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,11 +24,11 @@ use crate::devices::device::DeviceIdentifier;
 use crate::devices::devices_handler::{add_chip, remove_chip};
 use crate::ffi::ffi_transport;
 use crate::wireless;
-use crate::wireless::packet::{register_transport, unregister_transport, Response};
+use crate::wireless::packet::{Response, register_transport, unregister_transport};
 use bytes::Bytes;
 use log::{error, info, warn};
 use netsim_proto::common::ChipKind;
-use netsim_proto::hci_packet::{hcipacket::PacketType, HCIPacket};
+use netsim_proto::hci_packet::{HCIPacket, hcipacket::PacketType};
 use netsim_proto::packet_streamer::PacketRequest;
 use netsim_proto::startup::{ChipInfo as ChipInfoProto, StartupInfo as StartupInfoProto};
 use protobuf::{Enum, EnumOrUnknown, Message, MessageField};
@@ -52,7 +52,7 @@ impl Response for FdTransport {
         }
         buffer.extend(packet);
         if let Err(e) = self.file.write_all(&buffer[..]) {
-            error!("netsimd: error writing {}", e);
+            error!("netsimd: error writing {e}");
         }
     }
 }
@@ -69,18 +69,18 @@ unsafe fn fd_reader(
     chip_id: ChipIdentifier,
 ) -> JoinHandle<()> {
     thread::Builder::new()
-        .name(format!("fd_reader_{}", fd_rx))
+        .name(format!("fd_reader_{fd_rx}"))
         .spawn(move || {
             // SAFETY: The caller promises that `fd_rx` is valid and open.
             let mut rx = unsafe { File::from_raw_fd(fd_rx) };
 
-            info!("Handling fd={} for kind: {:?} chip_id: {:?}", fd_rx, kind, chip_id);
+            info!("Handling fd={fd_rx} for kind: {kind:?} chip_id: {chip_id:?}");
 
             loop {
                 match kind {
                     ChipKind::UWB => match uci::read_uci_packet(&mut rx) {
                         Err(e) => {
-                            error!("End reader connection with fd={}. Failed to reading uci control packet: {:?}", fd_rx, e);
+                            error!("End reader connection with fd={fd_rx}. Failed to reading uci control packet: {e:?}");
                             break;
                         }
                         Ok(uci::Packet { payload }) => {
@@ -94,16 +94,16 @@ unsafe fn fd_reader(
                         Err(PacketError::IoError(e))
                             if e.kind() == ErrorKind::UnexpectedEof =>
                         {
-                            info!("End reader connection with fd={}.", fd_rx);
+                            info!("End reader connection with fd={fd_rx}.");
                             break;
                         }
                         Err(e) => {
-                            error!("End reader connection with fd={}. Failed to reading hci control packet: {:?}", fd_rx, e);
+                            error!("End reader connection with fd={fd_rx}. Failed to reading hci control packet: {e:?}");
                             break;
                         }
                     },
                     _ => {
-                        error!("unknown control packet chip_kind: {:?}", kind);
+                        error!("unknown control packet chip_kind: {kind:?}");
                         break;
                     }
                 };
@@ -134,7 +134,7 @@ pub unsafe fn run_fd_transport(startup_json: &String) {
         match protobuf_json_mapping::parse_from_str::<StartupInfoProto>(startup_json.as_str()) {
             Ok(startup_info) => startup_info,
             Err(e) => {
-                error!("Error parsing startup info: {:?}", e);
+                error!("Error parsing startup info: {e:?}");
                 return;
             }
         };
@@ -145,7 +145,7 @@ pub unsafe fn run_fd_transport(startup_json: &String) {
     for device in startup_info.devices {
         info!("Processing startup device {}", device.name);
         for chip in &device.chips {
-            info!("Processing chip {:?}", chip);
+            info!("Processing chip {chip:?}");
             let chip_kind = chip.kind.enum_value_or_default();
             // TODO(b/323899010): Avoid having cfg(test) in mainline code
             #[cfg(not(test))]
@@ -161,7 +161,7 @@ pub unsafe fn run_fd_transport(startup_json: &String) {
                     address: chip.address.clone(),
                 }),
                 _ => {
-                    warn!("The provided chip kind is unsupported: {:?}", chip_kind);
+                    warn!("The provided chip kind is unsupported: {chip_kind:?}");
                     return;
                 }
             };
@@ -229,22 +229,21 @@ pub unsafe fn run_fd_transport(startup_json: &String) {
 ///
 /// `fd_rx` must be a valid and open file descriptor.
 unsafe fn connector_fd_reader(fd_rx: i32, kind: ChipKind, stream_id: u32) -> JoinHandle<()> {
-    info!("Connecting fd reader for stream_id: {}, fd_rx: {}", stream_id, fd_rx);
+    info!("Connecting fd reader for stream_id: {stream_id}, fd_rx: {fd_rx}");
     thread::Builder::new()
-        .name(format!("fd_connector_{}_{}", stream_id, fd_rx))
+        .name(format!("fd_connector_{stream_id}_{fd_rx}"))
         .spawn(move || {
             // SAFETY: The caller promises that `fd_rx` is valid and open.
             let mut rx = unsafe { File::from_raw_fd(fd_rx) };
-            info!("Handling fd={} for kind: {:?} stream_id: {:?}", fd_rx, kind, stream_id);
+            info!("Handling fd={fd_rx} for kind: {kind:?} stream_id: {stream_id:?}");
 
             loop {
                 match kind {
                     ChipKind::UWB => match uci::read_uci_packet(&mut rx) {
                         Err(e) => {
                             error!(
-                                "End reader connection with fd={}. Failed to read \
-                                     uci control packet: {:?}",
-                                fd_rx, e
+                                "End reader connection with fd={fd_rx}. Failed to read \
+                                     uci control packet: {e:?}"
                             );
                             break;
                         }
@@ -268,20 +267,19 @@ unsafe fn connector_fd_reader(fd_rx: i32, kind: ChipKind, stream_id: u32) -> Joi
                             ffi_transport::write_packet_request(stream_id, &proto_bytes);
                         }
                         Err(PacketError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                            info!("End reader connection with fd={}.", fd_rx);
+                            info!("End reader connection with fd={fd_rx}.");
                             break;
                         }
                         Err(e) => {
                             error!(
-                                "End reader connection with fd={}. Failed to read \
-                                     hci control packet: {:?}",
-                                fd_rx, e
+                                "End reader connection with fd={fd_rx}. Failed to read \
+                                     hci control packet: {e:?}"
                             );
                             break;
                         }
                     },
                     _ => {
-                        error!("unknown control packet chip_kind: {:?}", kind);
+                        error!("unknown control packet chip_kind: {kind:?}");
                         break;
                     }
                 };
@@ -311,18 +309,18 @@ fn connector_grpc_read_callback(stream_id: u32, proto_bytes: &[u8]) {
 
     if let Some(mut file_in) = get_connector_files().read().unwrap().get(&stream_id) {
         if let Err(e) = file_in.write_all(&buffer[..]) {
-            error!("Failed to write: {}", e);
+            error!("Failed to write: {e}");
         }
     } else {
-        warn!("Unable to find file with stream_id {}", stream_id);
+        warn!("Unable to find file with stream_id {stream_id}");
     }
 }
 
 /// Read from grpc server and write back to file descriptor.
 fn connector_grpc_reader(chip_kind: ChipKind, stream_id: u32, file_in: File) -> JoinHandle<()> {
-    info!("Connecting grpc reader for stream_id: {}", stream_id);
+    info!("Connecting grpc reader for stream_id: {stream_id}");
     thread::Builder::new()
-        .name(format!("grpc_reader_{}", stream_id))
+        .name(format!("grpc_reader_{stream_id}"))
         .spawn(move || {
             {
                 let connector_files = get_connector_files();
@@ -336,7 +334,7 @@ fn connector_grpc_reader(chip_kind: ChipKind, stream_id: u32, file_in: File) -> 
                 binding.insert(stream_id, file_in);
             }
             if (chip_kind != ChipKind::BLUETOOTH) && (chip_kind != ChipKind::UWB) {
-                warn!("Unable to register connector for chip type {:?}", chip_kind);
+                warn!("Unable to register connector for chip type {chip_kind:?}");
             }
             // Read packet from grpc and send to file_in.
             ffi_transport::read_packet_response_loop(stream_id, connector_grpc_read_callback);
@@ -382,7 +380,7 @@ pub fn run_fd_connector(startup_json: &String, server: &str) -> Result<(), Strin
                 stream_id,
                 &initial_request.write_to_bytes().unwrap(),
             );
-            info!("Sent initial request to grpc for stream_id: {}", stream_id);
+            info!("Sent initial request to grpc for stream_id: {stream_id}");
 
             handles.push(connector_grpc_reader(chip_kind, stream_id, file_in));
 

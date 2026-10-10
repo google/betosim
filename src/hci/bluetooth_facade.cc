@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,7 +48,8 @@ void SetLogColorEnable(bool);
 
 namespace netsim::hci::facade {
 
-int8_t SimComputeRssi(int send_id, int recv_id, int8_t tx_power);
+int8_t SimComputeRssi(int send_id, int recv_id, rootcanal::Phy::Type phy_type,
+                      int8_t tx_power);
 void IncrTx(uint32_t send_id, rootcanal::Phy::Type phy_type);
 void IncrRx(uint32_t receive_id, rootcanal::Phy::Type phy_type);
 
@@ -68,7 +69,7 @@ class SimPhyLayer : public PhyLayer {
   int8_t ComputeRssi(PhyDevice::Identifier sender_id,
                      PhyDevice::Identifier receiver_id,
                      int8_t tx_power) override {
-    return SimComputeRssi(sender_id, receiver_id, tx_power);
+    return SimComputeRssi(sender_id, receiver_id, type, tx_power);
   }
 
   // Check if the device is present in the phy_devices
@@ -465,9 +466,8 @@ void IncrRx(uint32_t id, rootcanal::Phy::Type phy_type) {
   }
 }
 
-// TODO: Make SimComputeRssi invoke netsim::device::GetDistanceRust with dev
-// flag
-int8_t SimComputeRssi(int send_id, int recv_id, int8_t tx_power) {
+int8_t SimComputeRssi(int send_id, int recv_id, rootcanal::Phy::Type phy_type,
+                      int8_t tx_power) {
   if (id_to_chip_info_.find(send_id) == id_to_chip_info_.end() ||
       id_to_chip_info_.find(recv_id) == id_to_chip_info_.end()) {
 #ifdef NETSIM_ANDROID_EMULATOR
@@ -477,10 +477,18 @@ int8_t SimComputeRssi(int send_id, int recv_id, int8_t tx_power) {
 #endif
     return tx_power;
   }
-  auto a = id_to_chip_info_[send_id]->chip_id;
-  auto b = id_to_chip_info_[recv_id]->chip_id;
-  auto distance = netsim::device::GetDistanceCxx(a, b);
-  return netsim::DistanceToRssi(tx_power, distance);
+  auto sender = id_to_chip_info_[send_id]->chip_id;
+  auto receiver = id_to_chip_info_[recv_id]->chip_id;
+  // Map rootcanal Phy type to netsim PhyKind
+  model::PhyKind link_kind;
+  if (phy_type == rootcanal::Phy::Type::LOW_ENERGY) {
+    link_kind = model::PhyKind::BLUETOOTH_LOW_ENERGY;
+  } else if (phy_type == rootcanal::Phy::Type::BR_EDR) {
+    link_kind = model::PhyKind::BLUETOOTH_CLASSIC;
+  } else {
+    link_kind = model::PhyKind::NONE;  // Unknown
+  }
+  return netsim::GetRssi(sender, receiver, link_kind, tx_power);
 }
 
 rust::Vec<::std::uint8_t> GetCxx(uint32_t id) {

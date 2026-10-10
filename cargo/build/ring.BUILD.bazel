@@ -1,0 +1,311 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_aarch64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:arm",
+    ],
+)
+
+config_setting(
+    name = "linux_x86_32",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_32",
+    ],
+)
+
+config_setting(
+    name = "macos_x86_64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "windows_x86_64",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "windows_arm64",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "ios_arm64",
+    constraint_values = [
+        "@platforms//os:ios",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# Need to override prefix_symbols.h for Windows since the precompiled files contain
+# `ring_core_0_17_2_`
+#
+# Use sed rather than python3: on Windows, Bazel runs genrule commands through
+# the bundled busybox shell, whose PATH does not include the host interpreters.
+# python3 is available to repository rules (which run in the Bazel server's own
+# environment) but not here, so invoking it fails with exit 127. busybox does
+# provide sed, and this is the command the pre-existing goldfish build used.
+genrule(
+    name = "windows_prefix_symbols",
+    srcs = ["ring_core_generated/prefix_symbols.h"],
+    outs = ["windows_includes/ring_core_generated/prefix_symbols.h"],
+    cmd = "sed 's/ring_core_android_platform_/ring_core_0_17_2_/g' $< > $@",
+)
+
+cc_library(
+    name = "libring-core",
+    srcs = [
+        "crypto/cpu_intel.c",
+        "crypto/crypto.c",
+        "crypto/curve25519/curve25519.c",
+        "crypto/fipsmodule/aes/aes_nohw.c",
+        "crypto/fipsmodule/bn/montgomery.c",
+        "crypto/fipsmodule/bn/montgomery_inv.c",
+        "crypto/fipsmodule/ec/ecp_nistz.c",
+        "crypto/fipsmodule/ec/gfp_p256.c",
+        "crypto/fipsmodule/ec/gfp_p384.c",
+        "crypto/fipsmodule/ec/p256.c",
+        "crypto/fipsmodule/ec/p256-nistz.c",
+        "crypto/limbs/limbs.c",
+        "crypto/mem.c",
+        "crypto/poly1305/poly1305.c",
+        "crypto/poly1305/poly1305_vec.c",
+    ] + select({
+        ":ios_arm64": [
+            "pregenerated/aesv8-armx-ios64.S",
+            "pregenerated/armv8-mont-ios64.S",
+            "pregenerated/chacha-armv8-ios64.S",
+            "pregenerated/chacha20_poly1305_armv8-ios64.S",
+            "pregenerated/ghash-neon-armv8-ios64.S",
+            "pregenerated/ghashv8-armx-ios64.S",
+            "pregenerated/p256-armv8-asm-ios64.S",
+            "pregenerated/sha256-armv8-ios64.S",
+            "pregenerated/sha512-armv8-ios64.S",
+            "pregenerated/vpaes-armv8-ios64.S",
+        ],
+        ":linux_aarch64": [
+            "pregenerated/aesv8-armx-linux64.S",
+            "pregenerated/armv8-mont-linux64.S",
+            "pregenerated/chacha-armv8-linux64.S",
+            "pregenerated/chacha20_poly1305_armv8-linux64.S",
+            "pregenerated/ghash-neon-armv8-linux64.S",
+            "pregenerated/ghashv8-armx-linux64.S",
+            "pregenerated/p256-armv8-asm-linux64.S",
+            "pregenerated/sha256-armv8-linux64.S",
+            "pregenerated/sha512-armv8-linux64.S",
+            "pregenerated/vpaes-armv8-linux64.S",
+        ],
+        ":linux_arm": [
+            "crypto/curve25519/asm/x25519-asm-arm.S",
+            "crypto/poly1305/poly1305_arm.c",
+            "crypto/poly1305/poly1305_arm_asm.S",
+            "pregenerated/aesv8-armx-linux32.S",
+            "pregenerated/armv4-mont-linux32.S",
+            "pregenerated/bsaes-armv7-linux32.S",
+            "pregenerated/chacha-armv4-linux32.S",
+            "pregenerated/ghash-armv4-linux32.S",
+            "pregenerated/ghashv8-armx-linux32.S",
+            "pregenerated/sha256-armv4-linux32.S",
+            "pregenerated/sha512-armv4-linux32.S",
+            "pregenerated/vpaes-armv7-linux32.S",
+        ],
+        ":linux_x86_32": [
+            "pregenerated/aesni-x86-elf.S",
+            "pregenerated/chacha-x86-elf.S",
+            "pregenerated/ghash-x86-elf.S",
+            "pregenerated/vpaes-x86-elf.S",
+            "pregenerated/x86-mont-elf.S",
+        ],
+        ":linux_x86_64": [
+            "crypto/curve25519/curve25519_64_adx.c",
+            "pregenerated/aesni-gcm-x86_64-elf.S",
+            "pregenerated/aesni-x86_64-elf.S",
+            "pregenerated/chacha-x86_64-elf.S",
+            "pregenerated/chacha20_poly1305_x86_64-elf.S",
+            "pregenerated/ghash-x86_64-elf.S",
+            "pregenerated/p256-x86_64-asm-elf.S",
+            "pregenerated/sha256-x86_64-elf.S",
+            "pregenerated/sha512-x86_64-elf.S",
+            "pregenerated/vpaes-x86_64-elf.S",
+            "pregenerated/x86_64-mont-elf.S",
+            "pregenerated/x86_64-mont5-elf.S",
+            "third_party/fiat/asm/fiat_curve25519_adx_mul.S",
+            "third_party/fiat/asm/fiat_curve25519_adx_square.S",
+        ],
+        ":macos_x86_64": [
+            "pregenerated/aesni-gcm-x86_64-macosx.S",
+            "pregenerated/aesni-x86_64-macosx.S",
+            "pregenerated/chacha-x86_64-macosx.S",
+            "pregenerated/chacha20_poly1305_x86_64-macosx.S",
+            "pregenerated/ghash-x86_64-macosx.S",
+            "pregenerated/p256-x86_64-asm-macosx.S",
+            "pregenerated/sha256-x86_64-macosx.S",
+            "pregenerated/sha512-x86_64-macosx.S",
+            "pregenerated/vpaes-x86_64-macosx.S",
+            "pregenerated/x86_64-mont-macosx.S",
+            "pregenerated/x86_64-mont5-macosx.S",
+            "third_party/fiat/asm/fiat_curve25519_adx_mul.S",
+            "third_party/fiat/asm/fiat_curve25519_adx_square.S",
+        ],
+        ":windows_arm64": [
+            "pregenerated/aesv8-armx-win64.S",
+            "pregenerated/armv8-mont-win64.S",
+            "pregenerated/chacha-armv8-win64.S",
+            "pregenerated/chacha20_poly1305_armv8-win64.S",
+            "pregenerated/ghash-neon-armv8-win64.S",
+            "pregenerated/ghashv8-armx-win64.S",
+            "pregenerated/p256-armv8-asm-win64.S",
+            "pregenerated/sha256-armv8-win64.S",
+            "pregenerated/sha512-armv8-win64.S",
+            "pregenerated/vpaes-armv8-win64.S",
+        ],
+        ":windows_x86_64": [
+            "pregenerated/aesni-gcm-x86_64-nasm.o",
+            "pregenerated/aesni-x86_64-nasm.o",
+            "pregenerated/chacha-x86_64-nasm.o",
+            "pregenerated/chacha20_poly1305_x86_64-nasm.o",
+            "pregenerated/ghash-x86_64-nasm.o",
+            "pregenerated/p256-x86_64-asm-nasm.o",
+            "pregenerated/sha256-x86_64-nasm.o",
+            "pregenerated/sha512-x86_64-nasm.o",
+            "pregenerated/vpaes-x86_64-nasm.o",
+            "pregenerated/x86_64-mont-nasm.o",
+            "pregenerated/x86_64-mont5-nasm.o",
+        ],
+        "//conditions:default": [],
+    }),
+    hdrs = glob([
+        "include/**/*.h",
+        "crypto/**/*.h",
+        "crypto/**/*.inl",
+        "third_party/fiat/**/*.h",
+    ]) + select({
+        ":windows_x86_64": [":windows_prefix_symbols"],
+        "//conditions:default": glob(["ring_core_generated/**/*.h"]),
+    }),
+    copts = [
+        "-O3",
+        "-fPIC",
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-fno-omit-frame-pointer",
+        "-fno-strict-aliasing",
+        "-fstack-protector",
+        "-fvisibility=hidden",
+        "-DNDEBUG",
+    ] + select({
+        # Forced-include of the prefix-renaming header, which must be the
+        # sed-rewritten copy produced by :windows_prefix_symbols and not the
+        # one in the source tree.
+        #
+        # Name it by $(execpath) rather than by a path resolved through -I.
+        # The -I form is ambiguous: `includes` puts both this genfiles
+        # directory and the package root on the -isystem search path, the
+        # package root also contains ring_core_generated/prefix_symbols.h, and
+        # Windows builds are unsandboxed so that source copy is visible on
+        # disk even though it is not a declared input on this platform. It won
+        # the search, so the C sources were compiled with the crate's own
+        # ring_core_android_platform_ prefix while the Rust side was told
+        # RING_CORE_PREFIX=ring_core_0_17_2_, and every C symbol came out
+        # undefined at link time. $(execpath) names one specific file, and
+        # because the header is guarded by ring_core_generated_PREFIX_SYMBOLS_H
+        # the later #include <ring_core_generated/prefix_symbols.h> in
+        # include/ring-core/base.h is then inert whichever copy it finds.
+        #
+        # This is the form the goldfish netsim_build tree uses (spelled there
+        # as the now-deprecated $(location), which expands identically). It
+        # failed with C1083 under MSVC cl.exe, which resolves /FI through
+        # #include "..." rules and never consults the working directory, but
+        # the hermetic toolchain compiles this with clang-cl, which does.
+        ":windows_x86_64": ["/FI$(execpath :windows_prefix_symbols)"],
+        "//conditions:default": [],
+    }),
+    data = select({
+        ":windows_x86_64": [":windows_prefix_symbols"],
+        "//conditions:default": [],
+    }),
+    includes = select({
+        ":windows_x86_64": ["windows_includes"],
+        "//conditions:default": [],
+    }) + [
+        ".",
+        "include",
+    ],
+)
+
+rust_library(
+    name = "ring",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = glob(["src/**/*.der"]),
+    crate_features = [
+        "alloc",
+        "default",
+        "dev_urandom_fallback",
+        "std",
+    ],
+    crate_name = "ring",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    rustc_env = select({
+        ":windows_x86_64": {
+            "RING_CORE_PREFIX": "ring_core_0_17_2_",
+        },
+        "//conditions:default": {
+            "RING_CORE_PREFIX": "ring_core_android_platform_",
+        },
+    }),
+    rustc_flags = [
+        "--cap-lints=allow",
+    ],
+    deps = [
+        ":libring-core",
+        "@getrandom_v0_2",
+        "@libc",
+        "@spin",
+        "@untrusted",
+    ],
+)

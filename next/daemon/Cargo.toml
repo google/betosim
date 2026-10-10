@@ -1,0 +1,62 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bluetooth-actor = { package = "bluetooth", path = "../bluetooth-actor" }
+capture-actor = { path = "../capture-actor" }
+cell-actor = { path = "../cell-actor" }
+clap = { version = "4.1.8", default-features = false, features = [
+  "derive",
+  "error-context",
+  "help",
+  "std",
+  "usage",
+  "env",
+] }
+nfc-actor = { path = "../nfc-actor" }
+
+device-actor = { path = "../device-actor" }
+grpc-server = { path = "../grpc-server" }
+grpcio = { version = "0.13", default-features = false, features = [
+  "protobufv3-codec",
+  "openssl",
+] }
+hci-server = { path = "../hci-server" }
+link-actor = { path = "../link-actor" }
+netsim-common = { path = "../common" }
+netsim-model = { path = "../model" }
+netsim-rest-api = { path = "../rest-api" }
+packet-stream = { path = "../packet-stream" }
+rootcanal-server = { path = "../rootcanal-server", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.28.2", features = ["full", "tracing"] }
+tracing = "0.1"
+uwb-actor = { path = "../uwb-actor" }
+websocket-server = { path = "../websocket-server" }
+wifi-actor = { path = "../wifi-actor" }
+
+[dev-dependencies]
+regex = "1"
+serde_json = "1.0"
+tempfile = "3"
+
+[features]
+default = []
+cuttlefish = ["dep:rootcanal-server"]

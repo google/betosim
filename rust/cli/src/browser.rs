@@ -1,10 +1,10 @@
-// Copyright 2022 Google LLC
+// Copyright 2022 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,11 +32,11 @@ pub fn open<T: AsRef<OsStr>>(path: T) {
         let mut open_cmd = Command::new(open_handler);
         open_cmd.arg(path);
         if open_cmd.output().is_ok() {
-            println!("Opened with command : {:?}", open_cmd);
+            println!("Opened with command : {open_cmd:?}");
             return;
         }
     }
-    println!("xdg-open, gnome-open, kde-open not working (linux). Open this url:{:?}", path);
+    println!("xdg-open, gnome-open, kde-open not working (linux). Open this url:{path:?}");
 }
 
 #[cfg(target_os = "macos")]

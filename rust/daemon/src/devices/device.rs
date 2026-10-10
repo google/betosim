@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -95,8 +95,8 @@ impl Device {
         patch: &ProtoPatchDeviceFields,
         pose_manager: Arc<PoseManager>,
     ) -> Result<(), String> {
-        if patch.visible.is_some() {
-            self.visible.store(patch.visible.unwrap(), Ordering::SeqCst);
+        if let Some(visible) = patch.visible {
+            self.visible.store(visible, Ordering::SeqCst);
         }
         if patch.position.is_some() {
             pose_manager.set_position(self.id, &patch.position);
@@ -131,7 +131,7 @@ impl Device {
                     return Err(format!(
                         "Chip {} not found in device {}",
                         patch_chip_name, self.name
-                    ))
+                    ));
                 }
             }
         }
@@ -172,8 +172,7 @@ impl Device {
         }
         if multiple_matches {
             return Err(format!(
-                "Multiple ambiguous matches were found with chip name {}",
-                patch_chip_name
+                "Multiple ambiguous matches were found with chip name {patch_chip_name}"
             ));
         }
         Ok(target)
@@ -315,8 +314,7 @@ mod tests {
         assert_eq!(
             result.err(),
             Some(format!(
-                "No chip name is supplied but multiple chips of chip kind {:?} exist.",
-                PATCH_CHIP_KIND
+                "No chip name is supplied but multiple chips of chip kind {PATCH_CHIP_KIND:?} exist."
             ))
         );
     }

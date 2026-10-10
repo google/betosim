@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,9 +30,10 @@
 #include <utility>             // for pair, make_pair, oper...
 #include <vector>              // for vector
 
-#include "aemu/base/EintrWrapper.h"  // for HANDLE_EINTR
-#include "aemu/base/Log.h"           // for LogStreamVoidify, Log...
-#include "aemu/base/logging/CLog.h"
+#include "util/log.h"
+using netsim::__BtsLog;
+
+#include "aemu/base/EintrWrapper.h"          // for HANDLE_EINTR
 #include "aemu/base/sockets/SocketUtils.h"   // for socketRecv, socketSet...
 #include "aemu/base/sockets/SocketWaiter.h"  // for SocketWaiter, SocketW...
 
@@ -115,7 +116,7 @@ class AsyncManager::AsyncFdWatcher {
     // start the thread if not started yet
     int started = tryStartThread();
     if (started != 0) {
-      derror("%s: Unable to start thread", __func__);
+      BtsLogError("Unable to start thread");
       return started;
     }
 
@@ -146,8 +147,7 @@ class AsyncManager::AsyncFdWatcher {
     if (std::this_thread::get_id() != thread_.get_id()) {
       thread_.join();
     } else {
-      dwarning("%s: Starting thread stop from inside the reading thread itself",
-               __func__);
+      BtsLogWarn("Starting thread stop from inside the reading thread itself");
     }
 
     {
@@ -168,10 +168,8 @@ class AsyncManager::AsyncFdWatcher {
     // set up the communication channel
     if (android::base::socketCreatePair(&notification_listen_fd_,
                                         &notification_write_fd_)) {
-      derror(
-          "%s:Unable to establish a communication channel to the reading "
-          "thread",
-          __func__);
+      BtsLogError(
+          "Unable to establish a communication channel to the reading thread");
       return -1;
     }
     android::base::socketSetNonBlocking(notification_listen_fd_);
@@ -179,7 +177,7 @@ class AsyncManager::AsyncFdWatcher {
 
     thread_ = std::thread([this]() { ThreadRoutine(); });
     if (!thread_.joinable()) {
-      derror("%s: Unable to start reading thread", __func__);
+      BtsLogError("Unable to start reading thread");
       return -1;
     }
     return 0;
@@ -188,7 +186,7 @@ class AsyncManager::AsyncFdWatcher {
   int notifyThread() {
     char buffer = '0';
     if (android::base::socketSend(notification_write_fd_, &buffer, 1) < 0) {
-      derror("%s: Unable to send message to reading thread", __func__);
+      BtsLogError("Unable to send message to reading thread");
       return -1;
     }
     return 0;
@@ -247,10 +245,10 @@ class AsyncManager::AsyncFdWatcher {
       // wait until there is data available to read on some FD
       int retval = read_fds->wait(std::numeric_limits<int64_t>::max());
       if (retval <= 0) {  // there was some error or a timeout
-        derror(
-            "%s: There was an error while waiting for data on the file "
+        BtsLogError(
+            "There was an error while waiting for data on the file "
             "descriptors: %s",
-            __func__, strerror(errno));
+            strerror(errno));
         continue;
       }
 
@@ -341,8 +339,7 @@ class AsyncManager::AsyncTaskManager {
     if (std::this_thread::get_id() != thread_.get_id()) {
       thread_.join();
     } else {
-      dwarning("%s: Starting thread stop from inside the task thread itself",
-               __func__);
+      BtsLogWarn("Starting thread stop from inside the task thread itself");
     }
     return 0;
   }
@@ -436,7 +433,7 @@ class AsyncManager::AsyncTaskManager {
     // start thread if necessary
     int started = tryStartThread();
     if (started != 0) {
-      derror("%s: Unable to start thread", __func__);
+      BtsLogError("Unable to start thread");
       return kInvalidTaskId;
     }
     // notify the thread so that it knows of the new task
@@ -460,7 +457,7 @@ class AsyncManager::AsyncTaskManager {
     running_ = true;
     thread_ = std::thread([this]() { ThreadRoutine(); });
     if (!thread_.joinable()) {
-      derror("%s: Unable to start task thread", __func__);
+      BtsLogError("Unable to start task thread");
       return -1;
     }
     return 0;

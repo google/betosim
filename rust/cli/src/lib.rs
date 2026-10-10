@@ -1,10 +1,10 @@
-// Copyright 2022 Google LLC
+// Copyright 2022 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@
 mod args;
 mod browser;
 mod display;
+mod error;
 mod file_handler;
 mod grpc_client;
 mod requests;
@@ -26,13 +27,13 @@ use netsim_common::util::ini_file::get_server_address;
 use netsim_common::util::os_utils::get_instance;
 use netsim_proto::frontend;
 
-use anyhow::{anyhow, Result};
 use grpcio::{ChannelBuilder, EnvBuilder};
+use log::error;
 use std::env;
 use std::fs::File;
 use std::path::PathBuf;
-use tracing::error;
 
+use crate::error::{Error, Result};
 use crate::grpc_client::{ClientResponseReader, GrpcRequest, GrpcResponse};
 use netsim_proto::frontend_grpc::FrontendServiceClient;
 
@@ -74,7 +75,7 @@ fn perform_command(
     command: &mut args::Command,
     client: FrontendServiceClient,
     verbose: bool,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     // Get command's gRPC request(s)
     let requests = match command {
         args::Command::Capture(args::Capture::Patch(_) | args::Capture::Get(_)) => {
@@ -90,26 +91,26 @@ fn perform_command(
     for (i, req) in requests.iter().enumerate() {
         let result = match command {
             // Continuous option sends the gRPC call every second
-            args::Command::Devices(ref cmd) if cmd.continuous => {
+            &mut args::Command::Devices(ref cmd) if cmd.continuous => {
                 continuous_perform_command(command, &client, req, verbose)?;
                 panic!("Continuous command interrupted. Exiting.");
             }
-            args::Command::Capture(args::Capture::List(ref cmd)) if cmd.continuous => {
+            &mut args::Command::Capture(args::Capture::List(ref cmd)) if cmd.continuous => {
                 continuous_perform_command(command, &client, req, verbose)?;
                 panic!("Continuous command interrupted. Exiting.");
             }
             // Get Capture use streaming gRPC reader request
-            args::Command::Capture(args::Capture::Get(ref mut cmd)) => {
+            args::Command::Capture(args::Capture::Get(cmd)) => {
                 let GrpcRequest::GetCapture(request) = req else {
-                    panic!("Expected to find GetCaptureRequest. Got: {:?}", req);
+                    panic!("Expected to find GetCaptureRequest. Got: {req:?}");
                 };
                 perform_streaming_request(&client, cmd, request, &cmd.filenames[i].to_owned())?;
                 Ok(None)
             }
-            args::Command::Beacon(args::Beacon::Remove(ref cmd)) => {
+            &mut args::Command::Beacon(args::Beacon::Remove(ref cmd)) => {
                 let response = grpc_client::send_grpc(&client, &GrpcRequest::ListDevice)?;
                 let GrpcResponse::ListDevice(response) = response else {
-                    panic!("Expected to find ListDeviceResponse. Got: {:?}", response);
+                    panic!("Expected to find ListDeviceResponse. Got: {response:?}");
                 };
                 let id = find_id_for_remove(response, cmd)?;
                 let res = grpc_client::send_grpc(
@@ -128,12 +129,12 @@ fn perform_command(
             }
         };
         if let Err(e) = process_result(command, result, verbose) {
-            error!("{}", e);
+            error!("{e}");
             process_error = true;
         };
     }
     if process_error {
-        return Err(anyhow!("Not all requests were processed successfully."));
+        return Err("Not all requests were processed successfully.".into());
     }
     Ok(())
 }
@@ -141,7 +142,7 @@ fn perform_command(
 fn find_id_for_remove(
     response: frontend::ListDeviceResponse,
     cmd: &args::BeaconRemove,
-) -> anyhow::Result<u32> {
+) -> Result<u32> {
     let devices = response.devices;
     let id = devices
         .iter()
@@ -150,19 +151,19 @@ fn find_id_for_remove(
             (device.chips.len() == 1).then_some(&device.chips[0]),
             |chip_name| device.chips.iter().find(|chip| &chip.name == chip_name)
         ))
-        .ok_or(
+        .ok_or_else(|| {
             cmd.chip_name
                 .as_ref()
-                .map_or(
-                    anyhow!("failed to delete chip: device '{}' has multiple possible candidates, please specify a chip name", cmd.device_name),
+                .map_or_else(
+                    || Error::from(format!("failed to delete chip: device '{}' has multiple possible candidates, please specify a chip name", cmd.device_name)),
                     |chip_name| {
-                        anyhow!(
+                        Error::from(format!(
                             "failed to delete chip: could not find chip '{}' on device '{}'",
                             chip_name, cmd.device_name
-                        )
+                        ))
                     },
                 )
-        )?
+        })?
         .id;
 
     Ok(id)
@@ -174,7 +175,7 @@ fn continuous_perform_command(
     client: &FrontendServiceClient,
     grpc_request: &GrpcRequest,
     verbose: bool,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     loop {
         let response = grpc_client::send_grpc(client, grpc_request)?;
         process_result(command, Ok(Some(response)), verbose)?;
@@ -184,19 +185,19 @@ fn continuous_perform_command(
 /// Check and handle the gRPC call result
 fn process_result(
     command: &args::Command,
-    result: anyhow::Result<Option<GrpcResponse>>,
+    result: Result<Option<GrpcResponse>>,
     verbose: bool,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     match result {
         Ok(grpc_response) => {
             let response = grpc_response.unwrap_or(GrpcResponse::Unknown);
             command.print_response(&response, verbose);
             Ok(())
         }
-        Err(e) => Err(anyhow!("Grpc call error: {}", e)),
+        Err(e) => Err(format!("Grpc call error: {e}").into()),
     }
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 /// main Rust netsim CLI function to be called by C wrapper netsim.cc
 pub extern "C" fn rust_main() {
     let mut args = NetsimArgs::parse();

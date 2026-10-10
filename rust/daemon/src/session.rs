@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,13 +22,15 @@ use log::error;
 use log::info;
 use netsim_common::system::netsimd_temp_dir;
 use netsim_proto::stats::NetsimStats as ProtoNetsimStats;
+use netsim_proto::stats::WifiStats as ProtoWifiStats;
+use protobuf::MessageField;
 use protobuf_json_mapping::print_to_string;
 use std::fs::File;
 use std::io::Write;
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockWriteGuard;
+use std::sync::mpsc::Receiver;
 use std::thread::{Builder, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -72,7 +74,11 @@ impl Session {
     //
     // Starts the session monitor thread to handle events and
     // write session stats to json file on event and periodically.
-    pub fn start(&mut self, events_rx: Receiver<Event>) -> &mut Self {
+    pub fn start<T>(&mut self, events_rx: Receiver<Event>, wifi_stats: T) -> &mut Self
+    where
+        T: Send + Sync + 'static,
+        for<'a> &'a T: Into<ProtoWifiStats>,
+    {
         let info = Arc::clone(&self.info);
 
         // Start up session monitor thread
@@ -148,7 +154,8 @@ impl Session {
                         if write_stats {
                             update_session_duration(&mut lock);
                             if lock.write_json {
-                                let current_stats = get_current_stats(lock.stats_proto.clone());
+                                let current_stats =
+                                    get_current_stats(lock.stats_proto.clone(), &wifi_stats);
                                 if let Err(err) = write_stats_to_json(current_stats) {
                                     error!("Failed to write stats to json: {err:?}");
                                 }
@@ -166,7 +173,10 @@ impl Session {
     //
     // Waits for the session monitor thread to finish and writes
     // the session proto to a json file. Consumes the session.
-    pub fn stop(mut self) -> anyhow::Result<()> {
+    pub fn stop<T>(mut self, wifi_stats: T) -> anyhow::Result<()>
+    where
+        for<'a> &'a T: Into<ProtoWifiStats>,
+    {
         if !self.handle.as_ref().expect("no session monitor").is_finished() {
             info!("session monitor active, waiting...");
         }
@@ -176,7 +186,7 @@ impl Session {
 
         let lock = self.info.read().expect("Could not acquire session lock");
         if lock.write_json {
-            let current_stats = get_current_stats(lock.stats_proto.clone());
+            let current_stats = get_current_stats(lock.stats_proto.clone(), &wifi_stats);
             write_stats_to_json(current_stats)?;
         }
         Ok(())
@@ -190,8 +200,12 @@ fn update_session_duration(session_lock: &mut RwLockWriteGuard<'_, SessionInfo>)
 }
 
 /// Construct current radio stats
-fn get_current_stats(mut current_stats: ProtoNetsimStats) -> ProtoNetsimStats {
+fn get_current_stats<T>(mut current_stats: ProtoNetsimStats, wifi_stats: &T) -> ProtoNetsimStats
+where
+    for<'a> &'a T: Into<ProtoWifiStats>,
+{
     current_stats.radio_stats.extend(get_radio_stats());
+    current_stats.wifi_stats = MessageField::some(wifi_stats.into());
     current_stats
 }
 
@@ -211,6 +225,7 @@ mod tests {
     use crate::devices::chip::ChipIdentifier;
     use crate::devices::device::DeviceIdentifier;
     use crate::events::{ChipAdded, ChipRemoved, DeviceRemoved, Event, Events, ShutDown};
+    use crate::wifi::stats::WifiStats;
     use netsim_proto::stats::{
         NetsimDeviceStats as ProtoDeviceStats, NetsimRadioStats as ProtoRadioStats,
     };
@@ -232,10 +247,11 @@ mod tests {
     }
 
     fn setup_session_start_test() -> (Session, Arc<Events>) {
+        let wifi_stats = WifiStats::default();
         let mut session = Session::new_internal(false);
         let events = Events::new();
         let events_rx = events.subscribe();
-        session.start(events_rx);
+        session.start(events_rx, wifi_stats);
         (session, events)
     }
 
@@ -269,6 +285,7 @@ mod tests {
 
     #[test]
     fn test_start_and_stop() {
+        let wifi_stats = WifiStats::default();
         let (session, events) = setup_session_start_test();
 
         // we want to be able to check the session time gets incremented
@@ -278,7 +295,7 @@ mod tests {
         events.publish(Event::ShutDown(ShutDown { reason: "Stop the session".to_string() }));
 
         // should not panic or deadlock
-        session.stop().unwrap();
+        session.stop(wifi_stats).unwrap();
     }
 
     // Tests for session.rs involving devices

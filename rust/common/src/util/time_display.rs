@@ -1,23 +1,22 @@
+//  Copyright 2023 The Android Open Source Project
 //
-//  Copyright 2023 Google, Inc.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at:
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-//  http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! # Time Display class
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 
 /// A simple class that contains information required to display time
 pub struct TimeDisplay {
@@ -44,8 +43,7 @@ impl TimeDisplay {
     ///
     /// `String` display of utc time.
     pub fn utc_display(&self) -> String {
-        if let Some(datetime) = NaiveDateTime::from_timestamp_opt(self.secs, self.nsecs) {
-            let current_datetime = DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc);
+        if let Some(current_datetime) = DateTime::<Utc>::from_timestamp(self.secs, self.nsecs) {
             return format!(
                 "{}-{:02}-{:02}-{:02}-{:02}-{:02}",
                 current_datetime.year(),
@@ -65,8 +63,7 @@ impl TimeDisplay {
     ///
     /// `Ok(String)` if the display was successful, `Error` otherwise.
     pub fn utc_display_hms(&self) -> String {
-        if let Some(datetime) = NaiveDateTime::from_timestamp_opt(self.secs, self.nsecs) {
-            let current_datetime = DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc);
+        if let Some(current_datetime) = DateTime::<Utc>::from_timestamp(self.secs, self.nsecs) {
             return format!(
                 "{:02}:{:02}:{:02}",
                 current_datetime.hour(),
@@ -79,16 +76,15 @@ impl TimeDisplay {
 
     /// Displays time in UTC for logs
     fn utc_display_log(&self) -> String {
-        if let Some(datetime) = NaiveDateTime::from_timestamp_opt(self.secs, self.nsecs) {
-            let current_datetime = DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc);
+        if let Some(current_datetime) = DateTime::<Utc>::from_timestamp(self.secs, self.nsecs) {
             return format!(
-                "{:02}-{:02} {:02}:{:02}:{:02}.{:.3}",
+                "{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
                 current_datetime.month(),
                 current_datetime.day(),
                 current_datetime.hour(),
                 current_datetime.minute(),
                 current_datetime.second(),
-                current_datetime.timestamp_subsec_nanos().to_string(),
+                current_datetime.timestamp_subsec_nanos() / 1_000_000,
             );
         }
         "INVALID-TIMESTAMP".to_string()
@@ -148,8 +144,8 @@ mod tests {
     fn test_utc_display_log() {
         let epoch_time = TimeDisplay::new(0, 0);
         let utc_epoch = epoch_time.utc_display_log();
-        assert_eq!(utc_epoch, "01-01 00:00:00.0");
-        let twok_time = TimeDisplay::new(946684900, 200);
+        assert_eq!(utc_epoch, "01-01 00:00:00.000");
+        let twok_time = TimeDisplay::new(946684900, 200_000_000);
         let utc_twok = twok_time.utc_display_log();
         assert_eq!(utc_twok, "01-01 00:01:40.200");
     }

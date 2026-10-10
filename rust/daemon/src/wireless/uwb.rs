@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use bytes::Bytes;
-use futures::{channel::mpsc::UnboundedSender, sink::SinkExt, StreamExt};
+use futures::{StreamExt, channel::mpsc::UnboundedSender, sink::SinkExt};
 use pica::{Handle, Pica};
 
-use netsim_proto::model::chip::Radio as ProtoRadio;
 use netsim_proto::model::Chip as ProtoChip;
-use netsim_proto::stats::{netsim_radio_stats, NetsimRadioStats as ProtoRadioStats};
+use netsim_proto::model::chip::Radio as ProtoRadio;
+use netsim_proto::stats::{NetsimRadioStats as ProtoRadioStats, netsim_radio_stats};
 
 use crate::devices::chip::ChipIdentifier;
 use crate::get_runtime;
@@ -73,7 +73,6 @@ impl Drop for Uwb {
 
 impl WirelessChip for Uwb {
     fn handle_request(&self, packet: &Bytes) {
-        // TODO(b/330788870): Increment tx_count
         self.uci_stream_writer
             .unbounded_send(packet.clone().into())
             .expect("UciStream Receiver Disconnected");

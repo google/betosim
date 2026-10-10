@@ -1,0 +1,68 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package netsim.nfc_service;
+
+import "netsim/model.proto";
+
+// Service to manage NFC capabilities in the simulation
+service NfcService {
+  // Get status of one or all NFC chips.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // Set RF power state (on/off) of an NFC chip.
+  rpc SetPower(SetPowerRequest) returns (SetPowerResponse);
+  // Execute NFC polling sequence against the simulation scene.
+  rpc Poll(PollRequest) returns (stream PollResponse);
+  // Transmit APDU packet to an NFC target or chip.
+  rpc SendApdu(SendApduRequest) returns (SendApduResponse);
+}
+
+message GetStatusRequest {
+  // Optional ID of the specific chip to get status for. If 0, returns all NFC
+  // chips.
+  uint32 chip_id = 1;
+}
+
+message GetStatusResponse {
+  repeated netsim.model.Chip chips = 1;
+}
+
+message SetPowerRequest {
+  uint32 chip_id = 1;
+  bool power_on = 2;
+}
+
+message SetPowerResponse {
+  netsim.model.Chip chip = 1;
+}
+
+message PollRequest {
+  uint32 chip_id = 1;
+}
+
+message PollResponse {
+  uint32 target_id = 1;
+  bytes tag_data = 2;
+}
+
+message SendApduRequest {
+  uint32 chip_id = 1;
+  bytes apdu = 2;
+}
+
+message SendApduResponse {
+  bytes response = 1;
+}

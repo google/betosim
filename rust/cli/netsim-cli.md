@@ -29,7 +29,7 @@ Options:
     * Usage: `netsim devices [OPTIONS]`
     * Options:
         * `-c, --continuous`:    Continuously print device(s) information every second
-* ### `beacon`: A chip that sends advertisements at a set interval
+* ### `beacon`:     A chip that sends advertisements at a set interval
     * Usage: `netsim beacon <COMMAND>`
     * #### Commands:
         * `create`: Create a beacon
@@ -95,7 +95,7 @@ Options:
                 * \[CHIP_NAME\]: Optional name of the beacon to remove
 * ### `reset`:      Reset Netsim device scene
     * Usage: `netsim reset`
-* ### `capture`:       Control the packet capture functionalities with commands: list, patch, get [aliases: pcap]
+* ### `capture`:    Control the packet capture functionalities with commands: list, patch, get [aliases: pcap]
     * Usage: `netsim capture <COMMAND>`
     * #### Commands
         * `list`:   List currently available Captures (packet captures)
@@ -118,6 +118,28 @@ Options:
                                     include ID, Device Name, and Chip Kind
             * Options:
                 * `-o, --location`: Directory to store downloaded capture file(s)
-* ### `gui`:        Opens netsim Web UI
-* ### `artifact`:   Opens netsim artifacts directory (log, pcaps)
+* ### `link`:       Manage Link properties
+    * Usage: `netsim link <COMMAND>`
+    * #### Commands
+        * `list`:   List all current links and their properties
+        * `patch`:  Add or modify link properties
+            * Usage: `netsim link patch <COMMAND>`
+            * ##### Commands
+                * `rssi`:   Patch RSSI (Received Signal Strength Indication) for a link
+                    * Arguments:
+                        * \<RADIO_TYPE\>:   Radio type for the link [possible values: ble, classic, wifi, uwb]
+                        * \<VALUE\>:        RSSI value in dBm (e.g., -60). Must be between -128 and 127
+                        * [SENDER_ID]:      Identifier for the sender chip. Defaults to 0 (ANY_CHIP), affecting all senders to the specified receiver
+                        * [RECEIVER_ID]:    Identifier for the receiver chip. Defaults to 0 (ANY_CHIP), affecting all receivers from the specified sender
+        * `delete`: Remove link properties
+            * Usage: `netsim link patch <COMMAND>`
+            * ##### Commands
+                * `rssi`:   Delete RSSI (Received Signal Strength Indication) for a link
+                    * Arguments:
+                        * \<RADIO_TYPE\>:   Radio type for the link [possible values: ble, classic, wifi, uwb]
+                        * [SENDER_ID]:      Identifier for the sender chip. Defaults to 0 (ANY_CHIP)
+                        * [RECEIVER_ID]:    Identifier for the receiver chip. Defaults to 0 (ANY_CHIP)
+* ### `gui`:        Open netsim Web UI
+* ### `artifact`:   Open netsim artifacts directory (log, pcaps)
+* ### `bumble`:     Open Bumble Hive Web Page
 * ### `help`:       Print this message or the help of the given subcommand(s)

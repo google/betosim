@@ -1,0 +1,70 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    testonly = True,
+    srcs = [
+        "src/features.rs",
+        "src/lib.rs",
+        "src/step.rs",
+        "src/utils.rs",
+    ],
+    crate_name = "features",
+    edition = "2024",
+    proc_macro_deps = [
+    ],
+    deps = [
+        "@gherkin",
+        "@regex",
+        "@serde",
+        "@serde_json",
+        "@termcolor",
+    ],
+)
+
+rust_test(
+    name = "integration-test",
+    srcs = [
+        "tests/lib_test_world.rs",
+    ],
+    compile_data = glob([
+        "tests/features/*.feat",
+        "tests/features/*.feature",
+    ]),
+    crate_features = ["testing"],
+    crate_root = "tests/lib_test_world.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "//next/verify/macros:verify_macros",
+    ],
+    deps = [
+        ":lib",
+        "//next/packets",
+        "@bytes",
+        "@futures",
+        "@gherkin",
+        "@regex",
+        "@serde",
+        "@serde_json",
+        "@tokio",
+        "@tokio-stream",
+        "@tracing",
+        "@tracing-subscriber",
+    ],
+)

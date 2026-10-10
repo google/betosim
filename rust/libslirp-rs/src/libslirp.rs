@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -92,8 +92,8 @@
 use crate::libslirp_config;
 use crate::libslirp_config::SlirpConfigs;
 use crate::libslirp_sys::{
-    self, SlirpPollType, SlirpProxyConnectFunc, SlirpTimerId, SLIRP_POLL_ERR, SLIRP_POLL_HUP,
-    SLIRP_POLL_IN, SLIRP_POLL_OUT, SLIRP_POLL_PRI,
+    self, SLIRP_POLL_ERR, SLIRP_POLL_HUP, SLIRP_POLL_IN, SLIRP_POLL_OUT, SLIRP_POLL_PRI,
+    SlirpPollType, SlirpProxyConnectFunc, SlirpTimerId,
 };
 
 use bytes::Bytes;
@@ -101,9 +101,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use log::{debug, info, warn};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{CStr, c_char, c_int, c_void};
+use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawSocket;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
@@ -135,6 +140,7 @@ enum SlirpCmd {
     TimerModified,
     Shutdown,
     ProxyConnect(SlirpProxyConnectFunc, usize, i32, i32),
+    Notify,
 }
 
 /// Alias for io::fd::RawFd on Unix or RawSocket on Windows (converted to i32)
@@ -169,6 +175,8 @@ type PollRequest = (Vec<PollFd>, u32);
 
 pub struct LibSlirp {
     tx_cmds: mpsc::Sender<SlirpCmd>,
+    slirp_thread_handle: Option<thread::JoinHandle<()>>,
+    poll_thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TimerManager {
@@ -224,6 +232,20 @@ impl TimerManager {
     }
 }
 
+// Create and return reader and writer TcpStreams of a connected pipe
+fn create_pipe() -> std::io::Result<(TcpStream, TcpStream)> {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .or_else(|_| TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))))?;
+    let addr = listener.local_addr()?;
+
+    let writer_stream = TcpStream::connect(addr)?;
+    let (reader_stream, _) = listener.accept()?;
+
+    reader_stream.set_nonblocking(true)?;
+    writer_stream.set_nonblocking(true)?;
+    Ok((reader_stream, writer_stream))
+}
+
 impl LibSlirp {
     /// Creates a new `LibSlirp` instance.
     pub fn new(
@@ -234,39 +256,55 @@ impl LibSlirp {
     ) -> LibSlirp {
         let (tx_cmds, rx_cmds) = mpsc::channel::<SlirpCmd>();
         let (tx_poll, rx_poll) = mpsc::channel::<PollRequest>();
+        let (signal_rx, signal_tx) = create_pipe().expect("failed to create signal pipe");
 
         // Create channels for polling thread and launch
         let tx_cmds_poll = tx_cmds.clone();
-        if let Err(e) = thread::Builder::new()
-            .name("slirp_poll".to_string())
-            .spawn(move || slirp_poll_thread(rx_poll, tx_cmds_poll))
-        {
-            warn!("Failed to start slirp poll thread: {}", e);
-        }
+        let poll_thread_handle =
+            match thread::Builder::new().name("slirp_poll".to_string()).spawn(move || {
+                slirp_poll_thread(rx_poll, tx_cmds_poll, signal_rx);
+            }) {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    warn!("Failed to start slirp poll thread: {}", e);
+                    None
+                }
+            };
 
         let tx_cmds_slirp = tx_cmds.clone();
-        // Create channels for command processor thread and launch
-        if let Err(e) = thread::Builder::new().name("slirp".to_string()).spawn(move || {
-            slirp_thread(
-                config,
-                tx_bytes,
-                tx_cmds_slirp,
-                rx_cmds,
-                tx_poll,
-                proxy_manager,
-                tx_proxy_bytes,
-            )
-        }) {
-            warn!("Failed to start slirp thread: {}", e);
-        }
+        let slirp_thread_handle =
+            match thread::Builder::new().name("slirp".to_string()).spawn(move || {
+                slirp_thread(
+                    config,
+                    tx_bytes,
+                    tx_cmds_slirp,
+                    rx_cmds,
+                    tx_poll,
+                    proxy_manager,
+                    tx_proxy_bytes,
+                    signal_tx,
+                )
+            }) {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    warn!("Failed to start slirp poll thread: {}", e);
+                    None
+                }
+            };
 
-        LibSlirp { tx_cmds }
+        LibSlirp { tx_cmds, slirp_thread_handle, poll_thread_handle }
     }
 
     /// Shuts down the `LibSlirp` instance.
-    pub fn shutdown(self) {
+    pub fn shutdown(mut self) {
         if let Err(e) = self.tx_cmds.send(SlirpCmd::Shutdown) {
             warn!("Failed to send Shutdown cmd: {}", e);
+        }
+        if let Some(handle) = self.slirp_thread_handle.take() {
+            handle.join().unwrap();
+        }
+        if let Some(handle) = self.poll_thread_handle.take() {
+            handle.join().unwrap();
         }
     }
 
@@ -420,6 +458,7 @@ impl Drop for Slirp {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn slirp_thread(
     config: libslirp_config::SlirpConfig,
     tx_bytes: mpsc::Sender<Bytes>,
@@ -428,6 +467,7 @@ fn slirp_thread(
     tx_poll: mpsc::Sender<PollRequest>,
     proxy_manager: Option<Box<dyn ProxyManager>>,
     tx_proxy_bytes: Option<mpsc::Sender<Bytes>>,
+    mut signal_tx: TcpStream,
 ) {
     // Data structures wrapped in an RC are referenced through the
     // libslirp callbacks and this code (both in the same thread).
@@ -474,6 +514,14 @@ fn slirp_thread(
 
             // A timer has been modified, new expired_time value
             Ok(SlirpCmd::TimerModified) => continue,
+
+            // A notification to wake up the poll thread
+            Ok(SlirpCmd::Notify) => {
+                if let Err(e) = signal_tx.write(&[0]) {
+                    warn!("Failed to signal poll thread: {}", e);
+                }
+                continue;
+            }
 
             // Exit the while loop and shutdown
             Ok(SlirpCmd::Shutdown) => break,
@@ -648,11 +696,7 @@ impl CallbackContext {
 
 macro_rules! ternary {
     ($cond:expr, $true_expr:expr) => {
-        if $cond != 0 {
-            $true_expr
-        } else {
-            0
-        }
+        if $cond != 0 { $true_expr } else { 0 }
     };
 }
 
@@ -664,20 +708,24 @@ macro_rules! ternary {
 ///
 /// The function handles platform-specific differences in polling mechanisms between Linux/macOS
 /// and Windows. It also converts between Slirp's `SlirpPollType` and the OS-specific poll event types.
-fn slirp_poll_thread(rx: mpsc::Receiver<PollRequest>, tx: mpsc::Sender<SlirpCmd>) {
+fn slirp_poll_thread(
+    rx: mpsc::Receiver<PollRequest>,
+    tx: mpsc::Sender<SlirpCmd>,
+    mut signal_rx: TcpStream,
+) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     use libc::{
-        nfds_t as OsPollFdsLenType, poll, pollfd, POLLERR as OS_POLL_ERR, POLLHUP as OS_POLL_HUP,
-        POLLIN as OS_POLL_IN, POLLNVAL as OS_POLL_NVAL, POLLOUT as OS_POLL_OUT,
-        POLLPRI as OS_POLL_PRI,
+        POLLERR as OS_POLL_ERR, POLLHUP as OS_POLL_HUP, POLLIN as OS_POLL_IN,
+        POLLNVAL as OS_POLL_NVAL, POLLOUT as OS_POLL_OUT, POLLPRI as OS_POLL_PRI,
+        nfds_t as OsPollFdsLenType, poll, pollfd,
     };
     #[cfg(target_os = "windows")]
     use winapi::{
         shared::minwindef::ULONG as OsPollFdsLenType,
         um::winsock2::{
-            WSAPoll as poll, POLLERR as OS_POLL_ERR, POLLHUP as OS_POLL_HUP,
-            POLLNVAL as OS_POLL_NVAL, POLLRDBAND as OS_POLL_PRI, POLLRDNORM as OS_POLL_IN,
-            POLLWRNORM as OS_POLL_OUT, SOCKET as FdType, WSAPOLLFD as pollfd,
+            POLLERR as OS_POLL_ERR, POLLHUP as OS_POLL_HUP, POLLNVAL as OS_POLL_NVAL,
+            POLLRDBAND as OS_POLL_PRI, POLLRDNORM as OS_POLL_IN, POLLWRNORM as OS_POLL_OUT,
+            SOCKET as FdType, WSAPOLLFD as pollfd, WSAPoll as poll,
         },
     };
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -703,11 +751,17 @@ fn slirp_poll_thread(rx: mpsc::Receiver<PollRequest>, tx: mpsc::Sender<SlirpCmd>
     }
 
     let mut prev_poll_fds_len = 0;
-    while let Ok((poll_fds, timeout)) = rx.recv() {
+    while let Ok((mut poll_fds, timeout)) = rx.recv() {
         if poll_fds.len() != prev_poll_fds_len {
             prev_poll_fds_len = poll_fds.len();
             debug!("slirp_poll_thread recv poll_fds.len(): {:?}", prev_poll_fds_len);
         }
+        #[cfg(not(windows))]
+        let signal_fd = signal_rx.as_raw_fd();
+        #[cfg(windows)]
+        let signal_fd = signal_rx.as_raw_socket() as i32;
+
+        poll_fds.push(PollFd { fd: signal_fd, events: SLIRP_POLL_IN, revents: 0 });
         // Create a c format array with the same size as poll
         let mut os_poll_fds: Vec<pollfd> = Vec::with_capacity(poll_fds.len());
         for fd in &poll_fds {
@@ -745,16 +799,28 @@ fn slirp_poll_thread(rx: mpsc::Receiver<PollRequest>, tx: mpsc::Sender<SlirpCmd>
         let allowed_revents = OS_POLL_HUP | OS_POLL_ERR;
         let mut slirp_poll_fds: Vec<PollFd> = Vec::with_capacity(poll_fds.len());
         for &fd in &os_poll_fds {
-            // Slrip does not handle POLLNVAL - print warning and skip
-            if fd.events & OS_POLL_NVAL != 0 {
-                warn!("POLLNVAL event - Skip poll for fd: {:?}", fd.fd);
-                continue;
+            if fd.fd == signal_fd as FdType {
+                if (fd.revents & OS_POLL_IN) != 0 {
+                    // Drain the signal pipe.
+                    let mut buf = [0u8; 64];
+                    while let Ok(n) = signal_rx.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Slrip does not handle POLLNVAL - print warning and skip
+                if fd.events & OS_POLL_NVAL != 0 {
+                    warn!("POLLNVAL event - Skip poll for fd: {:?}", fd.fd);
+                    continue;
+                }
+                slirp_poll_fds.push(PollFd {
+                    fd: fd.fd as c_int,
+                    events: to_slirp_events(fd.events),
+                    revents: to_slirp_revents(fd.revents & (fd.events | allowed_revents)),
+                });
             }
-            slirp_poll_fds.push(PollFd {
-                fd: fd.fd as c_int,
-                events: to_slirp_events(fd.events),
-                revents: to_slirp_revents(fd.revents & (fd.events | allowed_revents)),
-            });
         }
 
         // 'select_error' should be 1 if poll() returned an error, else 0.
@@ -1003,6 +1069,12 @@ impl CallbackContext {
         // Wake up slirp command thread to reset sleep duration
         let _ = self.tx_cmds.send(SlirpCmd::TimerModified);
     }
+
+    fn notify(&self) {
+        if let Err(e) = self.tx_cmds.send(SlirpCmd::Notify) {
+            warn!("Failed to send Notify cmd: {}", e);
+        }
+    }
 }
 
 extern "C" fn register_poll_fd_cb(_fd: c_int, _opaque: *mut c_void) {
@@ -1013,8 +1085,11 @@ extern "C" fn unregister_poll_fd_cb(_fd: c_int, _opaque: *mut c_void) {
     //TODO: Need implementation for Windows
 }
 
-extern "C" fn notify_cb(_opaque: *mut c_void) {
-    //TODO: Un-implemented
+extern "C" fn notify_cb(opaque: *mut c_void) {
+    // Safety:
+    //
+    // * `opaque` is a valid `CallbackContext` pointer.
+    unsafe { callback_context_from_raw(opaque) }.notify()
 }
 
 /// Callback function invoked by the slirp stack to initiate a proxy connection.
@@ -1124,12 +1199,6 @@ impl CallbackContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use std::os::unix::io::AsRawFd;
-    #[cfg(target_os = "windows")]
-    use std::os::windows::io::AsRawSocket;
 
     #[test]
     fn test_version_string() {
@@ -1148,11 +1217,12 @@ mod tests {
     ) {
         let (tx_cmds, rx_cmds) = mpsc::channel::<SlirpCmd>();
         let (tx_poll, rx_poll) = mpsc::channel::<PollRequest>();
+        let (signal_rx, _signal_tx) = create_pipe().unwrap();
 
         let tx_cmds_clone = tx_cmds.clone();
         let handle = thread::Builder::new()
             .name(format!("test_slirp_poll"))
-            .spawn(move || slirp_poll_thread(rx_poll, tx_cmds_clone))
+            .spawn(move || slirp_poll_thread(rx_poll, tx_cmds_clone, signal_rx))
             .unwrap();
 
         (tx_cmds, rx_cmds, tx_poll, handle)
@@ -1167,7 +1237,11 @@ mod tests {
         return stream.as_raw_socket() as i32;
     }
 
-    // Utility function to send a poll request and receive the result
+    /// Polls a file descriptor and asserts the received events.
+    ///
+    /// On some systems (e.g. macOS), the socket state may not update instantly,
+    /// leading to poll not returning the expected events immediately.
+    /// A short delay and a single retry handle this transient condition.
     fn poll_and_assert_result(
         tx_poll: &mpsc::Sender<PollRequest>,
         rx_cmds: &mpsc::Receiver<SlirpCmd>,
@@ -1175,17 +1249,38 @@ mod tests {
         poll_events: SlirpPollType,
         expected_revents: SlirpPollType,
     ) {
-        assert!(
-            tx_poll.send((vec![PollFd { fd, events: poll_events, revents: 0 }], 1000)).is_ok(),
-            "Failed to send poll request"
-        );
-        if let Ok(SlirpCmd::PollResult(poll_fds, select_error)) = rx_cmds.recv() {
-            assert_eq!(poll_fds.len(), 1, "poll_fds len is not 1.");
-            let poll_fd = poll_fds.get(0).unwrap();
-            assert_eq!(poll_fd.fd, fd, "poll file descriptor mismatch.");
-            assert_eq!(poll_fd.revents, expected_revents, "poll revents mismatch.");
-        } else {
-            assert!(false, "Received unexpected command poll result");
+        const POLL_RETRIES: u32 = 2;
+        const POLL_RETRY_DELAY_MS: u64 = 100;
+
+        for i in 0..POLL_RETRIES {
+            assert!(
+                tx_poll.send((vec![PollFd { fd, events: poll_events, revents: 0 }], 1000)).is_ok(),
+                "failed to send poll request"
+            );
+
+            let poll_fd = match rx_cmds.recv() {
+                Ok(SlirpCmd::PollResult(mut poll_fds, _)) if poll_fds.len() == 1 => {
+                    poll_fds.remove(0)
+                }
+                Ok(other) => panic!("unexpected command from poll thread: {:?}", other),
+                Err(e) => panic!("failed to receive command from poll thread: {}", e),
+            };
+
+            assert_eq!(poll_fd.fd, fd, "poll fd mismatch");
+
+            if poll_fd.revents == expected_revents {
+                return; // Success
+            }
+
+            if i < POLL_RETRIES - 1 {
+                warn!(
+                    "poll retry for fd {fd}: got {}, expected {}",
+                    poll_fd.revents, expected_revents
+                );
+                thread::sleep(Duration::from_millis(POLL_RETRY_DELAY_MS));
+            } else {
+                assert_eq!(poll_fd.revents, expected_revents, "revents mismatch after retries");
+            }
         }
     }
 
@@ -1279,7 +1374,7 @@ mod tests {
         // Launch the slirp polling thread.
         let (_tx_cmds, rx_cmds, tx_poll, handle) = launch_polling_thread();
         // Init a "broken" pipe that is accepted but no initial data is written
-        let (mut reader, writer) = create_accepted_stream_pipe();
+        let (reader, writer) = create_accepted_stream_pipe();
         let reader_fd = to_os_fd(&reader);
         // Close the writer end of the pipe
         drop(writer);
@@ -1327,6 +1422,12 @@ mod tests {
 
         // Shutdown the write half of the reader
         reader.shutdown(std::net::Shutdown::Write).unwrap();
+
+        // Try to read from the socket to force an update of its state.
+        // A read on a closed socket should return 0, or WouldBlock if non-blocking.
+        // We don't need the result.
+        let mut buf = [0; 1];
+        let _ = reader.read(&mut buf);
 
         // Check that expected poll result when writer end is dropped
         #[cfg(any(target_os = "linux", target_os = "macos"))]

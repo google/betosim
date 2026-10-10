@@ -1,0 +1,120 @@
+[
+  {
+    "_index": "packets-1970-01-01",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame": {
+          "frame.encap_type": "20",
+          "frame.time": "Jan  1, 1970 00:00:00.000000000 UTC",
+          "frame.time_utc": "Jan  1, 1970 00:00:00.000000000 UTC",
+          "frame.time_epoch": "0.000000000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "120",
+          "frame.cap_len": "120",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "wlan:data"
+        },
+        "wlan": {
+          "wlan.fc.type_subtype": "0x0020",
+          "wlan.fc": "0x0841",
+          "wlan.fc_tree": {
+            "wlan.fc.version": "0",
+            "wlan.fc.type": "2",
+            "wlan.fc.subtype": "0",
+            "wlan.flags": "0x41",
+            "wlan.flags_tree": {
+              "wlan.fc.ds": "0x01",
+              "wlan.fc.tods": "1",
+              "wlan.fc.fromds": "0",
+              "wlan.fc.frag": "0",
+              "wlan.fc.retry": "0",
+              "wlan.fc.pwrmgt": "0",
+              "wlan.fc.moredata": "0",
+              "wlan.fc.protected": "1",
+              "wlan.fc.order": "0"
+            }
+          },
+          "wlan.duration": "314",
+          "wlan.ra": "00:13:10:85:fe:01",
+          "wlan.ra_tree": {
+            "wlan.ra_resolved": "CiscoLinksys_85:fe:01",
+            "wlan.ra.oui": "4880",
+            "wlan.ra.oui_resolved": "Cisco-Linksys, LLC",
+            "wlan.ra.lg": "0",
+            "wlan.ra.ig": "0",
+            "wlan.addr": "00:13:10:85:fe:01",
+            "wlan.addr_resolved": "CiscoLinksys_85:fe:01",
+            "wlan.oui": "4880",
+            "wlan.oui_resolved": "Cisco-Linksys, LLC",
+            "wlan.addr.lg": "0",
+            "wlan.addr.ig": "0"
+          },
+          "wlan.ta": "02:15:b2:00:00:00",
+          "wlan.ta_tree": {
+            "wlan.ta_resolved": "MS-NLB-PhysServer-21_b2:00:00:00",
+            "wlan.ta.oui": "136626",
+            "wlan.ta.lg": "1",
+            "wlan.ta.ig": "0",
+            "wlan.addr": "02:15:b2:00:00:00",
+            "wlan.addr_resolved": "MS-NLB-PhysServer-21_b2:00:00:00",
+            "wlan.oui": "136626",
+            "wlan.addr.lg": "1",
+            "wlan.addr.ig": "0"
+          },
+          "wlan.da": "33:33:ff:c5:8c:61",
+          "wlan.da_tree": {
+            "wlan.da_resolved": "IPv6mcast_ff:c5:8c:61",
+            "wlan.da.oui": "3355647",
+            "wlan.da.lg": "1",
+            "wlan.da.ig": "1",
+            "wlan.addr": "33:33:ff:c5:8c:61",
+            "wlan.addr_resolved": "IPv6mcast_ff:c5:8c:61",
+            "wlan.oui": "3355647",
+            "wlan.addr.lg": "1",
+            "wlan.addr.ig": "1"
+          },
+          "wlan.sa": "02:15:b2:00:00:00",
+          "wlan.sa_tree": {
+            "wlan.sa_resolved": "MS-NLB-PhysServer-21_b2:00:00:00",
+            "wlan.sa.oui": "136626",
+            "wlan.sa.lg": "1",
+            "wlan.sa.ig": "0"
+          },
+          "wlan.bssid": "00:13:10:85:fe:01",
+          "wlan.bssid_tree": {
+            "wlan.bssid_resolved": "CiscoLinksys_85:fe:01",
+            "wlan.bssid.oui": "4880",
+            "wlan.bssid.oui_resolved": "Cisco-Linksys, LLC",
+            "wlan.bssid.lg": "0",
+            "wlan.bssid.ig": "0"
+          },
+          "wlan.staa": "02:15:b2:00:00:00",
+          "wlan.staa_tree": {
+            "wlan.staa_resolved": "MS-NLB-PhysServer-21_b2:00:00:00",
+            "wlan.staa.oui": "136626",
+            "wlan.staa.lg": "1",
+            "wlan.staa.ig": "0"
+          },
+          "wlan.frag": "0",
+          "wlan.seq": "1132",
+          "wlan.flags.str": ".p.....T",
+          "CCMP parameters": {
+            "wlan.ccmp.extiv": "0x000000000001",
+            "wlan.wep.key": "0"
+          }
+        },
+        "data": {
+          "data.data": "77:48:c3:d7:95:7a:4f:dc:ee:3c:71:a7:81:37:ce:6e:5e:b2:8d:b4:f0:3f:25:b6:a6:3d:f9:70:4a:4e:84:ee:a1:d2:c4:5b:87:ea:3c:ea:57:4b:f5:2b:9e:cd:7f:65:42:b4:5b:dc:94:2a:e6:d2:75:cf:5e:6a:f1:d5:7a:68:e7:19:b9:ae:19:05:c5:74:05:a8:35:47:4d:1a:4d:5e:41:9f:61:da:0e:ee:dc:9d",
+          "data.len": "88"
+        }
+      }
+    }
+  }
+]

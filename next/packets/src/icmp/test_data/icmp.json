@@ -1,0 +1,104 @@
+[
+  {
+    "_index": "packets-2006-12-29",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame": {
+          "frame.encap_type": "1",
+          "frame.time": "Dec 29, 2006 03:10:10.660442000 UTC",
+          "frame.time_utc": "Dec 29, 2006 03:10:10.660442000 UTC",
+          "frame.time_epoch": "1167361810.660442000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "74",
+          "frame.cap_len": "74",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "eth:ethertype:ip:icmp:data"
+        },
+        "eth": {
+          "eth.dst": "00:13:46:0b:22:ba",
+          "eth.dst_tree": {
+            "eth.dst_resolved": "DLink_0b:22:ba",
+            "eth.dst.oui": "4934",
+            "eth.dst.oui_resolved": "D-Link Corporation",
+            "eth.dst.lg": "0",
+            "eth.dst.ig": "0",
+            "eth.addr": "00:13:46:0b:22:ba",
+            "eth.addr_resolved": "DLink_0b:22:ba",
+            "eth.addr.oui": "4934",
+            "eth.addr.oui_resolved": "D-Link Corporation",
+            "eth.lg": "0",
+            "eth.ig": "0"
+          },
+          "eth.src": "00:16:ce:6e:8b:24",
+          "eth.src_tree": {
+            "eth.src_resolved": "HonHaiPrecis_6e:8b:24",
+            "eth.src.oui": "5838",
+            "eth.src.oui_resolved": "Hon Hai Precision Ind. Co.,Ltd.",
+            "eth.src.lg": "0",
+            "eth.src.ig": "0",
+            "eth.addr": "00:16:ce:6e:8b:24",
+            "eth.addr_resolved": "HonHaiPrecis_6e:8b:24",
+            "eth.addr.oui": "5838",
+            "eth.addr.oui_resolved": "Hon Hai Precision Ind. Co.,Ltd.",
+            "eth.lg": "0",
+            "eth.ig": "0"
+          },
+          "eth.type": "0x0800",
+          "eth.stream": "0"
+        },
+        "ip": {
+          "ip.version": "4",
+          "ip.hdr_len": "20",
+          "ip.dsfield": "0x00",
+          "ip.dsfield_tree": {
+            "ip.dsfield.dscp": "0",
+            "ip.dsfield.ecn": "0"
+          },
+          "ip.len": "60",
+          "ip.id": "0x8e9b",
+          "ip.flags": "0x00",
+          "ip.flags_tree": {
+            "ip.flags.rb": "0",
+            "ip.flags.df": "0",
+            "ip.flags.mf": "0"
+          },
+          "ip.frag_offset": "0",
+          "ip.ttl": "128",
+          "ip.proto": "1",
+          "ip.checksum": "0x2a62",
+          "ip.checksum.status": "2",
+          "ip.src": "192.168.0.114",
+          "ip.addr": "192.168.0.114",
+          "ip.src_host": "192.168.0.114",
+          "ip.host": "192.168.0.114",
+          "ip.dst": "192.168.0.1",
+          "ip.addr": "192.168.0.1",
+          "ip.dst_host": "192.168.0.1",
+          "ip.host": "192.168.0.1",
+          "ip.stream": "0"
+        },
+        "icmp": {
+          "icmp.type": "8",
+          "icmp.code": "0",
+          "icmp.checksum": "0x495c",
+          "icmp.checksum.status": "1",
+          "icmp.ident": "768",
+          "icmp.ident_le": "3",
+          "icmp.seq": "256",
+          "icmp.seq_le": "1",
+          "data": {
+            "data.data": "61:62:63:64:65:66:67:68:69:6a:6b:6c:6d:6e:6f:70:71:72:73:74:75:76:77:61:62:63:64:65:66:67:68:69",
+            "data.len": "32"
+          }
+        }
+      }
+    }
+  }
+]

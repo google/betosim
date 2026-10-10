@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -89,7 +89,7 @@ pub fn frame_into_pcap(frame: Frame) -> WifiResult<Vec<u8>> {
         version: 0,
         pad: 0,
         len: (std::mem::size_of::<RadiotapHeader>() as u16),
-        present: (1 << 3 /* channel */ | 1 << 5/* signal dBm */),
+        present: ((1 << 3) /* channel */ | (1 << 5)/* signal dBm */),
         channel: ChannelInfo { freq: frame.freq.unwrap_or(0) as u16, flags: 0 },
         signal: frame.signal.unwrap_or(0) as u8,
     };

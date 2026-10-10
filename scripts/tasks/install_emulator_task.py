@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
+# Copyright 2024 The Android Open Source Project
 #
-# Copyright 2024 - The Android Open Source Project
-#
-# Licensed under the Apache License, Version 2.0 (the',  help="License");
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an',  help="AS IS" BASIS,
+# distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+#
 
 import glob
 import logging
@@ -28,11 +29,18 @@ from tasks.task import Task
 from utils import (
     AOSP_ROOT,
     EMULATOR_ARTIFACT_PATH,
+    NETSIM_ROOT,
     binary_extension,
+    get_netsim_binaries,
     run,
 )
 
 OBJS_DIR = AOSP_ROOT / "tools" / "netsim" / "objs"
+BAZEL_OUT_DIR = (
+    NETSIM_ROOT / "bazel-bin"
+    if (NETSIM_ROOT / "bazel-bin").is_dir()
+    else AOSP_ROOT / "bazel-bin" / "external" / "netsim+"
+)
 PLATFORM_SYSTEM = platform.system()
 PLATFORM_MACHINE = platform.machine()
 
@@ -43,14 +51,19 @@ class InstallEmulatorTask(Task):
     super().__init__("InstallEmulator")
     self.buildbot = args.buildbot
     self.out_dir = args.out_dir
+    self.build_id = args.emulator_build_id
     # Local fetching use only - default to emulator-linux_x64_gfxstream
-    self.target = args.emulator_target + "_gfxstream"
+    self.target = args.emulator_target
     # Local Emulator directory
     self.local_emulator_dir = args.local_emulator_dir
 
   def do_run(self):
     install_emulator_manager = InstallEmulatorManager(
-        self.buildbot, self.out_dir, self.target, self.local_emulator_dir
+        self.buildbot,
+        self.out_dir,
+        self.target,
+        self.local_emulator_dir,
+        self.build_id,
     )
     return install_emulator_manager.process()
 
@@ -69,7 +82,14 @@ class InstallEmulatorManager:
       used for Android Build Bots.
   """
 
-  def __init__(self, buildbot, out_dir, target, local_emulator_dir):
+  def __init__(
+      self,
+      buildbot,
+      out_dir,
+      target,
+      local_emulator_dir,
+      build_id,
+  ):
     """Initializes the instances based on environment
 
     Args:
@@ -81,6 +101,12 @@ class InstallEmulatorManager:
     self.out_dir = out_dir
     self.target = target
     self.local_emulator_dir = local_emulator_dir
+    self.build_id = build_id
+    # For both Bazel and CMake, we use the distribution directory for local runs
+    # to ensure all artifacts (netsim + emulator) are in one place.
+    # OBJS_DIR is usually args.out_dir.
+    self.local_netsim_dir = Path(self.out_dir) / "distribution" / "emulator"
+    self.binaries = get_netsim_binaries()
 
   def __os_name_fetch(self):
     """Obtains the os substring of the emulator artifact"""
@@ -110,7 +136,7 @@ class InstallEmulatorManager:
         return False
     else:
       # Without buildbots, this scripts is only runnable on Linux
-      # TODO: support local builds for Mac and Windows
+      # TODO: support local builds for Mac and Windows (if needed beyond local_emulator_dir)
       if PLATFORM_SYSTEM != "Linux" and not self.local_emulator_dir:
         logging.info(
             "The local case only works for Linux if you don't have"
@@ -119,13 +145,16 @@ class InstallEmulatorManager:
         return False
       # Check if the netsim has been built prior to install_emulator
       if not (
-          OBJS_DIR.exists()
-          and (OBJS_DIR / binary_extension("netsim")).exists()
-          and (OBJS_DIR / binary_extension("netsimd")).exists()
+          self.local_netsim_dir.exists()
+          and all(
+              (self.local_netsim_dir / binary_extension(binary)).exists()
+              for binary in self.binaries.keys()
+          )
       ):
         logging.info(
-            "Please run 'scripts/build_tools.sh --Compile' "
-            "before running InstallEmulator"
+            "Please run 'scripts/build_tools.py --task Compile' or"
+            " 'scripts/build_tools.py --task CompileInstall' before running"
+            " InstallEmulator"
         )
         return False
     return True
@@ -183,20 +212,22 @@ class InstallEmulatorManager:
         os.remove(file)
     # Copy artifacts
     if self.buildbot:
-      shutil.copytree(
-          Path(self.out_dir) / "distribution" / "emulator",
-          emulator_filepath,
-          dirs_exist_ok=True,
-      )
+      # Copy netsim binaries
+      for binary, src in self.binaries.items():
+        binary_name = binary_extension(binary)
+        src_name = binary_extension(src)
+        src_file = self.local_netsim_dir / binary_name
+        if not src_file.exists():
+          src_file = BAZEL_OUT_DIR / src_name
+        if src_file.exists():
+          shutil.copy(src_file, emulator_filepath / binary_name)
+        else:
+          logging.warning(f"Binary not found: {src_file}")
+
     else:
       shutil.copytree(
           emulator_filepath,
-          OBJS_DIR,
-          dirs_exist_ok=True,
-      )
-      shutil.copytree(
-          emulator_filepath,
-          OBJS_DIR / "distribution" / "emulator",
+          self.local_netsim_dir,
           dirs_exist_ok=True,
       )
 
@@ -222,16 +253,20 @@ class InstallEmulatorManager:
       # Artifact fetching for local case
       if not self.buildbot:
         # Simulating the shell command
+        fetch_cmd = [
+            "/google/data/ro/projects/android/fetch_artifact",
+            "--branch",
+            "git_emu-main-dev",
+            "--target",
+            self.target,
+        ]
+        if self.build_id:
+          fetch_cmd.extend(["--bid", self.build_id])
+        else:
+          fetch_cmd.append("--latest")
+        fetch_cmd.append("sdk-repo-linux-emulator-*.zip")
         run(
-            [
-                "/google/data/ro/projects/android/fetch_artifact",
-                "--latest",
-                "--target",
-                self.target,
-                "--branch",
-                "aosp-emu-master-dev",
-                "sdk-repo-linux-emulator-*.zip",
-            ],
+            fetch_cmd,
             get_default_environment(AOSP_ROOT),
             "install_emulator",
             cwd=EMULATOR_ARTIFACT_PATH,

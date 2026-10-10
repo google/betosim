@@ -1,7 +1,10 @@
 # cmake build files
 **/build/
+!cargo/build/
 *~
 objs
+dist
+
 # python
 *.pyc
 # clangd
@@ -9,6 +12,27 @@ objs
 # rust
 **/target
 **/Cargo.lock
+debug/
+release/
+*.rs.bk
+*.rlib
+*.prof*
+*.log
+.env*
 # Android test
 **/.idea
 **/out
+# Bazel build files
+bazel-*
+# Nested lockfiles (e.g. bp2bzl test fixtures) are build artifacts, but the
+# workspace-root lockfile is checked in so module resolution is pinned and CI
+# does not re-resolve against the network on every build. This replaces the
+# toplevel.MODULE.bazel.lock that was tracked before the standalone split.
+MODULE.bazel.lock
+!/MODULE.bazel.lock
+# GEMINI
+.gemini/
+
+# Specification and planning files
+.specify/
+specs/

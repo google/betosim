@@ -1,16 +1,18 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(mismatched_lifetime_syntaxes)]
 
 //! The internal structure of CaptureInfo and CaptureMaps
 //!
@@ -20,8 +22,8 @@
 
 use bytes::Bytes;
 
-use std::collections::btree_map::{Iter, Values};
 use std::collections::BTreeMap;
+use std::collections::btree_map::{Iter, Values};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Result};
 use std::sync::mpsc::channel;
@@ -30,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::pcap_util::{write_pcap_header, write_pcapng_header, LinkType};
+use super::pcap_util::{LinkType, write_pcap_header, write_pcapng_header};
 use log::{info, warn};
 
 use netsim_proto::{common::ChipKind, model::Capture as ProtoCapture};
@@ -123,11 +125,13 @@ impl CaptureInfo {
             ChipKind::BLUETOOTH_BEACON => LinkType::BluetoothHciH4WithPhdr,
             ChipKind::WIFI => LinkType::Ieee80211RadioTap,
             ChipKind::UWB => LinkType::FiraUci,
+            #[allow(clippy::io_other_error)]
             _ => return Err(Error::new(ErrorKind::Other, "Unsupported link type")),
         };
         let size = match self.extension.as_str() {
             "pcap" => write_pcap_header(link_type, &mut file)?,
             "pcapng" => write_pcapng_header(link_type, &mut file)?,
+            #[allow(clippy::io_other_error)]
             _ => return Err(Error::new(ErrorKind::Other, "Incorrect Extension for file")),
         };
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
@@ -266,8 +270,8 @@ impl Default for Captures {
 /// and ChipRemoved events and updates the collection of CaptureInfo.
 ///
 pub fn spawn_capture_event_subscriber(event_rx: Receiver<Event>, capture: bool) {
-    let _ =
-        thread::Builder::new().name("capture_event_subscriber".to_string()).spawn(move || loop {
+    let _ = thread::Builder::new().name("capture_event_subscriber".to_string()).spawn(move || {
+        loop {
             match event_rx.recv() {
                 Ok(Event::ChipAdded(ChipAdded { chip_id, chip_kind, device_name, .. })) => {
                     let mut capture_info =
@@ -286,5 +290,6 @@ pub fn spawn_capture_event_subscriber(event_rx: Receiver<Event>, capture: bool) 
                 }
                 _ => {}
             }
-        });
+        }
+    });
 }

@@ -1,0 +1,54 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""pica bazel build rule"""
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "pica_uci_packets",
+    srcs = ["src/uci_packets.pdl"],
+    outs = ["uci_packets.rs"],
+    cmd = "$(execpath @pdl-compiler//:pdlc) --output-format rust $(SRCS) > $(OUTS)",
+    tools = ["@pdl-compiler//:pdlc"],
+)
+
+rust_library(
+    name = "pica",
+    srcs = glob(["src/**/*.rs"]) + [
+        ":pica_uci_packets",
+    ],
+    crate_name = "pica",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@num-derive",
+    ],
+    rustc_env = {"OUT_DIR": ".."},
+    deps = [
+        "@anyhow",
+        "@bytes",
+        "@futures",
+        "@glam",
+        "@hex",
+        "@log",
+        "@num-traits",
+        "@pdl-runtime",
+        "@serde",
+        "@thiserror",
+        "@tokio",
+    ],
+)

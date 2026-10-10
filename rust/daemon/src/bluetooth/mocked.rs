@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::bluetooth::{get_beacon_chips, BeaconChip};
+use crate::bluetooth::{BeaconChip, get_beacon_chips};
 use crate::devices::chip::{ChipIdentifier, FacadeIdentifier};
 use crate::devices::device::{AddChipResult, DeviceIdentifier};
 use ::protobuf::MessageField;
@@ -22,9 +22,9 @@ use netsim_proto::configuration::Controller as RootcanalController;
 use netsim_proto::model::chip::{BleBeacon, Bluetooth};
 use netsim_proto::model::chip_create::Chip as Builtin;
 use netsim_proto::model::{ChipCreate, DeviceCreate};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::{collections::HashMap, ptr::null};
 
 static IDS: AtomicU32 = AtomicU32::new(0);

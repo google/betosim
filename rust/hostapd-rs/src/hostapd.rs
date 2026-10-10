@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -63,14 +63,14 @@ use aes::Aes128;
 use anyhow::bail;
 use bytes::Bytes;
 use ccm::{
-    aead::{generic_array::GenericArray, Aead, Payload},
-    consts::{U13, U8},
     Ccm, KeyInit,
+    aead::{Aead, Payload, generic_array::GenericArray},
+    consts::{U8, U13},
 };
 use log::{debug, info, warn};
-use netsim_packets::ieee80211::{parse_mac_address, Ieee80211, MacAddress, CCMP_HDR_LEN};
+use netsim_packets::ieee80211::{CCMP_HDR_LEN, Ieee80211, MacAddress, parse_mac_address};
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(unix)]
 use std::os::fd::IntoRawFd;
@@ -80,15 +80,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
     TcpListener, TcpStream,
+    tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::hostapd_sys::{
-    get_active_gtk, get_active_ptk, run_hostapd_main, set_virtio_ctrl_sock, set_virtio_sock,
-    VIRTIO_WIFI_CTRL_CMD_RELOAD_CONFIG, VIRTIO_WIFI_CTRL_CMD_TERMINATE,
+    VIRTIO_WIFI_CTRL_CMD_RELOAD_CONFIG, VIRTIO_WIFI_CTRL_CMD_TERMINATE, get_active_gtk,
+    get_active_ptk, run_hostapd_main, set_virtio_ctrl_sock, set_virtio_sock,
 };
 use std::time::Duration;
 use tokio::fs::File;
@@ -252,7 +252,10 @@ impl Hostapd {
             )
             .await
             {
-                bail!("Failed to send VIRTIO_WIFI_CTRL_CMD_RELOAD_CONFIG to hostapd to reload config: {:?}", e);
+                bail!(
+                    "Failed to send VIRTIO_WIFI_CTRL_CMD_RELOAD_CONFIG to hostapd to reload config: {:?}",
+                    e
+                );
             }
         }
 
@@ -581,7 +584,7 @@ fn c_string_to_bytes(c_string: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netsim_packets::ieee80211::{parse_mac_address, FrameType, Ieee80211, Ieee80211ToAp};
+    use netsim_packets::ieee80211::{FrameType, Ieee80211, Ieee80211ToAp, parse_mac_address};
     use pdl_runtime::Packet;
     use std::env;
     use std::sync::OnceLock;

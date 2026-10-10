@@ -1,0 +1,56 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package netsim.ble_service;
+
+import "netsim/model.proto";
+
+// Service to manage Bluetooth test capabilities in the simulation
+service BleService {
+  // Initiates a Bluetooth scan at a given position.
+  rpc Scan(ScanRequest) returns (stream ScanResponse);
+  // Initiates a baseband sniffer capture.
+  rpc Sniff(SniffRequest) returns (stream SniffResponse);
+}
+
+message ScanRequest {
+  // Initial physical position of the scanner in the simulation.
+  netsim.model.Position position = 1;
+
+  // Set to true to use Active Scanning (0x01) instead of Passive Scanning
+  // (0x00). Active Scanning will trigger Scan Responses from nearby devices.
+  bool active = 2;
+}
+
+message ScanResponse {
+  // Raw HCI event packet
+  bytes packet = 1;
+}
+
+message SniffRequest {
+  // Initial physical position of the sniffer in the simulation.
+  netsim.model.Position position = 1;
+
+  // Optional parameters can be added as fields here in the future.
+}
+
+message SniffResponse {
+  // Raw link-layer packet (Baseband trace)
+  bytes packet = 1;
+
+  // Timestamp of the packet in microseconds since the UNIX epoch.
+  int64 timestamp = 2;
+}

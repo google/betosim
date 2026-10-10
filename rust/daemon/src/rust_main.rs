@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,8 +25,9 @@ use netsim_proto::frontend_grpc::FrontendServiceClient;
 
 use crate::captures::capture::spawn_capture_event_subscriber;
 use crate::config_file;
-use crate::devices::devices_handler::{spawn_shutdown_publisher, DeviceManager};
+use crate::devices::devices_handler::{DeviceManager, spawn_shutdown_publisher};
 use crate::events::{Event, Events, ShutDown};
+use crate::links::link::{ANY_CHIP, LinkManager, PhyKind};
 use crate::session::Session;
 use crate::version::get_version;
 use crate::wireless;
@@ -35,10 +36,11 @@ use netsim_common::util::netsim_logger;
 
 use crate::args::NetsimdArgs;
 use crate::ffi::ffi_util;
-use crate::service::{new_test_beacon, Service, ServiceParams};
+use crate::service::{Service, ServiceParams, new_test_beacon};
 use netsim_proto::config::{Bluetooth as BluetoothConfig, Capture, Config};
 use std::env;
 use std::ffi::{c_char, c_int};
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 /// Wireless network simulator for android (and other) emulated devices.
@@ -47,10 +49,14 @@ use std::sync::mpsc::Receiver;
 ///
 /// The file descriptors passed in `NetsimdArgs::fd_startup_str` must remain valid and open for as
 /// long as the program runs.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_main(argc: c_int, argv: *const *const c_char) {
     // enable Rust backtrace by setting env RUST_BACKTRACE=full
-    env::set_var("RUST_BACKTRACE", "full");
+    // SAFETY: Single-threaded main function.
+    // Note: set_var and remove_var have always been unsound when called in
+    // a multi-threaded context. They are marked unsafe in edition 2024.
+    // See https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html#stdenvset_var-remove_var
+    unsafe { env::set_var("RUST_BACKTRACE", "full") };
     ffi_util::set_up_crash_report();
     let netsimd_args = get_netsimd_args(argc, argv);
     netsim_logger::init("netsimd", netsimd_args.verbose);
@@ -98,7 +104,7 @@ fn run_netsimd_with_args(args: NetsimdArgs) {
     info!("netsim artifacts path: {:?}", netsimd_temp_dir());
 
     // Log all args
-    info!("{:#?}", args);
+    info!("{args:#?}");
 
     if !args.logtostderr {
         if let Err(err) =
@@ -108,7 +114,7 @@ fn run_netsimd_with_args(args: NetsimdArgs) {
         }
         // Duplicating the previous two logs to be included in netsim_stderr.log
         info!("netsim artifacts path: {:?}", netsimd_temp_dir());
-        info!("{:#?}", args);
+        info!("{args:#?}");
     }
 
     match args.connector_instance {
@@ -134,7 +140,7 @@ fn run_netsimd_connector(args: NetsimdArgs, instance: u16) {
         if server.is_some() {
             break;
         } else {
-            warn!("Unable to find ini file for instance {}, retrying", instance);
+            warn!("Unable to find ini file for instance {instance}, retrying");
             std::thread::sleep(std::time::Duration::from_secs(second));
         }
     }
@@ -146,7 +152,7 @@ fn run_netsimd_connector(args: NetsimdArgs, instance: u16) {
     // TODO: Make this function returns Result to use `?` instead of unwrap().
     info!("Starting in Connector mode to {}", server.as_str());
     crate::transport::fd::run_fd_connector(&fd_startup, server.as_str())
-        .map_err(|e| error!("Failed to run fd connector: {}", e))
+        .map_err(|e| error!("Failed to run fd connector: {e}"))
         .unwrap();
 }
 
@@ -208,6 +214,58 @@ fn disambiguate_args(args: &mut NetsimdArgs, config: &mut Config) {
     };
 }
 
+/// Parses a single "PHY_KIND=RSSI_VALUE" string and sets the global RSSI.
+fn parse_and_set_rssi(link_manager: &Arc<LinkManager>, rssi_str: &str) -> Result<(), String> {
+    let parts: Vec<&str> = rssi_str.split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "Invalid RSSI default format: '{rssi_str}'. Expected PHY_KIND:RSSI_VALUE"
+        ));
+    }
+
+    let phy_kind_input_str = parts[0].trim();
+    let rssi_input_str = parts[1].trim();
+    let phy_kind_str = phy_kind_input_str.to_uppercase();
+
+    // Match the uppercased input string against a list of known aliases and full names
+    // for PhyKind. This is case-insensitive due to the to_uppercase() call.
+    let phy_kind = match phy_kind_str.as_str() {
+        "BLE" | "BT_LE" | "BLUETOOTH_LOW_ENERGY" => Ok(PhyKind::BluetoothLowEnergy),
+        "CLASSIC" | "BT_CLASSIC" | "BLUETOOTH_CLASSIC" => Ok(PhyKind::BluetoothClassic),
+        "WIFI" => Ok(PhyKind::Wifi),
+        "UWB" => Ok(PhyKind::Uwb),
+        "WIFIRTT" | "WIFI_RTT" => Ok(PhyKind::WifiRtt),
+        "NONE" => Ok(PhyKind::None),
+        _ => Err(format!("Invalid or unhandled PhyKind string: '{phy_kind_input_str}'")),
+    }?;
+
+    let rssi_value = rssi_input_str.parse::<i8>().map_err(|e| {
+        format!(
+            "Invalid RSSI for {}: '{}'. Expected i8 ({} to {}). Error: {}",
+            phy_kind_input_str,
+            rssi_input_str,
+            i8::MIN,
+            i8::MAX,
+            e
+        )
+    })?;
+    info!("Setting global RSSI default: {phy_kind:?} = {rssi_value}");
+
+    link_manager.set_rssi(ANY_CHIP, ANY_CHIP, phy_kind, rssi_value);
+    Ok(())
+}
+
+/// Processes the `rssi` command line arguments and configures the LinkManager.
+fn process_rssi_arg(rssi_opt: &Option<Vec<String>>, link_manager: &Arc<LinkManager>) {
+    if let Some(rssi) = rssi_opt {
+        for rssi_str in rssi {
+            if let Err(e) = parse_and_set_rssi(link_manager, rssi_str) {
+                panic!("{}", e);
+            }
+        }
+    }
+}
+
 fn run_netsimd_primary(mut args: NetsimdArgs) {
     info!(
         "Netsim Version: {}, OS: {}, Arch: {}",
@@ -239,7 +297,7 @@ fn run_netsimd_primary(mut args: NetsimdArgs) {
                 config = config_from_file;
             }
             Err(e) => {
-                error!("Skipping config in {}: {:?}", filename, e);
+                error!("Skipping config in {filename}: {e:?}");
             }
         }
     }
@@ -247,7 +305,7 @@ fn run_netsimd_primary(mut args: NetsimdArgs) {
     disambiguate_args(&mut args, &mut config);
 
     // Print config file settings
-    info!("{:#?}", config);
+    info!("{config:#?}");
 
     if let Some(host_dns) = args.host_dns {
         config.wifi.mut_or_insert_default().slirp_options.mut_or_insert_default().host_dns =
@@ -265,16 +323,18 @@ fn run_netsimd_primary(mut args: NetsimdArgs) {
     let device_events_rx = events.subscribe();
     let main_events_rx = events.subscribe();
     let session_events_rx = events.subscribe();
-
-    DeviceManager::init(events.clone());
+    let link_manager = Arc::new(LinkManager::new());
+    process_rssi_arg(&args.rssi, &link_manager);
+    DeviceManager::init(events.clone(), link_manager.clone());
 
     // Start radio facades
     wireless::bluetooth::bluetooth_start(&config.bluetooth, instance_num);
-    wireless::wifi_manager::wifi_start(
+    let wifi_stats = wireless::wifi_manager::wifi_start(
         &config.wifi,
         args.forward_host_mdns,
         args.wifi,
         args.wifi_tap,
+        Arc::new(args.debug),
     );
     wireless::uwb::uwb_start();
 
@@ -291,42 +351,47 @@ fn run_netsimd_primary(mut args: NetsimdArgs) {
 
     // SAFETY: The caller guaranteed that the file descriptors in `fd_startup_str` would remain
     // valid and open for as long as the program runs.
-    let mut service = unsafe { Service::new(service_params) };
+    let mut service = unsafe { Service::new(service_params, link_manager) };
 
     // Run all netsimd services (grpc, socket, web)
     match service.run() {
         Err(e) => {
             error!("service.run() -> Err({e:?})");
+            error!("Failed to run netsimd services, exiting...");
+            service.shut_down();
             return;
         }
-        Ok((grpc_port, web_port)) => {
+        Ok((grpc_port, web_port, websocket_port)) => {
             // If create_ini fails, check if there is another netsimd instance.
             // If there isn't another netsimd instance, remove_ini and create_ini once more.
             for _ in 0..2 {
-                if let Err(e) = create_ini(instance_num, grpc_port, web_port) {
-                    warn!("create_ini error with {e:?}");
-                    // Continue if the address overlaps to support Oxygen CF Boot.
-                    // The pre-warmed device may leave stale netsim ini with the same grpc port.
-                    if let Some(address) = get_server_address(instance_num) {
-                        // If the address matches, break the loop and continue running netsimd.
-                        if address == format!("localhost:{grpc_port}") {
-                            info!("Reusing existing netsim ini with grpc_port: {grpc_port}");
-                            break;
+                match create_ini(instance_num, grpc_port, web_port, websocket_port) {
+                    Err(e) => {
+                        warn!("create_ini error with {e:?}");
+                        // Continue if the address overlaps to support Oxygen CF Boot.
+                        // The pre-warmed device may leave stale netsim ini with the same grpc port.
+                        if let Some(address) = get_server_address(instance_num) {
+                            // If the address matches, break the loop and continue running netsimd.
+                            if address == format!("localhost:{grpc_port}") {
+                                info!("Reusing existing netsim ini with grpc_port: {grpc_port}");
+                                break;
+                            }
+                        }
+                        // Checkes if a different netsimd instance exists
+                        if is_netsimd_alive(instance_num) {
+                            warn!("netsimd already running, exiting...");
+                            service.shut_down();
+                            return;
+                        } else {
+                            info!("Removing stale netsim ini");
+                            if let Err(e) = remove_ini(instance_num) {
+                                error!("{e:?}");
+                            }
                         }
                     }
-                    // Checkes if a different netsimd instance exists
-                    if is_netsimd_alive(instance_num) {
-                        warn!("netsimd already running, exiting...");
-                        service.shut_down();
-                        return;
-                    } else {
-                        info!("Removing stale netsim ini");
-                        if let Err(e) = remove_ini(instance_num) {
-                            error!("{e:?}");
-                        }
+                    _ => {
+                        break;
                     }
-                } else {
-                    break;
                 }
             }
         }
@@ -337,7 +402,7 @@ fn run_netsimd_primary(mut args: NetsimdArgs) {
 
     // Start Session Event listener
     let mut session = Session::new();
-    session.start(session_events_rx);
+    session.start(session_events_rx, wifi_stats.clone());
 
     // Pass all event receivers to each modules
     let capture = config.capture.enabled.unwrap_or_default();
@@ -360,7 +425,7 @@ fn run_netsimd_primary(mut args: NetsimdArgs) {
     service.shut_down();
 
     // write out session stats
-    let _ = session.stop();
+    let _ = session.stop(wifi_stats);
 
     // zip all artifacts
     if let Err(err) = zip_artifacts() {

@@ -110,25 +110,31 @@ repo sync -j8
 ```
 
 The `emulator` rebuild script does a complete clean build of all emulator components.
-For incrmental builds of the `netsimd` component, you can use the `cmake_setup` script:
+For incremental builds of the `netsimd` component, you can use the `build_tools.py` script.
+
+By default, it uses **Bazel** to build:
 ```
 cd /repo/netsim-dev/tools/netsim
-scripts/build_tools.py --task configure compileinstall
+scripts/build_tools.py --task compileinstall
 ```
 
-If the build fails with rust errors it may be necessary to issue this command:
-
+To clean the build artifacts (Bazel `clean --expunge`):
 ```
-rm rust/Cargo.lock
+scripts/build_tools.py --clean
 ```
 
-The output can be found in
+To build with **CMake** (legacy), use the `--cmake` flag:
+```
+scripts/build_tools.py --cmake --task configure compileinstall
+```
+
+The output can be found in:
 
 ```
 /repo/netsim-dev/tools/netsim/objs/distribution/emulator
 ```
 
-You can copy the netsim binaries into `emu-master-dev`
+You can copy the netsim binaries into `emu-master-dev`:
 
 ```
 cp -r /repo/netsim-dev/tools/netsim/objs/distribution/emulator/* /repo/emu-master-dev/external/qemu/objs/distribution/emulator
@@ -193,7 +199,7 @@ atest --host-unit-test-only --test-filter netsim
 
 Unit tests can be run from the `netsim-dev` branch using the following command
 ```
-scripts/build_tools.py --task runtest
+scripts/build_tools.py --task test
 ```
 
 ### Repo workflow

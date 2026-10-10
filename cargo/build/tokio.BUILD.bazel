@@ -1,0 +1,100 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""tokio bazel build rule"""
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "tokio",
+    srcs = glob(["**/*.rs"]),
+    crate_features = [
+        "bytes",
+        "fs",
+        "io-util",
+        "libc",
+        "macros",
+        "mio",
+        "net",
+        "process",
+        "rt",
+        "rt-multi-thread",
+        "signal",
+        "signal-hook-registry",
+        "socket2",
+        "sync",
+        "time",
+        "tokio-macros",
+    ],
+    crate_name = "tokio",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@tokio-macros",
+    ],
+    deps = [
+        "@bytes",
+        "@libc",
+        "@mio",
+        "@pin-project-lite",
+        "@signal-hook-registry",
+        "@socket2",
+    ] + select({
+        "@bazel_tools//src/conditions:windows": ["@windows-sys"],
+        "//conditions:default": [],
+    }),
+)
+
+rust_library(
+    name = "tokio_for_test",
+    srcs = glob(["**/*.rs"]),
+    crate_features = [
+        "bytes",
+        "fs",
+        "io-util",
+        "libc",
+        "macros",
+        "mio",
+        "net",
+        "process",
+        "rt",
+        "rt-multi-thread",
+        "signal",
+        "signal-hook-registry",
+        "socket2",
+        "sync",
+        "test-util",
+        "time",
+        "tokio-macros",
+    ],
+    crate_name = "tokio",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@tokio-macros",
+    ],
+    deps = [
+        "@bytes",
+        "@libc",
+        "@mio",
+        "@pin-project-lite",
+        "@signal-hook-registry",
+        "@socket2",
+    ] + select({
+        "@bazel_tools//src/conditions:windows": ["@windows-sys"],
+        "//conditions:default": [],
+    }),
+)

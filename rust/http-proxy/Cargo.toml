@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,13 +24,20 @@ doctest = false
 
 [dependencies]
 base64 = "0.22.0"
-bytes = { version = ">=1.4.0"}
-regex = "1.6.0"
+bytes = { version = ">=1.4.0" }
+etherparse = { version = "0.16" }
 httparse = "1.8.0"
 libslirp-rs = { path = "../libslirp-rs" }
 log = "0.4.17"
-tokio = { version = "1.32.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
-etherparse = {version = "0.16" }
+regex = "1.6.0"
+tokio = { version = "1.32.0", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+] }
 
 [dev-dependencies]
 capture = { path = "../capture" }

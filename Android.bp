@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,10 +18,10 @@ package {
         "//device/google/cuttlefish/build:__subpackages__",
     ],
     default_applicable_licenses: ["tools_netsim_license"],
+    default_team: "trendy_team_betosim",
 }
 
 // Added automatically by a large-scale-change
-// See: http://go/android-license-faq
 license {
     name: "tools_netsim_license",
     visibility: [":__subpackages__"],
@@ -31,95 +31,6 @@ license {
     license_text: [
         "LICENSE",
     ],
-}
-
-cc_defaults {
-    name: "netsim_defaults",
-    cflags: [
-        "-Wno-unused-parameter",
-        "-g", // Produce debugging information.
-    ],
-    ldflags: ["-rdynamic"], // Allow obtaining backtraces for debugging.
-    local_include_dirs: [
-        "src",
-    ],
-    shared_libs: [
-        "libgrpc++",
-        "libprotobuf-cpp-full",
-    ],
-    generated_headers: [
-        "FrontendStub_h",
-    ],
-    generated_sources: [
-        "FrontendStub_cc",
-    ],
-}
-
-rust_defaults {
-    name: "libnetsim_daemon_defaults",
-    features: ["cuttlefish"],
-    rlibs: [
-        "libbytes",
-        "libclap",
-        "libcxx",
-        "libanyhow",
-        "libdata_encoding",
-        "libfutures",
-        "libfutures_channel",
-        "libfutures_executor",
-        "libfutures_util",
-        "libglam",
-        "libgrpcio",
-        "liblibc",
-        "libnetsim_proto",
-        "libhttp",
-        "libnetsim_common",
-        "libnetsim_packets",
-        "libpdl_runtime",
-        "libpica",
-        "libprotobuf",
-        "libprotobuf_json_mapping",
-        "librand",
-        "libregex",
-        "libthiserror",
-        "libtokio",
-        "libtokio_stream",
-        "libtungstenite",
-        "liblog_rust",
-        "libopenssl",
-    ],
-    static_libs: ["libgrpc_wrap"],
-    srcs: [
-        "rust/daemon/src/lib.rs",
-    ],
-}
-
-rust_ffi_host_static {
-    name: "libnetsim_daemon",
-    crate_name: "netsim_daemon",
-    defaults: ["libnetsim_daemon_defaults"],
-}
-
-rust_test_host {
-    name: "libnetsim_daemon_tests",
-    defaults: ["libnetsim_daemon_defaults"],
-    test_suites: ["general_tests"],
-}
-
-genrule {
-    name: "netsim_daemon_cc",
-    tools: ["cxxbridge"],
-    cmd: "$(location cxxbridge) $(in) --cfg feature=\\\"cuttlefish\\\" >> $(out)",
-    srcs: ["rust/daemon/src/ffi.rs"],
-    out: ["netsim-daemon/src/ffi.rs.cc"],
-}
-
-genrule {
-    name: "netsim_daemon_h",
-    tools: ["cxxbridge"],
-    cmd: "$(location cxxbridge) $(in) --cfg feature=\\\"cuttlefish\\\" --header >> $(out)",
-    srcs: ["rust/daemon/src/ffi.rs"],
-    out: ["netsim-daemon/src/ffi.rs.h"],
 }
 
 genrule {
@@ -157,151 +68,11 @@ genrule {
     out: ["arp_packets.rs"],
 }
 
-cc_library_host_static {
-    name: "lib-netsim",
-    defaults: ["netsim_defaults"],
-    srcs: [
-        "src/backend/grpc_client.cc",
-        "src/hci/bluetooth_facade.cc",
-        "src/hci/hci_packet_transport.cc",
-        "src/hci/rust_device.cc",
-        "src/util/crash_report.cc",
-        "src/util/ini_file.cc",
-        "src/util/log.cc",
-        "src/util/os_utils.cc",
-        "src/util/string_utils.cc",
-    ],
-    generated_headers: [
-        "cxx-bridge-header",
-        "netsim_daemon_h",
-        "PacketStreamerStub_h",
-    ],
-    generated_sources: [
-        "netsim_daemon_cc",
-        "PacketStreamerStub_cc",
-    ],
-    shared_libs: [
-        "libbase",
-        "libgrpc++",
-        "libcrypto",
-        "libunwindstack",
-    ],
-    static_libs: [
-        "breakpad_client",
-        "libjsoncpp",
-        "libprotobuf-cpp-full",
-        "libscriptedbeaconpayload-protos-lite",
-        "lib-netsimd-proto",
-    ],
-    whole_static_libs: [
-        "libbt-rootcanal",
-    ],
-}
-
-netsim_ui_modules = [
-    "netsim_ui_index.html",
-    "netsim_ui_js_cube-sprite.js",
-    "netsim_ui_js_customize-map-button.js",
-    "netsim_ui_js_device-dragzone.js",
-    "netsim_ui_js_device-dropzone.js",
-    "netsim_ui_js_device-info.js",
-    "netsim_ui_js_device-list.js",
-    "netsim_ui_js_device-map.js",
-    "netsim_ui_js_device-observer.js",
-    "netsim_ui_js_license-info.js",
-    "netsim_ui_js_navigation-bar.js",
-    "netsim_ui_js_netsim-app.js",
-    "netsim_ui_js_packet-info.js",
-    "netsim_ui_js_pyramid-sprite.js",
-    "netsim_ui_tslib",
-    "netsim_ui_assets_grid-background.svg",
-    "netsim_ui_assets_hexagonal-background.png",
-    "netsim_ui_assets_netsim-logo-b.svg",
-    "netsim_ui_assets_netsim-logo.svg",
-    "netsim_ui_assets_polar-background.svg",
-]
-
-cc_binary_host {
-    name: "netsimd",
-    defaults: ["netsim_defaults"],
-    srcs: [
-        "rust/netsimd.cc",
-    ],
-    generated_headers: [
-        "cxx-bridge-header",
-        "netsim_daemon_h",
-    ],
-    shared_libs: [
-        "libbase",
-        "libgrpc++",
-        "libcap",
-        "libcrypto",
-        "libssl",
-        "libunwindstack",
-        "libz", // TODO: Remove for native rust binary
-    ],
-    static_libs: [
-        "breakpad_client",
-        "libprotobuf-cpp-full",
-        "libscriptedbeaconpayload-protos-lite", // TODO: Remove this after using pdl library.
-        "lib-netsimd-proto",
-        "lib-netsim",
-        "lib-netsim-frontend-proto",
-        "libgrpc_wrap",
-        "librootcanal_rs",
-    ],
-    whole_static_libs: [
-        "libnetsim_daemon",
-        "libbt-rootcanal",
-    ],
-    required: netsim_ui_modules,
-    strip: {
-        keep_symbols_and_debug_frame: true,
-    },
-}
-
-cc_test_host {
-    name: "netsim-test",
-    defaults: ["netsim_defaults"],
-    srcs: [
-        "src/util/ini_file_test.cc",
-        "src/util/os_utils_test.cc",
-        "src/util/string_utils_test.cc",
-    ],
-    generated_headers: [
-        "cxx-bridge-header",
-        "netsim_daemon_h",
-    ],
-    shared_libs: [
-        "libgrpc++",
-        "libcrypto",
-        "libbase",
-        "libunwindstack",
-        "libssl",
-        "libz", // TODO: Remove for native rust binary
-    ],
-    static_libs: [
-        "breakpad_client",
-        "libgrpc_wrap",
-        "libjsoncpp",
-        "libprotobuf-cpp-full",
-        "libscriptedbeaconpayload-protos-lite", // TODO: Remove this after using pdl library.
-        "lib-netsim-frontend-proto",
-        "lib-netsim",
-        "lib-netsimd-proto",
-        "librootcanal_rs",
-    ],
-    whole_static_libs: [
-        "libnetsim_daemon",
-        "libbt-rootcanal",
-    ],
-}
-
 rust_library_host {
     name: "libnetsim_proto",
     features: ["cuttlefish"],
     crate_name: "netsim_proto",
-    srcs: ["rust/proto/src/lib.rs"],
+    srcs: ["rust/proto-cf/src/lib.rs"],
     rustlibs: [
         "libprotobuf",
         "libgrpcio",
@@ -317,6 +88,7 @@ rust_defaults {
         "librand",
         "liblibc",
         "liblog_rust",
+        "libprotobuf_json_mapping",
         "libenv_logger",
         "libzip",
     ],
@@ -358,42 +130,7 @@ rust_test_host {
     test_suites: ["general_tests"],
 }
 
-rust_defaults {
-    name: "netsim_cli_defaults",
-    rustlibs: [
-        "libanyhow",
-        "libclap",
-        "libfutures",
-        "libfutures_util",
-        "libgrpcio",
-        "libhex",
-        "libnetsim_common",
-        "libnetsim_proto",
-        "libprotobuf",
-        "libtracing",
-    ],
-}
-
-rust_test_host {
-    name: "libnetsim_cli_tests",
-    srcs: ["rust/cli/src/lib.rs"],
-    defaults: ["netsim_cli_defaults"],
-    test_suites: ["general_tests"],
-}
-
-rust_library_host {
-    name: "libnetsim_cli",
-    crate_name: "netsim_cli",
-    srcs: ["rust/cli/src/lib.rs"],
-    defaults: [
-        "netsim_cli_defaults",
-    ],
-}
-
-rust_binary_host {
-    name: "netsim",
-    srcs: ["rust/cli/bin/netsim.rs"],
-    rustlibs: [
-        "libnetsim_cli",
-    ],
+team {
+    name: "trendy_team_betosim",
+    trendy_team_id: "4827929424265216",
 }
