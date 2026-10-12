@@ -93,3 +93,114 @@ impl UwbStats {
         uwb
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    #[test]
+    fn test_uwb_stats_initial_state() {
+        let stats = UwbStats::new();
+        for api in [
+            UwbApi::Open,
+            UwbApi::Close,
+            UwbApi::Start,
+            UwbApi::Stop,
+            UwbApi::Reconfigure,
+            UwbApi::SessionGetAppConfig,
+            UwbApi::SendData,
+            UwbApi::OnDataReceived,
+            UwbApi::AddControlee,
+            UwbApi::RemoveControlee,
+            UwbApi::Count,
+        ] {
+            assert_eq!(stats.get(api), 0);
+        }
+
+        let proto = stats.to_proto();
+        let mgr = proto.uwb_manager.as_ref().expect("uwb_manager exists");
+        assert_eq!(mgr.open_ranging_session(), 0);
+
+        let session = proto.ranging_session.as_ref().expect("ranging_session exists");
+        assert_eq!(session.close(), 0);
+        assert_eq!(session.start(), 0);
+        assert_eq!(session.stop(), 0);
+        assert_eq!(session.reconfigure(), 0);
+        assert_eq!(session.session_get_app_config(), 0);
+        assert_eq!(session.send_data(), 0);
+        assert_eq!(session.on_data_received(), 0);
+        assert_eq!(session.add_controlee(), 0);
+        assert_eq!(session.remove_controlee(), 0);
+    }
+
+    #[test]
+    fn test_uwb_stats_increment_all_apis() {
+        let stats = UwbStats::new();
+
+        stats.incr(UwbApi::Open);
+        stats.incr(UwbApi::Open);
+        stats.incr(UwbApi::Close);
+        stats.incr(UwbApi::Start);
+        stats.incr(UwbApi::Stop);
+        stats.incr(UwbApi::Reconfigure);
+        stats.incr(UwbApi::SessionGetAppConfig);
+        stats.incr(UwbApi::SendData);
+        stats.incr(UwbApi::OnDataReceived);
+        stats.incr(UwbApi::AddControlee);
+        stats.incr(UwbApi::RemoveControlee);
+
+        assert_eq!(stats.get(UwbApi::Open), 2);
+        assert_eq!(stats.get(UwbApi::Close), 1);
+        assert_eq!(stats.get(UwbApi::Start), 1);
+        assert_eq!(stats.get(UwbApi::Stop), 1);
+        assert_eq!(stats.get(UwbApi::Reconfigure), 1);
+        assert_eq!(stats.get(UwbApi::SessionGetAppConfig), 1);
+        assert_eq!(stats.get(UwbApi::SendData), 1);
+        assert_eq!(stats.get(UwbApi::OnDataReceived), 1);
+        assert_eq!(stats.get(UwbApi::AddControlee), 1);
+        assert_eq!(stats.get(UwbApi::RemoveControlee), 1);
+        assert_eq!(stats.get(UwbApi::Count), 0);
+
+        let proto = stats.to_proto();
+        let mgr = proto.uwb_manager.as_ref().expect("uwb_manager exists");
+        assert_eq!(mgr.open_ranging_session(), 2);
+
+        let session = proto.ranging_session.as_ref().expect("ranging_session exists");
+        assert_eq!(session.close(), 1);
+        assert_eq!(session.start(), 1);
+        assert_eq!(session.stop(), 1);
+        assert_eq!(session.reconfigure(), 1);
+        assert_eq!(session.session_get_app_config(), 1);
+        assert_eq!(session.send_data(), 1);
+        assert_eq!(session.on_data_received(), 1);
+        assert_eq!(session.add_controlee(), 1);
+        assert_eq!(session.remove_controlee(), 1);
+    }
+
+    #[test]
+    fn test_uwb_stats_clone_shares_counters() {
+        let stats1 = UwbStats::new();
+        let stats2 = stats1.clone();
+
+        stats1.incr(UwbApi::Start);
+        assert_eq!(stats2.get(UwbApi::Start), 1);
+
+        stats2.incr(UwbApi::Start);
+        assert_eq!(stats1.get(UwbApi::Start), 2);
+    }
+
+    #[test]
+    fn test_uwb_stats_saturation_to_i32_max() {
+        let stats = UwbStats::new();
+        // Manually write u32::MAX into the underlying atomic to test saturation
+        let open_idx = UwbApi::Open as usize;
+        stats.uwb_apis.data[open_idx].store(u32::MAX, Ordering::Relaxed);
+
+        assert_eq!(stats.get(UwbApi::Open), u32::MAX);
+        let proto = stats.to_proto();
+        let mgr = proto.uwb_manager.as_ref().expect("uwb_manager exists");
+        assert_eq!(mgr.open_ranging_session(), i32::MAX);
+    }
+}
