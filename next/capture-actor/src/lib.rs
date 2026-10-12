@@ -32,9 +32,7 @@ mod writer;
 
 use actor_framework::ResourceActor;
 pub use capture_actor::CaptureActor;
-pub use capture_api::{
-    CaptureAction, CaptureActionResult, CaptureCreate, CaptureInfo, CaptureSender, Direction,
-};
+pub use capture_api::CaptureCreate;
 pub use error::CaptureError;
 pub use writer::DataLinkType;
 

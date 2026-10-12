@@ -33,7 +33,7 @@ use zerocopy::{I32, IntoBytes, U16, U32};
 /// Implementations of this trait handle the actual writing of packets to a
 /// specific format.
 #[async_trait]
-pub trait CaptureWriter: Send + Sync {
+pub(crate) trait CaptureWriter: Send + Sync {
     /// Writes a packet to the capture.
     ///
     /// # Arguments

@@ -92,7 +92,7 @@ impl ModemPcapWriter {
 
     /// Encapsulates an AT command or response into a standard 3GPP TS 27.010
     /// MUX frame.
-    pub(crate) fn frame_gsm0710(direction: Direction, payload: &[u8]) -> Vec<u8> {
+    fn frame_gsm0710(direction: Direction, payload: &[u8]) -> Vec<u8> {
         // In 3GPP TS 27.010 Section 5.2.1.2, C/R bit interpretation depends on role:
         // - Initiator (App) Command: C/R = 1
         // - Responder (Modem) Response: C/R = 1

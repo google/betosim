@@ -44,18 +44,18 @@ use crate::{
 /// to allow shared access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct InternalCaptureInfo {
-    pub info: CaptureInfo,
+    pub(crate) info: CaptureInfo,
     /// Flag to be updated when capture status changes.
     /// This is used by the stream wrappers to check if capture is enabled
     /// without locking the actor.
     #[serde(skip)]
-    pub enabled_flag: Arc<AtomicBool>,
+    enabled_flag: Arc<AtomicBool>,
     /// Used to determine whether further error logs while writing captures
     /// should be suppressed.
     #[serde(skip)]
-    pub has_warned_on_write: bool,
+    pub(crate) has_warned_on_write: bool,
     #[serde(skip)]
-    pub sender: Option<
+    sender: Option<
         mpsc::UnboundedSender<(std::time::SystemTime, capture_api::Direction, bytes::Bytes)>,
     >,
 }
@@ -112,7 +112,7 @@ impl CaptureActor {
         }
     }
 
-    pub(crate) async fn create_entity(
+    async fn create_entity(
         &mut self,
         entity: &mut InternalCaptureInfo,
         ctx: &mut DynContext<Self>,
@@ -129,7 +129,7 @@ impl CaptureActor {
         Ok(())
     }
 
-    pub(crate) async fn update_entity(
+    async fn update_entity(
         &mut self,
         entity: &mut InternalCaptureInfo,
         enabled: bool,
@@ -161,7 +161,7 @@ impl CaptureActor {
         Ok(())
     }
 
-    pub(crate) async fn delete_entity(
+    async fn delete_entity(
         &mut self,
         entity: &InternalCaptureInfo,
         _ctx: &mut DynContext<Self>,
@@ -204,7 +204,7 @@ impl CaptureActor {
         Ok(writer)
     }
 
-    pub(crate) async fn list_entities(&self) -> Vec<CaptureInfo> {
+    async fn list_entities(&self) -> Vec<CaptureInfo> {
         let mut infos = Vec::new();
         for e in self.entities.values() {
             let (records_written, bytes_written) =
