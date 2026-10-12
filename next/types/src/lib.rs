@@ -200,7 +200,7 @@ impl std::str::FromStr for ChipKind {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
             "UNSPECIFIED" => Ok(ChipKind::UNSPECIFIED),
-            "BLUETOOTH" => Ok(ChipKind::BLUETOOTH),
+            "BLUETOOTH" | "BT" => Ok(ChipKind::BLUETOOTH),
             "WIFI" => Ok(ChipKind::WIFI),
             "UWB" => Ok(ChipKind::UWB),
             "NFC" => Ok(ChipKind::NFC),

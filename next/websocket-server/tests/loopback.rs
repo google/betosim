@@ -49,3 +49,25 @@ async fn test_loopback_echoes_without_registering_a_chip() {
     world.then_backend_receives_no_add_chip_request();
     world.then_backend_deletes_nothing();
 }
+
+#[tokio::test]
+async fn test_loopback_across_radio_routes() {
+    let mut world = TestWorld::new().await;
+
+    for path in [
+        "/v1/websocket/wifi?loopback=1",
+        "/v1/websocket/uwb?loopback=true",
+        "/v1/websocket/nfc?loopback=1",
+        "/v1/websocket/cellular?loopback=1",
+    ] {
+        let mut client = world.given_a_loopback_client_connected_at_path(path).await;
+        let payload = Bytes::from_static(HCI_RESET_COMMAND);
+        client.send_binary(payload.clone()).await;
+        assert_eq!(client.read_binary().await, payload, "loopback failed for {path}");
+
+        client.close().await;
+        assert!(client.read_binary().await.is_empty(), "expected the server's Close frame");
+        world.then_backend_receives_no_add_chip_request();
+        world.then_backend_deletes_nothing();
+    }
+}

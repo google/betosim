@@ -239,11 +239,23 @@ impl TestWorld {
         address: Option<&str>,
     ) -> usize {
         let path = build_path(name, address);
-        self.connect_internal("127.0.0.1", &path).await.expect("Failed to connect client")
+        self.given_a_websocket_client_connected_at_path(&path).await
+    }
+
+    pub async fn given_a_websocket_client_connected_at_path(&mut self, path: &str) -> usize {
+        self.connect_internal("127.0.0.1", path).await.expect("Failed to connect client")
     }
 
     pub async fn when_client_attempts_to_connect_to_invalid_path(&mut self) {
-        let _ = self.connect_internal("127.0.0.1", "/v1/websocket/invalid").await;
+        self.when_client_attempts_to_connect_to_path("/v1/websocket/invalid").await;
+    }
+
+    pub async fn when_client_attempts_to_connect_to_path(&mut self, path: &str) {
+        let _ = self.connect_internal("127.0.0.1", path).await;
+    }
+
+    pub fn add_request(&self, client_idx: usize) -> &DeviceAddChip {
+        &self.clients[client_idx].add_request
     }
 
     pub fn then_the_connection_fails_with_status(&self, expected_status: u16) {
@@ -327,7 +339,14 @@ impl TestWorld {
     /// Connects a client with `?loopback=1`. No add_chip request is expected,
     /// so the client is returned directly instead of being tracked.
     pub async fn given_a_loopback_client_connected(&mut self) -> ManualWebSocketClient {
-        ManualWebSocketClient::connect("127.0.0.1", self.port, "/v1/websocket/bt?loopback=1")
+        self.given_a_loopback_client_connected_at_path("/v1/websocket/bt?loopback=1").await
+    }
+
+    pub async fn given_a_loopback_client_connected_at_path(
+        &mut self,
+        path: &str,
+    ) -> ManualWebSocketClient {
+        ManualWebSocketClient::connect("127.0.0.1", self.port, path)
             .await
             .expect("Failed to connect loopback client")
     }

@@ -28,6 +28,20 @@ fn test_chip_kind_display_and_as_str() {
 }
 
 #[test]
+fn test_chip_kind_from_str() {
+    assert_eq!("bt".parse::<ChipKind>(), Ok(ChipKind::BLUETOOTH));
+    assert_eq!("bluetooth".parse::<ChipKind>(), Ok(ChipKind::BLUETOOTH));
+    assert_eq!("wifi".parse::<ChipKind>(), Ok(ChipKind::WIFI));
+    assert_eq!("uwb".parse::<ChipKind>(), Ok(ChipKind::UWB));
+    assert_eq!("nfc".parse::<ChipKind>(), Ok(ChipKind::NFC));
+    assert_eq!("cellular".parse::<ChipKind>(), Ok(ChipKind::CELLULAR));
+    assert_eq!("modem".parse::<ChipKind>(), Ok(ChipKind::CELLULAR));
+    assert_eq!("cellular_data".parse::<ChipKind>(), Ok(ChipKind::CELLULAR_DATA));
+    assert_eq!("ethernet".parse::<ChipKind>(), Ok(ChipKind::ETHERNET));
+    assert!("unknown".parse::<ChipKind>().is_err());
+}
+
+#[test]
 fn test_chip_kind_predicates() {
     assert!(ChipKind::BLUETOOTH.is_wireless());
     assert!(ChipKind::WIFI.is_wireless());

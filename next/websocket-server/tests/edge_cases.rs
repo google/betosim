@@ -54,6 +54,18 @@ async fn test_invalid_resource_path() {
 
     world.when_client_attempts_to_connect_to_invalid_path().await;
     world.then_the_connection_fails_with_status(404);
+
+    for invalid_path in [
+        "/v1/websocket",
+        "/v1/websocket/",
+        "/v1/websocket/unknown",
+        "/v1/websocket/unspecified",
+        "/v1/websocket/bt/extra",
+        "/v1/websocketbt",
+    ] {
+        world.when_client_attempts_to_connect_to_path(invalid_path).await;
+        world.then_the_connection_fails_with_status(404);
+    }
 }
 
 #[tokio::test]
