@@ -14,7 +14,7 @@
 
 //! # Time Display class
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
@@ -35,6 +35,14 @@ impl TimeDisplay {
     /// * `nsecs` - nano sub seconds since std::time::UNIX_EPOCH
     pub fn new(secs: i64, nsecs: u32) -> TimeDisplay {
         TimeDisplay { secs, nsecs }
+    }
+
+    /// Creates a new TimeDisplay from a Duration since UNIX_EPOCH, saturating seconds at i64::MAX.
+    pub fn from_duration(d: Duration) -> TimeDisplay {
+        TimeDisplay {
+            secs: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            nsecs: d.subsec_nanos(),
+        }
     }
 
     /// Resolves the UTC DateTime if seconds and nanoseconds form a valid timestamp.
@@ -99,7 +107,7 @@ impl TimeDisplay {
 // Get TimeDisplay of current_time
 fn get_current_time() -> TimeDisplay {
     let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
-    TimeDisplay::new(since_epoch.as_secs() as i64, since_epoch.subsec_nanos())
+    TimeDisplay::from_duration(since_epoch)
 }
 
 /// Return the timestamp of the current time for logs
@@ -114,6 +122,7 @@ pub fn file_current_time() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
 
     use super::TimeDisplay;
 
@@ -125,6 +134,15 @@ mod tests {
         let twok_time = TimeDisplay::new(946684900, 0);
         let utc_twok = twok_time.utc_display();
         assert_eq!(utc_twok, "2000-01-01-00-01-40");
+    }
+
+    #[test]
+    fn test_from_duration() {
+        let twok_time = TimeDisplay::from_duration(Duration::new(946684900, 200));
+        assert_eq!(twok_time.utc_display(), "2000-01-01-00-01-40");
+        assert_eq!(twok_time.utc_display_log(), "01-01 00:01:40.200");
+        let saturated = TimeDisplay::from_duration(Duration::MAX);
+        assert_eq!(saturated.utc_display(), "INVALID-TIMESTAMP");
     }
 
     #[test]

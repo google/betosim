@@ -92,8 +92,9 @@ impl Stats {
             self.proto.set_device_count(new_total);
         }
 
-        if (current_count as i32) > self.proto.peak_concurrent_devices() {
-            self.proto.set_peak_concurrent_devices(current_count as i32);
+        let current_count = i32::try_from(current_count).unwrap_or(i32::MAX);
+        if current_count > self.proto.peak_concurrent_devices() {
+            self.proto.set_peak_concurrent_devices(current_count);
         }
     }
 

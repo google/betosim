@@ -30,7 +30,7 @@ SPDX_TAG = "-".join(("SPDX", "License", "Identifier"))
 SPDX_APACHE = f"{SPDX_TAG}: Apache-2.0"
 
 # Headers are normalized through the SPDX form, then expanded to the full
-# Apache 2.0 notice required for open source.
+# Apache 2.0 notice, which OSPO Cross (go/cross) requires for open source.
 APACHE_NOTICE = (
     "",
     'Licensed under the Apache License, Version 2.0 (the "License");',
@@ -62,7 +62,7 @@ def expand_spdx_header(content):
   bare = prefix.rstrip()
   lines = [f"{prefix}{text}" if text else bare for text in APACHE_NOTICE]
   preceding = content[: match.start()].removesuffix("\n").rsplit("\n", 1)[-1]
-  if preceding == bare:
+  if preceding.rstrip() == bare:
     lines = lines[1:]
   return content[: match.start()] + "\n".join(lines) + content[match.end() :]
 

@@ -23,7 +23,7 @@ pub fn main() {
     let bindings = bindgen::Builder::default()
         .header("bindings/wrapper.h")
         // The Windows MCI sequencer API is unused, and its names trip
-        // inclusive-language checks.
+        // go/cross inclusive-language checks.
         .blocklist_item("MCI_SEQ_.*")
         .blocklist_type(".*MCI_SEQ_.*")
         .generate()

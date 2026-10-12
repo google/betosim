@@ -80,7 +80,7 @@ impl<'a> ParsedPacket<'a> {
             }
         };
 
-        let (network, mut ip_payload) = match ethertype {
+        let (network, ip_payload) = match ethertype {
             ether_type::IPV4 => {
                 let (ipv4_header, ipv4_payload) = Ipv4Header::parse(eth_payload)?;
                 (Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, ipv4_payload))), ipv4_payload)
@@ -97,58 +97,51 @@ impl<'a> ParsedPacket<'a> {
         };
 
         let (transport, transport_payload) = if let Some(NetworkPacket::Ip(ip_packet)) = &network {
-            match ip_packet {
-                IpPacket::V4(header, payload) => {
-                    ip_payload = *payload;
-                    match header.protocol {
-                        IP_P_ICMP => {
-                            let (icmp_header, icmp_payload) = IcmpHeader::parse(ip_payload)?;
-                            (Some(TransportPacket::Icmp(icmp_header, icmp_payload)), icmp_payload)
-                        }
-                        IP_P_TCP => {
-                            let (tcp_header, tcp_payload) = TcpHeader::parse(ip_payload)?;
-                            (Some(TransportPacket::Tcp(tcp_header, tcp_payload)), tcp_payload)
-                        }
-                        IP_P_UDP => {
-                            let (udp_header, udp_payload) = UdpHeader::parse(ip_payload)?;
-                            (Some(TransportPacket::Udp(udp_header, udp_payload)), udp_payload)
-                        }
-                        _ => (None, ip_payload),
-                    }
-                }
+            let (protocol, ip_payload) = match ip_packet {
+                IpPacket::V4(header, payload) => (header.protocol, *payload),
                 IpPacket::V6(header, payload) => {
                     let mut next_header = header.next_header;
-                    ip_payload = *payload;
+                    let mut ip_payload = *payload;
                     if next_header == IP_P_HOPOPTS {
                         let (hbh_header, hbh_payload) = Ipv6HopByHopHeader::parse(ip_payload)?;
                         next_header = hbh_header.next_header;
                         ip_payload = hbh_payload;
                     }
-                    match next_header {
-                        IP_P_ICMPV6 => {
-                            let (icmpv6_header, icmpv6_payload) = Icmpv6Header::parse(ip_payload)?;
-                            (
-                                Some(TransportPacket::Icmpv6(icmpv6_header, icmpv6_payload)),
-                                icmpv6_payload,
-                            )
-                        }
-                        IP_P_TCP => {
-                            let (tcp_header, tcp_payload) = TcpHeader::parse(ip_payload)?;
-                            (Some(TransportPacket::Tcp(tcp_header, tcp_payload)), tcp_payload)
-                        }
-                        IP_P_UDP => {
-                            let (udp_header, udp_payload) = UdpHeader::parse(ip_payload)?;
-                            (Some(TransportPacket::Udp(udp_header, udp_payload)), udp_payload)
-                        }
-                        _ => (None, ip_payload),
-                    }
+                    (next_header, ip_payload)
                 }
-            }
+            };
+            parse_transport_packet(protocol, ip_payload)?
         } else {
             (None, ip_payload)
         };
 
         Some(ParsedPacket { ethernet, network, transport, payload: transport_payload })
+    }
+}
+
+/// Parses the transport layer packet from an IP payload given its protocol or next header.
+fn parse_transport_packet<'a>(
+    protocol: u8,
+    payload: &'a [u8],
+) -> Option<(Option<TransportPacket<'a>>, &'a [u8])> {
+    match protocol {
+        IP_P_ICMP => {
+            let (icmp_header, icmp_payload) = IcmpHeader::parse(payload)?;
+            Some((Some(TransportPacket::Icmp(icmp_header, icmp_payload)), icmp_payload))
+        }
+        IP_P_ICMPV6 => {
+            let (icmpv6_header, icmpv6_payload) = Icmpv6Header::parse(payload)?;
+            Some((Some(TransportPacket::Icmpv6(icmpv6_header, icmpv6_payload)), icmpv6_payload))
+        }
+        IP_P_TCP => {
+            let (tcp_header, tcp_payload) = TcpHeader::parse(payload)?;
+            Some((Some(TransportPacket::Tcp(tcp_header, tcp_payload)), tcp_payload))
+        }
+        IP_P_UDP => {
+            let (udp_header, udp_payload) = UdpHeader::parse(payload)?;
+            Some((Some(TransportPacket::Udp(udp_header, udp_payload)), udp_payload))
+        }
+        _ => Some((None, payload)),
     }
 }
 
@@ -299,5 +292,137 @@ mod tests {
         assert!(packet.network.is_some());
         assert!(packet.transport.is_some());
         assert!(matches!(packet.transport.unwrap(), TransportPacket::Udp(..)));
+    }
+
+    #[test]
+    fn test_parse_ipv4_tcp() {
+        let mut bytes = Vec::new();
+        // Ethernet
+        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        bytes.extend_from_slice(&ether_type::IPV4.to_be_bytes());
+        // IPv4 (20 bytes header + 20 bytes TCP + 5 bytes payload = 45 bytes total)
+        bytes.extend_from_slice(&[0x45, 0x00]);
+        bytes.extend_from_slice(&45u16.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[64, IP_P_TCP]);
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[192, 168, 0, 1]);
+        bytes.extend_from_slice(&[192, 168, 0, 2]);
+        // TCP
+        bytes.extend_from_slice(&8080u16.to_be_bytes());
+        bytes.extend_from_slice(&80u16.to_be_bytes());
+        bytes.extend_from_slice(&1000u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&(5u16 << 12).to_be_bytes()); // Data offset 5 words = 20 bytes
+        bytes.extend_from_slice(&65535u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(b"hello");
+
+        let packet = ParsedPacket::parse(&bytes).expect("Failed to parse packet");
+        assert!(packet.network.is_some());
+        let transport = packet.transport.expect("No transport packet found");
+        if let TransportPacket::Tcp(header, payload) = transport {
+            assert_eq!(header.source_port.get(), 8080);
+            assert_eq!(header.dest_port.get(), 80);
+            assert_eq!(payload, b"hello");
+        } else {
+            panic!("Expected TCP packet");
+        }
+        assert_eq!(packet.payload, b"hello");
+    }
+
+    #[test]
+    fn test_parse_ipv6_tcp() {
+        let mut bytes = Vec::new();
+        // Ethernet
+        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        bytes.extend_from_slice(&ether_type::IPV6.to_be_bytes());
+        // IPv6 (40 bytes header, payload length = 20 + 4 = 24)
+        bytes.extend_from_slice(&0x60000000u32.to_be_bytes());
+        bytes.extend_from_slice(&24u16.to_be_bytes());
+        bytes.extend_from_slice(&[IP_P_TCP, 64]);
+        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        // TCP
+        bytes.extend_from_slice(&9000u16.to_be_bytes());
+        bytes.extend_from_slice(&443u16.to_be_bytes());
+        bytes.extend_from_slice(&2000u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&(5u16 << 12).to_be_bytes());
+        bytes.extend_from_slice(&32768u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(b"ping");
+
+        let packet = ParsedPacket::parse(&bytes).expect("Failed to parse packet");
+        let transport = packet.transport.expect("No transport packet found");
+        if let TransportPacket::Tcp(header, payload) = transport {
+            assert_eq!(header.source_port.get(), 9000);
+            assert_eq!(header.dest_port.get(), 443);
+            assert_eq!(payload, b"ping");
+        } else {
+            panic!("Expected TCP packet");
+        }
+        assert_eq!(packet.payload, b"ping");
+    }
+
+    #[test]
+    fn test_parse_ipv6_udp() {
+        let mut bytes = Vec::new();
+        // Ethernet
+        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        bytes.extend_from_slice(&ether_type::IPV6.to_be_bytes());
+        // IPv6 (40 bytes header, payload length = 8 + 4 = 12)
+        bytes.extend_from_slice(&0x60000000u32.to_be_bytes());
+        bytes.extend_from_slice(&12u16.to_be_bytes());
+        bytes.extend_from_slice(&[IP_P_UDP, 64]);
+        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        // UDP
+        bytes.extend_from_slice(&5353u16.to_be_bytes());
+        bytes.extend_from_slice(&5353u16.to_be_bytes());
+        bytes.extend_from_slice(&12u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(b"mdns");
+
+        let packet = ParsedPacket::parse(&bytes).expect("Failed to parse packet");
+        let transport = packet.transport.expect("No transport packet found");
+        if let TransportPacket::Udp(header, payload) = transport {
+            assert_eq!(header.source_port.get(), 5353);
+            assert_eq!(header.dest_port.get(), 5353);
+            assert_eq!(payload, b"mdns");
+        } else {
+            panic!("Expected UDP packet");
+        }
+        assert_eq!(packet.payload, b"mdns");
+    }
+
+    #[test]
+    fn test_parse_unknown_transport() {
+        let mut bytes = Vec::new();
+        // Ethernet
+        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        bytes.extend_from_slice(&ether_type::IPV4.to_be_bytes());
+        // IPv4 with unhandled protocol 253
+        bytes.extend_from_slice(&[0x45, 0x00]);
+        bytes.extend_from_slice(&24u16.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[64, 253]);
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[192, 168, 0, 1]);
+        bytes.extend_from_slice(&[192, 168, 0, 2]);
+        bytes.extend_from_slice(b"raw!");
+
+        let packet = ParsedPacket::parse(&bytes).expect("Failed to parse packet");
+        assert!(packet.network.is_some());
+        assert!(packet.transport.is_none());
+        assert_eq!(packet.payload, b"raw!");
     }
 }

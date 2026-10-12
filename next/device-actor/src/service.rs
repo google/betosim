@@ -426,13 +426,16 @@ impl DeviceActor {
         for (chip, stream_stats, cached_stats) in stats_to_archive {
             let chip_id = ChipId(chip.id);
             self.archive_chip_stats(id, &chip, stream_stats, cached_stats.as_ref()).await;
-
-            if let Some(chip_client) = self.chip_clients.get(&chip.kind) {
-                chip_client.delete(chip_id).await?;
+            if let Some(chip_client) = self.chip_clients.get(&chip.kind)
+                && let Err(err) = chip_client.delete(chip_id).await
+            {
+                warn!("Failed to delete chip {chip_id} of device {id}: {err}; continuing");
             }
-
-            // Notify Link Actor
-            self.link_client.notify_chip_removed(chip_id).await?;
+            if let Err(err) = self.link_client.notify_chip_removed(chip_id).await {
+                warn!(
+                    "Failed to notify link actor about chip {chip_id} removal: {err}; continuing"
+                );
+            }
         }
 
         if let Some(internal_device) = self.devices.remove(&id)

@@ -58,6 +58,124 @@ impl DhcpPacket {
     pub(crate) fn parse(bytes: &[u8]) -> Option<(DhcpPacketRef<'_>, &[u8])> {
         Ref::from_prefix(bytes).ok()
     }
+
+    pub(super) fn new_reply(
+        xid: [u8; 4],
+        flags: [u8; 2],
+        ciaddr: [u8; 4],
+        yiaddr: [u8; 4],
+        chaddr: [u8; 16],
+        siaddr: [u8; 4],
+    ) -> Self {
+        Self {
+            op: 2, // BootReply
+            htype: 1,
+            hlen: 6,
+            hops: 0,
+            xid,
+            secs: [0; 2],
+            flags,
+            ciaddr,
+            yiaddr,
+            siaddr,
+            giaddr: [0; 4],
+            chaddr,
+            sname: [0; 64],
+            file: [0; 128],
+            magic_cookie: DHCP_MAGIC_COOKIE,
+            options: [0; 308],
+        }
+    }
+
+    pub(super) fn set_options(&mut self, options: DhcpOptionBuilder) {
+        self.options.fill(0);
+        let bytes = options.options;
+        let len = bytes.len().min(MAX_OPTIONS_LEN);
+        if let Some(dest) = self.options.get_mut(..len)
+            && let Some(src) = bytes.get(..len)
+        {
+            dest.copy_from_slice(src);
+        }
+        if let Some(slot) = self.options.get_mut(len) {
+            *slot = 255; // End option
+        }
+    }
+}
+
+const MAX_OPTIONS_LEN: usize = 307;
+
+/// Builder for constructing DHCP options.
+#[derive(Default, Debug, Clone)]
+pub(super) struct DhcpOptionBuilder {
+    options: Vec<u8>,
+}
+
+impl DhcpOptionBuilder {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn add_option(mut self, code: u8, data: &[u8]) -> Self {
+        if code == 0 || code == 255 {
+            return self;
+        }
+        let len = data.len().min(u8::MAX.into());
+        if self.options.len() + 2 + len > MAX_OPTIONS_LEN {
+            warn!(
+                "DHCP option {} (length {}) exceeds remaining options capacity ({}/{}), skipping",
+                code,
+                len,
+                self.options.len(),
+                MAX_OPTIONS_LEN
+            );
+            return self;
+        }
+        self.options.push(code);
+        self.options.push(len as u8);
+        if let Some(src) = data.get(..len) {
+            self.options.extend_from_slice(src);
+        }
+        self
+    }
+
+    pub(super) fn message_type(self, msg_type: DhcpMessageType) -> Self {
+        self.add_option(53, &[msg_type as u8])
+    }
+
+    pub(super) fn network_config(self, host_ipv4: Ipv4Addr) -> Self {
+        self.add_option(1, &[255, 255, 255, 0]) // Subnet mask
+            .add_option(3, &host_ipv4.octets()) // Router
+            .add_option(6, &host_ipv4.octets()) // DNS server
+    }
+
+    pub(super) fn domain_options(mut self, config: &Config) -> Self {
+        if let Some(domain_name) = &config.domain_name {
+            self = self.add_option(15, domain_name.as_bytes());
+        }
+        if let Some(dns_search_option) = create_dns_search_option(config)
+            && let Some(sub) = dns_search_option.get(2..)
+        {
+            self = self.add_option(119, sub);
+        }
+        self
+    }
+
+    pub(super) fn hostname(mut self, config: &Config) -> Self {
+        if let Some(hostname) = &config.client_hostname {
+            self = self.add_option(12, hostname.as_bytes());
+        }
+        self
+    }
+
+    pub(super) fn boot_options(mut self, config: &Config) -> Self {
+        if let Some(tftp_server_name) = &config.tftp_server_name {
+            self = self.add_option(66, tftp_server_name.as_bytes());
+        }
+        if let Some(boot_file) = &config.boot_file {
+            self = self.add_option(67, boot_file.as_bytes());
+        }
+        self
+    }
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -238,45 +356,21 @@ impl DhcpManager {
         config: &Config,
         request_packet: &DhcpPacket,
     ) {
-        let mut ack_packet = DhcpPacket {
-            op: 2, // BootReply
-            htype: 1,
-            hlen: 6,
-            hops: 0,
-            xid: request_packet.xid,
-            secs: [0; 2],
-            flags: [0; 2],
-            ciaddr: request_packet.ciaddr, // client IP
-            yiaddr: [0; 4],                // yiaddr must be 0 for INFORM
-            siaddr: config.host_ipv4.octets(),
-            giaddr: [0; 4],
-            chaddr: request_packet.chaddr,
-            sname: [0; 64],
-            file: [0; 128],
-            magic_cookie: DHCP_MAGIC_COOKIE,
-            options: [0; 308],
-        };
+        let mut ack_packet = DhcpPacket::new_reply(
+            request_packet.xid,
+            [0; 2],
+            request_packet.ciaddr,
+            [0; 4], // yiaddr must be 0 for INFORM
+            request_packet.chaddr,
+            config.host_ipv4.octets(),
+        );
 
-        let mut options = Vec::new();
-        options.extend_from_slice(&[53, 1, DhcpMessageType::Ack as u8]);
-        options.extend_from_slice(&[1, 4, 255, 255, 255, 0]); // Subnet mask
-        options.extend_from_slice(&[3, 4]);
-        options.extend_from_slice(&config.host_ipv4.octets());
-        options.extend_from_slice(&[6, 4]);
-        options.extend_from_slice(&config.host_ipv4.octets());
-        if let Some(domain_name) = &config.domain_name {
-            options.extend_from_slice(&[15, domain_name.len() as u8]);
-            options.extend_from_slice(domain_name.as_bytes());
-        }
-        if let Some(dns_search_option) = create_dns_search_option(config) {
-            options.extend_from_slice(&dns_search_option);
-        }
-        options.push(255); // End option
-
-        let Some(dest) = ack_packet.options.get_mut(..options.len()) else {
-            return;
-        };
-        dest.copy_from_slice(&options);
+        ack_packet.set_options(
+            DhcpOptionBuilder::new()
+                .message_type(DhcpMessageType::Ack)
+                .network_config(config.host_ipv4)
+                .domain_options(config),
+        );
         self.send_packet(responses, config, &ack_packet);
     }
 
@@ -319,45 +413,18 @@ impl DhcpManager {
 
         info!("BOOTP: Handling legacy request from MAC {mac_addr}, assigning IP {ip_to_assign}");
 
-        let mut reply_packet = DhcpPacket {
-            op: 2, // BootReply
-            htype: 1,
-            hlen: 6,
-            hops: 0,
-            xid: bootp_packet.xid,
-            secs: [0; 2],
-            flags: bootp_packet.flags,
-            ciaddr: [0; 4],
-            yiaddr: ip_to_assign.octets(),
-            siaddr: config.host_ipv4.octets(),
-            giaddr: [0; 4],
-            chaddr: bootp_packet.chaddr,
-            sname: [0; 64],
-            file: [0; 128],
-            magic_cookie: DHCP_MAGIC_COOKIE,
-            options: [0; 308],
-        };
+        let mut reply_packet = DhcpPacket::new_reply(
+            bootp_packet.xid,
+            bootp_packet.flags,
+            [0; 4],
+            ip_to_assign.octets(),
+            bootp_packet.chaddr,
+            config.host_ipv4.octets(),
+        );
 
-        let mut options = Vec::new();
-        options.extend_from_slice(&[1, 4, 255, 255, 255, 0]); // Subnet mask
-        options.extend_from_slice(&[3, 4]);
-        options.extend_from_slice(&config.host_ipv4.octets());
-        options.extend_from_slice(&[6, 4]);
-        options.extend_from_slice(&config.host_ipv4.octets());
-        if let Some(tftp_server_name) = &config.tftp_server_name {
-            options.extend_from_slice(&[66, tftp_server_name.len() as u8]);
-            options.extend_from_slice(tftp_server_name.as_bytes());
-        }
-        if let Some(boot_file) = &config.boot_file {
-            options.extend_from_slice(&[67, boot_file.len() as u8]);
-            options.extend_from_slice(boot_file.as_bytes());
-        }
-        options.push(255); // End option
-
-        let Some(dest) = reply_packet.options.get_mut(..options.len()) else {
-            return;
-        };
-        dest.copy_from_slice(&options);
+        reply_packet.set_options(
+            DhcpOptionBuilder::new().network_config(config.host_ipv4).boot_options(config),
+        );
 
         // Copy boot file and tftp server name to legacy header fields
         if let Some(boot_file) = &config.boot_file {
@@ -428,57 +495,23 @@ impl DhcpManager {
         yiaddr: Ipv4Addr,
         msg_type: DhcpMessageType,
     ) {
-        let mut reply_packet = DhcpPacket {
-            op: 2, // BootReply
-            htype: 1,
-            hlen: 6,
-            hops: 0,
+        let mut reply_packet = DhcpPacket::new_reply(
             xid,
-            secs: [0; 2],
-            flags: [0; 2],
-            ciaddr: [0; 4],
-            yiaddr: yiaddr.octets(),
-            siaddr: config.host_ipv4.octets(),
-            giaddr: [0; 4],
+            [0; 2],
+            [0; 4],
+            yiaddr.octets(),
             chaddr,
-            sname: [0; 64],
-            file: [0; 128],
-            magic_cookie: DHCP_MAGIC_COOKIE,
-            options: [0; 308],
-        };
+            config.host_ipv4.octets(),
+        );
 
-        let mut options = Vec::new();
-        options.extend_from_slice(&[53, 1, msg_type as u8]);
-        options.extend_from_slice(&[1, 4, 255, 255, 255, 0]); // Subnet mask
-        options.extend_from_slice(&[3, 4]);
-        options.extend_from_slice(&config.host_ipv4.octets());
-        options.extend_from_slice(&[6, 4]);
-        options.extend_from_slice(&config.host_ipv4.octets());
-        if let Some(domain_name) = &config.domain_name {
-            options.extend_from_slice(&[15, domain_name.len() as u8]);
-            options.extend_from_slice(domain_name.as_bytes());
-        }
-        if let Some(dns_search_option) = create_dns_search_option(config) {
-            options.extend_from_slice(&dns_search_option);
-        }
-        if let Some(hostname) = &config.client_hostname {
-            options.extend_from_slice(&[12, hostname.len() as u8]);
-            options.extend_from_slice(hostname.as_bytes());
-        }
-        if let Some(tftp_server_name) = &config.tftp_server_name {
-            options.extend_from_slice(&[66, tftp_server_name.len() as u8]);
-            options.extend_from_slice(tftp_server_name.as_bytes());
-        }
-        if let Some(boot_file) = &config.boot_file {
-            options.extend_from_slice(&[67, boot_file.len() as u8]);
-            options.extend_from_slice(boot_file.as_bytes());
-        }
-        options.push(255); // End option
-
-        let Some(dest) = reply_packet.options.get_mut(..options.len()) else {
-            return;
-        };
-        dest.copy_from_slice(&options);
+        reply_packet.set_options(
+            DhcpOptionBuilder::new()
+                .message_type(msg_type)
+                .network_config(config.host_ipv4)
+                .domain_options(config)
+                .hostname(config)
+                .boot_options(config),
+        );
         self.send_packet(responses, config, &reply_packet);
     }
 
@@ -522,33 +555,16 @@ impl DhcpManager {
         config: &Config,
         request_packet: &DhcpPacket,
     ) {
-        let mut nak_packet = DhcpPacket {
-            op: 2, // BootReply
-            htype: 1,
-            hlen: 6,
-            hops: 0,
-            xid: request_packet.xid,
-            secs: [0; 2],
-            flags: [0; 2],
-            ciaddr: [0; 4],
-            yiaddr: [0; 4],
-            siaddr: [0; 4],
-            giaddr: [0; 4],
-            chaddr: request_packet.chaddr,
-            sname: [0; 64],
-            file: [0; 128],
-            magic_cookie: DHCP_MAGIC_COOKIE,
-            options: [0; 308],
-        };
+        let mut nak_packet = DhcpPacket::new_reply(
+            request_packet.xid,
+            [0; 2],
+            [0; 4],
+            [0; 4],
+            request_packet.chaddr,
+            [0; 4],
+        );
 
-        let mut options = Vec::new();
-        options.extend_from_slice(&[53, 1, DhcpMessageType::Nak as u8]);
-        options.push(255); // End option
-
-        let Some(dest) = nak_packet.options.get_mut(..options.len()) else {
-            return;
-        };
-        dest.copy_from_slice(&options);
+        nak_packet.set_options(DhcpOptionBuilder::new().message_type(DhcpMessageType::Nak));
         self.send_packet(responses, config, &nak_packet);
     }
 

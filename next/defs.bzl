@@ -39,6 +39,7 @@ NETSIM_CLIPPY_FLAGS = [
     "-Dclippy::large_stack_arrays",
     "-Dclippy::large_types_passed_by_value",
     # FFI / Safety
+    "-Dclippy::cast_possible_wrap",
     "-Dclippy::cast_ptr_alignment",
     "-Dclippy::ptr_as_ptr",
     "-Dclippy::ptr_cast_constness",
@@ -304,6 +305,7 @@ def _netsim_clippy_test_impl(ctx):
             t_args.add("-Aclippy::unimplemented")
             t_args.add("-Aclippy::todo")
             t_args.add("-Aclippy::panic_in_result_fn")
+            t_args.add("-Aclippy::cast_possible_wrap")
             t_args.add("-Aclippy::print_stdout")
             t_args.add("-Aclippy::print_stderr")
         else:

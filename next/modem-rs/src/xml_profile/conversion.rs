@@ -30,6 +30,28 @@ struct SimIoMapping {
     response: String,
 }
 
+impl SimIoMapping {
+    fn validate_record_addressing(&self, file_id: u16) -> Result<usize, XmlProfileError> {
+        if self.p2 != 0x04 {
+            return Err(XmlProfileError::InvalidValue {
+                file_id,
+                field: "SIMIO p2 (addressing mode)".to_string(),
+                value: format!("{:02X}", self.p2),
+                expected: "absolute addressing mode (04)".to_string(),
+            });
+        }
+        if self.p1 == 0 {
+            return Err(XmlProfileError::InvalidValue {
+                file_id,
+                field: "SIMIO p1 (record number)".to_string(),
+                value: "0".to_string(),
+                expected: "1-indexed record number between 1 and 255".to_string(),
+            });
+        }
+        Ok(self.p1 as usize)
+    }
+}
+
 /// Helper struct holding the result of parsing an Application Dedicated File
 /// (ADF) from the XML, separating the ADF representation itself from its nested
 /// filesystem members and sub-ADFs.
@@ -211,25 +233,7 @@ fn infer_records_from_read(
 
     for m in simio_mappings {
         if m.cmd == apdu::Instruction::ReadRecord {
-            // Enforce absolute addressing mode (P2 = 04) for simplicity and consistency
-            if m.p2 != 0x04 {
-                return Err(XmlProfileError::InvalidValue {
-                    file_id,
-                    field: "SIMIO p2 (addressing mode)".to_string(),
-                    value: format!("{:02X}", m.p2),
-                    expected: "absolute addressing mode (04)".to_string(),
-                });
-            }
-            let rec_num = m.p1;
-            if rec_num == 0 {
-                return Err(XmlProfileError::InvalidValue {
-                    file_id,
-                    field: "SIMIO p1 (record number)".to_string(),
-                    value: "0".to_string(),
-                    expected: "1-indexed record number between 1 and 255".to_string(),
-                });
-            }
-            let rec_num_usize = rec_num as usize;
+            let rec_num_usize = m.validate_record_addressing(file_id)?;
             max_rec_num = std::cmp::max(max_rec_num, rec_num_usize);
 
             let mut parts = m.response.split(',');
@@ -292,25 +296,7 @@ fn infer_records_from_update(
 
     for m in simio_mappings {
         if m.cmd == apdu::Instruction::UpdateRecord {
-            // Enforce absolute addressing mode (P2 = 04)
-            if m.p2 != 0x04 {
-                return Err(XmlProfileError::InvalidValue {
-                    file_id,
-                    field: "SIMIO p2 (addressing mode)".to_string(),
-                    value: format!("{:02X}", m.p2),
-                    expected: "absolute addressing mode (04)".to_string(),
-                });
-            }
-            let rec_num = m.p1;
-            if rec_num == 0 {
-                return Err(XmlProfileError::InvalidValue {
-                    file_id,
-                    field: "SIMIO p1 (record number)".to_string(),
-                    value: "0".to_string(),
-                    expected: "1-indexed record number between 1 and 255".to_string(),
-                });
-            }
-            let rec_num_usize = rec_num as usize;
+            let rec_num_usize = m.validate_record_addressing(file_id)?;
             max_rec_num = std::cmp::max(max_rec_num, rec_num_usize);
 
             let current_len = m.p3 as usize; // P3 defines record length in UPDATE RECORD

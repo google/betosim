@@ -19,7 +19,6 @@ import{__decorate as t}from"../node_modules/tslib/tslib.es6.js";import{css as i,
             Copyright (c) 2017 Google LLC. All rights reserved.
         </div>
         <div class="licensetext">
-            Distributed under the terms of the Lit license:<br>
             <a href="https://github.com/lit/lit/blob/main/LICENSE"
                target="_blank">https://github.com/lit/lit/blob/main/LICENSE</a>
         </div>

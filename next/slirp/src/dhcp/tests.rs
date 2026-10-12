@@ -20,7 +20,10 @@ use zerocopy::IntoBytes;
 use crate::{
     Config, SlirpResponse,
     clock::MockClock,
-    dhcp::dhcp_impl::{DHCP_MAGIC_COOKIE, DhcpManager, DhcpMessageType, DhcpPacket, DhcpPacketRef},
+    dhcp::dhcp_impl::{
+        DHCP_MAGIC_COOKIE, DhcpManager, DhcpMessageType, DhcpOptionBuilder, DhcpPacket,
+        DhcpPacketRef,
+    },
 };
 
 fn parse_dhcp_reply_payload(packet: &[u8]) -> DhcpPacketRef<'_> {
@@ -635,7 +638,9 @@ fn test_dhcp_inform_with_config() {
     };
     let ack_dhcp = parse_dhcp_reply_payload(&ack_packet);
     let options = parse_dhcp_options(&ack_dhcp.options);
-
+    assert_eq!(options.get(&1).unwrap(), &[255, 255, 255, 0]);
+    assert_eq!(options.get(&3).unwrap(), &config.host_ipv4.octets());
+    assert_eq!(options.get(&6).unwrap(), &config.host_ipv4.octets());
     assert_eq!(options.get(&15).unwrap(), b"example.com");
     assert!(options.contains_key(&119));
 }
@@ -766,4 +771,118 @@ fn test_dhcp_parse_option_edge_cases() {
     let reply_dhcp = parse_dhcp_reply_payload(&reply);
     let opts = parse_dhcp_options(&reply_dhcp.options);
     assert_eq!(opts.get(&53).unwrap(), &vec![DhcpMessageType::Nak as u8]);
+}
+
+#[test]
+fn test_dhcp_packet_new_reply_and_set_options() {
+    let xid = [1, 2, 3, 4];
+    let flags = [0x80, 0x00];
+    let ciaddr = [10, 0, 2, 15];
+    let yiaddr = [10, 0, 2, 16];
+    let chaddr = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let siaddr = [10, 0, 2, 2];
+
+    let mut packet = DhcpPacket::new_reply(xid, flags, ciaddr, yiaddr, chaddr, siaddr);
+    assert_eq!(packet.op, 2); // BootReply
+    assert_eq!(packet.htype, 1);
+    assert_eq!(packet.hlen, 6);
+    assert_eq!(packet.hops, 0);
+    assert_eq!(packet.xid, xid);
+    assert_eq!(packet.secs, [0; 2]);
+    assert_eq!(packet.flags, flags);
+    assert_eq!(packet.ciaddr, ciaddr);
+    assert_eq!(packet.yiaddr, yiaddr);
+    assert_eq!(packet.siaddr, siaddr);
+    assert_eq!(packet.giaddr, [0; 4]);
+    assert_eq!(packet.chaddr, chaddr);
+    assert_eq!(packet.sname, [0; 64]);
+    assert_eq!(packet.file, [0; 128]);
+    assert_eq!(packet.magic_cookie, DHCP_MAGIC_COOKIE);
+
+    packet.set_options(DhcpOptionBuilder::new().message_type(DhcpMessageType::Ack));
+
+    let parsed_opts = parse_dhcp_options(&packet.options);
+    assert_eq!(parsed_opts.get(&53).unwrap(), &[DhcpMessageType::Ack as u8]);
+}
+
+#[test]
+fn test_dhcp_packet_set_options_truncation() {
+    let mut packet = DhcpPacket::new_reply([1, 2, 3, 4], [0; 2], [0; 4], [0; 4], [0; 16], [0; 4]);
+
+    // Build structured TLV options that exceed the 307-byte payload capacity.
+    // 31 options of 10 bytes each = 310 bytes (code + len + 8 bytes payload).
+    let mut builder = DhcpOptionBuilder::new();
+    for i in 0..31 {
+        builder = builder.add_option(i + 1, &[0x42; 8]);
+    }
+
+    packet.set_options(builder);
+
+    // 30 options of 10 bytes fit in 300 bytes <= 307. 31st option would need 310 bytes > 307.
+    // DhcpOptionBuilder skips the 31st option, and set_options places End option (255) at index 300.
+    assert_eq!(packet.options[300], 255);
+
+    // Parsed options must be valid and intact
+    let parsed_opts = parse_dhcp_options(&packet.options);
+    assert_eq!(parsed_opts.len(), 30);
+    for i in 0..30 {
+        assert_eq!(parsed_opts.get(&(i + 1)).unwrap(), &[0x42; 8]);
+    }
+    assert_eq!(parsed_opts.get(&31), None);
+}
+
+#[test]
+fn test_dhcp_packet_set_options_payload_ends_in_255() {
+    let mut packet = DhcpPacket::new_reply([1, 2, 3, 4], [0; 2], [0; 4], [0; 4], [0; 16], [0; 4]);
+
+    // Broadcast address option (code 28, len 4): [10, 0, 2, 255] where last payload byte is 255
+    packet.set_options(DhcpOptionBuilder::new().add_option(28, &[10, 0, 2, 255]));
+
+    // End option (255) must still be appended at index 6 (after the 6 bytes of option 28)
+    assert_eq!(packet.options[6], 255);
+}
+
+#[test]
+fn test_dhcp_option_builder_long_strings() {
+    let mut packet = DhcpPacket::new_reply([1, 2, 3, 4], [0; 2], [0; 4], [0; 4], [0; 16], [0; 4]);
+    let mut config = Config {
+        domain_name: Some("a".repeat(300)),
+        boot_file: Some("b".repeat(300)),
+        tftp_server_name: Some("c".repeat(300)),
+        ..Config::default()
+    };
+
+    packet.set_options(DhcpOptionBuilder::new().domain_options(&config));
+    // Domain option code 15, length bounded to 255, End option 255 at index 257
+    assert_eq!(packet.options[0], 15);
+    assert_eq!(packet.options[1], 255);
+    assert_eq!(packet.options[257], 255);
+
+    packet.set_options(DhcpOptionBuilder::new().boot_options(&config));
+    // TFTP server name code 66, length bounded to 255 (257 bytes); boot file exceeds remaining
+    // 307-byte capacity and is skipped, placing End option 255 at index 257.
+    assert_eq!(packet.options[0], 66);
+    assert_eq!(packet.options[1], 255);
+    assert_eq!(packet.options[257], 255);
+
+    config.tftp_server_name = None;
+    packet.set_options(DhcpOptionBuilder::new().boot_options(&config));
+    // Boot file code 67, length bounded to 255, End option 255 at index 257
+    assert_eq!(packet.options[0], 67);
+    assert_eq!(packet.options[1], 255);
+    assert_eq!(packet.options[257], 255);
+}
+
+#[test]
+fn test_dhcp_option_builder_network_config() {
+    let mut packet = DhcpPacket::new_reply([1, 2, 3, 4], [0; 2], [0; 4], [0; 4], [0; 16], [0; 4]);
+    let host_ipv4 = Ipv4Addr::new(10, 0, 2, 2);
+    packet.set_options(
+        DhcpOptionBuilder::new().message_type(DhcpMessageType::Ack).network_config(host_ipv4),
+    );
+    let parsed_opts = parse_dhcp_options(&packet.options);
+    assert_eq!(parsed_opts.get(&53).unwrap(), &[DhcpMessageType::Ack as u8]);
+    assert_eq!(parsed_opts.get(&1).unwrap(), &[255, 255, 255, 0]);
+    assert_eq!(parsed_opts.get(&3).unwrap(), &[10, 0, 2, 2]);
+    assert_eq!(parsed_opts.get(&6).unwrap(), &[10, 0, 2, 2]);
 }

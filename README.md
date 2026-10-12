@@ -20,7 +20,7 @@ To ensure consistent code style and quality, this project uses a pre-commit hook
     ```bash
     brew install pipx
     ```
-    Homebrew install instructions: https://brew.sh
+    Homebrew install instructions: go/homebrew.
 
 2.  **Add pipx to your PATH:**
     ```bash

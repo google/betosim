@@ -85,6 +85,72 @@ fn test_invalid_record_number_fails() {
 }
 
 #[test]
+fn test_invalid_addressing_mode_fails() {
+    let bad_xml = r#"<IccProfile>
+        <MF>
+            <EF id="6FC7" structure="linear fixed">
+                <SIMIO cmd="B2" p1="01" p2="00" p3="26">90,00,01020304</SIMIO>
+            </EF>
+        </MF>
+    </IccProfile>"#;
+    let result = parse_xml_profile(bad_xml);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        XmlProfileError::InvalidValue {
+            file_id: UiccFileId::MailboxDialingNumbers.as_u16(),
+            field: "SIMIO p2 (addressing mode)".to_string(),
+            value: "00".to_string(),
+            expected: "absolute addressing mode (04)".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_invalid_update_addressing_mode_fails() {
+    let bad_xml = r#"<IccProfile>
+        <MF>
+            <EF id="6FC7" structure="linear fixed">
+                <SIMIO cmd="DC" p1="01" p2="00" p3="26">144,0</SIMIO>
+            </EF>
+        </MF>
+    </IccProfile>"#;
+    let result = parse_xml_profile(bad_xml);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        XmlProfileError::InvalidValue {
+            file_id: UiccFileId::MailboxDialingNumbers.as_u16(),
+            field: "SIMIO p2 (addressing mode)".to_string(),
+            value: "00".to_string(),
+            expected: "absolute addressing mode (04)".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_invalid_update_record_number_fails() {
+    let bad_xml = r#"<IccProfile>
+        <MF>
+            <EF id="6FC7" structure="linear fixed">
+                <SIMIO cmd="DC" p1="00" p2="04" p3="26">144,0</SIMIO>
+            </EF>
+        </MF>
+    </IccProfile>"#;
+    let result = parse_xml_profile(bad_xml);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        XmlProfileError::InvalidValue {
+            file_id: UiccFileId::MailboxDialingNumbers.as_u16(),
+            field: "SIMIO p1 (record number)".to_string(),
+            value: "0".to_string(),
+            expected: "1-indexed record number between 1 and 255".to_string(),
+        }
+    );
+}
+
+#[test]
 fn test_parameter_normalization() {
     let xml = r#"<IccProfile>
         <MF>

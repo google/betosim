@@ -83,7 +83,8 @@ impl TapInterface {
             return Err(WifiError::Internal(Box::from("Interface name too long")));
         }
         for (dest, &b) in if_req.ifr_name.iter_mut().zip(bytes) {
-            *dest = b as libc::c_char;
+            // Reinterpret the u8 byte bits as c_char for the FFI boundary.
+            *dest = libc::c_char::from_ne_bytes([b]);
         }
 
         // Set flags

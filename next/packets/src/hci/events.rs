@@ -174,7 +174,7 @@ pub fn parse_le_advertising_report(mut payload: &[u8]) -> Option<Vec<LeAdvertisi
 
         let (data, after_data) = rest.split_at_checked(data_len)?;
         let (&rssi_u8, next_rest) = after_data.split_first()?;
-        let rssi = rssi_u8 as i8;
+        let rssi = rssi_u8.cast_signed();
 
         reports.push(LeAdvertisingReport {
             event_type: prefix.event_type,

@@ -12,24 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use bytes::Bytes;
 use device_actor::DeviceClient;
+use device_api::{DeviceAddChip, DeviceConfig};
 use futures::StreamExt;
-use netsim_model::{BluetoothCreate, BluetoothMode, DeviceParams};
+use netsim_model::{Chip, ChipKind, ChipVariant, PacketSink, PacketStream};
 use packet_stream::transport::H4Codec;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
+    sync::mpsc,
 };
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::FramedRead;
 use tracing::{info, warn};
+
+const CHANNEL_BUFFER_CAPACITY: usize = 100;
+const UNKNOWN_PORT: u16 = 0;
 
 /// Start the async TCP transport for HCI connections
 ///
 /// Loops, passing each accepted connection to `handle_hci_client`.
 pub async fn run(listener: TcpListener, device_client: DeviceClient) {
-    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(UNKNOWN_PORT);
     info!("Hci socket server is listening on: {port}");
 
     loop {
@@ -48,14 +55,42 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
     }
 }
 
+/// Helper for constructing HCI Bluetooth chip parameters and device requests.
+struct HciChipBuilder;
+
+impl HciChipBuilder {
+    fn build_chip(name: &str) -> Chip {
+        Chip {
+            name: name.to_string(),
+            kind: ChipKind::BLUETOOTH,
+            variant: Some(ChipVariant::from(ChipKind::BLUETOOTH)),
+            ..Default::default()
+        }
+    }
+
+    fn build_device_add_chip_request(
+        name: String,
+        packet_stream: PacketStream,
+        packet_sink: PacketSink,
+    ) -> DeviceAddChip {
+        let chip = Self::build_chip(&name);
+        DeviceAddChip {
+            device_guid: name.clone(),
+            packet_stream: Some(packet_stream),
+            packet_sink: Some(packet_sink),
+            device_config: DeviceConfig { name, visible: true, ..Default::default() },
+            chip,
+        }
+    }
+}
+
 async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: DeviceClient) {
     let (socket_rx, mut socket_tx) = stream.into_split();
 
     // 1. Setup the AsyncStream bridging to `packet_stream::PacketStream`
-    let (stream_tx, stream_rx) =
-        tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(100);
+    let (stream_tx, stream_rx) = mpsc::channel::<Result<Bytes, io::Error>>(CHANNEL_BUFFER_CAPACITY);
     // 2. Setup the AsyncSink bridging from `packet_stream::PacketSink`
-    let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(100);
+    let (sink_tx, mut sink_rx) = mpsc::channel::<Bytes>(CHANNEL_BUFFER_CAPACITY);
 
     // Read Task: Read H4 packets from the socket and send to `stream_tx`
     let read_addr = addr;
@@ -86,58 +121,54 @@ async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: D
         }
     });
 
-    // 3. Create the Chip parameters
+    // 3. Create the Chip parameters and device request
     let name = format!("socket-{addr}");
-    let chip_create_params = BluetoothCreate {
-        address: String::new(), // Address will be automatically derived or configured
-        bt_properties: netsim_model::Controller::default(),
-        mode: BluetoothMode::Device(DeviceParams {}),
-    };
-
-    let chip = netsim_model::Chip {
-        name: name.clone(),
-        manufacturer: "Google".to_string(),
-        product_name: "Google".to_string(),
-        kind: netsim_model::ChipKind::BLUETOOTH,
-        variant: Some(netsim_model::ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
-            address: chip_create_params.address.clone(),
-            mode: chip_create_params.mode.clone(),
-            bt_properties: chip_create_params.bt_properties.clone(),
-            ..Default::default()
-        }))),
-        ..Default::default()
-    };
-
-    let packet_stream: netsim_model::PacketStream = Box::new(
-        tokio_stream::wrappers::ReceiverStream::new(stream_rx)
-            .filter_map(|res| std::future::ready(res.ok())),
-    );
-    let packet_sink: netsim_model::PacketSink = Box::pin(futures::sink::unfold(
+    let packet_stream: PacketStream =
+        Box::new(ReceiverStream::new(stream_rx).filter_map(|res| std::future::ready(res.ok())));
+    let packet_sink: PacketSink = Box::pin(futures::sink::unfold(
         sink_tx,
-        |tx: tokio::sync::mpsc::Sender<bytes::Bytes>, item: bytes::Bytes| async move {
-            tx.send(item)
-                .await
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err))?;
+        |tx: mpsc::Sender<Bytes>, item: Bytes| async move {
+            tx.send(item).await.map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
             Ok(tx)
         },
     ));
 
-    let request = device_api::DeviceAddChip {
-        device_guid: name.clone(),
-        packet_stream: Some(packet_stream),
-        packet_sink: Some(packet_sink),
-        device_config: device_api::DeviceConfig {
-            name,
-            visible: true,
-            pose: Default::default(),
-            builtin: false,
-            device_info: None,
-        },
-        chip,
-    };
+    let request = HciChipBuilder::build_device_add_chip_request(name, packet_stream, packet_sink);
 
     // 4. Send request to add chip
     if let Err(e) = device_client.add_chip(request).await {
         warn!("Failed to add virtual HCI chip for {addr}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::SinkExt;
+
+    use super::*;
+
+    #[test]
+    fn test_build_chip_defaults() {
+        let chip = HciChipBuilder::build_chip("socket-127.0.0.1:1234");
+        assert_eq!(chip.name, "socket-127.0.0.1:1234");
+        assert!(chip.manufacturer.is_empty());
+        assert!(chip.product_name.is_empty());
+        assert_eq!(chip.kind, ChipKind::BLUETOOTH);
+        assert_eq!(chip.variant, Some(ChipVariant::from(ChipKind::BLUETOOTH)));
+    }
+
+    #[test]
+    fn test_build_device_add_chip_request() {
+        let stream: PacketStream = Box::new(futures::stream::empty());
+        let sink: PacketSink = Box::pin(futures::sink::drain().sink_map_err(|e| match e {}));
+        let request = HciChipBuilder::build_device_add_chip_request(
+            "socket-127.0.0.1:1234".to_string(),
+            stream,
+            sink,
+        );
+        assert_eq!(request.device_guid, "socket-127.0.0.1:1234");
+        assert_eq!(request.device_config.name, "socket-127.0.0.1:1234");
+        assert!(request.device_config.visible);
+        assert!(!request.device_config.builtin);
     }
 }

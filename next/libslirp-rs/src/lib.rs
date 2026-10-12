@@ -21,6 +21,9 @@
 //! (IpV4Addr, SocketAddrV4, etc.).
 //!
 //! Callbacks for libslirp send_packet are delivered on Channel.
+
+#![allow(clippy::cast_possible_wrap)]
+
 mod libslirp;
 mod libslirp_config;
 // Keep libslirp_sys public to bypass dead code warnings for unused

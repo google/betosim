@@ -60,7 +60,7 @@ pub fn parse_hci_scan_report(data: &[u8]) -> Result<Vec<ScanResult>, &'static st
             return Err("Packet truncated: payload exceeds buffer");
         };
         let payload = payload_slice.to_vec();
-        let rssi = rssi_u8 as i8;
+        let rssi = rssi_u8.cast_signed();
         results.push(ScanResult { mac, event_type, rssi, payload });
         remaining = next_remaining;
     }

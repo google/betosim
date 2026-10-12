@@ -45,7 +45,7 @@ pub(crate) fn parse_scan_response(res: &ScanResponse, verbose: bool) -> Vec<BleE
     let mut events = Vec::new();
     let now =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let timestamp = TimeDisplay::new(now.as_secs() as i64, now.subsec_nanos()).utc_display_hms();
+    let timestamp = TimeDisplay::from_duration(now).utc_display_hms();
 
     let packet = &res.packet;
     let hex_packet = if verbose {
@@ -121,7 +121,7 @@ fn parse_ad_structures(data: &[u8], is_scan_rsp: bool) -> BTreeMap<u16, AdPayloa
             }
             GapDataType::TX_POWER_LEVEL => {
                 if let [power] = ad_data {
-                    format!("{} dBm", *power as i8)
+                    format!("{} dBm", power.cast_signed())
                 } else {
                     format_hex_data(ad_data)
                 }
@@ -254,8 +254,7 @@ pub(crate) fn print_json_event(event: &BleEvent, verbose: bool) {
 
 pub(crate) fn print_sniff_response(res: &SniffResponse, _verbose: bool) {
     let duration = std::time::Duration::from_micros(res.timestamp as u64);
-    let timestamp =
-        TimeDisplay::new(duration.as_secs() as i64, duration.subsec_nanos()).utc_display_hms();
+    let timestamp = TimeDisplay::from_duration(duration).utc_display_hms();
     let hex_packet = res.packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
 
     let packet_type = match res.packet.first() {

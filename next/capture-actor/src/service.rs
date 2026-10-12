@@ -60,17 +60,18 @@ pub(crate) struct InternalCaptureInfo {
     >,
 }
 
+fn current_epoch_timestamp() -> (i64, i32) {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    (
+        i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        i32::try_from(d.subsec_nanos()).expect("subsec_nanos is always < 1_000_000_000"),
+    )
+}
+
 impl InternalCaptureInfo {
     fn from_create_params(id: ChipId, params: CaptureCreate) -> Result<Self, CaptureError> {
         let enabled = params.enabled_flag.load(Ordering::SeqCst);
-        let (seconds, nanos) = if enabled {
-            let d = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            (d.as_secs() as i64, d.subsec_nanos() as i32)
-        } else {
-            (0, 0)
-        };
+        let (seconds, nanos) = if enabled { current_epoch_timestamp() } else { (0, 0) };
         Ok(Self {
             info: CaptureInfo {
                 chip_id: id,
@@ -142,11 +143,7 @@ impl CaptureActor {
 
         if entity.info.enabled {
             if state_changed || (entity.info.seconds == 0 && entity.info.nanos == 0) {
-                let d = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                entity.info.seconds = d.as_secs() as i64;
-                entity.info.nanos = d.subsec_nanos() as i32;
+                (entity.info.seconds, entity.info.nanos) = current_epoch_timestamp();
             }
             // If enabling, create a writer if one does not exist.
             if !self.writers.contains_key(&entity.info.chip_id) {

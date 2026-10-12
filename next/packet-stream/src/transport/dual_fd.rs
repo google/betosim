@@ -382,8 +382,8 @@ impl TransportListener for DualFdListener {
     fn local_addr(&self) -> Result<StreamAddress> {
         let total_chips: usize = self.config.devices.iter().map(|d| d.chips.len()).sum();
         Ok(StreamAddress::Fd {
-            in_fd: total_chips as i32,
-            out_fd: Some(self.config.devices.len() as i32),
+            in_fd: i32::try_from(total_chips).unwrap_or(i32::MAX),
+            out_fd: Some(i32::try_from(self.config.devices.len()).unwrap_or(i32::MAX)),
         })
     }
 

@@ -404,15 +404,17 @@ impl ResourceRecord {
         let rclass = cursor.read_u16()?;
         let _resource_class = ResourceClass::try_from(rclass)?;
         let _ttl = cursor.read_u32()?;
-        let rdlength = cursor.read_u16()? as usize;
+        let rdlength = u64::from(cursor.read_u16()?);
         let pos_before = cursor.position();
         let resource_data = ResourceData::split_once(cursor, &resource_type)?;
-        let bytes_consumed = (cursor.position() - pos_before) as usize;
+        let bytes_consumed = cursor.position() - pos_before;
         if bytes_consumed > rdlength {
             return Err(DnsError::InvalidLength);
         }
         if bytes_consumed < rdlength {
-            cursor.seek(SeekFrom::Current((rdlength - bytes_consumed) as i64))?;
+            cursor.seek(SeekFrom::Current(
+                i64::try_from(rdlength - bytes_consumed).unwrap_or(i64::MAX),
+            ))?;
         }
         Ok(ResourceRecord { name, resource_data })
     }
@@ -525,7 +527,7 @@ impl NamePart {
         let start = cursor.position() as usize;
         let label_bytes = buffer_ref.get(start..start + end).ok_or(DnsError::InvalidLength)?;
         let label = str::from_utf8(label_bytes)?.to_string();
-        cursor.seek(SeekFrom::Current(end as i64))?;
+        cursor.seek(SeekFrom::Current(i64::from(size)))?;
         Ok(NamePart::Label(label))
     }
 }

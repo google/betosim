@@ -77,7 +77,7 @@ def create_emulator_artifact_path():
 
 
 def fetch_build_chaining_artifacts(out_dir, presubmit):
-  """Fetch the Emulator prebuilts for build_bots"""
+  """Fetch the Emulator prebuilts for build_bots (go/build_chaining)"""
   try:
     out = Path(out_dir)
     prebuilt_path = out / "prebuilt_cached" / "artifacts"
