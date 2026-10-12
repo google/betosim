@@ -21,7 +21,7 @@ use crate::ethernet_actor::{EthernetActor, EthernetReq, EthernetResponse};
 
 #[derive(Clone)]
 pub struct EthernetClient {
-    pub(crate) inner: Box<dyn actor_framework::ActorClient<EthernetActor>>,
+    inner: Box<dyn actor_framework::ActorClient<EthernetActor>>,
 }
 
 impl std::fmt::Debug for EthernetClient {
@@ -31,7 +31,7 @@ impl std::fmt::Debug for EthernetClient {
 }
 
 impl EthernetClient {
-    pub fn new(client: ResourceClient<EthernetActor>) -> Self {
+    pub(crate) fn new(client: ResourceClient<EthernetActor>) -> Self {
         Self { inner: Box::new(client) }
     }
 }

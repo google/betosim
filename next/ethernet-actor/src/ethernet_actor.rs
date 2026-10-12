@@ -33,8 +33,7 @@ pub enum EthernetResponse {
 }
 
 pub struct EthernetActor {
-    #[allow(dead_code)]
-    pub(crate) slirp_client: SlirpClient,
+    slirp_client: SlirpClient,
     pub(crate) active_chips: HashMap<ChipId, Chip>,
     pub(crate) device_client: device_actor::DeviceClient,
 }
