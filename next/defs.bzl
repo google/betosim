@@ -39,10 +39,12 @@ NETSIM_CLIPPY_FLAGS = [
     "-Dclippy::large_stack_arrays",
     "-Dclippy::large_types_passed_by_value",
     # FFI / Safety
+    "-Dclippy::borrow_as_ptr",
     "-Dclippy::cast_possible_wrap",
     "-Dclippy::cast_ptr_alignment",
     "-Dclippy::ptr_as_ptr",
     "-Dclippy::ptr_cast_constness",
+    "-Dclippy::ref_as_ptr",
     "-Dclippy::undocumented_unsafe_blocks",
     # Code Hygiene
     "-Dclippy::cloned_instead_of_copied",

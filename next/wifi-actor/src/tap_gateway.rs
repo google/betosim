@@ -102,7 +102,7 @@ impl TapInterface {
 
         // SAFETY: `fd` is a valid open file descriptor for /dev/net/tun.
         // `if_req` is a valid libc::ifreq struct on the stack.
-        unsafe { tunsetiff(fd.as_raw_fd(), &if_req) }
+        unsafe { tunsetiff(fd.as_raw_fd(), std::ptr::from_ref(&if_req)) }
             .map_err(|e| WifiError::Internal(Box::from(format!("Failed to TUNSETIFF: {}", e))))?;
 
         // Set non-blocking

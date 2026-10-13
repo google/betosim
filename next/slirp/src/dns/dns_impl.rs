@@ -442,7 +442,7 @@ fn discover_host_dns_servers_windows() -> Vec<IpAddr> {
             GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
             core::ptr::null_mut(),
             buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
-            &mut buf_len,
+            core::ptr::from_mut(&mut buf_len),
         )
     };
 
@@ -456,7 +456,7 @@ fn discover_host_dns_servers_windows() -> Vec<IpAddr> {
                 GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
                 core::ptr::null_mut(),
                 buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
-                &mut buf_len,
+                core::ptr::from_mut(&mut buf_len),
             )
         };
     }

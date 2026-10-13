@@ -22,7 +22,7 @@
 //!
 //! Callbacks for libslirp send_packet are delivered on Channel.
 
-#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::borrow_as_ptr, clippy::cast_possible_wrap, clippy::ref_as_ptr)]
 
 mod libslirp;
 mod libslirp_config;
