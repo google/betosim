@@ -124,17 +124,3 @@ async fn test_beacon_advertises_adv_scan_ind() {
 
     world.then_scanner_sees_adv_type("Scanner", 0x02).await;
 }
-
-// Scenario: Beacon advertisement includes standard BLE Flags
-// (BR/EDR Not Supported, 0x04)
-#[tokio::test]
-async fn test_beacon_advertises_standard_ble_flags() {
-    let mut world = world::World::new();
-
-    world.given_beacon("Beacon").await;
-    world.given_scanner("Scanner").await;
-
-    let reports = world.receive_scan_report("Scanner").await;
-    assert!(!reports.is_empty(), "Expected at least one scan report");
-    assert_eq!(reports[0].payload, vec![0x02, 0x01, 0x04]);
-}

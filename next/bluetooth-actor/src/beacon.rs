@@ -112,9 +112,12 @@ pub(crate) fn create(
     )?;
 
     let adv_data = if let Some(adv_data) = &params.ble_beacon.adv_data {
-        construct_data(adv_data, adv_data.include_device_name.then_some(device_name), true)
+        construct_data(
+            adv_data,
+            &if adv_data.include_device_name { Some(device_name.to_string()) } else { None },
+        )
     } else {
-        construct_data(&netsim_model::AdvertiseData::default(), None, true)
+        construct_data(&netsim_model::AdvertiseData::default(), &None)
     };
 
     let mut adv_data_payload = [0u8; 31];
@@ -136,7 +139,10 @@ pub(crate) fn create(
 
     // LE Set Scan Response Data
     let scan_resp_data = if let Some(scan_resp) = &params.ble_beacon.scan_response {
-        construct_data(scan_resp, scan_resp.include_device_name.then_some(device_name), false)
+        construct_data(
+            scan_resp,
+            &if scan_resp.include_device_name { Some(device_name.to_string()) } else { None },
+        )
     } else {
         vec![]
     };
