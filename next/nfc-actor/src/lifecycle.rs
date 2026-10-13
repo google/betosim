@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::Ordering;
-
 use actor_framework::{ActorLifecycle, DynContext};
 use bytes::Bytes;
 use casimir::packets::nci::{
@@ -24,7 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info};
 
 use crate::{
-    nfc_actor::{NFC_MODE_IDLE, NFC_MODE_LISTEN, NFC_MODE_POLL, NfcActor},
+    nfc_actor::{NfcActor, NfcMode},
     stats::NfcApi,
 };
 
@@ -54,11 +52,11 @@ impl ActorLifecycle for NfcActor {
                     message
                 );
             } else if let Some(state) = self.active_chips.get(&id) {
-                match state.mode.load(Ordering::Relaxed) {
-                    NFC_MODE_POLL => {
+                match state.mode() {
+                    NfcMode::Poll => {
                         self.nfc_stats.incr(NfcApi::TagTransceive);
                     }
-                    NFC_MODE_LISTEN => {
+                    NfcMode::Listen => {
                         self.nfc_stats.incr(NfcApi::CardEmulationSendResponseApdu);
                     }
                     _ => {}
@@ -77,13 +75,13 @@ impl ActorLifecycle for NfcActor {
                         Ok(RfPacketChild::RfDiscoverCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::AdapterEnableReaderMode);
                             if let Some(state) = self.active_chips.get(&id) {
-                                state.mode.store(NFC_MODE_POLL, Ordering::Relaxed);
+                                state.set_mode(NfcMode::Poll);
                             }
                         }
                         Ok(RfPacketChild::RfDiscoverSelectCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::TagConnect);
                             if let Some(state) = self.active_chips.get(&id) {
-                                state.mode.store(NFC_MODE_POLL, Ordering::Relaxed);
+                                state.set_mode(NfcMode::Poll);
                             }
                         }
                         Ok(RfPacketChild::RfDeactivateCommand(cmd)) => {
@@ -91,7 +89,7 @@ impl ActorLifecycle for NfcActor {
                                 DeactivationType::IdleMode => {
                                     self.nfc_stats.incr(NfcApi::AdapterDisableReaderMode);
                                     if let Some(state) = self.active_chips.get(&id) {
-                                        state.mode.store(NFC_MODE_IDLE, Ordering::Relaxed);
+                                        state.set_mode(NfcMode::Idle);
                                     }
                                 }
                                 DeactivationType::SleepMode
@@ -100,9 +98,9 @@ impl ActorLifecycle for NfcActor {
                                     self.nfc_stats.incr(NfcApi::TagClose);
                                     if let Some(state) = self.active_chips.get(&id) {
                                         if cmd.deactivation_type == DeactivationType::Discovery {
-                                            state.mode.store(NFC_MODE_POLL, Ordering::Relaxed);
+                                            state.set_mode(NfcMode::Poll);
                                         } else {
-                                            state.mode.store(NFC_MODE_IDLE, Ordering::Relaxed);
+                                            state.set_mode(NfcMode::Idle);
                                         }
                                     }
                                 }
@@ -111,7 +109,7 @@ impl ActorLifecycle for NfcActor {
                         Ok(RfPacketChild::RfSetListenModeRoutingCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::AdapterSetListenModeRouting);
                             if let Some(state) = self.active_chips.get(&id) {
-                                state.mode.store(NFC_MODE_LISTEN, Ordering::Relaxed);
+                                state.set_mode(NfcMode::Listen);
                             }
                         }
                         _ => {}
@@ -147,7 +145,7 @@ impl ActorLifecycle for NfcActor {
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU64},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     };
 
     use actor_framework::Context;
@@ -160,7 +158,10 @@ mod tests {
     use netsim_model::{ChipId, DeviceId};
 
     use super::*;
-    use crate::{nfc_actor::ChipState, stats::NfcStats};
+    use crate::{
+        nfc_actor::{ChipState, NFC_MODE_IDLE, NFC_MODE_LISTEN, NFC_MODE_POLL},
+        stats::NfcStats,
+    };
 
     pub(crate) struct DummyContext;
     impl Context<NfcActor> for DummyContext {

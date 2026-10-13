@@ -57,6 +57,10 @@ impl Decoder for NciCodec {
     }
 }
 
+/// Maximum physical proximity threshold (in meters) for peer-to-peer NFC interactions.
+const PROXIMITY_THRESHOLD_METERS: f32 = 0.04;
+
+/// NCI Message Types (MT) encoded in bits 7-5 of Octet 0.
 const NCI_MT_DATA: u8 = 0;
 const NCI_MT_CMD: u8 = 1;
 const NCI_MT_RSP: u8 = 2;
@@ -98,7 +102,7 @@ async fn is_within_nfc_proximity(
 
     match (src_res, dst_res) {
         (Ok(Some(src_ent)), Ok(Some(dst_ent))) => {
-            src_ent.pose.position.distance(&dst_ent.pose.position) <= 0.04
+            src_ent.pose.position.distance(&dst_ent.pose.position) <= PROXIMITY_THRESHOLD_METERS
         }
         _ => true, // Fallback: allow missing positions to bypass spatial filtering
     }
@@ -123,7 +127,7 @@ impl ActorService for NfcActor {
         let chip_id = id.ok_or_else(|| ChipError::InvalidArguments("missing chip id".into()))?;
         let device_id = params.chip.device_id;
 
-        if self.active_chips.contains_key(&chip_id) {
+        if self.is_chip_active(&chip_id) {
             return Err(NfcError::Chip(ChipError::ChipExists(chip_id.0)));
         }
 
@@ -200,7 +204,7 @@ impl ActorService for NfcActor {
                                 NCI_MT_DATA => {
                                     nfc_stats_clone.incr_nci_data_tx();
                                     if mode_clone.load(Ordering::Relaxed)
-                                        == crate::nfc_actor::NFC_MODE_LISTEN
+                                        == crate::nfc_actor::NfcMode::Listen.as_u8()
                                     {
                                         nfc_stats_clone
                                             .incr(NfcApi::CardEmulationProcessCommandApdu);
@@ -313,7 +317,7 @@ impl ActorService for NfcActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
-        Ok(self.active_chips.get(&id).map(Into::into))
+        Ok(self.get_chip(&id).map(Into::into))
     }
 
     async fn handle_update(
@@ -322,25 +326,35 @@ impl ActorService for NfcActor {
         update: Self::Update,
         ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
-        let state = self
-            .active_chips
-            .get_mut(&id)
-            .ok_or_else(|| NfcError::Chip(ChipError::ChipNotFound(id)))?;
+        let (should_disable_adapter_base, should_disable_adapter_variant) = {
+            let state = self
+                .active_chips
+                .get_mut(&id)
+                .ok_or_else(|| NfcError::Chip(ChipError::ChipNotFound(id)))?;
 
-        if let Some(enabled) = update.enabled {
-            let prev = state.enabled.swap(enabled, Ordering::AcqRel);
-            if prev && !enabled {
-                self.nfc_stats.incr(NfcApi::AdapterDisable);
-            }
-        }
-        if let Some(netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
-            radio: netsim_model::RadioUpdate { state: Some(enabled), .. },
-        })) = &update.variant
-        {
-            let prev = state.enabled.swap(*enabled, Ordering::AcqRel);
-            if prev && !*enabled {
-                self.nfc_stats.incr(NfcApi::AdapterDisable);
-            }
+            let disable_base = if let Some(enabled) = update.enabled {
+                let prev = state.enabled.swap(enabled, Ordering::AcqRel);
+                prev && !enabled
+            } else {
+                false
+            };
+
+            let disable_variant =
+                if let Some(netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
+                    radio: netsim_model::RadioUpdate { state: Some(enabled), .. },
+                })) = &update.variant
+                {
+                    let prev = state.enabled.swap(*enabled, Ordering::AcqRel);
+                    prev && !*enabled
+                } else {
+                    false
+                };
+
+            (disable_base, disable_variant)
+        };
+
+        if should_disable_adapter_base || should_disable_adapter_variant {
+            self.nfc_stats.incr(NfcApi::AdapterDisable);
         }
 
         self.handle_get(id, ctx).await?.ok_or_else(|| NfcError::Chip(ChipError::ChipNotFound(id)))
