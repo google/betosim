@@ -467,3 +467,178 @@ async fn handle_set_device_configuration(
 
     Ok(format!("set_device_configuration {device_id} {preset}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phy_target_from_str() {
+        assert!(matches!(PhyTarget::from("0"), PhyTarget::LowEnergy));
+        assert!(matches!(PhyTarget::from("1"), PhyTarget::Classic));
+        assert!(matches!(PhyTarget::from("2"), PhyTarget::All));
+        assert!(matches!(PhyTarget::from("invalid"), PhyTarget::All));
+        assert!(matches!(PhyTarget::from(""), PhyTarget::All));
+    }
+
+    #[test]
+    fn test_parse_command_close_test_channel() {
+        assert!(matches!(parse_command("CLOSE_TEST_CHANNEL", &[]), Ok(Command::CloseTestChannel)));
+        let err = parse_command("CLOSE_TEST_CHANNEL", &["extra".to_string()]);
+        assert_eq!(
+            err.err().as_deref(),
+            Some("TestCommandHandler 'CLOSE_TEST_CHANNEL' takes no arguments")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_list() {
+        assert!(matches!(parse_command("list", &[]), Ok(Command::List)));
+        let err = parse_command("list", &["arg".to_string()]);
+        assert_eq!(err.err().as_deref(), Some("TestCommandHandler 'list' takes no arguments"));
+    }
+
+    #[test]
+    fn test_parse_command_reset() {
+        assert!(matches!(parse_command("reset", &[]), Ok(Command::Reset)));
+        let err = parse_command("reset", &["arg1".to_string(), "arg2".to_string()]);
+        assert_eq!(err.err().as_deref(), Some("TestCommandHandler 'reset' takes no arguments"));
+    }
+
+    #[test]
+    fn test_parse_command_phy_state_update_valid() {
+        let cmd = parse_command("add_device_to_phy", &["42".to_string(), "0".to_string()]).unwrap();
+        match cmd {
+            Command::PhyStateUpdate { device_id, target, raw_phy_str, enabled, command_name } => {
+                assert_eq!(device_id, 42);
+                assert!(matches!(target, PhyTarget::LowEnergy));
+                assert_eq!(raw_phy_str, "0");
+                assert!(enabled);
+                assert_eq!(command_name, "add_device_to_phy");
+            }
+            _ => panic!("Expected PhyStateUpdate"),
+        }
+
+        let cmd =
+            parse_command("del_device_from_phy", &["7".to_string(), "1".to_string()]).unwrap();
+        match cmd {
+            Command::PhyStateUpdate { device_id, target, raw_phy_str, enabled, command_name } => {
+                assert_eq!(device_id, 7);
+                assert!(matches!(target, PhyTarget::Classic));
+                assert_eq!(raw_phy_str, "1");
+                assert!(!enabled);
+                assert_eq!(command_name, "del_device_from_phy");
+            }
+            _ => panic!("Expected PhyStateUpdate"),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_phy_state_update_errors() {
+        let err_invalid_id =
+            parse_command("add_device_to_phy", &["not_a_number".to_string(), "0".to_string()]);
+        assert_eq!(err_invalid_id.err().as_deref(), Some("Invalid device_id"));
+
+        let err_bad_arity = parse_command("del_device_from_phy", &["42".to_string()]);
+        assert_eq!(
+            err_bad_arity.err().as_deref(),
+            Some("TestCommandHandler 'del_device_from_phy' takes two arguments")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_del() {
+        let cmd = parse_command("del", &["123".to_string()]).unwrap();
+        match cmd {
+            Command::DelDevice { device_id } => assert_eq!(device_id, 123),
+            _ => panic!("Expected DelDevice"),
+        }
+
+        let err_invalid_id = parse_command("del", &["bad".to_string()]);
+        assert_eq!(err_invalid_id.err().as_deref(), Some("Invalid device_id"));
+
+        let err_no_args = parse_command("del", &[]);
+        assert_eq!(
+            err_no_args.err().as_deref(),
+            Some("TestCommandHandler 'del' takes an argument")
+        );
+
+        let err_too_many = parse_command("del", &["1".to_string(), "2".to_string()]);
+        assert_eq!(
+            err_too_many.err().as_deref(),
+            Some("TestCommandHandler 'del' takes an argument")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_add() {
+        let cmd = parse_command("add", &["beacon".to_string()]).unwrap();
+        match cmd {
+            Command::AddDevice { device_type, address } => {
+                assert_eq!(device_type, "beacon");
+                assert!(address.is_empty());
+            }
+            _ => panic!("Expected AddDevice"),
+        }
+
+        let cmd =
+            parse_command("add", &["beacon".to_string(), "00:11:22:33:44:55".to_string()]).unwrap();
+        match cmd {
+            Command::AddDevice { device_type, address } => {
+                assert_eq!(device_type, "beacon");
+                assert_eq!(address, "00:11:22:33:44:55");
+            }
+            _ => panic!("Expected AddDevice"),
+        }
+
+        let err_no_args = parse_command("add", &[]);
+        assert_eq!(
+            err_no_args.err().as_deref(),
+            Some("TestCommandHandler 'add' takes an argument")
+        );
+
+        let err_too_many =
+            parse_command("add", &["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            err_too_many.err().as_deref(),
+            Some("TestCommandHandler 'add' takes an argument")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_set_device_configuration() {
+        let cmd = parse_command(
+            "set_device_configuration",
+            &["10".to_string(), "strict_mode".to_string()],
+        )
+        .unwrap();
+        match cmd {
+            Command::SetDeviceConfiguration { device_id, preset } => {
+                assert_eq!(device_id, 10);
+                assert_eq!(preset, "strict_mode");
+            }
+            _ => panic!("Expected SetDeviceConfiguration"),
+        }
+
+        let err_bad_id = parse_command(
+            "set_device_configuration",
+            &["xyz".to_string(), "strict_mode".to_string()],
+        );
+        assert_eq!(err_bad_id.err().as_deref(), Some("Invalid device_id"));
+
+        let err_bad_arity = parse_command("set_device_configuration", &["10".to_string()]);
+        assert_eq!(
+            err_bad_arity.err().as_deref(),
+            Some("TestCommandHandler 'set_device_configuration' takes two arguments")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_unknown() {
+        let cmd = parse_command("custom_unknown_op", &["foo".to_string()]).unwrap();
+        match cmd {
+            Command::Unknown { name } => assert_eq!(name, "custom_unknown_op"),
+            _ => panic!("Expected Unknown"),
+        }
+    }
+}
