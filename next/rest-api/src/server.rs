@@ -14,10 +14,10 @@
 
 //! HTTP REST request dispatcher and endpoint handlers for netsim.
 
-use std::{convert::Infallible, io::ErrorKind, sync::Arc};
+use std::{convert::Infallible, fmt::Display, io::ErrorKind, str::FromStr, sync::Arc};
 
-use ap_actor::ApClient;
-use device_actor::DeviceClient;
+use ap_actor::{ApClient, ApError};
+use device_actor::{DeviceClient, DeviceError};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::{
     Method, Request, Response, StatusCode,
@@ -27,7 +27,9 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use link_api::LinkClient;
+use link_api::{LinkClient, LinkError};
+use netsim_model::{ChipError, ClientError};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{net::TcpListener, task::JoinSet};
 use tracing::{debug, info, warn};
 
@@ -118,34 +120,258 @@ impl std::fmt::Debug for RestServer {
 }
 
 fn build_response<B: Into<Bytes>>(status: StatusCode, body: B) -> Response<Full<Bytes>> {
-    let mut resp = Response::new(Full::new(body.into()));
+    let body = body.into();
+    let has_body = !body.is_empty();
+    let mut resp = Response::new(Full::new(body));
     *resp.status_mut() = status;
-    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    resp.headers_mut().insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    let headers = resp.headers_mut();
+    if has_body {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     resp
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+/// Builds an HTTP JSON [`ErrorResponse`](crate::ErrorResponse) with the given
+/// `status` and `message`.
+pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     let body = serde_json::to_string(&crate::ErrorResponse { error: message.to_string() })
         .unwrap_or_else(|_| r#"{"error":"Internal Server Error"}"#.to_string());
     build_response(status, body)
 }
 
-/// Helper that serializes to JSON with 200 OK or returns 500 automatically.
-fn json_response<T: serde::Serialize>(val: &T) -> Response<Full<Bytes>> {
+fn json_status_response<T: Serialize>(status: StatusCode, val: &T) -> Response<Full<Bytes>> {
     match serde_json::to_string(val) {
-        Ok(json) => build_response(StatusCode::OK, json),
+        Ok(json) => build_response(status, json),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-/// Local wrapper around [`Response`] so domain types and `Result<T, E>` can
-/// convert into an HTTP JSON response via standard [`From`]/[`Into`].
-struct JsonResponse(Response<Full<Bytes>>);
+/// Serializes `val` to JSON with `200 OK` or returns `500 Internal Server Error`
+/// automatically.
+pub fn json_response<T: Serialize>(val: &T) -> Response<Full<Bytes>> {
+    json_status_response(StatusCode::OK, val)
+}
+
+/// Serializes `val` to JSON with `201 Created` or returns
+/// `500 Internal Server Error` automatically.
+pub fn created_response<T: Serialize>(val: &T) -> Response<Full<Bytes>> {
+    json_status_response(StatusCode::CREATED, val)
+}
+
+/// Builds an empty `204 No Content` response.
+pub fn no_content_response() -> Response<Full<Bytes>> {
+    build_response(StatusCode::NO_CONTENT, Bytes::new())
+}
+
+/// Lightweight HTTP error carrying a [`StatusCode`] and error message before
+/// serialization into a [`JsonResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpError {
+    status: StatusCode,
+    message: String,
+}
+
+impl HttpError {
+    /// Creates an [`HttpError`] with the given `status` and `message`.
+    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self { status, message: message.into() }
+    }
+
+    /// Creates a `400 Bad Request` [`HttpError`] with the given `message`.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message)
+    }
+
+    /// Returns the HTTP [`StatusCode`] for this error.
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Returns the human-readable error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+/// Parses a JSON request `body` into `T`, returning a `400 Bad Request`
+/// [`HttpError`] on malformed JSON or a body that does not match `T`.
+pub fn parse_json_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, HttpError> {
+    serde_json::from_slice(body)
+        .map_err(|e| HttpError::bad_request(format!("Invalid JSON body: {e}")))
+}
+
+/// Extracts the raw value of path parameter `name` from `params` (as returned by
+/// [`crate::openapi::find_route`]), or returns `400 Bad Request` if missing.
+pub fn path_param<'p>(params: &[(&str, &'p str)], name: &str) -> Result<&'p str, HttpError> {
+    params
+        .iter()
+        .find_map(|&(k, v)| (k == name).then_some(v))
+        .ok_or_else(|| HttpError::bad_request(format!("Missing path parameter: {name}")))
+}
+
+/// Extracts path parameter `name` from `params` and parses it into `T`,
+/// returning `400 Bad Request` if missing or invalid.
+pub fn parse_path_param<T>(params: &[(&str, &str)], name: &str) -> Result<T, HttpError>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    let raw = path_param(params, name)?;
+    raw.parse::<T>()
+        .map_err(|e| HttpError::bad_request(format!("Invalid path parameter {name}: {e}")))
+}
+
+/// Extracts and parses the `{id}` path parameter as a `u32` (converting into
+/// `u32`, `DeviceId`, `LinkId`, or `ChipId`), returning `400 Bad Request` if
+/// missing or not a valid `u32`.
+pub fn path_id<T: From<u32>>(params: &[(&str, &str)]) -> Result<T, HttpError> {
+    parse_path_param::<u32>(params, "id").map(T::from)
+}
+
+fn chip_error_status(err: &ChipError) -> StatusCode {
+    match err {
+        ChipError::ChipNotFound(_) => StatusCode::NOT_FOUND,
+        ChipError::ChipExists(_) => StatusCode::CONFLICT,
+        ChipError::InvalidArguments(_)
+        | ChipError::InvalidAddress(_)
+        | ChipError::UnexpectedChipKind { .. }
+        | ChipError::WrongVariantError
+        | ChipError::Unsupported => StatusCode::BAD_REQUEST,
+        ChipError::Io(io_err) => io_error_status(io_err),
+        ChipError::Backend(inner) | ChipError::Internal(inner) => dyn_error_status(&**inner),
+    }
+}
+
+fn io_error_status(err: &std::io::Error) -> StatusCode {
+    match err.kind() {
+        ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => StatusCode::BAD_REQUEST,
+        ErrorKind::AlreadyExists => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn device_error_status(err: &DeviceError) -> StatusCode {
+    match err {
+        DeviceError::NotFound(_) | DeviceError::DeviceNotFound(_) => StatusCode::NOT_FOUND,
+        DeviceError::ChipKindNotSupported(_) => StatusCode::BAD_REQUEST,
+        DeviceError::ActorCommunicationError(inner) => client_error_status(inner),
+        DeviceError::ResetErrors { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn link_error_status(err: &LinkError) -> StatusCode {
+    match err {
+        LinkError::NotFound(_) => StatusCode::NOT_FOUND,
+        LinkError::InvalidParam(_) => StatusCode::BAD_REQUEST,
+        LinkError::AlreadyExists => StatusCode::CONFLICT,
+        LinkError::Internal(inner) | LinkError::ActorCommunicationError(inner) => {
+            dyn_error_status(&**inner)
+        }
+    }
+}
+
+fn ap_error_status(err: &ApError) -> StatusCode {
+    match err {
+        ApError::ApNotFound(_) => StatusCode::NOT_FOUND,
+        ApError::ApAlreadyExists(_) => StatusCode::CONFLICT,
+        ApError::InvalidFrame => StatusCode::BAD_REQUEST,
+        ApError::Chip(chip_err) => chip_error_status(chip_err),
+        ApError::Internal(inner) => dyn_error_status(&**inner),
+    }
+}
+
+fn dyn_error_status(err: &(dyn std::error::Error + 'static)) -> StatusCode {
+    let mut curr = Some(err);
+    while let Some(err) = curr {
+        if let Some(client_err) = err.downcast_ref::<ClientError>() {
+            return client_error_status(client_err);
+        }
+        if let Some(chip_err) = err.downcast_ref::<ChipError>() {
+            return chip_error_status(chip_err);
+        }
+        if let Some(dev_err) = err.downcast_ref::<DeviceError>() {
+            return device_error_status(dev_err);
+        }
+        if let Some(link_err) = err.downcast_ref::<LinkError>() {
+            return link_error_status(link_err);
+        }
+        if let Some(ap_err) = err.downcast_ref::<ApError>() {
+            return ap_error_status(ap_err);
+        }
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            return io_error_status(io_err);
+        }
+        curr = err.source();
+    }
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+/// Maps an actor [`ClientError`] to the corresponding HTTP [`StatusCode`]:
+/// - Not found -> `404 Not Found`
+/// - Invalid input -> `400 Bad Request`
+/// - Already exists / conflict -> `409 Conflict`
+/// - Channel or internal errors -> `500 Internal Server Error`
+pub fn client_error_status(err: &ClientError) -> StatusCode {
+    match err {
+        ClientError::Chip(chip_err) => chip_error_status(chip_err),
+        ClientError::Framework(framework) => dyn_error_status(&**framework),
+        ClientError::Send(_) | ClientError::Recv(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Wrapper for `POST` create handlers that serializes its inner value as a
+/// `201 Created` JSON response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Created<T>(pub T);
+
+/// Marker for `DELETE` handlers that produces an empty `204 No Content`
+/// response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoContent;
+
+/// Wrapper around [`Response`] so domain types, [`Created`], [`NoContent`],
+/// [`HttpError`], [`ClientError`], and `Result<T, E>` can convert into an HTTP
+/// response via standard [`From`]/[`Into`].
+#[derive(Debug)]
+pub struct JsonResponse(pub Response<Full<Bytes>>);
+
+impl From<JsonResponse> for Response<Full<Bytes>> {
+    fn from(resp: JsonResponse) -> Self {
+        resp.0
+    }
+}
 
 impl From<Response<Full<Bytes>>> for JsonResponse {
     fn from(resp: Response<Full<Bytes>>) -> Self {
         Self(resp)
+    }
+}
+
+impl<T: Serialize> From<Created<T>> for JsonResponse {
+    fn from(Created(val): Created<T>) -> Self {
+        Self(created_response(&val))
+    }
+}
+
+impl From<NoContent> for JsonResponse {
+    fn from(_: NoContent) -> Self {
+        Self(no_content_response())
+    }
+}
+
+impl From<()> for JsonResponse {
+    fn from((): ()) -> Self {
+        Self(no_content_response())
     }
 }
 
@@ -155,9 +381,21 @@ impl From<crate::VersionResponse> for JsonResponse {
     }
 }
 
+impl From<crate::Device> for JsonResponse {
+    fn from(device: crate::Device) -> Self {
+        Self(json_response(&device))
+    }
+}
+
 impl From<Vec<crate::Device>> for JsonResponse {
     fn from(devices: Vec<crate::Device>) -> Self {
         Self(json_response(&crate::ListDeviceResponse::from(devices)))
+    }
+}
+
+impl From<crate::Link> for JsonResponse {
+    fn from(link: crate::Link) -> Self {
+        Self(json_response(&link))
     }
 }
 
@@ -167,17 +405,41 @@ impl From<Vec<crate::Link>> for JsonResponse {
     }
 }
 
+impl From<crate::Ap> for JsonResponse {
+    fn from(ap: crate::Ap) -> Self {
+        Self(json_response(&ap))
+    }
+}
+
 impl From<Vec<(u32, ap_actor::ApState)>> for JsonResponse {
     fn from(aps: Vec<(u32, ap_actor::ApState)>) -> Self {
         Self(json_response(&crate::ListApResponse::from(aps)))
     }
 }
 
-impl<T: Into<JsonResponse>, E: std::fmt::Display> From<Result<T, E>> for JsonResponse {
+impl From<HttpError> for JsonResponse {
+    fn from(err: HttpError) -> Self {
+        Self(error_response(err.status, &err.message))
+    }
+}
+
+impl From<ClientError> for HttpError {
+    fn from(err: ClientError) -> Self {
+        Self { status: client_error_status(&err), message: err.to_string() }
+    }
+}
+
+impl From<ClientError> for JsonResponse {
+    fn from(err: ClientError) -> Self {
+        HttpError::from(err).into()
+    }
+}
+
+impl<T: Into<JsonResponse>, E: Into<JsonResponse>> From<Result<T, E>> for JsonResponse {
     fn from(res: Result<T, E>) -> Self {
         match res {
             Ok(val) => val.into(),
-            Err(e) => Self(error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
+            Err(err) => err.into(),
         }
     }
 }
