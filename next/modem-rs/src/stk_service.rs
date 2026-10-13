@@ -196,6 +196,22 @@ impl StkService {
         last_item
     }
 
+    /// Advances `remaining` over a single BER-TLV element, returning `Some((tag, value))`
+    /// if a valid tag-length-value element is present and complete, or `None` otherwise.
+    fn next_tlv<'a>(remaining: &mut &'a [u8]) -> Option<(u8, &'a [u8])> {
+        let &[tag, len_u8, ref rest @ ..] = *remaining else {
+            return None;
+        };
+        let len = len_u8 as usize;
+        if rest.len() < len {
+            *remaining = &[];
+            return None;
+        }
+        let (value, next) = rest.split_at(len);
+        *remaining = next;
+        Some((tag, value))
+    }
+
     fn parse_menu_selection(command: &str) -> Option<u8> {
         let bytes = hex::decode(command).ok()?;
 
@@ -208,15 +224,8 @@ impl StkService {
         let mut remaining = payload;
         let mut item_id = None;
 
-        // Pattern match on the slice: [tag, len, rest_of_slice]
-        while let [tag, len_u8, rest @ ..] = remaining {
-            let len = *len_u8 as usize;
-            if rest.len() < len {
-                break;
-            }
-            let (value, next) = rest.split_at(len);
-
-            match *tag {
+        while let Some((tag, value)) = Self::next_tlv(&mut remaining) {
+            match tag {
                 TAG_ITEM_IDENTIFIER_1 | TAG_ITEM_IDENTIFIER_2 => {
                     if let [id] = value {
                         item_id = Some(*id);
@@ -224,7 +233,6 @@ impl StkService {
                 }
                 _ => {}
             }
-            remaining = next;
         }
 
         item_id
@@ -238,15 +246,8 @@ impl StkService {
         let mut general_result = None;
         let mut additional_info = None;
 
-        // Pattern match on slice: [tag, len, rest_of_slice]
-        while let [tag, len_u8, rest @ ..] = remaining {
-            let len = *len_u8 as usize;
-            if rest.len() < len {
-                break;
-            }
-            let (value, next) = rest.split_at(len);
-
-            match *tag {
+        while let Some((tag, value)) = Self::next_tlv(&mut remaining) {
+            match tag {
                 TAG_COMMAND_DETAILS | TAG_COMMAND_DETAILS_ALT => {
                     if let [_, cmd_type, ..] = value {
                         command_type = ProactiveCommandType::try_from(*cmd_type).ok();
@@ -264,7 +265,6 @@ impl StkService {
                 },
                 _ => {}
             }
-            remaining = next;
         }
 
         match (general_result?, command_type) {
@@ -711,5 +711,32 @@ mod tests {
         let sim_present = MockCardState::default();
         let res = service.execute(&StkCommand::QueryStkReady, &sim_present);
         assert!(matches!(res, ExecutionResult::Success(_)));
+    }
+
+    #[test]
+    fn test_stk_service_next_tlv() {
+        // Empty slice returns None
+        let mut empty = &[][..];
+        assert_eq!(StkService::next_tlv(&mut empty), None);
+
+        // Valid single TLV
+        let bytes = [0x10, 0x01, 0x50];
+        let mut slice = &bytes[..];
+        assert_eq!(StkService::next_tlv(&mut slice), Some((0x10, &[0x50][..])));
+        assert!(slice.is_empty());
+
+        // Multiple TLVs in sequence
+        let multi = [0x82, 0x02, 0x82, 0x81, 0x10, 0x01, 0x50];
+        let mut multi_slice = &multi[..];
+        assert_eq!(StkService::next_tlv(&mut multi_slice), Some((0x82, &[0x82, 0x81][..])));
+        assert_eq!(StkService::next_tlv(&mut multi_slice), Some((0x10, &[0x50][..])));
+        assert_eq!(StkService::next_tlv(&mut multi_slice), None);
+        assert!(multi_slice.is_empty());
+
+        // Truncated TLV (length declares 3 bytes, only 1 byte present)
+        let truncated = [0x82, 0x03, 0x82];
+        let mut trunc_slice = &truncated[..];
+        assert_eq!(StkService::next_tlv(&mut trunc_slice), None);
+        assert!(trunc_slice.is_empty());
     }
 }
