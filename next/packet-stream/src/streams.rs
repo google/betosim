@@ -194,7 +194,7 @@ impl Streams {
         self.listener_tasks.contains_key(name.as_ref())
     }
 
-    pub async fn stop_listener(&mut self, name: impl AsRef<str>) -> Result<()> {
+    pub fn stop_listener(&mut self, name: impl AsRef<str>) -> Result<()> {
         let name = name.as_ref();
         if let Some(task) = self.listener_tasks.remove(name) {
             task.abort();

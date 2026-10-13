@@ -272,7 +272,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn setup_grpc_listener(
+fn setup_grpc_listener(
     streams: &mut Streams,
     listener_addresses: &mut HashMap<String, StreamAddress>,
     requested_port: u16,
@@ -668,8 +668,7 @@ impl NetsimDaemon {
             capture_client.clone(),
             get_version(),
             frontend_stats.clone(),
-        )
-        .await?;
+        )?;
 
         // HTTP server for the /v1 API
         let resolved_http_port =

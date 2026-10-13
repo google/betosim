@@ -35,6 +35,7 @@ NETSIM_CLIPPY_FLAGS = [
     "-Dclippy::mutex_atomic",
     "-Dclippy::rc_mutex",
     "-Dclippy::significant_drop_in_scrutinee",
+    "-Dclippy::unused_async",
     # Performance
     "-Dclippy::large_stack_arrays",
     "-Dclippy::large_types_passed_by_value",
@@ -310,6 +311,7 @@ def _netsim_clippy_test_impl(ctx):
             t_args.add("-Aclippy::cast_possible_wrap")
             t_args.add("-Aclippy::print_stdout")
             t_args.add("-Aclippy::print_stderr")
+            t_args.add("-Aclippy::unused_async")
         else:
             t_args.add("--crate-type=rlib")
         t_args.add("--crate-name=%s" % info.name)

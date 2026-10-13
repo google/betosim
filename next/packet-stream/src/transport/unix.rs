@@ -27,7 +27,7 @@ pub struct UnixSocketListener {
 }
 
 impl UnixSocketListener {
-    pub async fn bind<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn bind<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_owned();
 
         // Remove existing socket file if it exists

@@ -32,7 +32,7 @@ impl ActorLifecycle for CellActor {
         if message.is_empty() {
             return;
         }
-        self.handle_packet_stream(id, message, ctx).await;
+        self.handle_packet_stream(id, message, ctx);
     }
 
     async fn on_stream_closed(&mut self, id: Self::Id, ctx: &mut DynContext<Self>) {
@@ -55,7 +55,7 @@ impl ActorLifecycle for CellActor {
 }
 
 impl CellActor {
-    async fn handle_packet_stream(
+    fn handle_packet_stream(
         &mut self,
         id: netsim_model::ChipId,
         message: Bytes,

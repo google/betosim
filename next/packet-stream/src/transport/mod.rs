@@ -112,7 +112,7 @@ impl CrossPlatformListener {
             {
                 let volume_socket = PathBuf::from("/shared/sockets/packetstream.sock");
                 if volume_socket.parent().is_some_and(|p| p.exists())
-                    && let Ok(listener) = unix::UnixSocketListener::bind(&volume_socket).await
+                    && let Ok(listener) = unix::UnixSocketListener::bind(&volume_socket)
                 {
                     return Ok(CrossPlatformListener::Unix(listener));
                 }
@@ -123,7 +123,7 @@ impl CrossPlatformListener {
             #[cfg(unix)]
             {
                 let host_socket = PathBuf::from("/tmp/packetstream-host.sock");
-                if let Ok(listener) = unix::UnixSocketListener::bind(&host_socket).await {
+                if let Ok(listener) = unix::UnixSocketListener::bind(&host_socket) {
                     return Ok(CrossPlatformListener::Unix(listener));
                 }
             }
@@ -133,12 +133,13 @@ impl CrossPlatformListener {
         Ok(CrossPlatformListener::Tcp(tokio::net::TcpListener::bind(addr).await?))
     }
 
+    #[cfg_attr(unix, allow(clippy::unused_async))]
     async fn bind_auto() -> Result<Self> {
         #[cfg(unix)]
         {
             let socket_path =
                 std::env::temp_dir().join(format!("packetstream_{}.sock", std::process::id()));
-            let listener = unix::UnixSocketListener::bind(&socket_path).await?;
+            let listener = unix::UnixSocketListener::bind(&socket_path)?;
             Ok(CrossPlatformListener::Unix(listener))
         }
 
@@ -147,7 +148,7 @@ impl CrossPlatformListener {
             let pipe_name = "packetstream";
             let fallback_addr: std::net::SocketAddr =
                 "localhost:0".parse().map_err(SocketError::from)?;
-            match windows::WindowsListener::bind_named_pipe(pipe_name).await {
+            match windows::WindowsListener::bind_named_pipe(pipe_name) {
                 Ok(listener) => Ok(CrossPlatformListener::Windows(listener)),
                 Err(err) => {
                     warn!("Failed to create named pipe, falling back to tcp: {err}");
@@ -169,7 +170,7 @@ impl CrossPlatformListener {
         match socket_type {
             #[cfg(unix)]
             SocketType::Unix(path) => {
-                let listener = unix::UnixSocketListener::bind(path).await?;
+                let listener = unix::UnixSocketListener::bind(path)?;
                 Ok(CrossPlatformListener::Unix(listener))
             }
             #[cfg(not(unix))]
@@ -180,7 +181,7 @@ impl CrossPlatformListener {
             }
             #[cfg(windows)]
             SocketType::NamedPipe(name) => {
-                let listener = windows::WindowsListener::bind_named_pipe(&name).await?;
+                let listener = windows::WindowsListener::bind_named_pipe(&name)?;
                 Ok(CrossPlatformListener::Windows(listener))
             }
             #[cfg(not(windows))]

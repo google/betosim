@@ -204,7 +204,7 @@ impl CaptureActor {
         Ok(writer)
     }
 
-    async fn list_entities(&self) -> Vec<CaptureInfo> {
+    fn list_entities(&self) -> Vec<CaptureInfo> {
         let mut infos = Vec::new();
         for e in self.entities.values() {
             let (records_written, bytes_written) =
@@ -369,6 +369,6 @@ impl ActorService for CaptureActor {
         &mut self,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Vec<Self::Entity>, Self::Error> {
-        Ok(self.list_entities().await)
+        Ok(self.list_entities())
     }
 }

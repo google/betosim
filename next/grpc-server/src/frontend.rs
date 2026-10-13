@@ -277,7 +277,7 @@ impl FrontendClient {
 
     #[deprecated(note = "Use handle_delete_device instead")]
     #[allow(deprecated)]
-    async fn handle_delete_chip(
+    fn handle_delete_chip(
         _client: DeviceClient,
         _req: netsim_proto::frontend::DeleteChipRequest,
     ) -> Result<(), RpcStatus> {
@@ -586,7 +586,7 @@ impl FrontendService for FrontendClient {
         self.frontend_stats.delete_chip.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.device_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_delete_chip(client, req).await.map(|_| Empty::new());
+            let res = Self::handle_delete_chip(client, req).map(|_| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -680,15 +680,15 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[test]
     #[allow(deprecated)]
-    async fn test_handle_delete_chip() {
+    fn test_handle_delete_chip() {
         let mock_client = MockActorClient::<DeviceActor>::new();
         let client = DeviceClient::new(Box::new(mock_client));
         let mut req = netsim_proto::frontend::DeleteChipRequest::new();
         req.id = 3;
 
-        let res = FrontendClient::handle_delete_chip(client, req).await;
+        let res = FrontendClient::handle_delete_chip(client, req);
         assert_eq!(res.unwrap_err().code(), RpcStatusCode::UNIMPLEMENTED);
     }
 

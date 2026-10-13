@@ -70,7 +70,7 @@ impl TransportType {
             }
             #[cfg(unix)]
             TransportType::Uds { path } => {
-                let listener = crate::transport::adapters::UdsTransportListener::bind(path).await?;
+                let listener = crate::transport::adapters::UdsTransportListener::bind(path)?;
                 Ok(super::Listener::Uds(listener))
             }
             TransportType::Fd { .. } => Err(PacketStreamError::InvalidConfig(

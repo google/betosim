@@ -87,7 +87,7 @@ pub struct UdsTransportListener {
 
 #[cfg(unix)]
 impl UdsTransportListener {
-    pub async fn bind(path: &str) -> Result<Self> {
+    pub fn bind(path: &str) -> Result<Self> {
         let path_buf = std::path::PathBuf::from(path);
         if path_buf.exists() {
             std::fs::remove_file(&path_buf)?;
