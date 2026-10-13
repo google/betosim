@@ -86,10 +86,12 @@ pub use link_actor::LinkActor;
 mod client;
 pub use client::LinkClient;
 
+const DEFAULT_ACTOR_CHANNEL_CAPACITY: usize = 32;
+
 /// Creates a new LinkActor and returns the runner and a client.
 ///
 /// The runner must be spawned on a runtime.
 pub fn new() -> (ResourceActor<LinkActor>, LinkClient) {
-    let (runner, client) = ResourceActor::new(32);
+    let (runner, client) = ResourceActor::new(DEFAULT_ACTOR_CHANNEL_CAPACITY);
     (runner, LinkClient::new(client))
 }

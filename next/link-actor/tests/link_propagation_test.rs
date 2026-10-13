@@ -207,3 +207,77 @@ async fn test_chip_removal_propagates_patch() {
     // Then
     // Verification happens on drop
 }
+
+// Scenario: Reset notifies downstream chip clients of cleared links
+//
+//   Given an active link exists
+//   When a reset action occurs
+//   Then downstream chip clients receive an update with an empty link list
+#[tokio::test]
+async fn test_reset_propagates_link_removal_to_chips() {
+    // Given
+    let mut shared_mock = MockChipClient::new();
+    let chip_sender = ChipId(1);
+    let chip_peer = ChipId(2);
+
+    configure_base_mock(&mut shared_mock);
+
+    // Expectation 1: Creation updates sender (Chip 1)
+    shared_mock
+        .expect_update()
+        .withf(move |id, patch| {
+            *id == ChipId(1)
+                && patch.links.is_some()
+                && patch.links.as_ref().unwrap().len() == 1
+                && patch.links.as_ref().unwrap().contains(&(ChipId(2), -50))
+        })
+        .times(1)
+        .returning(|_, _| Ok(netsim_model::Chip::default()));
+
+    // Expectation 2: Creation updates peer (Chip 2)
+    shared_mock
+        .expect_update()
+        .withf(move |id, patch| {
+            *id == ChipId(2)
+                && patch.links.is_some()
+                && patch.links.as_ref().unwrap().len() == 1
+                && patch.links.as_ref().unwrap().contains(&(ChipId(1), -55))
+        })
+        .times(1)
+        .returning(|_, _| Ok(netsim_model::Chip::default()));
+
+    // Expectation 3: Reset clears links on sender (Chip 1)
+    shared_mock
+        .expect_update()
+        .withf(move |id, patch| {
+            *id == ChipId(1) && patch.links.is_some() && patch.links.as_ref().unwrap().is_empty()
+        })
+        .times(1)
+        .returning(|_, _| Ok(netsim_model::Chip::default()));
+
+    // Expectation 4: Reset clears links on peer (Chip 2)
+    shared_mock
+        .expect_update()
+        .withf(move |id, patch| {
+            *id == ChipId(2) && patch.links.is_some() && patch.links.as_ref().unwrap().is_empty()
+        })
+        .times(1)
+        .returning(|_, _| Ok(netsim_model::Chip::default()));
+
+    let mut clients = HashMap::new();
+    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>);
+
+    let world = World::with_clients(clients).await;
+
+    world.when_notify_chip_added(chip_sender, ChipKind::BLUETOOTH).await;
+    world.when_notify_chip_added(chip_peer, ChipKind::BLUETOOTH).await;
+
+    world.when_create_link(chip_sender, chip_peer, -50).await.unwrap();
+    world.when_create_link(chip_peer, chip_sender, -55).await.unwrap();
+
+    // When
+    link_api::LinkClient::reset(&world.client).await.unwrap();
+
+    // Then
+    // Verification happens on drop
+}

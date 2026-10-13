@@ -104,3 +104,29 @@ async fn test_chip_removal_without_links() {
 
     assert_eq!(world.client.list().await.unwrap().len(), 0);
 }
+
+// Scenario: Reset restores initial state and restarts link ID allocation
+//
+//   Given links exist
+//   When a reset action occurs
+//   Then all links are cleared and subsequent links allocate starting from INITIAL_LINK_ID
+#[tokio::test]
+async fn test_reset_restores_initial_state_and_link_ids() {
+    // Given
+    let world = World::new().await;
+    world.given_default_chips().await;
+    let link_id = world.when_create_link(ChipId(1), ChipId(2), -50).await.unwrap();
+    assert_eq!(link_id, link_api::LinkId(1));
+    assert_eq!(world.client.list().await.unwrap().len(), 1);
+
+    // When reset is called
+    link_api::LinkClient::reset(&world.client).await.unwrap();
+
+    // Then links are cleared
+    let links = world.client.list().await.unwrap();
+    assert!(links.is_empty());
+
+    // And new links re-start ID allocation from INITIAL_LINK_ID (1)
+    let new_link_id = world.when_create_link(ChipId(1), ChipId(2), -60).await.unwrap();
+    assert_eq!(new_link_id, link_api::LinkId(1));
+}

@@ -128,3 +128,66 @@ async fn test_create_link_fails_self() {
     // Then
     assert!(result.is_err());
 }
+
+// Scenario: Validation failure does not advance next_id
+//
+//   Given the link actor is running with default chips
+//   When an invalid link creation request fails
+//   Then subsequent valid link creations still allocate sequential IDs
+#[tokio::test]
+async fn test_create_link_validation_failure_does_not_increment_next_id() {
+    // Given
+    let world = World::new().await;
+    world.given_default_chips().await;
+
+    // When an invalid request fails (self-link)
+    let err_result = world.when_create_link(ChipId(1), ChipId(1), -50).await;
+    assert!(err_result.is_err());
+
+    // Then a valid link creation starts from the initial ID (1)
+    let first_id = world.when_create_link(ChipId(1), ChipId(2), -50).await.unwrap();
+    assert_eq!(first_id, link_api::LinkId(1));
+
+    // When another invalid request fails (missing chip)
+    let missing_result = world.when_create_link(ChipId(1), ChipId(99), -50).await;
+    assert!(missing_result.is_err());
+
+    // Then subsequent valid link receives the next sequential ID (2)
+    let second_id = world.when_create_link(ChipId(2), ChipId(1), -60).await.unwrap();
+    assert_eq!(second_id, link_api::LinkId(2));
+}
+
+// Scenario: Auto-allocation skips existing custom link IDs
+//
+//   Given the link actor is running with default chips
+//   When a link is created with an explicit custom ID ahead in sequence
+//   Then subsequent auto-allocated links skip the custom ID without colliding
+#[tokio::test]
+async fn test_allocate_link_id_skips_existing_custom_ids() {
+    // Given
+    let world = World::new().await;
+    world.given_default_chips().await;
+
+    // Create link 1 (auto-allocated as ID 1)
+    let id1 = world.when_create_link(ChipId(1), ChipId(2), -50).await.unwrap();
+    assert_eq!(id1, link_api::LinkId(1));
+
+    // Delete link 1 so chip pair (1, 2) is free
+    world.client.delete(id1).await.unwrap();
+
+    // Create a link with custom ID 2
+    let params_custom = link_api::LinkCreate { sender: ChipId(1), receiver: ChipId(2), rssi: -55 };
+    let id_custom = world.client.create_with_id(link_api::LinkId(2), params_custom).await.unwrap();
+    assert_eq!(id_custom, link_api::LinkId(2));
+
+    // When auto-allocating another link (pair 2 -> 1)
+    // next_id is currently 2, which already exists, so it must skip to 3
+    let id3 = world.when_create_link(ChipId(2), ChipId(1), -60).await.unwrap();
+    assert_eq!(id3, link_api::LinkId(3));
+
+    // Verify both links coexist without collision
+    let list = world.client.list().await.unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().any(|l| l.id == link_api::LinkId(2)));
+    assert!(list.iter().any(|l| l.id == link_api::LinkId(3)));
+}
