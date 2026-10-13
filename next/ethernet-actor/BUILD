@@ -24,6 +24,11 @@ netsim_rust_library(
     proc_macro_deps = [
         "@async-trait",
     ],
+    test_deps = [
+        "//next/device-api",
+        "@bytes",
+        "@futures",
+    ],
     deps = [
         "//next/actor-framework",
         "//next/device-actor",

@@ -74,8 +74,48 @@ rust_test_host {
     ],
     lints: "none",
     rustlibs: [
+        "libbytes",
+        "libfutures",
         "libnetsim_next_actor_framework_testing",
         "libnetsim_next_device_actor_testing",
+        "libnetsim_next_device_api_testing",
+        "libnetsim_next_model_testing",
+        "libnetsim_next_slirp_actor_testing",
+        "libtokio",
+        "libtokio_stream",
+        "libtracing",
+    ],
+    proc_macros: [
+        "libasync_trait",
+    ],
+}
+
+rust_test_host {
+    name: "libnetsim_next_ethernet_actor_integration_tests",
+    crate_name: "ethernet_actor_tests",
+    edition: "2024",
+    crate_root: "tests/mod.rs",
+    test_suites: [
+        "general_tests",
+    ],
+    srcs: [
+        "tests/forwarding_test.rs",
+        "tests/lifecycle_test.rs",
+        "tests/mod.rs",
+        "tests/world.rs",
+    ],
+    features: [
+        "cuttlefish",
+        "testing",
+    ],
+    lints: "none",
+    rustlibs: [
+        "libbytes",
+        "libfutures",
+        "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_device_actor_testing",
+        "libnetsim_next_device_api_testing",
+        "libnetsim_next_ethernet_actor_testing",
         "libnetsim_next_model_testing",
         "libnetsim_next_slirp_actor_testing",
         "libtokio",
