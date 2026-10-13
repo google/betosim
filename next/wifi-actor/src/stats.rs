@@ -372,3 +372,241 @@ impl ThroughputValues {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wifi_stats_initial_state() {
+        let clock = Arc::new(MockClock::new());
+        let stats = WifiStats::new(clock);
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert_eq!(wifi.hostapd_errors(), 0);
+        assert_eq!(wifi.network_errors(), 0);
+        assert_eq!(wifi.client_errors(), 0);
+        assert_eq!(wifi.frame_errors(), 0);
+        assert_eq!(wifi.transmission_errors(), 0);
+        assert_eq!(wifi.other_errors(), 0);
+
+        assert_eq!(wifi.hwsim_frames_rx(), 0);
+        assert_eq!(wifi.hwsim_frames_tx(), 0);
+        assert_eq!(wifi.network_packets_tx(), 0);
+        assert_eq!(wifi.network_packets_rx(), 0);
+        assert_eq!(wifi.hostapd_frames_tx(), 0);
+        assert_eq!(wifi.hostapd_frames_rx(), 0);
+        assert_eq!(wifi.wmedium_frames_tx(), 0);
+        assert_eq!(wifi.wmedium_unicast_frames_tx(), 0);
+        assert_eq!(wifi.mgmt_frames_rx(), 0);
+        assert_eq!(wifi.mdns_count(), 0);
+
+        let api = ipc.wifi_api_stats.as_ref().expect("wifi_api_stats present");
+        let aware = api.wifi_aware_session.as_ref().expect("wifi_aware_session present");
+        assert_eq!(aware.publish_unsolicited(), 0);
+        assert_eq!(aware.publish_solicited(), 0);
+        assert_eq!(aware.subscribe_active(), 0);
+        assert_eq!(aware.subscribe_passive(), 0);
+    }
+
+    #[test]
+    fn test_wifi_stats_frame_counter_increments() {
+        let clock = Arc::new(MockClock::new());
+        let mut stats = WifiStats::new(clock);
+
+        stats.incr_hwsim_frames_rx();
+        stats.incr_hwsim_frames_tx();
+        stats.incr_hwsim_frames_tx();
+        stats.incr_network_packets_tx();
+        stats.incr_network_packets_rx();
+        stats.incr_hostapd_frames_tx();
+        stats.incr_hostapd_frames_rx();
+        stats.incr_wmedium_frames_tx();
+        stats.incr_wmedium_unicast_frames_tx();
+        stats.incr_mgmt_frames_rx();
+        stats.incr_mdns_count();
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert_eq!(wifi.hwsim_frames_rx(), 1);
+        assert_eq!(wifi.hwsim_frames_tx(), 2);
+        assert_eq!(wifi.network_packets_tx(), 1);
+        assert_eq!(wifi.network_packets_rx(), 1);
+        assert_eq!(wifi.hostapd_frames_tx(), 1);
+        assert_eq!(wifi.hostapd_frames_rx(), 1);
+        assert_eq!(wifi.wmedium_frames_tx(), 1);
+        assert_eq!(wifi.wmedium_unicast_frames_tx(), 1);
+        assert_eq!(wifi.mgmt_frames_rx(), 1);
+        assert_eq!(wifi.mdns_count(), 1);
+    }
+
+    #[test]
+    fn test_wifi_stats_error_increments() {
+        let clock = Arc::new(MockClock::new());
+        let mut stats = WifiStats::new(clock);
+
+        stats.log_and_incr_err_count(&WifiError::Hostapd("test hostapd".into()));
+        stats.log_and_incr_err_count(&WifiError::Network("test network".into()));
+        stats.log_and_incr_err_count(&WifiError::Client("test client".into()));
+        stats.log_and_incr_err_count(&WifiError::Frame("test frame".into()));
+        stats.log_and_incr_err_count(&WifiError::Transmission("test tx".into()));
+        stats.log_and_incr_err_count(&WifiError::Other("test other".into()));
+        stats.log_and_incr_err_count(&WifiError::Internal("test internal".into()));
+        stats.log_and_incr_err_count(&WifiError::Chip(netsim_model::ChipError::Internal(
+            "test chip".into(),
+        )));
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert_eq!(wifi.hostapd_errors(), 1);
+        assert_eq!(wifi.network_errors(), 1);
+        assert_eq!(wifi.client_errors(), 1);
+        assert_eq!(wifi.frame_errors(), 1);
+        assert_eq!(wifi.transmission_errors(), 1);
+        // Other, Internal, and Chip map to other_error
+        assert_eq!(wifi.other_errors(), 3);
+    }
+
+    #[test]
+    fn test_wifi_stats_log_outcome_helper() {
+        let clock = Arc::new(MockClock::new());
+        let mut stats = WifiStats::new(clock);
+
+        let ok_result: Result<u32, WifiError> = Ok(42);
+        stats.log_outcome(ok_result, |s, val| {
+            assert_eq!(val, 42);
+            s.incr_hwsim_frames_rx();
+        });
+
+        let err_result: Result<(), WifiError> = Err(WifiError::Network("network down".into()));
+        stats.log_outcome(err_result, |_s, _val| {
+            panic!("Should not execute success operation on error");
+        });
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert_eq!(wifi.hwsim_frames_rx(), 1);
+        assert_eq!(wifi.network_errors(), 1);
+    }
+
+    #[test]
+    fn test_wifi_stats_api_increments_and_mapping() {
+        let clock = Arc::new(MockClock::new());
+        let mut stats = WifiStats::new(clock);
+
+        stats.incr_wifi_api(WifiApi::WifiAwareSessionPublishUnsolicited);
+        stats.incr_wifi_api(WifiApi::WifiAwareSessionPublishSolicited);
+        stats.incr_wifi_api(WifiApi::WifiAwareSessionSubscribeActive);
+        stats.incr_wifi_api(WifiApi::WifiAwareSessionSubscribePassive);
+        stats.incr_wifi_api(WifiApi::WifiAwareDiscoverySessionSendMessage);
+        stats.incr_wifi_api(WifiApi::WifiAwareNdpRequest);
+        stats.incr_wifi_api(WifiApi::WifiAwareNdpResponse);
+        stats.incr_wifi_api(WifiApi::WifiAwareNdpConfirm);
+        stats.incr_wifi_api(WifiApi::WifiAwareNdpTerminate);
+
+        stats.incr_wifi_api(WifiApi::WifiP2pManagerCreateGroup);
+        stats.incr_wifi_api(WifiApi::WifiP2pManagerConnect);
+        stats.incr_wifi_api(WifiApi::WifiP2pManagerDiscoverPeers);
+        stats.incr_wifi_api(WifiApi::WifiP2pManagerDiscoverServices);
+
+        stats.incr_wifi_api(WifiApi::WifiRttManagerStartRanging);
+        stats.incr_wifi_api(WifiApi::WifiRttManagerOnRangingResults);
+
+        stats.incr_wifi_api(WifiApi::WifiEasyConnectAuthRequest);
+        stats.incr_wifi_api(WifiApi::WifiEasyConnectAuthResponse);
+        stats.incr_wifi_api(WifiApi::WifiEasyConnectAuthConfirm);
+
+        // Out of bounds check: incrementing Count should not panic
+        stats.incr_wifi_api(WifiApi::Count);
+
+        let ipc = stats.to_proto();
+        let api = ipc.wifi_api_stats.as_ref().expect("wifi_api_stats present");
+
+        let aware_session = api.wifi_aware_session.as_ref().expect("aware_session present");
+        assert_eq!(aware_session.publish_unsolicited(), 1);
+        assert_eq!(aware_session.publish_solicited(), 1);
+        assert_eq!(aware_session.subscribe_active(), 1);
+        assert_eq!(aware_session.subscribe_passive(), 1);
+
+        let discovery =
+            api.wifi_aware_discovery_session.as_ref().expect("discovery_session present");
+        assert_eq!(discovery.send_message(), 1);
+
+        let ndp = api.wifi_aware_ndp.as_ref().expect("ndp present");
+        assert_eq!(ndp.request(), 1);
+        assert_eq!(ndp.response(), 1);
+        assert_eq!(ndp.confirm(), 1);
+        assert_eq!(ndp.terminate(), 1);
+
+        let p2p = api.wifi_p2p_manager.as_ref().expect("p2p_manager present");
+        assert_eq!(p2p.create_group(), 1);
+        assert_eq!(p2p.connect(), 1);
+        assert_eq!(p2p.discover_peers(), 1);
+        assert_eq!(p2p.discover_services(), 1);
+
+        let rtt = api.wifi_rtt_manager.as_ref().expect("rtt_manager present");
+        assert_eq!(rtt.start_ranging(), 1);
+        assert_eq!(rtt.on_ranging_results(), 1);
+
+        let dpp = api.wifi_easy_connect.as_ref().expect("easy_connect present");
+        assert_eq!(dpp.auth_request(), 1);
+        assert_eq!(dpp.auth_response(), 1);
+        assert_eq!(dpp.auth_confirm(), 1);
+    }
+
+    #[test]
+    fn test_wifi_stats_saturation_to_i32_max() {
+        let clock = Arc::new(MockClock::new());
+        let mut stats = WifiStats::new(clock);
+
+        stats.counts.hostapd_error = (i32::MAX as u64) + 500;
+        stats.counts.hwsim_frames_rx = (i32::MAX as u64) + 1000;
+        if let Some(count) =
+            stats.counts.wifi_apis.get_mut(WifiApi::WifiAwareSessionPublishUnsolicited)
+        {
+            *count = (i32::MAX as u64) + 2000;
+        }
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert_eq!(wifi.hostapd_errors(), i32::MAX);
+        assert_eq!(wifi.hwsim_frames_rx(), i32::MAX);
+
+        let api = ipc.wifi_api_stats.as_ref().expect("wifi_api_stats present");
+        let aware = api.wifi_aware_session.as_ref().expect("aware present");
+        assert_eq!(aware.publish_unsolicited(), i32::MAX);
+    }
+
+    #[test]
+    fn test_wifi_stats_throughput_recording_and_mbps_conversion() {
+        let clock = Arc::new(MockClock::new());
+        let mut stats = WifiStats::new(clock.clone());
+
+        // 1,000,000 bytes per second = 8,000,000 bits per second = 8.0 Mbps
+        assert_eq!(WifiStats::bytes_ps_to_mbps(1_000_000), 8.0);
+        assert_eq!(WifiStats::bytes_ps_to_mbps(0), 0.0);
+
+        // Window start at t = 1000 ms
+        clock.store(1000);
+        stats.record_download_bytes(500_000);
+        stats.record_upload_bytes(250_000);
+
+        // Within 5 second window (t = 4000 ms, elapsed = 3000 ms < 5000 ms)
+        clock.store(4000);
+        stats.record_download_bytes(500_000);
+        stats.record_upload_bytes(250_000);
+
+        // Window flush at t = 7000 ms (elapsed = 6000 ms >= 5000 ms)
+        // Previous window had 1,000,000 bytes download over 6.0s = ~166,666 bytes/sec
+        // Previous window had 500,000 bytes upload over 6.0s = ~83,333 bytes/sec
+        clock.store(7000);
+        stats.record_download_bytes(100_000);
+        stats.record_upload_bytes(50_000);
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert!(wifi.max_download_throughput() > 0.0);
+        assert!(wifi.max_upload_throughput() > 0.0);
+    }
+}
