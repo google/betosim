@@ -37,11 +37,14 @@ netsim_rust_binary(
         "@futures-util",
         "@grpcio",
         "@hex",
+        "@httparse",
         "@protobuf-json-mapping",
         "@protobuf-rust",
         "@serde",
         "@serde_json",
+        "@tokio",
         "@tracing",
+        "@tungstenite",
     ],
 )
 
@@ -61,11 +64,14 @@ rust_test(
         "@futures-util",
         "@grpcio",
         "@hex",
+        "@httparse",
         "@protobuf-json-mapping",
         "@protobuf-rust",
         "@serde",
         "@serde_json",
+        "@tokio",
         "@tracing",
+        "@tungstenite",
     ],
 )
 

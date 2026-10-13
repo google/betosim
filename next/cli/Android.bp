@@ -20,6 +20,7 @@ rust_binary_host {
         "libfutures_util",
         "libgrpcio",
         "libhex",
+        "libhttparse",
         "libnetsim_next_common",
         "libnetsim_next_model",
         "libnetsim_next_packets",
@@ -29,7 +30,9 @@ rust_binary_host {
         "libprotobuf_json_mapping",
         "libserde",
         "libserde_json",
+        "libtokio",
         "libtracing",
+        "libtungstenite",
     ],
 }
 
@@ -55,6 +58,7 @@ rust_test_host {
         "libfutures_util",
         "libgrpcio",
         "libhex",
+        "libhttparse",
         "libnetsim_next_common_testing",
         "libnetsim_next_model_testing",
         "libnetsim_next_packets_testing",
@@ -64,6 +68,8 @@ rust_test_host {
         "libprotobuf_json_mapping",
         "libserde",
         "libserde_json",
+        "libtokio",
         "libtracing",
+        "libtungstenite",
     ],
 }

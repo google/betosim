@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, iter, str::FromStr};
+use std::{fmt, iter, path::PathBuf, str::FromStr};
 
 use clap::{
     Args, Parser, Subcommand, ValueEnum,
@@ -542,6 +542,8 @@ pub(crate) enum Capture {
     Patch(PatchCapture),
     /// Download the packet capture content
     Get(GetCapture),
+    /// Stream live packet capture content over WebSocket
+    Stream(StreamCapture),
 }
 
 #[derive(Debug, Args, PartialEq, Default)]
@@ -576,6 +578,15 @@ pub(crate) struct GetCapture {
     pub filenames: Vec<String>,
     #[arg(skip)]
     pub current_file: String,
+}
+
+#[derive(Debug, Args, PartialEq, Default)]
+pub(crate) struct StreamCapture {
+    /// Capture chip ID to stream
+    pub(crate) chip_id: u32,
+    /// Optional file path to write the PCAP stream (defaults to stdout)
+    #[arg(short = 'o', long, value_name = "FILE")]
+    pub(crate) output: Option<PathBuf>,
 }
 
 impl From<&BeaconBleSettings> for AdvertiseSettingsProto {

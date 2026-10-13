@@ -138,6 +138,12 @@ impl Command {
                             .into(),
                     );
                 }
+                Capture::Stream(_) => {
+                    return Err(
+                        "Capture::Stream uses WebSocket over the HTTP server and is handled in main.rs."
+                            .into(),
+                    );
+                }
             },
 
             Command::Beacon(action) => match action {
@@ -543,7 +549,7 @@ mod tests {
             AdvertiseMode, BeaconBleAdvertiseData, BeaconBleScanResponseData, BeaconBleSettings,
             BeaconCreateBle, BeaconCreateUwb, BeaconPatchBle, Command, Devices, Interval, Link,
             LinkCreate, LinkPatch, ListCapture, Move, NetsimArgs, ParsableBytes, Radio, RadioType,
-            TxPower, TxPowerLevel,
+            StreamCapture, TxPower, TxPowerLevel,
         },
         error::Error,
     };
@@ -962,6 +968,42 @@ mod tests {
             Command::Capture(Capture::List(ListCapture { ..Default::default() })),
             GrpcRequest::ListCapture,
         )
+    }
+
+    #[test]
+    fn test_capture_stream_stdout() {
+        let cmd = NetsimArgs::parse_from("netsim-cli capture stream 1".split_whitespace()).command;
+        assert_eq!(
+            cmd,
+            Command::Capture(Capture::Stream(StreamCapture { chip_id: 1, output: None }))
+        );
+        assert!(cmd.get_request().is_err());
+    }
+
+    #[test]
+    fn test_capture_stream_output_file() {
+        let cmd =
+            NetsimArgs::parse_from("netsim-cli pcap stream 2 -o capture.pcap".split_whitespace())
+                .command;
+        assert_eq!(
+            cmd,
+            Command::Capture(Capture::Stream(StreamCapture {
+                chip_id: 2,
+                output: Some(std::path::PathBuf::from("capture.pcap")),
+            }))
+        );
+
+        let cmd_long = NetsimArgs::parse_from(
+            "netsim-cli capture stream 3 --output out.pcap".split_whitespace(),
+        )
+        .command;
+        assert_eq!(
+            cmd_long,
+            Command::Capture(Capture::Stream(StreamCapture {
+                chip_id: 3,
+                output: Some(std::path::PathBuf::from("out.pcap")),
+            }))
+        );
     }
 
     //TODO: Add capture patch and get tests

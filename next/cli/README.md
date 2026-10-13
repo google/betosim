@@ -134,7 +134,7 @@ Options:
         - \[CHIP_NAME\]: Optional name of the beacon to remove
 - ### `reset`: Reset Netsim device scene
   - Usage: `netsim reset`
-- ### `capture`: Control the packet capture functionalities with commands: list, patch, get [aliases: pcap]
+- ### `capture`: Control the packet capture functionalities with commands: list, patch, get, stream [aliases: pcap]
   - Usage: `netsim capture <COMMAND>`
   - #### Commands
     - `list`: List currently available Captures (packet captures)
@@ -158,6 +158,13 @@ Options:
           Possible filter fields include ID, Device Name, and Chip Kind
       - Options:
         - `-o, --location`: Directory to store downloaded capture file(s)
+    - `stream`: Stream live packet capture content over WebSocket
+      - Usage: `netsim capture stream [OPTIONS] <CHIP_ID>`
+      - Arguments:
+        - \<CHIP_ID\>: Capture chip ID to stream
+      - Options:
+        - `-o, --output <FILE>`: Optional file path to write the PCAP stream
+          (defaults to stdout, e.g. `netsim capture stream 1 | wireshark -k -i -`)
 - ### `link`: Manage Link properties
   - Usage: `netsim link <COMMAND>`
   - #### Commands

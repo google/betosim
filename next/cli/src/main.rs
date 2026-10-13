@@ -20,6 +20,7 @@ mod ap;
 mod args;
 mod ble;
 mod browser;
+mod capture_stream;
 mod cell_helper;
 mod display;
 mod error;
@@ -217,8 +218,14 @@ fn process_result(
         Err(e) => Err(format!("Grpc call error: {e}").into()),
     }
 }
-/// Runs `command` if it is served over the REST API; returns `None` otherwise.
-fn run_rest(command: &args::Command, rest: &NetsimRestClient, verbose: bool) -> Option<Result<()>> {
+/// Runs `command` if it is served over the REST/HTTP API; returns `None`
+/// otherwise.
+fn run_rest(
+    command: &args::Command,
+    rest: &NetsimRestClient,
+    http_server: &str,
+    verbose: bool,
+) -> Option<Result<()>> {
     let result = match command {
         args::Command::Version => rest
             .get_version()
@@ -226,6 +233,9 @@ fn run_rest(command: &args::Command, rest: &NetsimRestClient, verbose: bool) -> 
             .map(|resp| println!("Netsim version: {}", resp.version)),
         args::Command::Link(args::Link::List) => {
             rest.get_links().send_blocking().map(|resp| println!("{}", resp.display(verbose)))
+        }
+        args::Command::Capture(args::Capture::Stream(cmd)) => {
+            return Some(capture_stream::stream_capture(http_server, cmd));
         }
         _ => return None,
     };
@@ -265,8 +275,8 @@ fn run(args: NetsimArgs) -> Result<()> {
 
     let instance_num = get_instance(args.instance);
     let http_server = get_http_server_address(instance_num).unwrap_or_default();
-    let rest_client = NetsimRestClient::from_addr(http_server);
-    if let Some(result) = run_rest(&args.command, &rest_client, verbose) {
+    let rest_client = NetsimRestClient::from_addr(http_server.clone());
+    if let Some(result) = run_rest(&args.command, &rest_client, &http_server, verbose) {
         return result;
     }
 

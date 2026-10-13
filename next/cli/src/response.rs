@@ -105,6 +105,12 @@ impl args::Command {
                     println!("Successfully downloaded file: {}", cmd.current_file);
                 }
             }
+            Command::Capture(Capture::Stream(_)) => {
+                return Err(
+                    "Capture::Stream uses WebSocket over the HTTP server and is handled in main.rs."
+                        .into(),
+                );
+            }
 
             Command::Beacon(action) => match action {
                 Beacon::Create(kind) => match kind {
