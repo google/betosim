@@ -318,7 +318,8 @@ impl TokioHost {
         }
     }
 
-    pub fn connection_count(&self) -> usize {
+    #[cfg(test)]
+    fn connection_count(&self) -> usize {
         self.connections.lock().len()
     }
 }
@@ -857,5 +858,15 @@ mod tests {
 
         let conns = connections.lock();
         assert!(matches!(conns.get(&conn_id), Some(Connection::Tcp(_))));
+    }
+
+    #[tokio::test]
+    async fn test_connection_count() {
+        let (slirp_tx, _slirp_rx) = mpsc::channel(10);
+        let (_resp_tx, resp_rx) = mpsc::channel(10);
+        let (guest_tx, _guest_rx) = mpsc::channel(10);
+        let host = TokioHost::from_channels(slirp_tx, resp_rx, guest_tx, None, Config::default());
+
+        assert_eq!(host.connection_count(), 0);
     }
 }
