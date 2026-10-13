@@ -158,6 +158,11 @@ pub fn get_tcp_server_address(instance_num: u16) -> Option<String> {
     get_address_by_key(instance_num, "tcp.port")
 }
 
+/// Get the WebSocket server address for netsim packet stream
+pub fn get_ws_server_address(instance_num: u16) -> Option<String> {
+    get_address_by_key(instance_num, "ws.port")
+}
+
 /// Get the HTTP server address for netsim REST API
 pub fn get_http_server_address(instance_num: u16) -> Option<String> {
     get_address_by_key(instance_num, "http.port")
@@ -280,7 +285,7 @@ mod tests {
         };
 
         // Test case 1: Only grpc.port exists
-        let ini_content = "grpc.port=1234\ntcp.port=5678\n";
+        let ini_content = "grpc.port=1234\ntcp.port=5678\nws.port=7681\n";
         std::fs::write(tmp_dir_path.join("netsim.ini"), ini_content).unwrap();
 
         let grpc_addr = super::get_address_by_key_with_env(&mock_env, 1, "grpc.port");
@@ -288,6 +293,9 @@ mod tests {
 
         let tcp_addr = super::get_address_by_key_with_env(&mock_env, 1, "tcp.port");
         assert_eq!(tcp_addr.unwrap(), "localhost:5678");
+
+        let ws_addr = super::get_address_by_key_with_env(&mock_env, 1, "ws.port");
+        assert_eq!(ws_addr.unwrap(), "localhost:7681");
 
         // Test case 2: Port with address-like value
         let ini_content = "grpc.port=[::1]:1235\ntcp.port=1.2.3.4:5679\n";
