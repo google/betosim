@@ -26,7 +26,7 @@ const WS_MAGIC_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// Generates the `Sec-WebSocket-Accept` header value for the server handshake.
 ///
 /// Ref: RFC 6455, Section 4.2.2 - Server Opening Handshake
-fn generate_websocket_accept(websocket_key: &str) -> String {
+pub(crate) fn generate_websocket_accept(websocket_key: &str) -> String {
     let concat = format!("{websocket_key}{WS_MAGIC_GUID}");
     let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, concat.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(digest)
