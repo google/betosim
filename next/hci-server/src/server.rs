@@ -63,7 +63,7 @@ impl HciChipBuilder {
         Chip {
             name: name.to_string(),
             kind: ChipKind::BLUETOOTH,
-            variant: Some(ChipVariant::from(ChipKind::BLUETOOTH)),
+            variant: ChipVariant::try_from(ChipKind::BLUETOOTH).ok(),
             ..Default::default()
         }
     }
@@ -154,7 +154,7 @@ mod tests {
         assert!(chip.manufacturer.is_empty());
         assert!(chip.product_name.is_empty());
         assert_eq!(chip.kind, ChipKind::BLUETOOTH);
-        assert_eq!(chip.variant, Some(ChipVariant::from(ChipKind::BLUETOOTH)));
+        assert!(matches!(chip.variant, Some(ChipVariant::Bluetooth(_))));
     }
 
     #[test]

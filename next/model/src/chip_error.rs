@@ -56,6 +56,10 @@ pub enum ChipError {
     #[error("Unexpected chip kind: expected {expected:?}, got {actual:?}")]
     UnexpectedChipKind { expected: ChipKind, actual: ChipKind },
 
+    /// The chip kind has no simulated radio implementation.
+    #[error("Unsupported chip kind: {0}")]
+    UnsupportedChipKind(ChipKind),
+
     /// Invalid arguments.
     #[error("Invalid arguments: {0}")]
     InvalidArguments(#[source] Box<dyn std::error::Error + Send + Sync>),

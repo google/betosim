@@ -244,6 +244,7 @@ fn chip_error_status(err: &ChipError) -> StatusCode {
         ChipError::InvalidArguments(_)
         | ChipError::InvalidAddress(_)
         | ChipError::UnexpectedChipKind { .. }
+        | ChipError::UnsupportedChipKind(_)
         | ChipError::WrongVariantError
         | ChipError::Unsupported => StatusCode::BAD_REQUEST,
         ChipError::Io(io_err) => io_error_status(io_err),

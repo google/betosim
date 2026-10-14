@@ -303,6 +303,7 @@ async fn test_client_error_mapping_bad_request() {
     let cases: Vec<ClientError> = vec![
         ClientError::Chip(ChipError::InvalidArguments("bad arg".into())),
         ClientError::Chip(ChipError::InvalidAddress("bad mac".into())),
+        ClientError::Chip(ChipError::UnsupportedChipKind(ChipKind::UNSPECIFIED)),
         ClientError::Chip(ChipError::Unsupported),
         FrameworkError::ServiceError(device_actor::DeviceError::ChipKindNotSupported(
             "UNSPECIFIED".into(),
