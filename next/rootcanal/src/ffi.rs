@@ -17,9 +17,9 @@
 #![allow(non_camel_case_types)]
 
 /// A C-compatible unsigned 8-bit integer.
-pub type uint8_t = u8;
+type uint8_t = u8;
 /// A C-compatible size type.
-pub type size_t = usize;
+pub(crate) type size_t = usize;
 
 use std::{
     option::Option,
@@ -27,7 +27,7 @@ use std::{
 };
 
 /// Callback signature for rootcanal log interception.
-pub type FfiLogCallback = extern "C" fn(level: c_int, message: *const c_char);
+type FfiLogCallback = extern "C" fn(level: c_int, message: *const c_char);
 
 unsafe extern "C" {
     /// Creates a new Bluetooth controller.
@@ -44,7 +44,7 @@ unsafe extern "C" {
     /// * `cookie` can be any pointer (including null) but it will be blindly
     ///   passed back to the provided function pointers. The caller is
     ///   responsible for ensuring it is valid when those callbacks are invoked.
-    pub fn ffi_controller_new(
+    pub(crate) fn ffi_controller_new(
         address: *const uint8_t,
         send_hci: Option<
             unsafe extern "C" fn(
@@ -85,10 +85,10 @@ unsafe extern "C" {
     ) -> *mut c_void;
 
     /// Deletes a Bluetooth controller.
-    pub fn ffi_controller_delete(controller: *mut c_void);
+    pub(crate) fn ffi_controller_delete(controller: *mut c_void);
 
     /// Receives an HCI packet from the host.
-    pub fn ffi_controller_receive_hci(
+    pub(crate) fn ffi_controller_receive_hci(
         controller: *mut c_void,
         idc: c_int,
         data: *const uint8_t,
@@ -96,7 +96,7 @@ unsafe extern "C" {
     );
 
     /// Receives a link layer packet from a peer.
-    pub fn ffi_controller_receive_ll(
+    pub(crate) fn ffi_controller_receive_ll(
         controller: *mut c_void,
         data: *const uint8_t,
         data_len: size_t,
@@ -105,14 +105,14 @@ unsafe extern "C" {
     );
 
     /// Reconfigures the controller with new properties.
-    pub fn ffi_controller_set_properties(
+    pub(crate) fn ffi_controller_set_properties(
         controller: *mut c_void,
         proto_bytes: *const uint8_t,
         proto_len: size_t,
     ) -> bool;
 
     /// Advances the controller's state by one tick.
-    pub fn ffi_controller_tick(controller: *mut c_void);
+    pub(crate) fn ffi_controller_tick(controller: *mut c_void);
 
     /// Returns true if the controller has a connection to the given address.
     ///
@@ -121,7 +121,7 @@ unsafe extern "C" {
     ///   `ffi_controller_new` that hasn't been deleted.
     /// * `source_addr` and `destination_addr` must be valid, non-null pointers
     ///   to contiguous arrays of exactly 6 bytes (`[u8; 6]`).
-    pub fn ffi_controller_has_le_connection(
+    pub(crate) fn ffi_controller_has_le_connection(
         controller: *mut c_void,
         source_addr: *const uint8_t,
         destination_addr: *const uint8_t,
@@ -132,5 +132,5 @@ unsafe extern "C" {
     /// # Safety
     /// When specified, `callback` must point to a thread-safe `extern "C"`
     /// function that expects a valid null-terminated C string.
-    pub fn ffi_set_log_callback(callback: Option<FfiLogCallback>);
+    pub(crate) fn ffi_set_log_callback(callback: Option<FfiLogCallback>);
 }

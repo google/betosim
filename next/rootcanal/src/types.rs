@@ -63,17 +63,20 @@ impl Address {
     }
 
     /// Returns `true` if the address is resolvable.
-    pub fn is_resolvable(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_resolvable(&self) -> bool {
         (self.address[0] & 0xc0) == 0x40
     }
 
     /// Returns `true` if the address is non-resolvable.
-    pub fn is_non_resolvable(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_non_resolvable(&self) -> bool {
         (self.address[0] & 0xc0) == 0x00
     }
 
     /// Returns `true` if the address is a static identity address.
-    pub fn is_static_identity(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_static_identity(&self) -> bool {
         (self.address[0] & 0xc0) == 0xc0
     }
 }

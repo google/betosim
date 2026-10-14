@@ -49,7 +49,7 @@ pub trait Callbacks: Send + Sync {
 }
 
 /// Trait used by the controller to call the Bluetooth manager.
-pub trait BtOps: Send + Sync {
+pub(crate) trait BtOps: Send + Sync {
     /// Controller received a LL packet from rootcanal that needs to be
     /// broadcasted
     fn broadcast_rootcanal_ll_packet(&self, send_id: Id, packet: &[u8], phy: Phy, tx_power: i32);

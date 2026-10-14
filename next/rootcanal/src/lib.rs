@@ -27,15 +27,15 @@
 //!
 //! The [`error`] module defines the error types used in this crate.
 //!
-//! The [`ffi`] module contains the low-level bindings to the C++ FFI. This
+//! The `ffi` module contains the low-level bindings to the C++ FFI. This
 //! module is not intended to be used directly by consumers of this crate.
 //!
 //! ## Example
 
 pub mod controller;
 pub mod error;
-pub mod ffi;
-pub mod rootcanal;
+mod ffi;
+mod rootcanal;
 pub mod types;
 
 pub use controller::{Id, Stats};

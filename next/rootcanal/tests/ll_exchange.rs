@@ -27,8 +27,8 @@ use std::{
 
 use bytes::Bytes;
 use rootcanal::{
+    Callbacks as RootcanalCallbacks, Rootcanal,
     controller::{Callbacks as ControllerCallbacks, Id},
-    rootcanal::{Callbacks as RootcanalCallbacks, Rootcanal},
     types::{Address, Phy},
 };
 use tokio::{

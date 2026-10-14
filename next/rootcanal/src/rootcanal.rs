@@ -136,7 +136,7 @@ extern "C" fn rootcanal_log_callback(
 ///
 /// This routes rootcanal logs through active tracing subscribers and test
 /// writers, preventing direct stdout/stderr pollution.
-pub(crate) fn init_rootcanal_logging() {
+fn init_rootcanal_logging() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         // SAFETY: `ffi_set_log_callback` registers a static extern "C" function
@@ -260,7 +260,8 @@ impl Rootcanal {
     }
 
     /// Returns a vector of the current controller IDs.
-    pub fn get_controller_ids(&self) -> Vec<ControllerId> {
+    #[cfg(test)]
+    fn get_controller_ids(&self) -> Vec<ControllerId> {
         let mut keys: Vec<ControllerId> = self.controllers.lock().keys().copied().collect();
         keys.sort();
         keys
