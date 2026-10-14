@@ -16,19 +16,37 @@
 const MAX_AD_PAYLOAD_LEN: usize = 31;
 
 // AD Structure Types
+const AD_TYPE_FLAGS: u8 = 0x01;
 const AD_TYPE_NAME_SHORTENED: u8 = 0x08;
 const AD_TYPE_NAME_COMPLETE: u8 = 0x09;
 const AD_TYPE_TX_POWER_LEVEL: u8 = 0x0A;
 
 const AD_TYPE_MANUFACTURER_SPECIFIC: u8 = 0xFF;
 
-/// Helper to construct advertising data payload
+// BLE Flags (Bluetooth Core Spec Vol 3, Part C, Section 9.1.1.2 & 9.2.2.2):
+// Non-connectable BLE broadcasters (ADV_SCAN_IND / ADV_NONCONN_IND) operate in
+// Non-Discoverable Mode and must not set LE Limited/General Discoverable Mode
+// (0x01 / 0x02), which would also cause Android's btm_ble_is_discoverable() to
+// report simulated BLE beacons during Classic BluetoothAdapter.startDiscovery()
+// inquiries. Only set BR/EDR Not Supported (0x04).
+const AD_FLAG_BR_EDR_NOT_SUPPORTED: u8 = 0x04;
+const FLAGS_DATA: [u8; 3] = [0x02, AD_TYPE_FLAGS, AD_FLAG_BR_EDR_NOT_SUPPORTED];
+
+/// Helper to construct advertising or scan response data payload.
+///
+/// Per Bluetooth Core Specification Supplement (CSS) Part A, Section 1.3.1,
+/// the Flags AD structure (`0x01`) is included in advertising data
+/// (`include_flags = true`) and omitted from Scan Response PDUs
+/// (`include_flags = false`).
 pub(crate) fn construct_data(
     adv_data: &netsim_model::AdvertiseData,
-    device_name: &Option<String>,
+    device_name: Option<&str>,
+    include_flags: bool,
 ) -> Vec<u8> {
     let mut data = Vec::new();
-    // TODO(b/525453912): Add back standard BLE flags structure
+    if include_flags {
+        data.extend_from_slice(&FLAGS_DATA);
+    }
 
     // Manufacturer Data
     if !adv_data.manufacturer_data.is_empty() {
@@ -158,49 +176,57 @@ mod tests {
     #[test]
     fn test_construct_data_basic() {
         let adv_data = netsim_model::AdvertiseData::default();
-        let data = construct_data(&adv_data, &None);
-        assert_eq!(data, Vec::<u8>::new());
+        let data = construct_data(&adv_data, None, true);
+        assert_eq!(data, FLAGS_DATA);
     }
 
     #[test]
     fn test_construct_data_with_name() {
         let mut adv_data = netsim_model::AdvertiseData::default();
         adv_data.include_device_name = true;
-        let data = construct_data(&adv_data, &Some("Test".to_string()));
-        // Name (2 + 4) = 6 bytes
-        assert_eq!(data, vec![0x05, 0x09, b'T', b'e', b's', b't']);
+        let data = construct_data(&adv_data, Some("Test"), true);
+        // Flags (3) + Name (2 + 4) = 9 bytes
+        let mut expected = FLAGS_DATA.to_vec();
+        expected.extend_from_slice(&[0x05, 0x09, b'T', b'e', b's', b't']);
+        assert_eq!(data, expected);
     }
 
     #[test]
     fn test_construct_data_with_manufacturer_data() {
         let mut adv_data = netsim_model::AdvertiseData::default();
         adv_data.manufacturer_data = vec![0x01, 0x02];
-        let data = construct_data(&adv_data, &None);
-        // Mfg (2 + 2) = 4 bytes
-        assert_eq!(data, vec![0x03, 0xFF, 0x01, 0x02]);
+        let data = construct_data(&adv_data, None, true);
+        // Flags (3) + Mfg (2 + 2) = 7 bytes
+        let mut expected = FLAGS_DATA.to_vec();
+        expected.extend_from_slice(&[0x03, 0xFF, 0x01, 0x02]);
+        assert_eq!(data, expected);
     }
 
     #[test]
     fn test_construct_data_truncate_name() {
-        // Remaining = 31 bytes
+        // Flags = 3 bytes
+        // Remaining = 31 - 3 = 28 bytes
         // Name header = 2 bytes
-        // Max name len = 29 bytes
+        // Max name len = 26 bytes
         let adv_data = netsim_model::AdvertiseData::default();
         let long_name = "A".repeat(30);
-        let data = construct_data(&adv_data, &Some(long_name));
+        let data = construct_data(&adv_data, Some(&long_name), true);
         assert_eq!(data.len(), 31);
-        assert_eq!(data[0], 0x1e); // Length = 30 (29 + 1 type)
-        assert_eq!(data[1], 0x08);
-        assert_eq!(&data[2..], "A".repeat(29).as_bytes());
+        assert_eq!(&data[..3], &FLAGS_DATA);
+        assert_eq!(data[3], 0x1b); // Length = 27 (26 + 1 type)
+        assert_eq!(data[4], 0x08);
+        assert_eq!(&data[5..], "A".repeat(26).as_bytes());
     }
 
     #[test]
     fn test_construct_data_with_tx_power_level() {
         let mut adv_data = netsim_model::AdvertiseData::default();
         adv_data.include_tx_power_level = true;
-        let data = construct_data(&adv_data, &None);
-        // Tx Power (3) = 3 bytes
-        assert_eq!(data, vec![0x02, 0x0A, 20]);
+        let data = construct_data(&adv_data, None, true);
+        // Flags (3) + Tx Power (3) = 6 bytes
+        let mut expected = FLAGS_DATA.to_vec();
+        expected.extend_from_slice(&[0x02, 0x0A, 20]);
+        assert_eq!(data, expected);
     }
 
     #[test]
@@ -214,11 +240,13 @@ mod tests {
             uuid: "180F".to_string(), // Battery Service 16-bit UUID
             data: vec![],
         });
-        let data = construct_data(&adv_data, &None);
-        // Service (1 len + 1 type + 4 uuid elements) = 6 bytes
+        let data = construct_data(&adv_data, None, true);
+        // Flags (3) + Service (1 len + 1 type + 4 uuid elements) = 9 bytes
         // 180D -> 0x0D, 0x18
         // 180F -> 0x0F, 0x18
-        assert_eq!(data, vec![0x05, 0x03, 0x0D, 0x18, 0x0F, 0x18]);
+        let mut expected = FLAGS_DATA.to_vec();
+        expected.extend_from_slice(&[0x05, 0x03, 0x0D, 0x18, 0x0F, 0x18]);
+        assert_eq!(data, expected);
     }
 
     #[test]
@@ -232,9 +260,9 @@ mod tests {
             uuid: "180D11".to_string(), // 3 bytes (invalid specification length)
             data: vec![],
         });
-        let data = construct_data(&adv_data, &None);
-        // Invalid services should be skipped. Empty data remains.
-        assert_eq!(data, Vec::<u8>::new());
+        let data = construct_data(&adv_data, None, true);
+        // Invalid services should be skipped. Only Flags remain.
+        assert_eq!(data, FLAGS_DATA);
     }
 
     #[test]
@@ -245,12 +273,27 @@ mod tests {
                 .services
                 .push(netsim_model::Service { uuid: format!("{:04X}", 0x1800 + i), data: vec![] });
         }
-        let data = construct_data(&adv_data, &None);
-        assert_eq!(data.len(), 30);
-        assert_eq!(data[0], 29);
-        assert_eq!(data[1], 0x02);
-        assert_eq!(&data[2..4], &[0x00, 0x18]);
-        assert_eq!(&data[28..30], &[0x0D, 0x18]);
+        let data = construct_data(&adv_data, None, true);
+        // Flags (3) + header (2) + 13 UUIDs (26) = 31 bytes
+        assert_eq!(data.len(), 31);
+        assert_eq!(&data[..3], &FLAGS_DATA);
+        assert_eq!(data[3], 27);
+        assert_eq!(data[4], 0x02);
+        assert_eq!(&data[5..7], &[0x00, 0x18]);
+        assert_eq!(&data[29..31], &[0x0C, 0x18]);
+    }
+
+    #[test]
+    fn test_construct_data_scan_response_omits_flags() {
+        let empty = netsim_model::AdvertiseData::default();
+        assert_eq!(construct_data(&empty, None, false), Vec::<u8>::new());
+
+        let mut scan_resp = netsim_model::AdvertiseData::default();
+        scan_resp.manufacturer_data = vec![0x01, 0x02, 0x03, 0x04];
+        assert_eq!(
+            construct_data(&scan_resp, None, false),
+            vec![0x05, 0xFF, 0x01, 0x02, 0x03, 0x04]
+        );
     }
 
     #[test]
@@ -260,9 +303,11 @@ mod tests {
             uuid: "180D1122".to_string(), // 32-bit UUID (4 bytes)
             data: vec![],
         });
-        let data = construct_data(&adv_data, &None);
-        // 1 len + 1 type (0x05 for complete 32-bit UUID) + 4 reversed uuid bytes (22, 11, 0D, 18)
-        assert_eq!(data, vec![0x05, 0x05, 0x22, 0x11, 0x0D, 0x18]);
+        let data = construct_data(&adv_data, None, true);
+        // Flags (3) + 1 len + 1 type (0x05) + 4 reversed uuid bytes
+        let mut expected = FLAGS_DATA.to_vec();
+        expected.extend_from_slice(&[0x05, 0x05, 0x22, 0x11, 0x0D, 0x18]);
+        assert_eq!(data, expected);
     }
 
     #[test]
@@ -272,37 +317,35 @@ mod tests {
             uuid: "0000180D-0000-1000-8000-00805F9B34FB".to_string(), // 128-bit UUID (16 bytes)
             data: vec![],
         });
-        let data = construct_data(&adv_data, &None);
-        // 1 len + 1 type (0x07 for complete 128-bit UUID) + 16 reversed uuid bytes
-        assert_eq!(data.len(), 18);
-        assert_eq!(data[0], 17);
-        assert_eq!(data[1], 0x07);
-        assert_eq!(
-            &data[2..],
-            &[
-                0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x0D, 0x18,
-                0x00, 0x00,
-            ]
-        );
+        let data = construct_data(&adv_data, None, true);
+        // Flags (3) + 1 len + 1 type (0x07) + 16 reversed uuid bytes
+        let mut expected = FLAGS_DATA.to_vec();
+        expected.extend_from_slice(&[
+            17, 0x07, 0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x0D,
+            0x18, 0x00, 0x00,
+        ]);
+        assert_eq!(data, expected);
     }
 
     #[test]
     fn test_construct_data_with_tx_power_near_limit() {
         let mut adv_data = netsim_model::AdvertiseData::default();
-        adv_data.manufacturer_data = vec![0x42; 26]; // 28 bytes with header (1 len + 1 type + 26 data)
+        // 25 bytes with header (1 len + 1 type + 23 data)
+        adv_data.manufacturer_data = vec![0x42; 23];
         adv_data.include_tx_power_level = true;
-        let data = construct_data(&adv_data, &None);
-        // 28 bytes mfg data + 3 bytes tx power = 31 bytes (exactly MAX_AD_PAYLOAD_LEN)
+        let data = construct_data(&adv_data, None, true);
+        // 3 bytes flags + 25 bytes mfg data + 3 bytes tx power = 31 bytes
         assert_eq!(data.len(), 31);
-        assert_eq!(data[0], 27);
-        assert_eq!(data[1], AD_TYPE_MANUFACTURER_SPECIFIC);
+        assert_eq!(&data[..3], &FLAGS_DATA);
+        assert_eq!(data[3], 24);
+        assert_eq!(data[4], AD_TYPE_MANUFACTURER_SPECIFIC);
         assert_eq!(&data[28..], &[2, AD_TYPE_TX_POWER_LEVEL, 20]);
 
         // If manufacturer data exceeds space, tx power is omitted
         let mut adv_data_overflow = netsim_model::AdvertiseData::default();
-        adv_data_overflow.manufacturer_data = vec![0x42; 27]; // 29 bytes with header
+        adv_data_overflow.manufacturer_data = vec![0x42; 24]; // 26 bytes with header
         adv_data_overflow.include_tx_power_level = true;
-        let data_overflow = construct_data(&adv_data_overflow, &None);
+        let data_overflow = construct_data(&adv_data_overflow, None, true);
         assert_eq!(data_overflow.len(), 29);
     }
 
