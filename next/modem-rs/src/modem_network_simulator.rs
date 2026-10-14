@@ -34,7 +34,7 @@ use crate::{
     profiles::get_builtin_profile,
     time::{Clock, SystemClock},
     types::{
-        ClirMode, CommandAction, HostEvent, ModemError, ModemId, ModemSink, NumberPresentation,
+        CommandAction, HangupReason, HostEvent, ModemError, ModemId, ModemSink, NumberPresentation,
         Parsable, PhoneNumber,
     },
 };
@@ -170,6 +170,9 @@ impl IncomingSmsQueue {
         self.link_state.is_idle() && self.pending.is_empty()
     }
 }
+
+/// Maximum number of call diversions allowed for a single call (3GPP TS 24.082).
+const MAX_CALL_FORWARD_HOPS: usize = 5;
 
 /// Manages multiple modems and simulates network interactions.
 pub struct ModemNetworkSimulator {
@@ -526,7 +529,7 @@ impl ModemNetworkSimulator {
         match action {
             CommandAction::InitiateCall(args) => {
                 self.metrics.calls_initiated.fetch_add(1, AtomicOrdering::Relaxed);
-                effects.extend(self.initiate_call(id, &args.number, args.clir, args.is_emergency));
+                effects.extend(self.initiate_call(id, &args.number, args.is_emergency));
             }
             CommandAction::AnswerCall(answered_modem_id) => {
                 self.metrics.calls_answered.fetch_add(1, AtomicOrdering::Relaxed);
@@ -553,7 +556,11 @@ impl ModemNetworkSimulator {
             CommandAction::HangupCall { initiator, target_peer, reason } => {
                 self.metrics.calls_hung_up.fetch_add(1, AtomicOrdering::Relaxed);
 
-                if let Some(target) = self.modems.get_mut(&target_peer)
+                if let Some(forward_effects) =
+                    self.try_forward_hangup(initiator, target_peer, reason)
+                {
+                    effects.extend(forward_effects);
+                } else if let Some(target) = self.modems.get_mut(&target_peer)
                     && target.receive_hangup_from_peer_id(initiator)
                 {
                     let urc = reason.as_urc_str(target.quirks.goldfish_ril_37_or_earlier);
@@ -776,12 +783,89 @@ impl ModemNetworkSimulator {
         self.apply_to_modem(id, |modem| modem.update_physical_channel_configs())
     }
 
+    fn try_forward_hangup(
+        &mut self,
+        initiator: ModemId,
+        caller_id: ModemId,
+        reason: HangupReason,
+    ) -> Option<Vec<(ModemId, ModemEffect)>> {
+        let fwd_num = self.modems.get(&initiator)?.forward_number_on_release(reason)?;
+        let caller = self.modems.get(&caller_id)?;
+        let outbound = caller
+            .calls()
+            .iter()
+            .find(|c| c.state.is_outbound() && c.peer_id == Some(initiator))?;
+        let caller_number = caller.phone_number();
+        let presentation = outbound.number_presentation;
+
+        self.route_call_to_number(
+            caller_id,
+            caller_number.as_ref(),
+            presentation,
+            &fwd_num,
+            vec![caller_id, initiator],
+        )
+    }
+
+    fn route_call_to_number(
+        &mut self,
+        caller_id: ModemId,
+        caller_number: Option<&PhoneNumber>,
+        presentation: NumberPresentation,
+        initial_target: &PhoneNumber,
+        mut visited: Vec<ModemId>,
+    ) -> Option<Vec<(ModemId, ModemEffect)>> {
+        let mut current_target = initial_target.clone();
+        loop {
+            let normalized_target = current_target.normalized();
+            if visited.len() > 1
+                && caller_number.is_some_and(|n| n.normalized() == normalized_target)
+            {
+                return None;
+            }
+            let target_id = self.find_peer_id(caller_id, |m| {
+                m.phone_number().as_ref().is_some_and(|n| n.normalized() == normalized_target)
+            });
+
+            let Some(tid) = target_id else {
+                if let Some(caller) = self.modems.get_mut(&caller_id) {
+                    caller.set_outbound_call_peer_id(None);
+                }
+                return Some(Vec::new());
+            };
+
+            if visited.contains(&tid) {
+                return None;
+            }
+
+            if let Some(next_number) = self.modems.get(&tid)?.incoming_call_forward_target() {
+                if visited.len() > MAX_CALL_FORWARD_HOPS {
+                    return None;
+                }
+                visited.push(tid);
+                current_target = next_number;
+                continue;
+            }
+
+            let callee_effects = self.modems.get_mut(&tid)?.trigger_incoming_call(
+                caller_number,
+                presentation,
+                Some(caller_id),
+            )?;
+
+            if let Some(caller) = self.modems.get_mut(&caller_id) {
+                caller.set_outbound_call_peer_id(Some(tid));
+            }
+
+            return Some(callee_effects.into_iter().map(|e| (tid, e)).collect());
+        }
+    }
+
     /// Initiates a call from one modem to another (Internal).
     fn initiate_call(
         &mut self,
         caller_id: ModemId,
         phone_number: &PhoneNumber,
-        clir: ClirMode,
         is_emergency: bool,
     ) -> Vec<(ModemId, ModemEffect)> {
         debug!(
@@ -813,49 +897,40 @@ impl ModemNetworkSimulator {
                 );
             }
         }
-        // Find target
-        let normalized_target = phone_number.normalized();
-        let target_id = self.find_peer_id(caller_id, |m| {
-            m.phone_number().as_ref().is_some_and(|n| n.normalized() == normalized_target)
-        });
-        debug!("[Network] target_id found for call: {:?}", target_id);
 
-        if let Some(tid) = target_id {
-            let caller_number = self.modems.get(&caller_id).and_then(|m| m.phone_number());
-            let number_presentation = match clir {
-                ClirMode::Invocation => NumberPresentation::Restricted,
-                _ => NumberPresentation::Allowed,
-            };
-
-            let ring_effects = self.modems.get_mut(&tid).and_then(|callee| {
-                callee.trigger_incoming_call(
-                    caller_number.as_ref(),
-                    number_presentation,
-                    Some(caller_id),
-                )
-            });
-
-            if let Some(ring_effects) = ring_effects {
-                if let Some(caller) = self.modems.get_mut(&caller_id)
-                    && caller.set_outbound_call_peer_id(tid)
-                {
-                    debug!(
-                        "[Network] Set peer_id of caller {} to {} for dialing call",
-                        caller_id, tid
-                    );
-                }
-                return ring_effects.into_iter().map(|e| (tid, e)).collect();
+        let (caller_number, presentation) = match self.modems.get(&caller_id) {
+            Some(caller) => {
+                let number = caller.phone_number();
+                let presentation = caller
+                    .calls()
+                    .iter()
+                    .find(|c| c.state.is_outbound())
+                    .map_or(NumberPresentation::Allowed, |c| c.number_presentation);
+                (number, presentation)
             }
+            None => (None, NumberPresentation::Allowed),
+        };
 
-            if let Some(caller) = self.modems.get_mut(&caller_id)
-                && caller.fail_outbound_call()
-            {
-                // Goldfish RIL uses RING to trigger callStateChanged -> AT+CLCC poll when an unroutable outbound call is cleared.
-                return vec![(caller_id, ModemEffect::Response(b"RING\r\n".to_vec()))];
+        match self.route_call_to_number(
+            caller_id,
+            caller_number.as_ref(),
+            presentation,
+            phone_number,
+            vec![caller_id],
+        ) {
+            Some(effects) => effects,
+            None => {
+                if let Some(caller) = self.modems.get_mut(&caller_id)
+                    && caller.fail_outbound_call()
+                {
+                    let urc =
+                        HangupReason::Normal.as_urc_str(caller.quirks.goldfish_ril_37_or_earlier);
+                    vec![(caller_id, ModemEffect::Response(urc.as_bytes().to_vec()))]
+                } else {
+                    Vec::new()
+                }
             }
         }
-
-        Vec::new()
     }
 
     /// Ticks the event loop.

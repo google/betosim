@@ -19,7 +19,7 @@ use tracing::{debug, error};
 
 use crate::{
     CardState, RadioAdmission,
-    call_service::{CallCommand, CallService},
+    call_service::{CallCommand, CallResponse, CallService, RingToken},
     config::{ProfileMetadata, SimProfile},
     constants::CALL_RING_TIMEOUT,
     data_service::DataService,
@@ -32,9 +32,9 @@ use crate::{
     sup_service::SupService,
     time::Clock,
     types::{
-        AT_OK, CmeError, CommandAction, CopsMode, ExecutionResult, HangupReason, ModemError,
-        ModemId, NumberPresentation, PhoneNumber, RadioPowerLevel, RegistrationUnsolicitedMode,
-        Response, SignalQuality,
+        AT_OK, CallForwardCondition, CmeError, CommandAction, CopsMode, ExecutionResult,
+        HangupReason, ModemError, ModemId, NumberPresentation, PhoneNumber, RadioPowerLevel,
+        RegistrationUnsolicitedMode, Response, SignalQuality,
     },
 };
 
@@ -61,7 +61,7 @@ pub enum State {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModemEvent {
-    CallRingTimeout { call_token: u32 },
+    CallRingTimeout { ring_token: RingToken },
     AttachNetwork,
     TestEvent,
 }
@@ -114,34 +114,29 @@ impl ModemImpl {
             debug!("[Modem {}] radio off / unregistered, suppressing MT call", self.id);
             return None;
         }
+        let ring_token =
+            self.call_service.ring(number.cloned(), number_presentation, peer_id).ok()?;
         let mut effects = Vec::new();
-        let call_res = self.call_service.ring(number.cloned(), number_presentation, peer_id);
-        let result: ExecutionResult = call_res.into();
-        if let ExecutionResult::Success(handled) = result {
-            for response in handled.responses {
-                let resp_str = response.to_string();
-                if !resp_str.is_empty() {
-                    effects.push(ModemEffect::Response(resp_str.into_bytes()));
-                }
-            }
-            if self.sup_service.clip_enabled() {
-                let val = number_presentation.format_number(number);
-                let mode = if number_presentation == NumberPresentation::Allowed && number.is_none()
-                {
-                    NumberPresentation::NotAvailable as u8
-                } else {
-                    number_presentation as u8
-                };
-                let number_str = val.number;
-                let clip = format!("+CLIP: \"{number_str}\",{},,,,{mode}\r\n", val.toa);
-                effects.push(ModemEffect::Response(clip.into_bytes()));
-            }
+        effects.push(ModemEffect::Response(CallResponse::Ring.to_string().into_bytes()));
 
-            effects.push(ModemEffect::Schedule {
-                delay: CALL_RING_TIMEOUT,
-                event: ModemEvent::CallRingTimeout { call_token: 1 },
-            });
+        if self.sup_service.clip_enabled() {
+            let val = number_presentation.format_number(number);
+            let mode = if number_presentation == NumberPresentation::Allowed && number.is_none() {
+                NumberPresentation::NotAvailable as u8
+            } else {
+                number_presentation as u8
+            };
+            let number_str = val.number;
+            let clip = format!("+CLIP: \"{number_str}\",{},,,,{mode}\r\n", val.toa);
+            effects.push(ModemEffect::Response(clip.into_bytes()));
         }
+
+        let delay = self.sup_service.no_reply_timeout().unwrap_or(CALL_RING_TIMEOUT);
+        effects.push(ModemEffect::Schedule {
+            delay,
+            event: ModemEvent::CallRingTimeout { ring_token },
+        });
+
         Some(effects)
     }
 
@@ -292,8 +287,35 @@ impl ModemImpl {
         self.call_service.remote_answer()
     }
 
-    pub(crate) fn set_outbound_call_peer_id(&mut self, peer_id: ModemId) -> bool {
-        self.call_service.set_outbound_peer_id(peer_id)
+    pub(crate) fn set_outbound_call_peer_id(&mut self, peer_id: Option<ModemId>) {
+        self.call_service.set_outbound_peer_id(peer_id);
+    }
+
+    pub(crate) fn incoming_call_forward_target(&self) -> Option<PhoneNumber> {
+        if let Some(target) =
+            self.sup_service.active_forward_number(CallForwardCondition::Unconditional)
+        {
+            return Some(target);
+        }
+        if !self.network_service.can_terminate_voice_call() {
+            return self.sup_service.active_forward_number(CallForwardCondition::NotReachable);
+        }
+        let is_busy = self.call_service.has_inbound()
+            || (self.call_service.has_active()
+                && !self.sup_service.is_voice_call_waiting_enabled());
+        if is_busy {
+            return self.sup_service.active_forward_number(CallForwardCondition::Busy);
+        }
+        None
+    }
+
+    pub(crate) fn forward_number_on_release(&self, reason: HangupReason) -> Option<PhoneNumber> {
+        let condition = match reason {
+            HangupReason::Busy => CallForwardCondition::Busy,
+            HangupReason::NoAnswer => CallForwardCondition::NoReply,
+            HangupReason::Normal => return None,
+        };
+        self.sup_service.active_forward_number(condition)
     }
 
     pub(crate) fn calls(&self) -> &[crate::call_service::CallStatus] {
@@ -522,8 +544,8 @@ impl ModemImpl {
             ModemEvent::TestEvent => {
                 effects.push(ModemEffect::Response(b"TEST_EVENT_FIRED\r\n".to_vec()));
             }
-            ModemEvent::CallRingTimeout { call_token } => {
-                let res = self.call_service.handle_ring_timeout(self.id, call_token);
+            ModemEvent::CallRingTimeout { ring_token } => {
+                let res = self.call_service.handle_ring_timeout(self.id, ring_token);
                 let result: ExecutionResult = res.into();
                 if let ExecutionResult::Success(handled) = result {
                     for action in handled.actions {

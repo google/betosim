@@ -99,6 +99,23 @@ impl CallState {
     }
 }
 
+/// Monotonic token pairing a scheduled `ModemEvent::CallRingTimeout` with the
+/// specific incoming call attempt that armed it.
+///
+/// Because scheduled timer events are not cancelled when a call is answered or
+/// hung up (and `CallId` slots are immediately reused), `handle_ring_timeout`
+/// checks this token so a stale timer from an earlier call does not drop a
+/// newer incoming call.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RingToken(u32);
+
+impl RingToken {
+    pub(crate) fn next(&mut self) -> Self {
+        self.0 = self.0.wrapping_add(1);
+        *self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallStatus {
     pub id: u8,
@@ -109,6 +126,7 @@ pub struct CallStatus {
     pub number: Option<PhoneNumber>,
     pub peer_id: Option<ModemId>,
     pub number_presentation: NumberPresentation,
+    pub(crate) ring_token: Option<RingToken>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +145,11 @@ impl std::fmt::Display for CallResponse {
             CallResponse::Ring => write!(f, "RING\r\n"),
             CallResponse::CurrentCalls(calls) => {
                 for call in calls {
-                    let val = call.number_presentation.format_number(call.number.as_ref());
+                    let presentation = match call.direction {
+                        CallDirection::Outgoing => NumberPresentation::Allowed,
+                        CallDirection::Incoming => call.number_presentation,
+                    };
+                    let val = presentation.format_number(call.number.as_ref());
                     write!(
                         f,
                         "+CLCC: {},{},{},{},{},{},{}\r\n",
@@ -162,6 +184,7 @@ pub struct CallService {
     calls: Vec<CallStatus>,
     mute: bool,
     emergency_mode: bool,
+    next_ring_token: RingToken,
 }
 
 impl CallService {
@@ -181,12 +204,9 @@ impl CallService {
         self.calls.iter().any(|c| c.state.is_outbound() && c.peer_id == Some(peer_id))
     }
 
-    pub(crate) fn set_outbound_peer_id(&mut self, peer_id: ModemId) -> bool {
+    pub(crate) fn set_outbound_peer_id(&mut self, peer_id: Option<ModemId>) {
         if let Some(call) = self.calls.iter_mut().find(|c| c.state.is_outbound()) {
-            call.peer_id = Some(peer_id);
-            true
-        } else {
-            false
+            call.peer_id = peer_id;
         }
     }
 
@@ -221,6 +241,18 @@ impl CallService {
         number_presentation: NumberPresentation,
         peer_id: Option<ModemId>,
     ) -> Option<u8> {
+        self.add_call_with_token(state, direction, number, number_presentation, peer_id, None)
+    }
+
+    fn add_call_with_token(
+        &mut self,
+        state: CallState,
+        direction: CallDirection,
+        number: Option<PhoneNumber>,
+        number_presentation: NumberPresentation,
+        peer_id: Option<ModemId>,
+        ring_token: Option<RingToken>,
+    ) -> Option<u8> {
         let id = self.allocate_id()?;
         self.calls.push(CallStatus {
             id,
@@ -231,6 +263,7 @@ impl CallService {
             number,
             peer_id,
             number_presentation,
+            ring_token,
         });
         Some(id)
     }
@@ -289,10 +322,10 @@ impl CallService {
         actions
     }
 
-    pub fn handle_ring_timeout(&mut self, id: ModemId, _call_token: u32) -> CallResult {
+    pub fn handle_ring_timeout(&mut self, id: ModemId, ring_token: RingToken) -> CallResult {
         let mut actions = Vec::new();
         self.calls.retain(|call| {
-            if call.state.is_inbound() {
+            if call.state.is_inbound() && call.ring_token == Some(ring_token) {
                 if let Some(peer_id) = call.peer_id {
                     actions.push(CommandAction::HangupCall {
                         initiator: id,
@@ -313,16 +346,24 @@ impl CallService {
         number: Option<PhoneNumber>,
         number_presentation: NumberPresentation,
         peer_id: Option<ModemId>,
-    ) -> CallResult {
+    ) -> Result<RingToken, ExecutionResult> {
         let initial_state =
             if self.has_active() { CallState::Waiting } else { CallState::Incoming };
+        let ring_token = self.next_ring_token.next();
         if self
-            .add_call(initial_state, CallDirection::Incoming, number, number_presentation, peer_id)
+            .add_call_with_token(
+                initial_state,
+                CallDirection::Incoming,
+                number,
+                number_presentation,
+                peer_id,
+                Some(ring_token),
+            )
             .is_none()
         {
             return Err(ExecutionResult::error());
         }
-        Ok(Some(CallResponse::Ring))
+        Ok(ring_token)
     }
 
     pub fn receive_peer_hold(&mut self, peer_id: ModemId, on_hold: bool) {
@@ -369,7 +410,7 @@ impl CallService {
         self.calls.iter().any(|c| c.state.is_outbound())
     }
 
-    fn has_inbound(&self) -> bool {
+    pub(crate) fn has_inbound(&self) -> bool {
         self.calls.iter().any(|c| c.state.is_inbound())
     }
 
@@ -377,7 +418,7 @@ impl CallService {
         self.calls.iter().any(|c| c.state.is_foreground())
     }
 
-    fn has_active(&self) -> bool {
+    pub(crate) fn has_active(&self) -> bool {
         self.has_call_in_state(CallState::Active)
     }
 
@@ -461,12 +502,20 @@ impl CallService {
             }
         }
 
+        let call_clir =
+            if args.clir == ClirMode::SubscriptionDefault { clir_default } else { args.clir };
+
+        let number_presentation = match call_clir {
+            ClirMode::Invocation => NumberPresentation::Restricted,
+            _ => NumberPresentation::Allowed,
+        };
+
         if self
             .add_call(
                 CallState::Dialing,
                 CallDirection::Outgoing,
                 Some(args.number.clone()),
-                NumberPresentation::Allowed,
+                number_presentation,
                 None,
             )
             .is_none()
@@ -474,9 +523,6 @@ impl CallService {
             return Err(ExecutionResult::error());
         }
         debug!("[CallService] Calls after dial: {:?}", self.calls);
-
-        let call_clir =
-            if args.clir == ClirMode::SubscriptionDefault { clir_default } else { args.clir };
 
         actions.push(CommandAction::InitiateCall(DialArgs {
             number: args.number,

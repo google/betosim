@@ -888,7 +888,7 @@ fn test_mt_incoming_call_delivery_matrix() {
     world.send_and_expect_ok("B", "AT+CFUN=0");
     world.send_and_expect_ok("A", &format!("ATD{TEST_PHONE_NUMBER_LONG_B};"));
     world.then_no_response("B");
-    world.then_response_is("A", "RING");
+    world.then_response_is("A", "NO CARRIER");
     world.assert_clcc("A", &[]);
 
     let (id_b, _) = world.get_modem("B");
@@ -903,7 +903,7 @@ fn test_mt_incoming_call_delivery_matrix() {
         .set_voice_registration(RegistrationStatus::NotRegistered);
     world.send_and_expect_ok("A", &format!("ATD{TEST_PHONE_NUMBER_LONG_B};"));
     world.then_no_response("B");
-    world.then_response_is("A", "RING");
+    world.then_response_is("A", "NO CARRIER");
     world.assert_clcc("A", &[]);
 
     // Callee Radio On (AT+CFUN=1) but Emergency Registration: caller dials, callee
@@ -915,7 +915,7 @@ fn test_mt_incoming_call_delivery_matrix() {
         .set_voice_registration(RegistrationStatus::Emergency);
     world.send_and_expect_ok("A", &format!("ATD{TEST_PHONE_NUMBER_LONG_B};"));
     world.then_no_response("B");
-    world.then_response_is("A", "RING");
+    world.then_response_is("A", "NO CARRIER");
     world.assert_clcc("A", &[]);
 
     // Callee Radio On (AT+CFUN=1) + Registered: caller dials, callee gets RING /
@@ -981,4 +981,298 @@ fn test_goldfish_37_udub_and_timeout_preserves_ring() {
     world.then_response_is("B", "RING");
     world.assert_idle("A");
     world.assert_idle("B");
+}
+
+#[test]
+fn test_call_forwarding_unconditional() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+
+    world.send_and_expect_ok("C", "AT+CLIP=1");
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=0,3,2,2,\"{CALL_PEER_C}\",1"));
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("C", "RING");
+    let num_a = TEST_PHONE_NUMBER_LONG_A.strip_prefix('+').unwrap_or(TEST_PHONE_NUMBER_LONG_A);
+    world.then_response_contains("C", &format!("+CLIP: \"{num_a}\""));
+    world.then_no_response("B");
+
+    world.send_and_expect_ok("C", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B}I;"));
+    world.then_response_contains("C", "RING");
+    world.then_response_contains("C", "+CLIP: \"\",129,,,,1");
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,2,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("C");
+}
+
+#[test]
+fn test_call_forwarding_busy_ndub() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+    world.given_modem_with_number("D", "444");
+
+    world.send_and_expect_ok("C", "AT+CLIP=1");
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=1,3,2,2,\"{CALL_PEER_C}\",1"));
+
+    world.connect_call("B", "D");
+    world.assert_clcc("B", &[&format!("+CLCC: 1,0,0,0,0,444,{TOA_NATIONAL}")]);
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("C", "RING");
+    let num_a = TEST_PHONE_NUMBER_LONG_A.strip_prefix('+').unwrap_or(TEST_PHONE_NUMBER_LONG_A);
+    world.then_response_contains("C", &format!("+CLIP: \"{num_a}\""));
+    world.then_no_response("B");
+    world.assert_clcc("B", &[&format!("+CLCC: 1,0,0,0,0,444,{TOA_NATIONAL}")]);
+
+    world.send_and_expect_ok("C", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.hangup("B");
+    world.then_response_is("D", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+    world.assert_idle("D");
+}
+
+#[test]
+fn test_call_forwarding_busy_udub() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+    world.given_modem_with_number("D", "444");
+
+    world.send_and_expect_ok("C", "AT+CLIP=1");
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=1,3,2,2,\"{CALL_PEER_C}\",1"));
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("B", "RING");
+
+    world.send_and_expect_ok("B", "ATH");
+    world.then_response_contains("C", "RING");
+    let num_a = TEST_PHONE_NUMBER_LONG_A.strip_prefix('+').unwrap_or(TEST_PHONE_NUMBER_LONG_A);
+    world.then_response_contains("C", &format!("+CLIP: \"{num_a}\""));
+
+    world.send_and_expect_ok("C", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+
+    world.send_and_expect_ok("B", "AT+CCWA=1,1,1");
+    world.connect_call("B", "D");
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.assert_clcc(
+        "B",
+        &[
+            &format!("+CLCC: 1,0,0,0,0,444,{TOA_NATIONAL}"),
+            &format!("+CLCC: 2,1,5,0,0,{num_a},{TOA_INTERNATIONAL}"),
+        ],
+    );
+
+    world.release_held_calls("B");
+    world.then_response_contains("C", "RING");
+    world.then_response_contains("C", &format!("+CLIP: \"{num_a}\""));
+
+    world.send_and_expect_ok("C", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+    world.assert_clcc("B", &[&format!("+CLCC: 1,0,0,0,0,444,{TOA_NATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.hangup("B");
+    world.then_response_is("D", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+    world.assert_idle("D");
+}
+
+#[test]
+fn test_call_forwarding_no_reply_and_stale_timer_guard() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+
+    world.send_and_expect_ok("C", "AT+CLIP=1");
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=2,3,2,2,\"{CALL_PEER_C}\",1,\"\",\"\",,10"));
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("B", "RING");
+
+    world.when_time_advances_ms(2000);
+    world.send_and_expect_ok("B", "ATH");
+    world.then_response_is("A", "BUSY");
+    world.assert_idle("A");
+    world.assert_idle("B");
+
+    world.when_time_advances_ms(3000);
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("B", "RING");
+
+    world.when_time_advances_ms(5000);
+    world.then_no_response("C");
+
+    world.when_time_advances_ms(5100);
+    world.then_response_contains("C", "RING");
+    let num_a = TEST_PHONE_NUMBER_LONG_A.strip_prefix('+').unwrap_or(TEST_PHONE_NUMBER_LONG_A);
+    world.then_response_contains("C", &format!("+CLIP: \"{num_a}\""));
+
+    world.send_and_expect_ok("C", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.when_time_advances_ms(20000);
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+}
+
+#[test]
+fn test_call_forwarding_not_reachable() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+
+    world.send_and_expect_ok("C", "AT+CLIP=1");
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=3,3,2,2,\"{CALL_PEER_C}\",1"));
+
+    world.send_and_expect_ok("B", "AT+CFUN=0");
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_no_response("B");
+
+    world.then_response_contains("C", "RING");
+    let num_a = TEST_PHONE_NUMBER_LONG_A.strip_prefix('+').unwrap_or(TEST_PHONE_NUMBER_LONG_A);
+    world.then_response_contains("C", &format!("+CLIP: \"{num_a}\""));
+
+    world.send_and_expect_ok("C", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("C", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("C", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("C");
+}
+
+#[test]
+fn test_call_forwarding_multi_hop_and_loop_rejection() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+    world.given_modem_with_number("D", "444");
+
+    world.send_and_expect_ok("D", "AT+CLIP=1");
+
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=0,3,2,2,\"{CALL_PEER_C}\",1"));
+    world.send_and_expect_ok("C", "AT+CCFCU=0,3,2,2,\"444\",1");
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_no_response("B");
+    world.then_no_response("C");
+
+    world.then_response_contains("D", "RING");
+    let num_a = TEST_PHONE_NUMBER_LONG_A.strip_prefix('+').unwrap_or(TEST_PHONE_NUMBER_LONG_A);
+    world.then_response_contains("D", &format!("+CLIP: \"{num_a}\""));
+
+    world.send_and_expect_ok("D", "ATA");
+    world.then_response_is("A", "RING");
+
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_clcc("D", &[&format!("+CLCC: 1,1,0,0,0,{num_a},{TOA_INTERNATIONAL}")]);
+
+    world.hangup("A");
+    world.then_response_is("D", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+    world.assert_idle("D");
+
+    world.send_and_expect_ok("C", &format!("AT+CCFCU=0,3,2,2,\"{CALL_PEER_B}\",1"));
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_is("A", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+}
+
+#[test]
+fn test_call_forwarding_late_forward_fallback_and_offnet() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.given_modem_with_number("C", CALL_PEER_C);
+
+    world.send_and_expect_ok("B", &format!("AT+CCFCU=1,3,2,2,\"{CALL_PEER_C}\",1"));
+    world.send_and_expect_ok("C", &format!("AT+CCFCU=0,3,2,2,\"{CALL_PEER_B}\",1"));
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("B", "RING");
+
+    world.send_and_expect_ok("B", "ATH");
+    world.then_response_is("A", "BUSY");
+    world.assert_idle("A");
+    world.assert_idle("B");
+    world.assert_idle("C");
+
+    world.send_and_expect_ok("B", "AT+CCFCU=1,3,2,2,\"999\",1");
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_B};"));
+    world.then_response_contains("B", "RING");
+
+    world.send_and_expect_ok("B", "ATH");
+    world.assert_clcc("A", &[&format!("+CLCC: 1,0,2,0,0,{CALL_PEER_B},{TOA_NATIONAL}")]);
+    world.assert_idle("B");
+
+    world.hangup("A");
+    world.assert_idle("A");
 }
