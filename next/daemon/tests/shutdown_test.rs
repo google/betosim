@@ -141,3 +141,19 @@ async fn test_startup_shutdown_timeout() {
 
     world.then_daemon_shutdown(3000).await;
 }
+
+// Scenario: Daemon releases its discovery files when it shuts down
+//   Given a running Netsim Daemon that owns netsim.ini.lock
+//   When the startup grace period expires with no devices
+//   Then netsim.ini is removed and netsim.ini.lock can be acquired again
+#[tokio::test]
+async fn test_shutdown_releases_discovery_files() {
+    let mut args = daemon::Args::default();
+    args.startup_timeout = Some(1000);
+    args.logtostderr = true;
+    let mut world = World::new_with_args(args).await;
+    world.when_spawn_daemon().await;
+
+    world.then_daemon_shutdown(5000).await;
+    world.then_discovery_files_released();
+}

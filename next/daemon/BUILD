@@ -53,6 +53,10 @@ netsim_rust_library(
     rustc_env = {
         "NETSIM_VERSION_SUFFIX": "{STABLE_NETSIM_VERSION_SUFFIX}",
     },
+    select_deps = select({
+        "@bazel_tools//src/conditions:windows": ["@winapi-util"],
+        "//conditions:default": [],
+    }),
     stamp = 1,
     test_deps = [
         "//proto",

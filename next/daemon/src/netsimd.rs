@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     env, io,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicU32},
+    sync::{Arc, OnceLock, atomic::AtomicU32},
     time::Duration,
 };
 
@@ -51,7 +51,7 @@ use tokio::{
     sync::mpsc,
     task::JoinSet,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 #[cfg(feature = "cuttlefish")]
 use {
     packet_stream::{
@@ -64,13 +64,26 @@ use {
 
 use crate::{
     args::Args,
-    ini_file::{IniFile, IniFileAccess, IniFileInitialized, IniFileUninitialized, NetsimConfig},
+    ini_file::{
+        FileIdentity, IniFile, IniFileAccess, IniFileInitialized, IniFileUninitialized,
+        NetsimConfig,
+    },
     logger,
     version::{get_version, strip_version_suffix},
 };
 
 const MAX_INIT_RETRIES: i32 = 100;
 const RETRY_DELAY: Duration = Duration::from_millis(100);
+/// Number of gRPC connection attempts before treating a lock owner as unresponsive.
+const LIVENESS_PROBE_ATTEMPTS: u32 = 2;
+/// Per-attempt deadline for [`is_netsimd_alive`] gRPC connection probes.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+/// Maximum time to wait for `DeviceActor` and secondary actors to shut down.
+const ACTOR_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time to wait for session artifact zipping while `netsim.ini.lock` is held.
+const ARTIFACT_ZIP_TIMEOUT: Duration = Duration::from_secs(3);
+/// Hard deadline for daemon teardown before forcing process exit to release `netsim.ini.lock`.
+const TEARDOWN_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, PartialEq)]
 pub enum RunResult {
@@ -271,6 +284,56 @@ where
     arg_port.or_else(|| get_env_port_impl(env_var, get_var))
 }
 
+/// Checks whether the netsimd gRPC server on `grpc_port` is responsive,
+/// matching legacy `rust_main.rs::is_netsimd_alive`.
+async fn is_netsimd_alive(grpc_port: u16) -> bool {
+    static PROBE_ENV: OnceLock<Arc<grpcio::Environment>> = OnceLock::new();
+    if grpc_port == 0 {
+        return false;
+    }
+    let addr = format!("localhost:{grpc_port}");
+    let env = PROBE_ENV.get_or_init(|| Arc::new(grpcio::Environment::new(1))).clone();
+    for attempt in 1..=LIVENESS_PROBE_ATTEMPTS {
+        let channel = grpcio::ChannelBuilder::new(env.clone()).connect(&addr);
+        let deadline = grpcio::Deadline::from(LIVENESS_PROBE_TIMEOUT);
+        if channel.wait_for_connected(deadline).await {
+            return true;
+        }
+        debug!("is_netsimd_alive attempt {attempt}/{LIVENESS_PROBE_ATTEMPTS} failed for {addr}");
+    }
+    false
+}
+
+/// Runs `zip_fn` on Tokio's blocking pool and waits at most `timeout_duration`
+/// for it. Returns `true` when `zip_fn` returned before the deadline (a zip
+/// error is logged but still counts, because the task is finished) and `false`
+/// when it timed out or panicked. On timeout the blocking task is detached via
+/// `runtime.shutdown_background()` as `run()` exits, so callers must not assume
+/// the artifact directory is quiescent afterwards.
+async fn run_zip_with_timeout<F, E>(timeout_duration: Duration, zip_fn: F) -> bool
+where
+    F: FnOnce() -> Result<(), E> + Send + 'static,
+    E: std::fmt::Debug + Send + 'static,
+{
+    let Ok(join_result) =
+        tokio::time::timeout(timeout_duration, tokio::task::spawn_blocking(zip_fn)).await
+    else {
+        warn!("Artifact zip exceeded {timeout_duration:?}; leaving artifacts unzipped");
+        return false;
+    };
+    match join_result {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
+            error!("Failed to zip artifacts: {err:?}");
+            true
+        }
+        Err(err) => {
+            error!("Artifact zip task panicked: {err}");
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn setup_grpc_listener(
     streams: &mut Streams,
@@ -353,6 +416,8 @@ pub struct NetsimDaemon {
     streams: Streams,
     /// Path to the discovery INI file.
     ini_path: PathBuf,
+    /// The platform file identity of the `.lock` file held by this daemon.
+    ini_lock_inode: Option<FileIdentity>,
     /// Client for interacting with the Device Service.
     device_client: DeviceClient,
     /// Client for interacting with the Capture Service.
@@ -481,6 +546,7 @@ impl NetsimDaemon {
         );
 
         let mut attempts = 0;
+        let mut stale_eviction_attempted = false;
         // Support Cuttlefish multi-instance by using instance-specific INI
         // files.
         let instance_num = get_instance(args.instance);
@@ -499,17 +565,45 @@ impl NetsimDaemon {
                 }
                 // This instance is a Reader, another daemon is already running.
                 IniFileAccess::Reader(config) => {
-                    info!("Lock held by another process. Reading config: {:?}", config);
-                    return Ok(StartUpMode::Client(config));
-                }
-                IniFileAccess::Initializing => {
-                    if attempts >= MAX_INIT_RETRIES {
-                        return Err(init_error("Timed out waiting for daemon to initialize"));
+                    if is_netsimd_alive(config.grpc_port).await {
+                        info!("Lock held by another process. Reading config: {:?}", config);
+                        return Ok(StartUpMode::Client(config));
                     }
-                    attempts += 1;
-                    tokio::time::sleep(RETRY_DELAY).await;
+                    if stale_eviction_attempted {
+                        return Err(init_error(format!(
+                            "Existing netsimd (pid {:?}) on port {} is unresponsive and stale lock could not be evicted",
+                            config.pid, config.grpc_port
+                        )));
+                    }
+                    warn!(
+                        "Existing netsimd (pid {:?}) on port {} is unresponsive; removing stale netsim.ini and starting new daemon",
+                        config.pid, config.grpc_port
+                    );
+                    if IniFile::evict_stale_lock(&discovery_dir, instance_num, &config)
+                        .map_err(init_error)?
+                    {
+                        stale_eviction_attempted = true;
+                        continue;
+                    }
+                    // Nothing was evicted: another process holds
+                    // `netsim.ini.init.lock` (evicting the same owner,
+                    // initializing as the new owner, or briefly inspecting
+                    // the discovery files) or the files changed since
+                    // `try_acquire`. Re-observe after the `Initializing`
+                    // back-off instead of spending the single eviction
+                    // attempt on a no-op.
+                    info!("Stale lock eviction skipped; re-checking discovery files");
                 }
+                // Another process holds `netsim.ini.init.lock` or has not
+                // published `netsim.ini` yet.
+                IniFileAccess::Initializing => {}
             }
+
+            if attempts >= MAX_INIT_RETRIES {
+                return Err(init_error("Timed out waiting for daemon to initialize"));
+            }
+            attempts += 1;
+            tokio::time::sleep(RETRY_DELAY).await;
         }
     }
 
@@ -912,6 +1006,7 @@ impl NetsimDaemon {
         // are running so external launchers cannot connect before actors are ready.
         let initialized_guard = ini_guard.write(&ini_data).map_err(init_error)?;
         let ini_path = initialized_guard.path().to_path_buf();
+        let ini_lock_inode = initialized_guard.lock_inode();
         info!("Wrote to INI file {}", ini_path.display());
 
         // Clone chip_clients for NetsimDaemon
@@ -941,6 +1036,7 @@ impl NetsimDaemon {
                 capture_task,
                 artifact_dir,
                 ini_path,
+                ini_lock_inode,
                 link_client: Box::new(link_client),
                 slirp_client,
                 chip_clients: daemon_chip_clients,
@@ -1059,8 +1155,10 @@ impl NetsimDaemon {
         }
     }
 
-    /// Runs the main event loop for the daemon.
-    pub async fn run_daemon(mut self) -> RunResult {
+    /// Runs the main event loop for the daemon, then tears it down while
+    /// `ini_guard` keeps `netsim.ini.lock` held; the guard is released only
+    /// after `self` (actors, gRPC server, C++ FFI state) has been dropped.
+    pub async fn run_daemon(mut self, ini_guard: IniFileInitialized) -> RunResult {
         info!("Netsimd started {}", if self.args.no_shutdown { "--no-shutdown" } else { "" });
 
         let shutdown_signal = shutdown_signal();
@@ -1118,7 +1216,26 @@ impl NetsimDaemon {
                 }
             }
         }
-        IniFileInitialized::unlink_discovery_files(&self.ini_path);
+        // Hard watchdog armed with a disarm channel: if actor teardown,
+        // zipping, or a C++ FFI destructor (`Drop` of `NetsimDaemon`) hangs
+        // past `TEARDOWN_WATCHDOG_TIMEOUT` while `netsim.ini.lock` is still
+        // held, force-exit so the OS releases `.lock`. Dropping `watchdog_tx`
+        // at the end of `run_daemon` disconnects the channel so the blocking
+        // task exits immediately on normal shutdown.
+        let (watchdog_tx, watchdog_rx) = std::sync::mpsc::channel::<()>();
+        tokio::task::spawn_blocking(move || {
+            if matches!(
+                watchdog_rx.recv_timeout(TEARDOWN_WATCHDOG_TIMEOUT),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                error!(
+                    "Teardown watchdog fired after {TEARDOWN_WATCHDOG_TIMEOUT:?}; exiting without releasing resources gracefully"
+                );
+                std::process::exit(2);
+            }
+        });
+
+        IniFileInitialized::unlink_discovery_file_if_owner(&self.ini_path, self.ini_lock_inode);
         let grpc_shutdown = self._grpc_server.as_mut().map(|s| {
             let fut = s.shutdown();
             s.cancel_all_calls();
@@ -1126,7 +1243,7 @@ impl NetsimDaemon {
         });
         // Shut down DeviceActor sequentially before secondary actors so it can
         // query active chip stats during on_shutdown() without racing against
-        // chip actor termination. Bound entire teardown to 5s.
+        // chip actor termination.
         let teardown = async {
             if !self.device_task.is_finished() {
                 let _ = self.device_client.shutdown().await;
@@ -1135,13 +1252,24 @@ impl NetsimDaemon {
             self.shutdown_actors(grpc_shutdown).await;
             self.join_set.shutdown().await;
         };
-        let _ = tokio::time::timeout(Duration::from_secs(5), teardown).await;
-        info!("NetsimDaemon main loop exited.");
-        // Zip all artifacts synchronously while `.lock` is still held so the next
-        // instance cannot call remove_old_artifacts_in_dir() until zipping completes.
-        if let Err(err) = zip_artifacts_in_dir(&self.artifact_dir) {
-            error!("Failed to zip artifacts: {err:?}");
+        if tokio::time::timeout(ACTOR_TEARDOWN_TIMEOUT, teardown).await.is_err() {
+            warn!(
+                "Actor teardown exceeded {ACTOR_TEARDOWN_TIMEOUT:?} timeout; continuing shutdown"
+            );
         }
+        info!("NetsimDaemon main loop exited.");
+        // Zip session artifacts under `ARTIFACT_ZIP_TIMEOUT` while `.lock` is
+        // still held so a successor cannot call `remove_old_artifacts_in_dir()`
+        // mid-zip.
+        let artifact_dir = self.artifact_dir.clone();
+        let _ =
+            run_zip_with_timeout(ARTIFACT_ZIP_TIMEOUT, move || zip_artifacts_in_dir(&artifact_dir))
+                .await;
+        // Drop `self` (C++ FFI / gRPC destructors) and then the discovery lock
+        // while the teardown watchdog is still armed, then disarm it.
+        drop(self);
+        drop(ini_guard);
+        drop(watchdog_tx);
         RunResult::ExitedNormally
     }
 }
@@ -1210,10 +1338,24 @@ async fn shutdown_signal() {
     }
 }
 
-#[tokio::main]
-pub async fn run() -> RunResult {
+pub fn run() -> RunResult {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return RunResult::InitializationError(format!("Failed to start Tokio runtime: {err}"));
+        }
+    };
+    let result = runtime.block_on(run_async());
+    // Detach any wedged worker or timed-out `spawn_blocking` task immediately
+    // once `run_async()` returns (`Runtime::drop` would block indefinitely, and
+    // waiting after `ini_guard` is dropped would keep `.lock`-less cleanup alive).
+    runtime.shutdown_background();
+    result
+}
+
+async fn run_async() -> RunResult {
     match NetsimDaemon::new().await {
-        Ok(StartUpMode::Owner(daemon, _ini_guard)) => daemon.run_daemon().await,
+        Ok(StartUpMode::Owner(daemon, ini_guard)) => daemon.run_daemon(ini_guard).await,
         Ok(StartUpMode::Client(config)) => {
             // If we are just a client, we shouldn't necessarily fail, but if
             // the user expected to start a NEW daemon, they might
@@ -1506,5 +1648,49 @@ mod tests {
             "guid-3".to_string(),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_is_netsimd_alive_rejects_unresponsive_port() {
+        assert!(!is_netsimd_alive(0).await);
+
+        // A listener that never completes the HTTP/2 handshake models a
+        // wedged netsimd that still holds its port open.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_port = listener.local_addr().unwrap().port();
+
+        let probe_start = std::time::Instant::now();
+        assert!(!is_netsimd_alive(dead_port).await);
+        // Two 400ms attempts must stay well below the Initializing retry budget.
+        assert!(probe_start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn test_run_zip_with_timeout_bounds_a_stalled_zip() {
+        assert!(run_zip_with_timeout(Duration::from_secs(1), || Ok::<(), io::Error>(())).await);
+        // A zip error is logged but still counts as finished.
+        assert!(
+            run_zip_with_timeout(Duration::from_secs(1), || Err(io::Error::other("zip failed")))
+                .await
+        );
+        // A panicking blocking task resolves `JoinError` to `false` without aborting teardown.
+        assert!(
+            !run_zip_with_timeout(Duration::from_secs(1), || -> Result<(), io::Error> {
+                panic!("zip panicked");
+            })
+            .await
+        );
+
+        // A zip task that never returns must not block teardown.
+        let (unblock_zip_tx, unblock_zip_rx) = std::sync::mpsc::channel::<()>();
+        let start = std::time::Instant::now();
+        let finished_in_time = run_zip_with_timeout(Duration::from_millis(100), move || {
+            let _ = unblock_zip_rx.recv();
+            Ok::<(), io::Error>(())
+        })
+        .await;
+        assert!(!finished_in_time);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(unblock_zip_tx);
     }
 }

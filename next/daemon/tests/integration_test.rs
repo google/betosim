@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -248,4 +248,156 @@ async fn test_daemon_startup_with_valid_proxy() {
 
     let version = world.when_get_version().await;
     assert!(!version.is_empty());
+}
+
+// Feature: Discovery lock recovery
+//
+//   As an emulator launching netsimd
+//   I want a wedged netsimd's stale netsim.ini.lock to be evicted
+//   So that later AVDs can still boot
+
+// Scenario: Start daemon while an unresponsive owner holds netsim.ini.lock
+//   Given netsim.ini advertises a gRPC port that accepts TCP but never answers
+//   And its owner still holds netsim.ini.lock
+//   When I start netsimd in the same discovery directory
+//   Then it evicts the stale lock and starts as Owner on a new port
+//   And the evicted owner releasing its lock leaves the new netsim.ini intact
+#[tokio::test]
+async fn test_startup_evicts_stale_lock_of_unresponsive_owner() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("netsim_stale_lock_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
+
+    let wedged_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = wedged_listener.local_addr().unwrap().port();
+
+    let stale_ini = daemon::IniFile::new_for_dir(temp_dir.clone(), 1).unwrap();
+    let Ok(daemon::IniFileAccess::Writer(stale_writer)) = stale_ini.try_acquire() else {
+        panic!("Wedged owner should be Writer");
+    };
+    let mut stale_data = HashMap::new();
+    stale_data.insert("pid".to_string(), std::process::id().to_string());
+    stale_data.insert("grpc.port".to_string(), dead_port.to_string());
+    let stale_guard = stale_writer.write(&stale_data).unwrap();
+
+    let mut args = daemon::Args::default();
+    args.logtostderr = true;
+    args.no_shutdown = true;
+
+    // `new_with_args_in_dir` panics unless the daemon starts as Owner.
+    let mut world = World::new_with_args_in_dir(temp_dir, args).await;
+    world.when_spawn_daemon().await;
+
+    assert_ne!(world.grpc_port, dead_port);
+    assert!(!stale_guard.still_owns_lock());
+    world.then_discovery_file_advertises_port(world.grpc_port);
+
+    drop(stale_guard);
+    world.then_discovery_file_advertises_port(world.grpc_port);
+}
+
+// Scenario: Start daemon while a responsive owner holds netsim.ini.lock
+//   Given a running Netsim Daemon
+//   When I start another netsimd in the same discovery directory
+//   Then it becomes a Client of the running daemon instead of evicting it
+#[tokio::test]
+async fn test_startup_joins_responsive_owner_as_client() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+
+    let mut args = daemon::Args::default();
+    args.logtostderr = true;
+    args.no_shutdown = true;
+
+    match world.when_start_daemon_in_same_dir(args).await {
+        daemon::StartUpMode::Client(config) => assert_eq!(config.grpc_port, world.grpc_port),
+        _ => panic!("Expected StartUpMode::Client"),
+    }
+    world.then_discovery_file_advertises_port(world.grpc_port);
+}
+
+// Scenario: Another process holds netsim.ini.init.lock when the stale owner
+// is first evicted
+//   Given netsim.ini advertises a gRPC port that accepts TCP but never answers
+//   And its owner still holds netsim.ini.lock
+//   And another starter takes netsim.ini.init.lock as soon as the liveness
+//     probe connects and keeps it past the probe deadline
+//   When I start netsimd in the same discovery directory
+//   Then its first eviction attempt is skipped rather than consumed
+//   And it evicts the stale lock once netsim.ini.init.lock is released
+//   And starts as Owner on a new port
+#[tokio::test]
+async fn test_startup_retries_eviction_after_busy_init_lock() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("netsim_busy_init_lock_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
+
+    let wedged_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = wedged_listener.local_addr().unwrap().port();
+
+    let stale_ini = daemon::IniFile::new_for_dir(temp_dir.clone(), 1).unwrap();
+    let Ok(daemon::IniFileAccess::Writer(stale_writer)) = stale_ini.try_acquire() else {
+        panic!("Wedged owner should be Writer");
+    };
+    let mut stale_data = HashMap::new();
+    stale_data.insert("pid".to_string(), std::process::id().to_string());
+    stale_data.insert("grpc.port".to_string(), dead_port.to_string());
+    let stale_guard = stale_writer.write(&stale_data).unwrap();
+
+    // The probe connecting to the dead port is the first moment that is
+    // provably after `try_acquire` released `netsim.ini.init.lock` and at
+    // least 400 ms before `evict_stale_lock` runs. Hold the init lock from
+    // then until well past the 2 x 400 ms probe deadline so the first
+    // eviction attempt finds it busy, then release it so the retry succeeds.
+    let init_lock_path = temp_dir.join("netsim.ini.init.lock");
+    let init_lock_holder = tokio::task::spawn_blocking(move || {
+        wedged_listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let probe_stream = loop {
+            match wedged_listener.accept() {
+                Ok((stream, _)) => break Some(stream),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("accept on the dead port failed: {err}"),
+            }
+        };
+        let probe_connected = probe_stream.is_some();
+        if probe_connected {
+            let init_lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&init_lock_path)
+                .unwrap();
+            init_lock.lock().unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            // Unlock explicitly so the daemon's retry never observes a lazily
+            // released LockFileEx lock on Windows.
+            init_lock.unlock().unwrap();
+            drop(init_lock);
+        }
+        // Keep the accepted probe connection and the dead port open (still
+        // silent) until the test ends.
+        (probe_connected, probe_stream, wedged_listener)
+    });
+
+    let mut args = daemon::Args::default();
+    args.logtostderr = true;
+    args.no_shutdown = true;
+
+    // `new_with_args_in_dir` panics unless the daemon starts as Owner.
+    let mut world = World::new_with_args_in_dir(temp_dir, args).await;
+    world.when_spawn_daemon().await;
+
+    let (probe_connected, _probe_stream, _wedged_listener) = init_lock_holder.await.unwrap();
+    assert!(probe_connected, "the dead port never saw the liveness probe connect");
+    assert_ne!(world.grpc_port, dead_port);
+    assert!(!stale_guard.still_owns_lock());
+    world.then_discovery_file_advertises_port(world.grpc_port);
+    drop(stale_guard);
 }

@@ -57,6 +57,9 @@ regex = "1"
 serde_json = "1.0"
 tempfile = "3"
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
 [features]
 default = []
 cuttlefish = ["dep:rootcanal-server"]

@@ -94,8 +94,9 @@ impl RootcanalWorld {
             panic!("Daemon already spawned");
         }
         if let Some(daemon) = self.daemon.take() {
+            let ini_guard = self._ini_guard.take().expect("Discovery lock already handed over");
             let task = tokio::spawn(async move {
-                let _ = daemon.run_daemon().await;
+                let _ = daemon.run_daemon(ini_guard).await;
             });
             self.daemon_task = Some(task);
             // Allow time to yield and let the listener bind
