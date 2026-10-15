@@ -106,6 +106,26 @@ impl CaptureClient {
     pub async fn patch_capture(&self, chip_id: ChipId, enabled: bool) -> Result<(), ClientError> {
         self.update_capture(chip_id, enabled).err_into::<ClientError>().await.map(|_| ())
     }
+
+    /// Subscribes to a live PCAP stream of a chip's packets.
+    ///
+    /// The first message is the PCAP global header, then one message per
+    /// record. Works whether or not file capture is enabled. The stream ends
+    /// when the capture is deleted; drop the receiver to unsubscribe.
+    pub async fn stream_capture(
+        &self,
+        chip_id: ChipId,
+    ) -> Result<tokio::sync::mpsc::Receiver<Bytes>, ClientError> {
+        match self
+            .inner
+            .perform_action(Some(chip_id), CaptureAction::Subscribe)
+            .err_into::<ClientError>()
+            .await?
+        {
+            CaptureActionResult::Stream(receiver) => Ok(receiver),
+            res => Err(ClientError::Recv(format!("Unexpected result from Subscribe: {res:?}"))),
+        }
+    }
 }
 
 impl Deref for CaptureClient {

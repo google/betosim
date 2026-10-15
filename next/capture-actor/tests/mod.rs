@@ -15,4 +15,5 @@
 mod flush_test;
 mod format_test;
 mod lifecycle_test;
+mod stream_test;
 pub mod world;

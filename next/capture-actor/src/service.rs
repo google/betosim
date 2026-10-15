@@ -33,6 +33,7 @@ use crate::{
     modem_pcap::ModemPcapWriter,
     nci_pcap::NciPcapWriter,
     uwb_pcap::UwbPcapWriter,
+    wifi_pcap::WifiPcapWriter,
     writer::{CaptureWriter, DataLinkType, PcapWriter},
 };
 
@@ -49,7 +50,7 @@ pub(crate) struct InternalCaptureInfo {
     /// This is used by the stream wrappers to check if capture is enabled
     /// without locking the actor.
     #[serde(skip)]
-    enabled_flag: Arc<AtomicBool>,
+    pub(crate) enabled_flag: Arc<AtomicBool>,
     /// Used to determine whether further error logs while writing captures
     /// should be suppressed.
     #[serde(skip)]
@@ -129,6 +130,14 @@ impl CaptureActor {
         Ok(())
     }
 
+    fn file_stats(&self, id: ChipId) -> (u64, u64) {
+        self.writers
+            .get(&id)
+            .and_then(|ws| ws.iter().find(|w| w.is_file()))
+            .map(|w| w.get_stats())
+            .unwrap_or_default()
+    }
+
     async fn update_entity(
         &mut self,
         entity: &mut InternalCaptureInfo,
@@ -138,26 +147,32 @@ impl CaptureActor {
         let state_changed = entity.info.enabled != enabled;
         if state_changed {
             entity.info.enabled = enabled;
-            entity.enabled_flag.store(enabled, Ordering::SeqCst);
         }
 
         if entity.info.enabled {
             if state_changed || (entity.info.seconds == 0 && entity.info.nanos == 0) {
                 (entity.info.seconds, entity.info.nanos) = current_epoch_timestamp();
             }
-            // If enabling, create a writer if one does not exist.
-            if !self.writers.contains_key(&entity.info.chip_id) {
+            if !self
+                .writers
+                .get(&entity.info.chip_id)
+                .is_some_and(|ws| ws.iter().any(|w| w.is_file()))
+            {
                 let writer = self.create_writer(entity).await?;
-                self.writers.insert(entity.info.chip_id, writer);
+                self.writers.entry(entity.info.chip_id).or_default().push(writer);
             }
-        } else {
-            // Disable capture: remove the writer to close the file
-            if let Some(mut writer) = self.writers.remove(&entity.info.chip_id)
-                && let Err(err) = writer.flush().await
+        } else if let Some(writers) = self.writers.get_mut(&entity.info.chip_id) {
+            if let Some(i) = writers.iter().position(|w| w.is_file())
+                && let Err(err) = writers.swap_remove(i).flush().await
             {
                 warn!("Failed to flush writer for chip {}: {err}", entity.info.chip_id);
             }
+            if writers.is_empty() {
+                self.writers.remove(&entity.info.chip_id);
+            }
         }
+        let active = self.writers.get(&entity.info.chip_id).is_some_and(|ws| !ws.is_empty());
+        entity.enabled_flag.store(active, Ordering::SeqCst);
         Ok(())
     }
 
@@ -166,11 +181,16 @@ impl CaptureActor {
         entity: &InternalCaptureInfo,
         _ctx: &mut DynContext<Self>,
     ) -> Result<(), CaptureError> {
-        if let Some(mut writer) = self.writers.remove(&entity.info.chip_id)
-            && let Err(err) = writer.flush().await
-        {
-            warn!("Failed to flush writer for chip {}: {err}", entity.info.chip_id);
+        // Removing and dropping all writers flushes the file and closes every
+        // subscriber's channel.
+        if let Some(writers) = self.writers.remove(&entity.info.chip_id) {
+            for mut writer in writers {
+                if let Err(err) = writer.flush().await {
+                    warn!("Failed to flush writer for chip {}: {err}", entity.info.chip_id);
+                }
+            }
         }
+        entity.enabled_flag.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -190,7 +210,7 @@ impl CaptureActor {
         let writer: Box<dyn CaptureWriter> = match entity.info.chip_kind {
             ChipKind::BLUETOOTH => BluetoothH4Writer::new(&filepath).await?,
             ChipKind::UWB => UwbPcapWriter::new(&filepath).await?,
-            ChipKind::WIFI => crate::wifi_pcap::WifiPcapWriter::new(&filepath).await?,
+            ChipKind::WIFI => WifiPcapWriter::new(&filepath).await?,
             ChipKind::ETHERNET | ChipKind::CELLULAR_DATA => {
                 EthernetPcapWriter::new(&filepath).await?
             }
@@ -204,11 +224,29 @@ impl CaptureActor {
         Ok(writer)
     }
 
+    /// Adds a live stream writer for the chip to the writer multimap.
+    fn subscribe(&mut self, entity: &InternalCaptureInfo) -> mpsc::Receiver<bytes::Bytes> {
+        let (writer, receiver): (Box<dyn CaptureWriter>, _) = match entity.info.chip_kind {
+            ChipKind::BLUETOOTH => BluetoothH4Writer::new_stream(),
+            ChipKind::UWB => UwbPcapWriter::new_stream(),
+            ChipKind::WIFI => WifiPcapWriter::new_stream(),
+            ChipKind::ETHERNET | ChipKind::CELLULAR_DATA => EthernetPcapWriter::new_stream(),
+            ChipKind::NFC => NciPcapWriter::new_stream(),
+            ChipKind::CELLULAR => ModemPcapWriter::new_stream(),
+            ChipKind::UNSPECIFIED => {
+                let (pcap, rx) = PcapWriter::new_stream(DataLinkType::User0);
+                (Box::new(pcap), rx)
+            }
+        };
+        self.writers.entry(entity.info.chip_id).or_default().push(writer);
+        entity.enabled_flag.store(true, Ordering::SeqCst);
+        receiver
+    }
+
     fn list_entities(&self) -> Vec<CaptureInfo> {
         let mut infos = Vec::new();
         for e in self.entities.values() {
-            let (records_written, bytes_written) =
-                self.writers.get(&e.info.chip_id).map(|w| w.get_stats()).unwrap_or_default();
+            let (records_written, bytes_written) = self.file_stats(e.info.chip_id);
             let mut info = e.info.clone();
             info.records_written = records_written;
             info.bytes_written = bytes_written;
@@ -243,8 +281,7 @@ impl CaptureActor {
             CaptureAction::Patch { chip_id, enabled } => {
                 if entity.info.chip_id == chip_id {
                     self.update_entity(entity, enabled, ctx).await?;
-                    let (records_written, bytes_written) =
-                        self.writers.get(&chip_id).map(|w| w.get_stats()).unwrap_or_default();
+                    let (records_written, bytes_written) = self.file_stats(chip_id);
                     let mut info = entity.info.clone();
                     info.records_written = records_written;
                     info.bytes_written = bytes_written;
@@ -264,6 +301,7 @@ impl CaptureActor {
                 Ok(CaptureActionResult::Success)
             }
             CaptureAction::Create { .. } => Ok(CaptureActionResult::Success),
+            CaptureAction::Subscribe => Ok(CaptureActionResult::Stream(self.subscribe(entity))),
         }
     }
 }
@@ -298,8 +336,7 @@ impl ActorService for CaptureActor {
         _ctx: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
         if let Some(entity) = self.entities.get(&id) {
-            let (records_written, bytes_written) =
-                self.writers.get(&id).map(|w| w.get_stats()).unwrap_or_default();
+            let (records_written, bytes_written) = self.file_stats(id);
             let mut info = entity.info.clone();
             info.records_written = records_written;
             info.bytes_written = bytes_written;
@@ -317,8 +354,7 @@ impl ActorService for CaptureActor {
     ) -> Result<Self::Entity, Self::Error> {
         let mut entity = self.entities.remove(&id).ok_or_else(|| ChipError::ChipNotFound(id))?;
         self.update_entity(&mut entity, update, _ctx).await?;
-        let (records_written, bytes_written) =
-            self.writers.get(&id).map(|w| w.get_stats()).unwrap_or_default();
+        let (records_written, bytes_written) = self.file_stats(id);
         let mut info = entity.info.clone();
         info.records_written = records_written;
         info.bytes_written = bytes_written;
@@ -356,6 +392,9 @@ impl ActorService for CaptureActor {
         };
 
         let Some(mut entity) = self.entities.remove(&id) else {
+            if action == CaptureAction::Subscribe {
+                return Err(ChipError::ChipNotFound(id).into());
+            }
             return Ok(CaptureActionResult::Success);
         };
 

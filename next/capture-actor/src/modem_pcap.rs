@@ -49,7 +49,9 @@
 use std::{io, path::Path, time::SystemTime};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use capture_api::Direction;
+use tokio::sync::mpsc;
 
 use crate::writer::{CaptureWriter, DataLinkType, PcapWriter};
 
@@ -88,6 +90,11 @@ impl ModemPcapWriter {
     pub(crate) async fn new<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn CaptureWriter>> {
         let inner = PcapWriter::new(path, DataLinkType::User0).await?;
         Ok(Box::new(Self { inner }))
+    }
+
+    pub(crate) fn new_stream() -> (Box<dyn CaptureWriter>, mpsc::Receiver<Bytes>) {
+        let (inner, rx) = PcapWriter::new_stream(DataLinkType::User0);
+        (Box::new(Self { inner }), rx)
     }
 
     /// Encapsulates an AT command or response into a standard 3GPP TS 27.010
@@ -150,5 +157,13 @@ impl CaptureWriter for ModemPcapWriter {
 
     fn get_stats(&self) -> (u64, u64) {
         self.inner.get_stats()
+    }
+
+    fn is_file(&self) -> bool {
+        self.inner.is_file()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
     }
 }

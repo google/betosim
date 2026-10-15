@@ -29,7 +29,7 @@ use netsim_rest_api::{
 };
 
 #[derive(Debug)]
-struct MockLinkClient;
+pub(crate) struct MockLinkClient;
 
 #[async_trait::async_trait]
 impl link_api::LinkClient for MockLinkClient {
@@ -75,7 +75,13 @@ async fn test_handle_request_version() {
     let ap_client = ApClient::new(actor_framework::ResourceClient::new(ap_tx));
     let link_client = Arc::new(MockLinkClient);
 
-    let server = RestServer::new(device_client, link_client, ap_client, "0.3.92".to_string());
+    let server = RestServer::new(
+        device_client,
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
 
     let response = server.handle_request(&Method::GET, "/v1/version", &[]).await;
     let status = response.status();
@@ -94,7 +100,13 @@ async fn test_handle_request_links() {
     let ap_client = ApClient::new(actor_framework::ResourceClient::new(ap_tx));
     let link_client = Arc::new(MockLinkClient);
 
-    let server = RestServer::new(device_client, link_client, ap_client, "0.3.92".to_string());
+    let server = RestServer::new(
+        device_client,
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
 
     let response = server.handle_request(&Method::GET, "/v1/links", &[]).await;
     let status = response.status();
@@ -113,7 +125,13 @@ async fn test_handle_request_not_found() {
     let ap_client = ApClient::new(actor_framework::ResourceClient::new(ap_tx));
     let link_client = Arc::new(MockLinkClient);
 
-    let server = RestServer::new(device_client, link_client, ap_client, "0.3.92".to_string());
+    let server = RestServer::new(
+        device_client,
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
 
     let response = server.handle_request(&Method::GET, "/v1/unknown", &[]).await;
     let status = response.status();
@@ -139,7 +157,13 @@ async fn test_handle_request_aps() {
         }
     });
 
-    let server = RestServer::new(device_client, link_client, ap_client, "0.3.92".to_string());
+    let server = RestServer::new(
+        device_client,
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
 
     let response = server.handle_request(&Method::GET, "/v1/aps", &[]).await;
     let status = response.status();
@@ -170,7 +194,13 @@ async fn test_handle_request_openapi() {
     let ap_client = ApClient::new(actor_framework::ResourceClient::new(ap_tx));
     let link_client = Arc::new(MockLinkClient);
 
-    let server = RestServer::new(device_client, link_client, ap_client, "0.3.92".to_string());
+    let server = RestServer::new(
+        device_client,
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
 
     let response = server.handle_request(&Method::GET, netsim_rest_api::path::OPENAPI, &[]).await;
     let status = response.status();

@@ -17,6 +17,7 @@
 use std::{convert::Infallible, fmt::Display, io::ErrorKind, str::FromStr, sync::Arc};
 
 use ap_actor::{ApClient, ApError};
+use capture_actor::CaptureClient;
 use device_actor::{DeviceClient, DeviceError};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::{
@@ -40,14 +41,15 @@ const MAX_BODY_BYTES: usize = 1 << 20;
 /// Serves the `/v1` HTTP API on `listener` until the task is cancelled.
 ///
 /// The caller binds the listener so it owns port selection and publishing the
-/// bound port; this crate owns the accept loop. Only the REST endpoints are
-/// served here today; the WebSocket endpoint at `/v1/websocket/bt` still has
-/// its own listener.
+/// bound port; this crate owns the accept loop. The REST endpoints and the
+/// `/v1/capture` WebSocket are served here; the WebSocket endpoint at
+/// `/v1/websocket/bt` still has its own listener.
 pub async fn run(
     listener: TcpListener,
     device_client: DeviceClient,
     link_client: Arc<dyn LinkClient>,
     ap_client: ApClient,
+    capture_client: CaptureClient,
     version: String,
 ) {
     match listener.local_addr() {
@@ -55,7 +57,8 @@ pub async fn run(
         Err(e) => warn!("REST API server failed to read local address: {e}"),
     }
 
-    let server = Arc::new(RestServer::new(device_client, link_client, ap_client, version));
+    let server =
+        Arc::new(RestServer::new(device_client, link_client, ap_client, capture_client, version));
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -70,7 +73,10 @@ pub async fn run(
                                 async move { server.serve(req).await }
                             });
                             if let Err(e) =
-                                http1::Builder::new().serve_connection(TokioIo::new(socket), service).await
+                                http1::Builder::new()
+                                    .serve_connection(TokioIo::new(socket), service)
+                                    .with_upgrades()
+                                    .await
                             {
                                 debug!("REST connection error: {e}");
                             }
@@ -108,6 +114,7 @@ pub struct RestServer {
     pub device_client: DeviceClient,
     pub link_client: Arc<dyn LinkClient>,
     pub ap_client: ApClient,
+    pub capture_client: CaptureClient,
     pub version: String,
 }
 
@@ -450,9 +457,10 @@ impl RestServer {
         device_client: DeviceClient,
         link_client: Arc<dyn LinkClient>,
         ap_client: ApClient,
+        capture_client: CaptureClient,
         version: String,
     ) -> Self {
-        Self { device_client, link_client, ap_client, version }
+        Self { device_client, link_client, ap_client, capture_client, version }
     }
 
     fn get_version(&self) -> crate::VersionResponse {
@@ -464,6 +472,12 @@ impl RestServer {
     /// The error type is [`Infallible`] because every failure is reported as an
     /// HTTP status rather than by dropping the connection.
     pub async fn serve(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+        if req.method() == Method::GET
+            && req.uri().path().trim_end_matches('/') == crate::path::CAPTURE
+        {
+            return Ok(crate::capture_stream::upgrade(&self.capture_client, req).await);
+        }
+
         // Split the head from the body so the path can be borrowed rather than
         // copied; consuming the body would otherwise invalidate any borrow of
         // `req`.

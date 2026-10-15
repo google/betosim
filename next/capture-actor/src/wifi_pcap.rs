@@ -24,8 +24,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use capture_api::Direction;
 use netsim_packets::{HwsimCmd, HwsimFrame, HwsimMsg, create_radiotap_packet};
+use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::writer::{CaptureWriter, DataLinkType, PcapWriter};
@@ -42,6 +44,11 @@ impl WifiPcapWriter {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) async fn new<P: AsRef<Path>>(path: P) -> Result<Box<dyn CaptureWriter>> {
         Ok(Box::new(Self { inner: PcapWriter::new(path, DataLinkType::Ieee80211Radio).await? }))
+    }
+
+    pub(crate) fn new_stream() -> (Box<dyn CaptureWriter>, mpsc::Receiver<Bytes>) {
+        let (inner, rx) = PcapWriter::new_stream(DataLinkType::Ieee80211Radio);
+        (Box::new(Self { inner }), rx)
     }
 }
 
@@ -82,6 +89,14 @@ impl CaptureWriter for WifiPcapWriter {
 
     fn get_stats(&self) -> (u64, u64) {
         self.inner.get_stats()
+    }
+
+    fn is_file(&self) -> bool {
+        self.inner.is_file()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
     }
 }
 

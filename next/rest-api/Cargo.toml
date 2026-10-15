@@ -19,12 +19,17 @@ edition = "2024"
 
 [dependencies]
 ap-actor = { path = "../ap-actor" }
+base64 = "0.22"
+bytes = "1.5"
+capture-actor = { path = "../capture-actor" }
 device-actor = { path = "../device-actor" }
+form_urlencoded = "1.2"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 link-api = { path = "../link-api" }
 netsim-model = { path = "../model" }
+ring = "0.17.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = [
@@ -40,3 +45,4 @@ tracing = "0.1"
 [dev-dependencies]
 actor-framework = { path = "../actor-framework" }
 async-trait = "0.1"
+capture-api = { path = "../capture-api" }

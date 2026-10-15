@@ -153,10 +153,15 @@ pub enum CaptureAction {
     Delete { chip_id: ChipId },
     /// Set default capture directory.
     SetCaptureDirectory { path: PathBuf },
+    /// Subscribe to a live PCAP stream of the chip's packets. Independent of
+    /// whether file capture is enabled.
+    Subscribe,
 }
 
 /// Result of an action performed on a capture.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Clone`: [`CaptureActionResult::Stream`] owns a channel receiver.
+#[derive(Debug, Serialize, Deserialize)]
 pub enum CaptureActionResult {
     /// Action succeeded.
     Success,
@@ -165,6 +170,11 @@ pub enum CaptureActionResult {
     /// Returns a high-throughput packet sender.
     #[serde(skip)]
     PacketSender(tokio::sync::mpsc::UnboundedSender<(std::time::SystemTime, Direction, Bytes)>),
+    /// Live PCAP stream: the first message is the PCAP global header, then one
+    /// message per record (record header and payload). The stream ends when
+    /// the capture is deleted.
+    #[serde(skip)]
+    Stream(tokio::sync::mpsc::Receiver<Bytes>),
 }
 
 /// Information about a capture.

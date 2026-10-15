@@ -45,18 +45,19 @@ impl ActorLifecycle for CaptureActor {
             return;
         };
 
-        if !entity.info.enabled {
+        let Some(writers) = self.writers.get_mut(&chip_id) else {
             return;
-        }
+        };
 
-        if let Some(writer) = self.writers.get_mut(&chip_id)
-            && let Err(err) = writer.write_packet(timestamp, direction, &bytes).await
-            && !entity.has_warned_on_write
-        {
-            entity.has_warned_on_write = true;
-            error!(
-                "Packet capture write failed for chip {chip_id}: {err}. Further errors for this chip will be suppressed."
-            );
+        for writer in writers {
+            if let Err(err) = writer.write_packet(timestamp, direction, &bytes).await
+                && !entity.has_warned_on_write
+            {
+                entity.has_warned_on_write = true;
+                error!(
+                    "Packet capture write failed for chip {chip_id}: {err}. Further errors for this chip will be suppressed."
+                );
+            }
         }
     }
 

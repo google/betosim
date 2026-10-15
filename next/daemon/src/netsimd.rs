@@ -1017,6 +1017,7 @@ impl NetsimDaemon {
             device_client.clone(),
             Arc::new(link_client.clone()),
             ap_client.clone(),
+            capture_client.clone(),
             get_version(),
         ));
 

@@ -118,6 +118,7 @@ rust_test_host {
         "tests/format_test.rs",
         "tests/lifecycle_test.rs",
         "tests/mod.rs",
+        "tests/stream_test.rs",
         "tests/world.rs",
     ],
     features: [
