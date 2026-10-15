@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
+# Copyright 2024 The Android Open Source Project
 #
-# Copyright 2024 - The Android Open Source Project
-#
-# Licensed under the Apache License, Version 2.0 (the',  help="License");
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an',  help="AS IS" BASIS,
+# distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+#
 
 import logging
 from pathlib import Path
@@ -23,12 +24,18 @@ from tasks.task import Task
 from utils import (
     AOSP_ROOT,
     EMULATOR_ARTIFACT_PATH,
+    NETSIM_ROOT,
     binary_extension,
     run,
 )
 
 PYTEST_DIR = AOSP_ROOT / "external" / "adt-infra" / "pytest" / "test_embedded"
 OBJS_DIR = AOSP_ROOT / "tools" / "netsim" / "objs"
+BAZEL_OUT_DIR = (
+    NETSIM_ROOT / "bazel-bin"
+    if (NETSIM_ROOT / "bazel-bin").is_dir()
+    else AOSP_ROOT / "bazel-bin" / "external" / "netsim+"
+)
 
 
 class RunPyTestTask(Task):
@@ -37,9 +44,12 @@ class RunPyTestTask(Task):
     super().__init__("RunPyTest")
     self.buildbot = args.buildbot
     self.pytest_input_dir = args.pytest_input_dir
+    self.out = Path(args.out_dir)
 
   def do_run(self):
-    run_pytest_manager = RunPytestManager(self.buildbot, self.pytest_input_dir)
+    run_pytest_manager = RunPytestManager(
+        self.buildbot, self.pytest_input_dir, self.out
+    )
     return run_pytest_manager.process()
 
 
@@ -57,7 +67,7 @@ class RunPytestManager:
     Bots
   """
 
-  def __init__(self, buildbot, pytest_input_dir):
+  def __init__(self, buildbot, pytest_input_dir, out_dir):
     """Initializes the instances based on environment
 
     Args:
@@ -65,16 +75,18 @@ class RunPytestManager:
           self.dir as the directory of the emulator binary
         pytest_input_dir: Defined the directory that includes netsim and
           emulator binaries and libraries. Ignore if the string is empty.
+        out_dir: Defines the out directory of the build environment
     """
-    # Default self.dir
-    self.dir = EMULATOR_ARTIFACT_PATH / "emulator" if buildbot else OBJS_DIR
-
-    # If pytest_input_dir is provided, set self.dir accordingly
     if pytest_input_dir:
       try:
         self.dir = AOSP_ROOT / "tools" / "netsim" / Path(pytest_input_dir)
       except Exception as e:
         logging.error(f"Invalid pytest_input_dir value: {e}")
+    elif buildbot:
+      self.dir = EMULATOR_ARTIFACT_PATH / "emulator"
+    else:
+      # For both Bazel and CMake, we use the distribution directory for local runs
+      self.dir = out_dir / "distribution" / "emulator"
 
   def _run_with_n_attempts(cmd, n):
     for attempt in range(1, n + 1):
@@ -96,7 +108,7 @@ class RunPytestManager:
     emulator_bin = self.dir / binary_extension("emulator")
     if not (self.dir.exists() and emulator_bin.exists()):
       logging.info(
-          "Please run 'scripts/build_tools.sh --InstallEmulator' "
+          "Please run 'scripts/build_tools.py --task InstallEmulator' "
           "before running RunPyTest"
       )
       return False

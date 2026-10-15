@@ -1,0 +1,704 @@
+[
+  {
+    "_index": "packets-2025-12-07",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame_raw": [
+          "80000000ffffffffffff020000000000020000000000000000000000000000006400010000066e657473696d",
+          0,
+          44,
+          0,
+          1
+        ],
+        "frame": {
+          "frame.encap_type": "20",
+          "frame.time": "Dec  7, 2025 01:40:21.000001000 UTC",
+          "frame.time_utc": "Dec  7, 2025 01:40:21.000001000 UTC",
+          "frame.time_epoch": "1765071621.000001000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "44",
+          "frame.cap_len": "44",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "wlan"
+        },
+        "wlan_raw": [
+          "80000000ffffffffffff0200000000000200000000000000",
+          0,
+          24,
+          0,
+          1
+        ],
+        "wlan": {
+          "wlan.fc.type_subtype_raw": [
+            "80",
+            0,
+            1,
+            0,
+            5
+          ],
+          "wlan.fc.type_subtype": "0x0008",
+          "wlan.fc_raw": [
+            "8000",
+            0,
+            2,
+            0,
+            5
+          ],
+          "wlan.fc": "0x8000",
+          "wlan.fc_tree": {
+            "wlan.fc.version_raw": [
+              "0",
+              0,
+              1,
+              3,
+              4
+            ],
+            "wlan.fc.version": "0",
+            "wlan.fc.type_raw": [
+              "0",
+              0,
+              1,
+              12,
+              4
+            ],
+            "wlan.fc.type": "0",
+            "wlan.fc.subtype_raw": [
+              "8",
+              0,
+              1,
+              240,
+              4
+            ],
+            "wlan.fc.subtype": "8",
+            "wlan.flags_raw": [
+              "00",
+              1,
+              1,
+              0,
+              4
+            ],
+            "wlan.flags": "0x00",
+            "wlan.flags_tree": {
+              "wlan.fc.ds_raw": [
+                "0",
+                1,
+                1,
+                3,
+                4
+              ],
+              "wlan.fc.ds": "0x00",
+              "wlan.fc.tods_raw": [
+                "0",
+                1,
+                1,
+                1,
+                2
+              ],
+              "wlan.fc.tods": "0",
+              "wlan.fc.fromds_raw": [
+                "0",
+                1,
+                1,
+                2,
+                2
+              ],
+              "wlan.fc.fromds": "0",
+              "wlan.fc.frag_raw": [
+                "0",
+                1,
+                1,
+                4,
+                2
+              ],
+              "wlan.fc.frag": "0",
+              "wlan.fc.retry_raw": [
+                "0",
+                1,
+                1,
+                8,
+                2
+              ],
+              "wlan.fc.retry": "0",
+              "wlan.fc.pwrmgt_raw": [
+                "0",
+                1,
+                1,
+                16,
+                2
+              ],
+              "wlan.fc.pwrmgt": "0",
+              "wlan.fc.moredata_raw": [
+                "0",
+                1,
+                1,
+                32,
+                2
+              ],
+              "wlan.fc.moredata": "0",
+              "wlan.fc.protected_raw": [
+                "0",
+                1,
+                1,
+                64,
+                2
+              ],
+              "wlan.fc.protected": "0",
+              "wlan.fc.order_raw": [
+                "0",
+                1,
+                1,
+                128,
+                2
+              ],
+              "wlan.fc.order": "0"
+            }
+          },
+          "wlan.duration_raw": [
+            "0",
+            2,
+            2,
+            32767,
+            5
+          ],
+          "wlan.duration": "0",
+          "wlan.ra_raw": [
+            "ffffffffffff",
+            4,
+            6,
+            0,
+            29
+          ],
+          "wlan.ra": "ff:ff:ff:ff:ff:ff",
+          "wlan.ra_tree": {
+            "wlan.ra_resolved_raw": [
+              "ffffffffffff",
+              4,
+              6,
+              0,
+              26
+            ],
+            "wlan.ra_resolved": "Broadcast",
+            "wlan.ra.oui_raw": [
+              "ffffff",
+              4,
+              3,
+              0,
+              6
+            ],
+            "wlan.ra.oui": "16777215",
+            "wlan.ra.lg_raw": [
+              "1",
+              4,
+              3,
+              131072,
+              2
+            ],
+            "wlan.ra.lg": "1",
+            "wlan.ra.ig_raw": [
+              "1",
+              4,
+              3,
+              65536,
+              2
+            ],
+            "wlan.ra.ig": "1",
+            "wlan.addr_raw": [
+              "ffffffffffff",
+              4,
+              6,
+              0,
+              29
+            ],
+            "wlan.addr": "ff:ff:ff:ff:ff:ff",
+            "wlan.addr_resolved_raw": [
+              "ffffffffffff",
+              4,
+              6,
+              0,
+              26
+            ],
+            "wlan.addr_resolved": "Broadcast",
+            "wlan.oui_raw": [
+              "ffffff",
+              4,
+              3,
+              0,
+              6
+            ],
+            "wlan.oui": "16777215",
+            "wlan.addr.lg_raw": [
+              "1",
+              4,
+              3,
+              131072,
+              2
+            ],
+            "wlan.addr.lg": "1",
+            "wlan.addr.ig_raw": [
+              "1",
+              4,
+              3,
+              65536,
+              2
+            ],
+            "wlan.addr.ig": "1"
+          },
+          "wlan.da_raw": [
+            "ffffffffffff",
+            4,
+            6,
+            0,
+            29
+          ],
+          "wlan.da": "ff:ff:ff:ff:ff:ff",
+          "wlan.da_tree": {
+            "wlan.da_resolved_raw": [
+              "ffffffffffff",
+              4,
+              6,
+              0,
+              26
+            ],
+            "wlan.da_resolved": "Broadcast",
+            "wlan.da.oui_raw": [
+              "ffffff",
+              4,
+              3,
+              0,
+              6
+            ],
+            "wlan.da.oui": "16777215",
+            "wlan.da.lg_raw": [
+              "1",
+              4,
+              3,
+              131072,
+              2
+            ],
+            "wlan.da.lg": "1",
+            "wlan.da.ig_raw": [
+              "1",
+              4,
+              3,
+              65536,
+              2
+            ],
+            "wlan.da.ig": "1"
+          },
+          "wlan.ta_raw": [
+            "020000000000",
+            10,
+            6,
+            0,
+            29
+          ],
+          "wlan.ta": "02:00:00:00:00:00",
+          "wlan.ta_tree": {
+            "wlan.ta_resolved_raw": [
+              "020000000000",
+              10,
+              6,
+              0,
+              26
+            ],
+            "wlan.ta_resolved": "02:00:00:00:00:00",
+            "wlan.ta.oui_raw": [
+              "020000",
+              10,
+              3,
+              0,
+              6
+            ],
+            "wlan.ta.oui": "131072",
+            "wlan.ta.lg_raw": [
+              "1",
+              10,
+              3,
+              131072,
+              2
+            ],
+            "wlan.ta.lg": "1",
+            "wlan.ta.ig_raw": [
+              "0",
+              10,
+              3,
+              65536,
+              2
+            ],
+            "wlan.ta.ig": "0"
+          },
+          "wlan.sa_raw": [
+            "020000000000",
+            10,
+            6,
+            0,
+            29
+          ],
+          "wlan.sa": "02:00:00:00:00:00",
+          "wlan.sa_tree": {
+            "wlan.sa_resolved_raw": [
+              "020000000000",
+              10,
+              6,
+              0,
+              26
+            ],
+            "wlan.sa_resolved": "02:00:00:00:00:00",
+            "wlan.sa.oui_raw": [
+              "020000",
+              10,
+              3,
+              0,
+              6
+            ],
+            "wlan.sa.oui": "131072",
+            "wlan.sa.lg_raw": [
+              "1",
+              10,
+              3,
+              131072,
+              2
+            ],
+            "wlan.sa.lg": "1",
+            "wlan.sa.ig_raw": [
+              "0",
+              10,
+              3,
+              65536,
+              2
+            ],
+            "wlan.sa.ig": "0"
+          },
+          "wlan.bssid_raw": [
+            "020000000000",
+            16,
+            6,
+            0,
+            29
+          ],
+          "wlan.bssid": "02:00:00:00:00:00",
+          "wlan.bssid_tree": {
+            "wlan.bssid_resolved_raw": [
+              "020000000000",
+              16,
+              6,
+              0,
+              26
+            ],
+            "wlan.bssid_resolved": "02:00:00:00:00:00",
+            "wlan.bssid.oui_raw": [
+              "020000",
+              16,
+              3,
+              0,
+              6
+            ],
+            "wlan.bssid.oui": "131072",
+            "wlan.bssid.lg_raw": [
+              "1",
+              16,
+              3,
+              131072,
+              2
+            ],
+            "wlan.bssid.lg": "1",
+            "wlan.bssid.ig_raw": [
+              "0",
+              16,
+              3,
+              65536,
+              2
+            ],
+            "wlan.bssid.ig": "0"
+          },
+          "wlan.addr_raw": [
+            "020000000000",
+            10,
+            6,
+            0,
+            29
+          ],
+          "wlan.addr": "02:00:00:00:00:00",
+          "wlan.addr_resolved_raw": [
+            "020000000000",
+            10,
+            6,
+            0,
+            26
+          ],
+          "wlan.addr_resolved": "02:00:00:00:00:00",
+          "wlan.oui_raw": [
+            "020000",
+            10,
+            3,
+            0,
+            6
+          ],
+          "wlan.oui": "131072",
+          "wlan.addr_raw": [
+            "020000000000",
+            16,
+            6,
+            0,
+            29
+          ],
+          "wlan.addr": "02:00:00:00:00:00",
+          "wlan.addr_resolved_raw": [
+            "020000000000",
+            16,
+            6,
+            0,
+            26
+          ],
+          "wlan.addr_resolved": "02:00:00:00:00:00",
+          "wlan.oui_raw": [
+            "020000",
+            16,
+            3,
+            0,
+            6
+          ],
+          "wlan.oui": "131072",
+          "wlan.frag_raw": [
+            "0",
+            22,
+            2,
+            15,
+            5
+          ],
+          "wlan.frag": "0",
+          "wlan.seq_raw": [
+            "0",
+            22,
+            2,
+            65520,
+            5
+          ],
+          "wlan.seq": "0",
+          "wlan.flags.str": "........"
+        },
+        "wlan.mgt_raw": [
+          "00000000000000006400010000066e657473696d",
+          24,
+          20,
+          0,
+          1
+        ],
+        "wlan.mgt": {
+          "wlan.fixed.all_raw": [
+            "000000000000000064000100",
+            24,
+            12,
+            0,
+            0
+          ],
+          "wlan.fixed.all": {
+            "wlan.fixed.timestamp_raw": [
+              "0000000000000000",
+              24,
+              8,
+              0,
+              11
+            ],
+            "wlan.fixed.timestamp": "0",
+            "wlan.fixed.beacon_raw": [
+              "6400",
+              32,
+              2,
+              0,
+              7
+            ],
+            "wlan.fixed.beacon": "100",
+            "wlan.fixed.capabilities_raw": [
+              "0100",
+              34,
+              2,
+              0,
+              5
+            ],
+            "wlan.fixed.capabilities": "0x0001",
+            "wlan.fixed.capabilities_tree": {
+              "wlan.fixed.capabilities.ess_raw": [
+                "1",
+                34,
+                2,
+                1,
+                2
+              ],
+              "wlan.fixed.capabilities.ess": "1",
+              "wlan.fixed.capabilities.ibss_raw": [
+                "0",
+                34,
+                2,
+                2,
+                2
+              ],
+              "wlan.fixed.capabilities.ibss": "0",
+              "wlan.fixed.capabilities.reserved1_raw": [
+                "0",
+                34,
+                2,
+                4,
+                5
+              ],
+              "wlan.fixed.capabilities.reserved1": "0",
+              "wlan.fixed.capabilities.reserved2_raw": [
+                "0",
+                34,
+                2,
+                8,
+                5
+              ],
+              "wlan.fixed.capabilities.reserved2": "0",
+              "wlan.fixed.capabilities.privacy_raw": [
+                "0",
+                34,
+                2,
+                16,
+                2
+              ],
+              "wlan.fixed.capabilities.privacy": "0",
+              "wlan.fixed.capabilities.short_preamble_raw": [
+                "0",
+                34,
+                2,
+                32,
+                2
+              ],
+              "wlan.fixed.capabilities.short_preamble": "0",
+              "wlan.fixed.capabilities.critical_update_flag_raw": [
+                "0",
+                34,
+                2,
+                64,
+                2
+              ],
+              "wlan.fixed.capabilities.critical_update_flag": "0",
+              "wlan.fixed.capabilities.nontran_bss_critical_update_flag_raw": [
+                "0",
+                34,
+                2,
+                128,
+                2
+              ],
+              "wlan.fixed.capabilities.nontran_bss_critical_update_flag": "0",
+              "wlan.fixed.capabilities.spec_man_raw": [
+                "0",
+                34,
+                2,
+                256,
+                2
+              ],
+              "wlan.fixed.capabilities.spec_man": "0",
+              "wlan.fixed.capabilities.qos_raw": [
+                "0",
+                34,
+                2,
+                512,
+                2
+              ],
+              "wlan.fixed.capabilities.qos": "0",
+              "wlan.fixed.capabilities.short_slot_time_raw": [
+                "0",
+                34,
+                2,
+                1024,
+                2
+              ],
+              "wlan.fixed.capabilities.short_slot_time": "0",
+              "wlan.fixed.capabilities.apsd_raw": [
+                "0",
+                34,
+                2,
+                2048,
+                2
+              ],
+              "wlan.fixed.capabilities.apsd": "0",
+              "wlan.fixed.capabilities.radio_measurement_raw": [
+                "0",
+                34,
+                2,
+                4096,
+                2
+              ],
+              "wlan.fixed.capabilities.radio_measurement": "0",
+              "wlan.fixed.capabilities.epd_raw": [
+                "0",
+                34,
+                2,
+                8192,
+                2
+              ],
+              "wlan.fixed.capabilities.epd": "0",
+              "wlan.fixed.capabilities.reserved5_raw": [
+                "0",
+                34,
+                2,
+                16384,
+                5
+              ],
+              "wlan.fixed.capabilities.reserved5": "0",
+              "wlan.fixed.capabilities.reserved6_raw": [
+                "0",
+                34,
+                2,
+                32768,
+                5
+              ],
+              "wlan.fixed.capabilities.reserved6": "0"
+            }
+          },
+          "wlan.tagged.all_raw": [
+            "00066e657473696d",
+            36,
+            8,
+            0,
+            0
+          ],
+          "wlan.tagged.all": {
+            "wlan.tag_raw": [
+              "00066e657473696d",
+              36,
+              8,
+              0,
+              0
+            ],
+            "wlan.tag": {
+              "wlan.tag.number_raw": [
+                "00",
+                36,
+                1,
+                0,
+                4
+              ],
+              "wlan.tag.number": "0",
+              "wlan.tag.length_raw": [
+                "06",
+                37,
+                1,
+                0,
+                7
+              ],
+              "wlan.tag.length": "6",
+              "wlan.ssid_raw": [
+                "6e657473696d",
+                38,
+                6,
+                0,
+                30
+              ],
+              "wlan.ssid": "6e:65:74:73:69:6d"
+            }
+          }
+        }
+      }
+    }
+  }
+]

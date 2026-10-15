@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,13 +20,13 @@ use http::Request;
 use log::{error, info, warn};
 use netsim_proto::common::ChipKind;
 use netsim_proto::startup::DeviceInfo as ProtoDeviceInfo;
-use tungstenite::{protocol::Role, Message, WebSocket};
+use tungstenite::{Message, WebSocket, protocol::Role};
 
 use crate::devices::chip;
 use crate::devices::devices_handler::{add_chip, remove_chip};
 use crate::http_server::server_response::ResponseWritable;
 use crate::wireless;
-use crate::wireless::packet::{register_transport, unregister_transport, Response};
+use crate::wireless::packet::{Response, register_transport, unregister_transport};
 
 use super::h4;
 
@@ -35,7 +35,7 @@ use super::h4;
 use crate::openssl;
 
 /// Generate Sec-Websocket-Accept value from given Sec-Websocket-Key value
-fn generate_websocket_accept(websocket_key: String) -> String {
+pub fn generate_websocket_accept(websocket_key: String) -> String {
     let concat = websocket_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     let hashed = openssl::sha::sha1(concat.as_bytes());
     data_encoding::BASE64.encode(&hashed)
@@ -73,6 +73,7 @@ struct WebSocketTransport {
 }
 
 impl Response for WebSocketTransport {
+    #[allow(clippy::useless_conversion)]
     fn response(&mut self, packet: Bytes, packet_type: u8) {
         let mut buffer = Vec::new();
         buffer.push(packet_type);
@@ -81,7 +82,7 @@ impl Response for WebSocketTransport {
             .websocket_writer
             .lock()
             .expect("Failed to acquire lock on WebSocket")
-            .send(Message::Binary(buffer))
+            .send(Message::Binary(buffer.into()))
         {
             error!("{err}");
         };

@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,8 +41,28 @@ const WLAN_ACTION_VENDOR_SPECIFIC: u8 = 127;
 /// A Ieee80211 MAC address
 
 impl MacAddress {
+    pub const LEN: usize = 6;
+
+    const MDNS_MULTICAST_V4: MacAddress =
+        MacAddress(u64::from_le_bytes([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb, 0, 0]));
+    const MDNS_MULTICAST_V6: MacAddress =
+        MacAddress(u64::from_le_bytes([0x33, 0x33, 0x5e, 0x00, 0x00, 0xfb, 0, 0]));
+
     pub fn to_vec(&self) -> [u8; 6] {
         u64::to_le_bytes(self.0)[0..6].try_into().expect("slice with incorrect length")
+    }
+
+    pub fn is_multicast(&self) -> bool {
+        let addr = u64::to_le_bytes(self.0);
+        (addr[0] & 0x1) == 1
+    }
+
+    pub fn is_broadcast(&self) -> bool {
+        self.0 == u64::MAX
+    }
+
+    pub fn is_mdns(&self) -> bool {
+        self == &Self::MDNS_MULTICAST_V4 || self == &Self::MDNS_MULTICAST_V6
     }
 }
 
@@ -83,20 +103,7 @@ impl From<MacAddress> for [u8; 6] {
     }
 }
 
-impl MacAddress {
-    pub const LEN: usize = 6;
-
-    pub fn is_multicast(&self) -> bool {
-        let addr = u64::to_le_bytes(self.0);
-        (addr[0] & 0x1) == 1
-    }
-
-    pub fn is_broadcast(&self) -> bool {
-        self.0 == u64::MAX
-    }
-}
-
-struct Ieee8023<'a> {
+pub struct Ieee8023<'a> {
     destination: MacAddress,
     source: MacAddress,
     ethertype: EtherType,

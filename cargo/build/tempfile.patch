@@ -1,0 +1,38 @@
+diff --git a/src/file/imp/unix.rs b/src/file/imp/unix.rs
+index e423bb0..7043818 100644
+--- a/src/file/imp/unix.rs
++++ b/src/file/imp/unix.rs
+@@ -11,2 +12,3 @@ use {
+     std::fs::hard_link,
+ };
++use std::os::unix::ffi::OsStrExt;
+@@ -56,7 +58,7 @@ pub fn create(dir: &Path) -> io::Result<File> {
+         .or_else(|e| {
+-            match Errno::from_io_error(&e) {
++            match Errno::from_raw_os_error(e.raw_os_error().unwrap_or(0)) {
+                 // These are the three "not supported" error codes for O_TMPFILE.
+-                Some(Errno::OPNOTSUPP) | Some(Errno::ISDIR) | Some(Errno::NOENT) => {
++                Errno::OPNOTSUPP | Errno::ISDIR | Errno::NOENT => {
+                     create_unix(dir)
+                 }
+                 _ => Err(e),
+@@ -111,3 +113,3 @@ pub fn persist(old_path: &Path, new_path: &Path, overwrite: bool) -> io::Result<
+     if overwrite {
+-        rename(old_path, new_path)?;
++        rename(old_path.as_os_str().as_bytes(), new_path.as_os_str().as_bytes()).map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+     } else {
+@@ -131,3 +133,3 @@ pub fn persist(old_path: &Path, new_path: &Path, overwrite: bool) -> io::Result<
+             if !NOSYS.load(Relaxed) {
+-                match renameat_with(CWD, old_path, CWD, new_path, RenameFlags::NOREPLACE) {
++                match renameat_with(CWD, old_path.as_os_str().as_bytes(), CWD, new_path.as_os_str().as_bytes(), RenameFlags::NOREPLACE) {
+                     Ok(()) => return Ok(()),
+@@ -136,3 +138,3 @@ pub fn persist(old_path: &Path, new_path: &Path, overwrite: bool) -> io::Result<
+                     Err(Errno::INVAL) => {}
+-                    Err(e) => return Err(e.into()),
++                    Err(e) => return Err(std::io::Error::from_raw_os_error(e.raw_os_error())),
+                 }
+@@ -146,3 +148,3 @@ pub fn persist(old_path: &Path, new_path: &Path, overwrite: bool) -> io::Result<
+         // Ignore unlink errors. Can we do better?
+-        let _ = unlink(old_path);
++        let _ = unlink(old_path.as_os_str().as_bytes());
+     }

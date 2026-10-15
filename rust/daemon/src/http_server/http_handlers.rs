@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,6 +29,10 @@ use log::warn;
 use crate::{
     captures::captures_handler::handle_capture,
     devices::devices_handler::handle_device,
+    links::{
+        link::LinkManager,
+        links_handler::{handle_link_delete, handle_link_list, handle_link_patch},
+    },
     transport::websocket::{handle_websocket, run_websocket_transport},
     version::VERSION,
 };
@@ -72,12 +76,15 @@ pub fn create_filename_hash_set() -> HashSet<String> {
     let mut valid_files: HashSet<String> = HashSet::new();
     for path_prefix in PATH_PREFIXES {
         let dir_path = ui_path(path_prefix);
-        if let Ok(mut file) = fs::read_dir(dir_path) {
-            while let Some(Ok(entry)) = file.next() {
-                valid_files.insert(entry.path().to_str().unwrap().to_string());
+        match fs::read_dir(dir_path) {
+            Ok(mut file) => {
+                while let Some(Ok(entry)) = file.next() {
+                    valid_files.insert(entry.path().to_str().unwrap().to_string());
+                }
             }
-        } else {
-            warn!("netsim-ui doesn't exist");
+            _ => {
+                warn!("netsim-ui doesn't exist");
+            }
         }
     }
     valid_files
@@ -129,7 +136,7 @@ fn handle_static(request: &Request<Vec<u8>>, path: &str, writer: ResponseWritabl
 }
 
 fn handle_version(_request: &Request<Vec<u8>>, _param: &str, writer: ResponseWritable) {
-    let body = format!("{{\"version\": \"{}\"}}", VERSION);
+    let body = format!("{{\"version\": \"{VERSION}\"}}");
     writer.put_ok("text/plain", body.as_str(), vec![]);
 }
 
@@ -137,7 +144,12 @@ fn handle_dev(request: &Request<Vec<u8>>, _param: &str, writer: ResponseWritable
     handle_file(request.method().as_str(), "dev.html", writer)
 }
 
-pub fn handle_connection(mut stream: TcpStream, valid_files: Arc<HashSet<String>>, dev: bool) {
+pub fn handle_connection(
+    mut stream: TcpStream,
+    valid_files: Arc<HashSet<String>>,
+    dev: bool,
+    link_manager: Arc<LinkManager>,
+) {
     let mut router = Router::new();
     router.add_route(Uri::from_static("/"), Box::new(handle_index));
     router.add_route(Uri::from_static("/version"), Box::new(handle_version));
@@ -145,7 +157,9 @@ pub fn handle_connection(mut stream: TcpStream, valid_files: Arc<HashSet<String>
     router.add_route(Uri::from_static(r"/v1/devices/{id}"), Box::new(handle_device));
     router.add_route(Uri::from_static("/v1/captures"), Box::new(handle_capture));
     router.add_route(Uri::from_static(r"/v1/captures/{id}"), Box::new(handle_capture));
-    router.add_route(Uri::from_static(r"/v1/websocket/{radio}"), Box::new(handle_websocket));
+    if std::env::var("NETSIM_WS_PORT").is_err() {
+        router.add_route(Uri::from_static(r"/v1/websocket/{radio}"), Box::new(handle_websocket));
+    }
 
     // Adding additional routes in dev mode.
     if dev {
@@ -174,22 +188,55 @@ pub fn handle_connection(mut stream: TcpStream, valid_files: Arc<HashSet<String>
         )
     }
 
-    if let Ok(request) = parse_http_request::<&TcpStream>(&mut BufReader::new(&stream)) {
-        let mut response_writer = ServerResponseWriter::new(&mut stream);
-        router.handle_request(&request, &mut response_writer);
-        if let Some(response) = response_writer.get_response() {
-            // Status code of 101 represents switching of protocols from HTTP to Websocket
-            if response.status().as_u16() == 101 {
-                match collect_query(request.uri().query().unwrap_or("")) {
-                    Ok(queries) => run_websocket_transport(stream, queries),
-                    Err(err) => warn!("{err}"),
-                };
+    // A closure for checking if path is link, and call methods in links_handler accordingly
+    let handle_link_wrapper = move |request: &Request<Vec<u8>>,
+                                    _path: &str,
+                                    writer: ResponseWritable| {
+        match request.method().as_str() {
+            "LIST" => match handle_link_list(&link_manager) {
+                Ok(response) => writer.put_ok("text/json", &response, vec![]),
+                Err(e) => writer.put_error(404, &e),
+            },
+            "PATCH" => {
+                let body = request.body();
+                let patch_json = String::from_utf8(body.to_vec()).unwrap();
+                match handle_link_patch(&link_manager, &patch_json) {
+                    Ok(response) => writer.put_ok("text/plain", &response, vec![]),
+                    Err(e) => writer.put_error(404, &e),
+                }
+            }
+            "DELETE" => {
+                let body = request.body();
+                let delete_json = String::from_utf8(body.to_vec()).unwrap();
+                match handle_link_delete(&link_manager, &delete_json) {
+                    Ok(response) => writer.put_ok("text/plain", &response, vec![]),
+                    Err(e) => writer.put_error(404, &e),
+                }
+            }
+            _ => writer.put_error(404, "Unsupported request method"),
+        }
+    };
+    router.add_route(Uri::from_static(r"/v1/link"), Box::new(handle_link_wrapper.clone()));
+
+    match parse_http_request::<&TcpStream>(&mut BufReader::new(&stream)) {
+        Ok(request) => {
+            let mut response_writer = ServerResponseWriter::new(&mut stream);
+            router.handle_request(&request, &mut response_writer);
+            if let Some(response) = response_writer.get_response() {
+                // Status code of 101 represents switching of protocols from HTTP to Websocket
+                if response.status().as_u16() == 101 {
+                    match collect_query(request.uri().query().unwrap_or("")) {
+                        Ok(queries) => run_websocket_transport(stream, queries),
+                        Err(err) => warn!("{err}"),
+                    };
+                }
             }
         }
-    } else {
-        let mut response_writer = ServerResponseWriter::new(&mut stream);
-        let body = "404 not found (netsim): parse header failed";
-        response_writer.put_error(404, body);
+        _ => {
+            let mut response_writer = ServerResponseWriter::new(&mut stream);
+            let body = "404 not found (netsim): parse header failed";
+            response_writer.put_error(404, body);
+        }
     };
 }
 

@@ -1,0 +1,54 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "bluetooth"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+actor-framework = { path = "../actor-framework" }
+async-trait = "0.1.68"
+bytes = "1.4.0"
+device-actor = { path = "../device-actor" }
+futures = "0.3.31"
+hex = "0.4.3"
+netsim-model = { path = "../model" }
+netsim-packets = { path = "../packets" }
+rootcanal = { path = "../rootcanal" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+tokio = { version = "1.32.0", default-features = false, features = [
+  "rt",
+  "time",
+  "sync",
+  "macros",
+] }
+tokio-stream = "0.1.17"
+tracing = "0.1"
+zerocopy = "0.8.25"
+
+[features]
+default = []
+test-utils = []
+
+[dev-dependencies]
+rootcanal = { path = "../rootcanal" }
+netsim-testing = { path = "../testing", features = ["testing"] }
+rand = "0.8.5"
+tokio-stream = "0.1.17"

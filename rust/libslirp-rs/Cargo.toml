@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,16 +20,16 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["staticlib","lib"]
+crate-type = ["staticlib", "lib"]
 doctest = false
 
 [dependencies]
-etherparse = {version = "0.16" }
 bytes = { version = "1.4.0" }
+etherparse = { version = "0.16" }
 libc = "0.2"
 log = "0.4.17"
+tokio = { version = "1.32.0", features = ["net", "rt-multi-thread"] }
 winapi = { version = "0.3", features = ["winsock2"] }
-tokio = { version = "1.32.0", features = [ "net", "rt-multi-thread"] }
 
 [build-dependencies]
 ##bindgen = "0.69.4"

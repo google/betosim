@@ -1,0 +1,100 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""pdl_compiler bazel build rule"""
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "pdl-compiler",
+    srcs = glob(["**/*.rs"]),
+    crate_features = [
+        "default",
+        "serde",
+    ],
+    crate_name = "pdl_compiler",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@pest_derive",
+    ],
+    deps = [
+        "@argh",
+        "@codespan-reporting",
+        "@heck",
+        "@pest",
+        "@prettyplease",
+        "@proc-macro2",
+        "@quote",
+        "@serde",
+        "@serde_json",
+        "@syn",
+    ],
+)
+
+rust_binary(
+    name = "pdlc",
+    srcs = glob(["**/*.rs"]),
+    crate_features = [
+        "default",
+        "serde",
+    ],
+    crate_name = "pdlc",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@pest_derive",
+    ],
+    deps = [
+        ":pdl-compiler",
+        "@argh",
+        "@codespan-reporting",
+        "@heck",
+        "@pest",
+        "@prettyplease",
+        "@proc-macro2",
+        "@quote",
+        "@serde",
+        "@serde_json",
+        "@syn",
+    ],
+)
+
+# generate_cxx_backend.py is a Python program, not a shell script. Declaring it
+# as sh_binary only works where the kernel honours its `#!/usr/bin/env python3`
+# shebang. Bazel runs genrule commands through the bundled busybox shell on
+# Windows, whose PATH has no python3, so rootcanal's *_cxx_gen genrules failed
+# with `env: can't execute 'python3'` (exit 127). py_binary supplies the
+# interpreter and a working Windows launcher. This matches the definition in
+# hardware/generic/goldfish/third_party/rust/crates/netsim_build.
+py_binary(
+    name = "pdl_cxx_generator",
+    srcs = ["scripts/generate_cxx_backend.py"] + glob(["scripts/pdl/*.py"]),
+    imports = ["scripts"],
+    main = "scripts/generate_cxx_backend.py",
+)
+
+cc_library(
+    name = "pdl_cxx_packet_runtime",
+    hdrs = [
+        "scripts/packet_runtime.h",
+    ],
+    includes = [
+        "scripts",
+    ],
+)

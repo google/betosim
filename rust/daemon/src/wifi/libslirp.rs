@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,7 @@ use bytes::Bytes;
 use http_proxy::Manager;
 pub use libslirp_rs::libslirp::LibSlirp;
 use libslirp_rs::libslirp::ProxyManager;
-use libslirp_rs::libslirp_config::{lookup_host_dns, SlirpConfig};
+use libslirp_rs::libslirp_config::{SlirpConfig, lookup_host_dns};
 use netsim_proto::config::SlirpOptions as ProtoSlirpOptions;
 use std::sync::mpsc;
 

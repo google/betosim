@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +15,7 @@
 #![allow(clippy::empty_line_after_doc_comments)]
 
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{OnceLock, RwLock};
 use std::thread;
 
@@ -120,7 +120,7 @@ pub fn handle_response_cxx(chip_id: u32, packet: &cxx::CxxVector<u8>, packet_typ
     };
     // transports lock is now released
     if let Err(e) = result {
-        warn!("handle_response: error {:?}", e);
+        warn!("handle_response: error {e:?}");
         unregister_transport(chip_id);
     }
 }
@@ -138,7 +138,7 @@ pub fn handle_response(chip_id: ChipIdentifier, packet: &Bytes) {
     };
     // transports lock is now released
     if let Err(e) = result {
-        warn!("handle_response: error {:?}", e);
+        warn!("handle_response: error {e:?}");
         unregister_transport(chip_id);
     }
 }

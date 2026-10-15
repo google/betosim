@@ -1,0 +1,95 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+package netsim.access_point;
+
+import "google/protobuf/empty.proto";
+
+service AccessPointService {
+  // Create a new Access Point.
+  rpc Create(CreateAccessPointRequest) returns (AccessPoint);
+
+  // Get an existing Access Point.
+  rpc Get(GetAccessPointRequest) returns (AccessPoint);
+
+  // Update an existing Access Point.
+  rpc Update(UpdateAccessPointRequest) returns (AccessPoint);
+
+  // Delete an existing Access Point.
+  rpc Delete(DeleteAccessPointRequest) returns (google.protobuf.Empty);
+
+  // List all Access Points.
+  rpc List(ListAccessPointsRequest) returns (ListAccessPointsResponse);
+
+  // Execute an action on an Access Point.
+  rpc Execute(ExecuteAccessPointRequest) returns (google.protobuf.Empty);
+}
+
+message ExecuteAccessPointRequest {
+  uint32 id = 1;
+  oneof action {
+    DisconnectRequest disconnect = 2;
+  }
+}
+
+message AccessPoint {
+  // ID is the Chip ID in netsim architecture.
+  uint32 id = 1;
+  string ssid = 2;
+  string bssid = 3;  // formatted MAC address
+  uint32 channel = 4;
+  string hw_mode = 5;         // "a", "b", "g", "n", "ac", "ax"
+  string wpa_passphrase = 6;  // optional
+  uint32 beacon_interval = 7;
+  string country_code = 8;
+  uint32 dtim_period = 9;
+  bool hidden_ssid = 10;
+  bool sae = 11;
+  bool wmm_enabled = 12;
+  bool enterprise_enabled = 13;
+  uint32 mac_acl_mode = 14;  // 0=Disable, 1=Deny, 2=Allow
+  repeated string mac_acl_list = 15;
+  bool ftm_responder_enabled = 16;
+  repeated string connected_devices = 17;
+}
+
+message CreateAccessPointRequest {
+  AccessPoint access_point = 1;
+}
+
+message GetAccessPointRequest {
+  uint32 id = 1;
+}
+
+message UpdateAccessPointRequest {
+  uint32 id = 1;
+  // Fields to update.
+  optional string ssid = 2;
+  optional uint32 channel = 3;
+}
+
+message DisconnectRequest {
+  string mac_address = 1;
+}
+
+message DeleteAccessPointRequest {
+  uint32 id = 1;
+}
+
+message ListAccessPointsRequest {}
+
+message ListAccessPointsResponse {
+  repeated AccessPoint access_points = 1;
+}

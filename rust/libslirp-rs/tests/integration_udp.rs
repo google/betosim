@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,6 @@ use etherparse::LinkHeader::Ethernet2;
 use etherparse::{NetHeaders, PacketBuilder, PacketHeaders, PayloadSlice, TransportHeader};
 use libslirp_rs::libslirp::LibSlirp;
 use libslirp_rs::libslirp_config::SlirpConfig;
-use std::fs;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc;
@@ -29,7 +28,7 @@ const PAYLOAD: &[u8; 23] = b"Hello, UDP echo server!";
 const PAYLOAD_PONG: &[u8; 23] = b"Hello, UDP echo client!";
 
 /// Test UDP packets sent through libslirp
-#[cfg(not(windows))] // TOOD: remove once test is working on windows.
+#[cfg(not(windows))] // TODO: remove once test is working on windows.
 #[test]
 fn udp_echo() {
     let config = SlirpConfig { ..Default::default() };
@@ -43,22 +42,19 @@ fn udp_echo() {
     let server_addr = one_shot_udp_echo_server().unwrap();
 
     println!("server addr {:?}", server_addr);
-    let server_ip = match server_addr {
-        SocketAddr::V4(addr) => addr.ip().to_owned(),
-        _ => panic!("Unsupported address type"),
-    };
-    // Source address
-    let source_ip = server_ip.clone();
+    let source_ip = std::net::Ipv4Addr::UNSPECIFIED;
+    // Destination address
+    let host_ip = std::net::Ipv4Addr::LOCALHOST;
 
     // Source and destination ports
     let source_port: u16 = 20000;
     let destination_port = server_addr.port();
 
     // Build the UDP packet
-    // with abitrary source and destination mac addrs
-    // We use server address 0.0.0.0 to avoid ARP packets
+    // with arbitrary source and destination mac addrs
+    // We use guest source 0.0.0.0 to avoid ARP packets
     let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
-        .ipv4(source_ip.octets(), server_ip.octets(), 20)
+        .ipv4(source_ip.octets(), host_ip.octets(), 20)
         .udp(source_port, destination_port);
 
     // Get some memory to store the result
@@ -95,8 +91,8 @@ fn udp_echo() {
             }
 
             if let Some(NetHeaders::Ipv4(ipv4_header, _)) = headers.net {
-                assert_eq!(ipv4_header.source, [127, 0, 0, 1]);
-                assert_eq!(ipv4_header.destination, [0, 0, 0, 0]);
+                assert_eq!(ipv4_header.source, std::net::Ipv4Addr::LOCALHOST.octets());
+                assert_eq!(ipv4_header.destination, std::net::Ipv4Addr::UNSPECIFIED.octets());
             } else {
                 panic!("expected IpV4 header, got {:?}", headers.net);
             }
@@ -115,7 +111,7 @@ fn udp_echo() {
             }
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            assert!(false, "Timeout waiting for udp packet");
+            panic!("Timeout waiting for udp packet");
         }
         Err(e) => {
             panic!("Failed to receive data in main thread: {}", e);
@@ -135,24 +131,24 @@ fn udp_echo() {
 }
 
 fn one_shot_udp_echo_server() -> std::io::Result<SocketAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    let socket = UdpSocket::bind("127.0.0.1:0")?;
     let addr = socket.local_addr()?;
     thread::spawn(move || {
         let mut buf = [0u8; 1024];
         let (len, addr) = socket.recv_from(&mut buf).unwrap();
         let data = &buf[..len];
         if data != PAYLOAD {
-            panic!("mistmatch payload");
+            panic!("mismatch payload");
         }
         println!("sending to addr {addr:?}");
-        let _ = socket.send_to(PAYLOAD_PONG, addr);
+        socket.send_to(PAYLOAD_PONG, addr).unwrap();
     });
     Ok(addr)
 }
 
 #[cfg(target_os = "linux")]
 fn count_open_fds() -> io::Result<usize> {
-    let entries = fs::read_dir("/proc/self/fd")?;
+    let entries = std::fs::read_dir("/proc/self/fd")?;
     Ok(entries.count())
 }
 

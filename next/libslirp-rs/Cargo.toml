@@ -1,0 +1,35 @@
+# Copyright 2024 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "libslirp-rs"
+version = "0.1.0"
+edition = "2024"
+##build = "build_cargo.rs"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["staticlib", "lib"]
+doctest = false
+
+[dependencies]
+bytes = { version = "1.4.0" }
+libc = "0.2"
+slirp = { path = "../slirp" }
+tokio = { version = "1.32.0", features = ["net", "rt-multi-thread", "sync"] }
+tracing = "0.1"
+windows-sys = { version = "0.59.0", features = ["Win32_Networking_WinSock"] }
+
+[build-dependencies]
+##bindgen = "0.69.4"

@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,7 +46,7 @@ fn netsimd_temp_dir_pathbuf() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     {
         let user = match env::var("USER") {
-            Ok(var) => format!("android-{}", var),
+            Ok(var) => format!("android-{var}"),
             _ => "android".to_string(),
         };
         path.push(user);
@@ -66,8 +66,14 @@ mod tests {
     #[test]
     fn test_forge() {
         let _locked = ENV_MUTEX.lock();
-        env::set_var("ANDROID_TMP", "/tmp/forge");
-        env::set_var("USER", "ryle");
+        // SAFETY: Test code.
+        // Note: set_var and remove_var have always been unsound when called in
+        // a multi-threaded context. They are marked unsafe in edition 2024.
+        // See https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html#stdenvset_var-remove_var
+        unsafe {
+            env::set_var("ANDROID_TMP", "/tmp/forge");
+            env::set_var("USER", "ryle");
+        }
         let tmp_dir = netsimd_temp_dir_pathbuf();
         assert_eq!(tmp_dir.to_str().unwrap(), "/tmp/forge/android-ryle/netsimd");
     }
@@ -76,8 +82,14 @@ mod tests {
     fn test_non_forge() {
         let _locked = ENV_MUTEX.lock();
         let temp_dir = env::temp_dir();
-        env::remove_var("ANDROID_TMP");
-        env::set_var("USER", "ryle");
+        // SAFETY: Test code.
+        // Note: set_var and remove_var have always been unsound when called in
+        // a multi-threaded context. They are marked unsafe in edition 2024.
+        // See https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html#stdenvset_var-remove_var
+        unsafe {
+            env::remove_var("ANDROID_TMP");
+            env::set_var("USER", "ryle");
+        }
         let netsimd_temp_dir = netsimd_temp_dir_pathbuf();
         assert_eq!(
             netsimd_temp_dir.to_str().unwrap(),

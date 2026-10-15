@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
 use crate::http_server::http_handlers::{create_filename_hash_set, handle_connection};
 
 use crate::http_server::thread_pool::ThreadPool;
+use crate::links::link::LinkManager;
 use log::{info, warn};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -32,7 +33,7 @@ fn bind_listener(http_port: u16) -> Result<TcpListener, std::io::Error> {
 }
 
 /// Start the HTTP Server.
-pub fn run_http_server(instance_num: u16, dev: bool) -> u16 {
+pub fn run_http_server(instance_num: u16, dev: bool, link_manager: Arc<LinkManager>) -> u16 {
     let http_port = DEFAULT_HTTP_PORT + instance_num - 1;
     let _ = thread::Builder::new().name("http_server".to_string()).spawn(move || {
         let listener = match bind_listener(http_port) {
@@ -43,13 +44,14 @@ pub fn run_http_server(instance_num: u16, dev: bool) -> u16 {
             }
         };
         let pool = ThreadPool::new(4);
-        info!("Frontend http server is listening on http://localhost:{}", http_port);
+        info!("Frontend http server is listening on http://localhost:{http_port}");
         let valid_files = Arc::new(create_filename_hash_set());
         for stream in listener.incoming() {
             let stream = stream.unwrap();
             let valid_files = valid_files.clone();
+            let link_manager_clone = Arc::clone(&link_manager);
             pool.execute(move || {
-                handle_connection(stream, valid_files, dev);
+                handle_connection(stream, valid_files, dev, link_manager_clone);
             });
         }
         info!("Shutting down frontend http server.");

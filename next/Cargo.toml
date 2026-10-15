@@ -1,0 +1,54 @@
+# Copyright 2022 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[workspace]
+resolver = "3"
+members = [
+  "actor-framework",
+  "rest-api",
+  "ap-actor",
+  "slirp-actor",
+  "capture-actor",
+  "capture-api",
+  "bluetooth-actor",
+  "model",
+  "cell-actor",
+  "nfc-actor",
+  "daemon",
+  "hci-server",
+  "packets",
+  "packet-stream",
+  "link-actor",
+  "link-api",
+  "modem-rs",
+  "modem-rs-derive",
+  "uwb-actor",
+  "types",
+  "device-actor",
+  "device-api",
+
+  "slirp",
+  "slirp/host",
+  "libslirp-rs",
+  "http-proxy",
+
+  "rootcanal",
+  "rootcanal-server",
+  "testing",
+  "cli",
+  "common",
+]
+
+[workspace.doc]
+default-members = ["daemon"]

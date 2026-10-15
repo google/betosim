@@ -1,0 +1,330 @@
+[
+  {
+    "_index": "packets-2025-12-07",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame_raw": [
+          "ffffffffffff00112233445508060001080006040001001122334455c0a80001000000000000c0a8000200000000000000000000000000000000000000000000",
+          0,
+          64,
+          0,
+          1
+        ],
+        "frame": {
+          "frame.encap_type": "1",
+          "frame.time": "Dec  7, 2025 01:40:21.000001000 UTC",
+          "frame.time_utc": "Dec  7, 2025 01:40:21.000001000 UTC",
+          "frame.time_epoch": "1765071621.000001000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "64",
+          "frame.cap_len": "64",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "eth:ethertype:arp"
+        },
+        "eth_raw": [
+          "ffffffffffff0011223344550806",
+          0,
+          14,
+          0,
+          1
+        ],
+        "eth": {
+          "eth.dst_raw": [
+            "ffffffffffff",
+            0,
+            6,
+            0,
+            29
+          ],
+          "eth.dst": "ff:ff:ff:ff:ff:ff",
+          "eth.dst_tree": {
+            "eth.dst_resolved_raw": [
+              "ffffffffffff",
+              0,
+              6,
+              0,
+              26
+            ],
+            "eth.dst_resolved": "Broadcast",
+            "eth.dst.oui_raw": [
+              "ffffff",
+              0,
+              3,
+              0,
+              6
+            ],
+            "eth.dst.oui": "16777215",
+            "eth.dst.lg_raw": [
+              "1",
+              0,
+              3,
+              131072,
+              2
+            ],
+            "eth.dst.lg": "1",
+            "eth.dst.ig_raw": [
+              "1",
+              0,
+              3,
+              65536,
+              2
+            ],
+            "eth.dst.ig": "1",
+            "eth.addr_raw": [
+              "ffffffffffff",
+              0,
+              6,
+              0,
+              29
+            ],
+            "eth.addr": "ff:ff:ff:ff:ff:ff",
+            "eth.addr_resolved_raw": [
+              "ffffffffffff",
+              0,
+              6,
+              0,
+              26
+            ],
+            "eth.addr_resolved": "Broadcast",
+            "eth.addr.oui_raw": [
+              "ffffff",
+              0,
+              3,
+              0,
+              6
+            ],
+            "eth.addr.oui": "16777215",
+            "eth.lg_raw": [
+              "1",
+              0,
+              3,
+              131072,
+              2
+            ],
+            "eth.lg": "1",
+            "eth.ig_raw": [
+              "1",
+              0,
+              3,
+              65536,
+              2
+            ],
+            "eth.ig": "1"
+          },
+          "eth.src_raw": [
+            "001122334455",
+            6,
+            6,
+            0,
+            29
+          ],
+          "eth.src": "00:11:22:33:44:55",
+          "eth.src_tree": {
+            "eth.src_resolved_raw": [
+              "001122334455",
+              6,
+              6,
+              0,
+              26
+            ],
+            "eth.src_resolved": "CIMSYS_33:44:55",
+            "eth.src.oui_raw": [
+              "001122",
+              6,
+              3,
+              0,
+              6
+            ],
+            "eth.src.oui": "4386",
+            "eth.src.oui_resolved_raw": [
+              "001122334455",
+              6,
+              6,
+              0,
+              26
+            ],
+            "eth.src.oui_resolved": "CIMSYS Inc",
+            "eth.src.lg_raw": [
+              "0",
+              6,
+              3,
+              131072,
+              2
+            ],
+            "eth.src.lg": "0",
+            "eth.src.ig_raw": [
+              "0",
+              6,
+              3,
+              65536,
+              2
+            ],
+            "eth.src.ig": "0",
+            "eth.addr_raw": [
+              "001122334455",
+              6,
+              6,
+              0,
+              29
+            ],
+            "eth.addr": "00:11:22:33:44:55",
+            "eth.addr_resolved_raw": [
+              "001122334455",
+              6,
+              6,
+              0,
+              26
+            ],
+            "eth.addr_resolved": "CIMSYS_33:44:55",
+            "eth.addr.oui_raw": [
+              "001122",
+              6,
+              3,
+              0,
+              6
+            ],
+            "eth.addr.oui": "4386",
+            "eth.addr.oui_resolved_raw": [
+              "001122334455",
+              6,
+              6,
+              0,
+              26
+            ],
+            "eth.addr.oui_resolved": "CIMSYS Inc",
+            "eth.lg_raw": [
+              "0",
+              6,
+              3,
+              131072,
+              2
+            ],
+            "eth.lg": "0",
+            "eth.ig_raw": [
+              "0",
+              6,
+              3,
+              65536,
+              2
+            ],
+            "eth.ig": "0"
+          },
+          "eth.type_raw": [
+            "0806",
+            12,
+            2,
+            0,
+            5
+          ],
+          "eth.type": "0x0806",
+          "eth.stream": "0",
+          "eth.padding_raw": [
+            "000000000000000000000000000000000000",
+            42,
+            18,
+            0,
+            30
+          ],
+          "eth.padding": "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00",
+          "eth.fcs_raw": [
+            "00000000",
+            60,
+            4,
+            0,
+            7
+          ],
+          "eth.fcs": "0x00000000",
+          "eth.fcs.status": "2"
+        },
+        "arp_raw": [
+          "0001080006040001001122334455c0a80001000000000000c0a80002",
+          14,
+          28,
+          0,
+          1
+        ],
+        "arp": {
+          "arp.hw.type_raw": [
+            "0001",
+            14,
+            2,
+            0,
+            5
+          ],
+          "arp.hw.type": "1",
+          "arp.proto.type_raw": [
+            "0800",
+            16,
+            2,
+            0,
+            5
+          ],
+          "arp.proto.type": "0x0800",
+          "arp.hw.size_raw": [
+            "06",
+            18,
+            1,
+            0,
+            4
+          ],
+          "arp.hw.size": "6",
+          "arp.proto.size_raw": [
+            "04",
+            19,
+            1,
+            0,
+            4
+          ],
+          "arp.proto.size": "4",
+          "arp.opcode_raw": [
+            "0001",
+            20,
+            2,
+            0,
+            5
+          ],
+          "arp.opcode": "1",
+          "arp.src.hw_mac_raw": [
+            "001122334455",
+            22,
+            6,
+            0,
+            29
+          ],
+          "arp.src.hw_mac": "00:11:22:33:44:55",
+          "arp.src.proto_ipv4_raw": [
+            "c0a80001",
+            28,
+            4,
+            0,
+            32
+          ],
+          "arp.src.proto_ipv4": "192.168.0.1",
+          "arp.dst.hw_mac_raw": [
+            "000000000000",
+            32,
+            6,
+            0,
+            29
+          ],
+          "arp.dst.hw_mac": "00:00:00:00:00:00",
+          "arp.dst.proto_ipv4_raw": [
+            "c0a80002",
+            38,
+            4,
+            0,
+            32
+          ],
+          "arp.dst.proto_ipv4": "192.168.0.2"
+        }
+      }
+    }
+  }
+]

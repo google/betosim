@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use crate::devices::chip::ChipIdentifier;
-use crate::wireless::wifi_manager::WifiManager;
 use crate::wireless::WirelessChip;
+use crate::wireless::wifi_manager::WifiManager;
 use bytes::Bytes;
 use log::warn;
 use netsim_proto::model::Chip as ProtoChip;
-use netsim_proto::stats::{netsim_radio_stats, NetsimRadioStats as ProtoRadioStats};
-use std::sync::atomic::Ordering;
+use netsim_proto::stats::{NetsimRadioStats as ProtoRadioStats, netsim_radio_stats};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Parameters for creating WifiChips
 /// allow(dead_code) due to not being used in unit tests
@@ -42,7 +42,7 @@ impl Drop for WifiChip {
 impl WirelessChip for WifiChip {
     fn handle_request(&self, packet: &Bytes) {
         if let Err(e) = self.wifi_manager.tx_request.send((self.chip_id.0, packet.clone())) {
-            warn!("Failed wifi handle_request: {:?}", e);
+            warn!("Failed wifi handle_request: {e:?}");
         }
     }
 

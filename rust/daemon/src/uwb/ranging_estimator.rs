@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(mismatched_lifetime_syntaxes)]
+
 use log::{debug, error};
 use netsim_proto::model::Device as ProtoDevice;
 use pica::{Handle, RangingEstimator, RangingMeasurement};
 
 use crate::devices::{chip::ChipIdentifier, devices_handler::get_device};
-use crate::ranging::{compute_range_azimuth_elevation, Pose};
+use crate::ranging::{Pose, compute_range_azimuth_elevation};
 use crate::uwb::ranging_data::RangingDataSet;
 
 use std::collections::HashMap;
@@ -113,8 +115,8 @@ fn is_uwb_state_on(device: &ProtoDevice, chip_id: &ChipIdentifier) -> bool {
 mod tests {
     use super::*;
 
-    use netsim_proto::model::chip::Radio as ProtoRadio;
     use netsim_proto::model::Chip as ProtoChip;
+    use netsim_proto::model::chip::Radio as ProtoRadio;
 
     fn create_proto_device_with_uwb_chip(uwb_state: bool) -> (ProtoDevice, ChipIdentifier) {
         // Setting Radio State to true

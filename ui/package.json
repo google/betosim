@@ -10,7 +10,7 @@
     "test": "tsc && wtr --coverage",
     "test:watch": "tsc && concurrently -k -r \"tsc --watch --preserveWatchOutput\" \"wtr --watch\"",
     "analyze": "cem analyze --litelement",
-    "tsproto": "protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./ts --proto_path=../proto --proto_path=../../../packages/modules/Bluetooth/tools/rootcanal/proto --ts_proto_opt=onlyTypes=true --ts_proto_opt=stringEnums=true netsim/model.proto",
+    "tsproto": "protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=./ts --proto_path=../proto --proto_path=../../../tools/rootcanal/proto --ts_proto_opt=onlyTypes=true --ts_proto_opt=stringEnums=true netsim/model.proto",
     "build": "tsc && cp -r ./assets ./web && rimraf dist/* && rollup -c rollup.config.mjs",
     "start": "tsc && cp -r ./assets ./web && concurrently -k -r \"tsc --watch --preserveWatchOutput\" \"wds\" \"serve /tmp/\""
   },

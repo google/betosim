@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,8 +37,7 @@ message NetsimRadioStats {
     UNSPECIFIED = 0;
     BLUETOOTH_LOW_ENERGY = 1;
     BLUETOOTH_CLASSIC = 2;
-    // built-in BLE beacon
-    BLE_BEACON = 3;
+    BLE_BEACON = 3 [deprecated = true];
     WIFI = 4;
     UWB = 5;
     NFC = 6;
@@ -55,6 +54,10 @@ message NetsimRadioStats {
   optional int32 rx_bytes = 7;
   // Recent Invalid Packets
   repeated InvalidPacket invalid_packets = 8;
+  // Payload messages transmitted on P2P medium
+  optional int32 p2p_tx_count = 9;
+  // Payload messages received on P2P medium
+  optional int32 p2p_rx_count = 10;
 }
 
 // Frontend statistics for a netsim session representing count of API calls
@@ -69,6 +72,7 @@ message NetsimFrontendStats {
   optional uint32 patch_capture = 8;
   optional uint32 list_capture = 9;
   optional uint32 get_capture = 10;
+  optional uint32 delete_device = 11;
 }
 
 // Detailed stats of a device
@@ -89,6 +93,248 @@ message NetsimDeviceStats {
   optional string arch = 7;
 }
 
+// Detailed Wi-Fi stats
+message WifiStats {
+  // === Error Counters ===
+  // Errors related to the hostapd.
+  optional int32 hostapd_errors = 1;
+  // Errors related to network connectivity (e.g., Slirp/Tap interface).
+  optional int32 network_errors = 2;
+  // Errors related to client-specific operations or state.
+  optional int32 client_errors = 3;
+  // Errors encountered while parsing, decoding, or handling IEEE 802.11
+  // frames.
+  optional int32 frame_errors = 4;
+  // Errors related to transmission or reception of frame.
+  optional int32 transmission_errors = 5;
+  // Other uncategorized errors.
+  optional int32 other_errors = 6;
+
+  // === Core Traffic Flow & Type Counters ===
+  // 802.11 frames received from clients via Hwsim messages.
+  optional int32 hwsim_frames_rx = 7;
+  // 802.11 frames transmitted to clients via Hwsim messages.
+  optional int32 hwsim_frames_tx = 8;
+  // L3 packets transmitted to external network (e.g., Slirp).
+  optional int32 network_packets_tx = 9;
+  // L3 packets received from external network.
+  optional int32 network_packets_rx = 10;
+  // 802.11 frames transmitted to hostapd process.
+  optional int32 hostapd_frames_tx = 11;
+  // 802.11 frames received from hostapd process.
+  optional int32 hostapd_frames_rx = 12;
+  // Station-to-station 802.11 frames transmitted via medium.
+  optional int32 wmedium_frames_tx = 13;
+  // Unicast 802.11 frames transmitted to another station via medium.
+  optional int32 wmedium_unicast_frames_tx = 14;
+  // 802.11 Management frames received by medium.
+  optional int32 mgmt_frames_rx = 15;
+
+  // === Specific Protocol Counters ===
+  // mDNS frames count.
+  optional int32 mdns_count = 16;
+
+  // === Performance Statistics ===
+  // Max Throughput from Internet to device(s) in Mbits per second
+  optional float max_download_throughput = 17;
+  // Max Throughput from device(s) to Internet in Mbits per second
+  optional float max_upload_throughput = 18;
+}
+
+// Detailed NFC stats
+message NfcStats {
+  // === Error Counters ===
+  // Errors encountered while parsing, decoding, or handling NCI packets.
+  optional int32 nci_errors = 1;
+  // Errors related to Casimir simulation backend or RF scene routing.
+  optional int32 casimir_errors = 2;
+  // Errors related to contactless RF transmission or tag emulation.
+  optional int32 rf_errors = 3;
+  // Other uncategorized NFC errors.
+  optional int32 other_errors = 4;
+
+  // === Core Traffic Flow & Type Counters ===
+  // NCI control command packets received from guest OS.
+  // Mapped to Android NFC HAL / stack control operations (e.g., adapter
+  // enable/disable, RF discovery configuration, routing updates).
+  optional int32 nci_commands_rx = 5;
+  // NCI control response packets transmitted to guest OS.
+  optional int32 nci_responses_tx = 6;
+  // NCI notification packets transmitted to guest OS.
+  optional int32 nci_notifications_tx = 7;
+  // NCI data packets received from guest OS.
+  optional int32 nci_data_rx = 8;
+  // NCI data packets transmitted to guest OS.
+  // Mapped to Android NFC HAL / Framework API payload I/O operations (e.g.,
+  // Ndef read/write, IsoDep/Tag transceive, HostApduService APDU exchanges).
+  optional int32 nci_data_tx = 9;
+  // Over-the-air RF contactless tap events transmitted via Casimir.
+  optional int32 rf_taps_tx = 10;
+  // Over-the-air RF contactless tap events received via Casimir.
+  optional int32 rf_taps_rx = 11;
+
+  // === Simulation & Emulation Transaction Counters ===
+  // Number of Card Emulation (HCE) transactions simulated.
+  optional int32 card_emulation_count = 12;
+  // Number of Tag Emulation transactions simulated.
+  optional int32 tag_emulation_count = 13;
+}
+
+// Frontend statistics for NfcService gRPC API calls
+message NfcServiceStats {
+  optional uint32 get_status = 1;
+  optional uint32 set_power = 2;
+  optional uint32 poll = 3;
+  optional uint32 send_apdu = 4;
+}
+
+// Wi-Fi IPC statistics. Used for transport between wifi-actor and device-actor.
+message WifiIpcStats {
+  optional WifiStats wifi_stats = 1;
+  optional WifiApiStats wifi_api_stats = 2;
+}
+
+// NFC IPC statistics. Used for transport between nfc-actor and device-actor.
+message NfcIpcStats {
+  optional NfcStats nfc_stats = 1;
+  optional NfcApiStats nfc_api_stats = 2;
+}
+
+// Application-level API Counters for all technologies.
+message ApiStats {
+  // 1-99 reserved for Bluetooth
+  optional WifiApiStats wifi = 100;
+  optional int32 wifi_total_calls = 101;
+
+  optional UwbApiStats uwb = 200;
+  optional int32 uwb_total_calls = 201;
+
+  optional NfcApiStats nfc = 300;
+  optional int32 nfc_total_calls = 301;
+}
+
+// Wi-Fi API Counters
+message WifiApiStats {
+  optional WifiAwareSessionStats wifi_aware_session = 1;
+  optional WifiAwareDiscoverySessionStats wifi_aware_discovery_session = 2;
+  optional WifiAwareNdpStats wifi_aware_ndp = 3;
+  optional WifiP2pManagerStats wifi_p2p_manager = 4;
+  optional WifiRttManagerStats wifi_rtt_manager = 5;
+  optional WifiEasyConnectStats wifi_easy_connect = 6;
+}
+
+message WifiAwareSessionStats {
+  optional int32 publish_unsolicited = 1;
+  optional int32 publish_solicited = 2;
+  optional int32 subscribe_active = 3;
+  optional int32 subscribe_passive = 4;
+}
+
+message WifiAwareDiscoverySessionStats {
+  optional int32 send_message = 1;
+}
+
+message WifiAwareNdpStats {
+  optional int32 request = 1;
+  optional int32 response = 2;
+  optional int32 confirm = 3;
+  optional int32 terminate = 4;
+}
+
+message WifiP2pManagerStats {
+  optional int32 create_group = 1;
+  optional int32 connect = 2;
+  optional int32 discover_peers = 3;
+  optional int32 discover_services = 4;
+}
+
+message WifiRttManagerStats {
+  optional int32 start_ranging = 1;
+  optional int32 on_ranging_results = 2;
+}
+
+message WifiEasyConnectStats {
+  optional int32 auth_request = 1;
+  optional int32 auth_response = 2;
+  optional int32 auth_confirm = 3;
+}
+
+// UWB API Counters
+message UwbApiStats {
+  optional UwbManagerStats uwb_manager = 1;
+  optional RangingSessionStats ranging_session = 2;
+}
+
+message UwbManagerStats {
+  optional int32 open_ranging_session = 1;
+}
+
+message RangingSessionStats {
+  optional int32 close = 1;
+  optional int32 start = 2;
+  optional int32 stop = 3;
+  optional int32 reconfigure = 4;
+  // HAL-level UCI command (SessionGetAppConfigCmd)
+  optional int32 session_get_app_config = 5;
+  optional int32 send_data = 6;
+  optional int32 on_data_received = 7;
+  optional int32 add_controlee = 8;
+  optional int32 remove_controlee = 9;
+}
+
+// NFC API Counters (aligned with Android Framework APIs)
+message NfcApiStats {
+  // Legacy protocol-level fields (retained for pipeline backwards
+  // compatibility)
+  optional NciCoreStats nci_core = 1 [deprecated = true];
+  optional NciRfStats nci_rf = 2 [deprecated = true];
+  optional NciDataStats nci_data = 3 [deprecated = true];
+
+  // High-level Android Framework API mappings (aligned with Wi-Fi & UWB)
+  optional NfcAdapterStats nfc_adapter = 4;
+  optional TagStats tag = 5;
+  optional CardEmulationStats card_emulation = 6;
+}
+
+// Android android.nfc.NfcAdapter API calls
+message NfcAdapterStats {
+  optional int32 enable = 1;
+  optional int32 disable = 2;
+  optional int32 enable_reader_mode = 3;
+  optional int32 disable_reader_mode = 4;
+  optional int32 set_listen_mode_routing = 5;
+}
+
+// Android android.nfc.Tag & TagTechnology (IsoDep, Ndef, etc.) API calls
+message TagStats {
+  optional int32 connect = 1;
+  optional int32 close = 2;
+  optional int32 transceive = 3;
+}
+
+// Android android.nfc.cardemulation (HostApduService) API calls
+message CardEmulationStats {
+  optional int32 process_command_apdu = 1;
+  optional int32 send_response_apdu = 2;
+}
+
+message NciCoreStats {
+  optional int32 reset = 1;
+  optional int32 init = 2;
+}
+
+message NciRfStats {
+  optional int32 discover = 1;
+  optional int32 discover_select = 2;
+  optional int32 deactivate = 3;
+  optional int32 rf_set_listen_mode_routing = 4;
+}
+
+message NciDataStats {
+  optional int32 send = 1;
+  optional int32 receive = 2;
+}
+
 // Statistics for a netsim session.
 message NetsimStats {
   // The length of the session in seconds
@@ -105,4 +351,14 @@ message NetsimStats {
   optional NetsimFrontendStats frontend_stats = 6;
   // Device statistics
   repeated NetsimDeviceStats device_stats = 7;
+  // Wi-Fi statistics
+  optional WifiStats wifi_stats = 8;
+  // NFC statistics
+  optional NfcStats nfc_stats = 9;
+  // NFC Service API statistics
+  optional NfcServiceStats nfc_service_stats = 10;
+  // Combined API statistics
+  optional ApiStats api_stats = 12;
+
+  reserved 11;
 }

@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -93,7 +93,7 @@ message Chip {
   // BleBeacon has numerous configurable fields.
   // Address, AdvertiseSetting, AdvertiseData.
   message BleBeacon {
-    // Advertise Settigns dictate how the beacon functions on the netwwork.
+    // Advertise Settings dictate how the beacon functions on the network.
     message AdvertiseSettings {
       // How often the beacon sends an advertising packet
       //
@@ -148,7 +148,7 @@ message Chip {
       }
       // Whether the beacon will respond to scan requests.
       bool scannable = 5;
-      // Limit adveritising to a given amoutn of time.
+      // Limit advertising to a given amount of time.
       uint64 timeout = 6;
     }
 
@@ -179,7 +179,7 @@ message Chip {
     Bluetooth bt = 1;
     // BD_ADDR address
     string address = 2;
-    // Settings on how beacon functions
+    // Settings on how the beacon functions
     AdvertiseSettings settings = 3;
     // Advertising Data
     AdvertiseData adv_data = 4;
@@ -195,7 +195,15 @@ message Chip {
     Radio uwb = 7;
     // WIFI
     Radio wifi = 8;
-    // Reserved fields 10 to 14
+    // ETHERNET
+    Radio ethernet = 10;
+    // CELLULAR. Chip ID matches Cell ID in cell.proto.
+    Radio cellular = 11;
+    // CELLULAR_DATA
+    Radio cellular_data = 12;
+    // NFC
+    Radio nfc = 13;
+    // Reserved fields 14
   }
   // Offset of the chip position from center of device
   optional Position offset = 15;
@@ -292,4 +300,20 @@ message Capture {
   // True if capture for the chip is attached to netsim.
   // False if chip has been detached from netsim.
   bool valid = 8;
+}
+
+// Link model for netsim
+message Link {
+  // Sender chip identifier. 0 acts as a wildcard, matching any chip.
+  uint32 sender_id = 1;
+  // Receiver chip identifier. 0 acts as a wildcard, matching any chip.
+  uint32 receiver_id = 2;
+  // Radio kind of link (i.e. BLE, WiFi, etc)
+  PhyKind link_kind = 3 [deprecated = true];
+  // Received Signal Strength Indicator (RSSI) value in dBm
+  int32 rssi = 4;
+  // Chip Kind (Bluetooth, WiFi, UWB, etc.)
+  netsim.common.ChipKind kind = 5;
+  // Link Identifier
+  uint32 id = 6;
 }

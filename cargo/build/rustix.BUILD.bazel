@@ -1,0 +1,73 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""rustix bazel build rule"""
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "rustix",
+    srcs = select({
+        "@rules_rust//rust/platform:linux": glob(["src/**/*.rs"]),
+        "//conditions:default": glob(
+            include = ["src/**/*.rs"],
+            exclude = ["src/backend/linux_raw/**"],
+        ),
+    }),
+    aliases = {
+        "@errno": "libc_errno",
+    },
+    crate_features = [
+        "alloc",
+        "event",
+        "fs",
+        "libc",
+        "libc_errno",
+        "mm",
+        "net",
+        "param",
+        "pipe",
+        "std",
+        "use-libc",
+        "use-libc-auxv",
+    ],
+    crate_name = "rustix",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    rustc_flags = [
+        "--cfg=libc",
+        "--cfg=static_assertions",
+    ] + select({
+        "@rules_rust//rust/platform:linux": [
+            "--cfg=linux_like",
+            "--cfg=linux_kernel",
+            "--cfg=rustix_no_linux_raw",
+        ],
+        "@rules_rust//rust/platform:macos": [
+            "--cfg=apple",
+            "--cfg=bsd",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "@bitflags",
+        "@errno",
+        "@libc",
+    ] + select({
+        "@rules_rust//rust/platform:windows": ["@windows-sys"],
+        "//conditions:default": [],
+    }),
+)

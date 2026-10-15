@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -39,7 +39,13 @@ service FrontendService {
   rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
 
   // Delete a builtin chip. Implicitly deletes devices which contain no chips.
-  rpc DeleteChip(DeleteChipRequest) returns (google.protobuf.Empty);
+  // Deprecated: Use DeleteDevice instead.
+  rpc DeleteChip(DeleteChipRequest) returns (google.protobuf.Empty) {
+    option deprecated = true;
+  }
+
+  // Delete a builtin device.
+  rpc DeleteDevice(DeleteDeviceRequest) returns (google.protobuf.Empty);
 
   // Patch a device
   rpc PatchDevice(PatchDeviceRequest) returns (google.protobuf.Empty);
@@ -64,6 +70,18 @@ service FrontendService {
 
   // Retrieve the contents of the packet capture as streaming bytes
   rpc GetCapture(GetCaptureRequest) returns (stream GetCaptureResponse);
+
+  // Create a new link.
+  rpc CreateLink(CreateLinkRequest) returns (CreateLinkResponse);
+
+  // List all current links on netsim.
+  rpc ListLink(google.protobuf.Empty) returns (ListLinkResponse);
+
+  // Patch (modify) a link.
+  rpc PatchLink(PatchLinkRequest) returns (google.protobuf.Empty);
+
+  // Delete a link.
+  rpc DeleteLink(DeleteLinkRequest) returns (google.protobuf.Empty);
 }
 
 // Response of GetVersion.
@@ -91,12 +109,20 @@ message CreateDeviceResponse {
   netsim.model.Device device = 1;
 }
 
+// Request of DeleteChip.
+//
+// Deprecated: Use DeleteDevice instead.
+message DeleteChipRequest {
+  // Device Identifier
+  uint32 id = 2 [deprecated = true];
+}
+
 // Request of DeleteDevice.
 //
 // DeleteDevice is only used for built-in device.
-message DeleteChipRequest {
+message DeleteDeviceRequest {
   // Device Identifier
-  uint32 id = 2;
+  uint32 id = 1;
 }
 
 // Request of PatchDevice.
@@ -188,4 +214,38 @@ message GetCaptureRequest {
 message GetCaptureResponse {
   // Max of 1024 bytes of capture file
   bytes capture_stream = 1;
+}
+
+// Request of CreateLink.
+message CreateLinkRequest {
+  // The link to create.
+  netsim.model.Link link = 1;
+}
+
+// Response of CreateLink.
+message CreateLinkResponse {
+  // The created link.
+  netsim.model.Link link = 1;
+}
+
+// Response of ListLink
+message ListLinkResponse {
+  // Collection of current links
+  repeated netsim.model.Link links = 1;
+}
+
+// Request of PatchLink.
+message PatchLinkRequest {
+  // The properties to apply.
+  netsim.model.Link link = 1;
+  // The link ID.
+  uint32 id = 2;
+}
+
+// Request of DeleteLink.
+message DeleteLinkRequest {
+  // The link to delete (deprecated, use id).
+  netsim.model.Link link = 1 [deprecated = true];
+  // The link ID.
+  uint32 id = 2;
 }

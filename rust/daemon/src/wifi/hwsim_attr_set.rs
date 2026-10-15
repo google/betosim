@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -202,14 +202,14 @@ impl HwsimAttrSetBuilder {
 impl fmt::Display for HwsimAttrSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{ ")?;
-        self.transmitter.map(|v| write!(f, "transmitter: {}, ", v));
-        self.receiver.map(|v| write!(f, "receiver: {}, ", v));
-        self.cookie.map(|v| write!(f, "cookie: {}, ", v));
-        self.flags.map(|v| write!(f, "flags: {}, ", v));
-        self.rx_rate_idx.map(|v| write!(f, "rx_rate_idx: {}, ", v));
-        self.signal.map(|v| write!(f, "signal: {}, ", v));
+        self.transmitter.map(|v| write!(f, "transmitter: {v}, "));
+        self.receiver.map(|v| write!(f, "receiver: {v}, "));
+        self.cookie.map(|v| write!(f, "cookie: {v}, "));
+        self.flags.map(|v| write!(f, "flags: {v}, "));
+        self.rx_rate_idx.map(|v| write!(f, "rx_rate_idx: {v}, "));
+        self.signal.map(|v| write!(f, "signal: {v}, "));
         self.frame.as_ref().map(|v| write!(f, "frame: {:?}, ", &v));
-        self.freq.map(|v| write!(f, "freq: {}, ", v));
+        self.freq.map(|v| write!(f, "freq: {v}, "));
         self.tx_info.as_ref().map(|v| write!(f, "tx_info: {:?}, ", &v));
         self.tx_info_flags.as_ref().map(|v| write!(f, "tx_info_flags: {:?}, ", &v));
         write!(f, "}}")?;
@@ -367,7 +367,7 @@ mod tests {
         let hwsim_msg = HwsimMsg::decode_full(&packet).unwrap();
         let attrs = HwsimAttrSet::parse(hwsim_msg.attributes()).unwrap();
 
-        let fmt_attrs = format!("{}", attrs);
+        let fmt_attrs = format!("{attrs}");
         assert!(fmt_attrs.contains("transmitter: 02:15:b2:00:00:00"));
         assert!(fmt_attrs.contains("cookie: 201"));
     }

@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,7 @@ use crate::wireless::{WirelessChip, WirelessChipImpl};
 use bytes::Bytes;
 use netsim_proto::common::ChipKind as ProtoChipKind;
 use netsim_proto::model::Chip as ProtoChip;
-use netsim_proto::stats::{netsim_radio_stats, NetsimRadioStats as ProtoRadioStats};
+use netsim_proto::stats::{NetsimRadioStats as ProtoRadioStats, netsim_radio_stats};
 use protobuf::EnumOrUnknown;
 
 /// Parameters for creating Mocked chips
@@ -47,11 +47,13 @@ impl WirelessChip for Mock {
     fn get_stats(&self, _duration_secs: u64) -> Vec<ProtoRadioStats> {
         let mut stats = ProtoRadioStats::new();
         stats.kind = Some(EnumOrUnknown::new(match self.chip_kind {
-            ProtoChipKind::UNSPECIFIED => netsim_radio_stats::Kind::UNSPECIFIED,
             ProtoChipKind::BLUETOOTH => netsim_radio_stats::Kind::BLUETOOTH_LOW_ENERGY,
             ProtoChipKind::WIFI => netsim_radio_stats::Kind::WIFI,
             ProtoChipKind::UWB => netsim_radio_stats::Kind::UWB,
             ProtoChipKind::BLUETOOTH_BEACON => netsim_radio_stats::Kind::BLE_BEACON,
+            ProtoChipKind::NFC => netsim_radio_stats::Kind::NFC,
+            ProtoChipKind::CELLULAR => netsim_radio_stats::Kind::UNSPECIFIED,
+            _ => netsim_radio_stats::Kind::UNSPECIFIED,
         }));
         vec![stats]
     }

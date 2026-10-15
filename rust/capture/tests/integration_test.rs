@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -47,11 +47,27 @@ async fn read_file() -> Result<(), std::io::Error> {
                 assert_eq!(DATA.len() as u64, reader.stream_position().await?);
                 break;
             }
-            _ => {
-                assert!(false, "Unexpected error");
+            Err(e) => {
+                return Err(e);
             }
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_file() -> Result<(), std::io::Error> {
+    let mut writer = tokio::io::BufWriter::new(Vec::new());
+    let link_type = pcap::LinkType::Ethernet;
+    pcap::write_file_header(link_type, &mut writer).await?;
+    let packet = [1, 2, 3, 4];
+    let timestamp = std::time::Duration::new(1, 0);
+    pcap::write_record(timestamp, &mut writer, &packet).await?;
+    let written_data = writer.into_inner();
+    let mut reader = BufReader::new(Cursor::new(written_data));
+    let _ = pcap::read_file_header(&mut reader).await?;
+    let (_, record_data) = pcap::read_record(&mut reader).await?;
+    assert_eq!(record_data, packet);
     Ok(())
 }

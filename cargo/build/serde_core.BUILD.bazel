@@ -1,0 +1,44 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""serde bazel build rule"""
+
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "serde_core",
+    srcs = [
+        "out/private.rs",
+        "src/crate_root.rs",
+        "src/format.rs",
+        "src/lib.rs",
+        "src/macros.rs",
+    ] + glob([
+        "src/de/*.rs",
+        "src/private/*.rs",
+        "src/ser/*.rs",
+    ]),
+    crate_features = [
+        "rc",
+        "result",
+        "std",
+    ],
+    crate_name = "serde_core",
+    crate_root = "src/lib.rs",
+    data = ["out/private.rs"],
+    edition = "2021",
+    rustc_env = {"OUT_DIR": "../out"},
+)

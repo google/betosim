@@ -1,5 +1,19 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! gRPC frontend client library for netsim.
-use anyhow::{anyhow, Result};
+use crate::error::Result;
 use futures_util::StreamExt;
 use netsim_proto::frontend;
 use netsim_proto::frontend_grpc::FrontendServiceClient;
@@ -36,6 +50,9 @@ pub enum GrpcRequest {
     PatchDevice(frontend::PatchDeviceRequest),
     PatchCapture(frontend::PatchCaptureRequest),
     GetCapture(frontend::GetCaptureRequest),
+    ListLink,
+    PatchLink(frontend::PatchLinkRequest),
+    DeleteLink(frontend::DeleteLinkRequest),
 }
 
 // Enum of Grpc Responses holding the response proto as applicable
@@ -49,6 +66,9 @@ pub enum GrpcResponse {
     DeleteChip,
     PatchDevice,
     PatchCapture,
+    ListLink(frontend::ListLinkResponse),
+    PatchLink,
+    DeleteLink,
     Unknown,
 }
 
@@ -103,6 +123,20 @@ pub fn send_grpc(
             client.patch_capture(req)?;
             Ok(GrpcResponse::PatchCapture)
         }
-        _ => Err(anyhow!(grpcio::RpcStatus::new(grpcio::RpcStatusCode::INVALID_ARGUMENT,))),
+        GrpcRequest::ListLink => {
+            Ok(GrpcResponse::ListLink(client.list_link(&empty::Empty::new())?))
+        }
+        GrpcRequest::PatchLink(req) => {
+            client.patch_link(req)?;
+            Ok(GrpcResponse::PatchLink)
+        }
+        GrpcRequest::DeleteLink(req) => {
+            client.delete_link(req)?;
+            Ok(GrpcResponse::DeleteLink)
+        }
+        _ => Err(grpcio::Error::RpcFailure(grpcio::RpcStatus::new(
+            grpcio::RpcStatusCode::INVALID_ARGUMENT,
+        ))
+        .into()),
     }
 }

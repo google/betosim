@@ -1,2 +1,2 @@
 include proto/netsim/*.proto
-include ../../packages/modules/Bluetooth/tools/rootcanal/proto/rootcanal/*.proto
+include ../../tools/rootcanal/proto/rootcanal/*.proto

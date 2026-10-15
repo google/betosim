@@ -1,10 +1,10 @@
-// Copyright 2024 Google LLC
+// Copyright 2024 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,8 +16,8 @@ use std::marker::Unpin;
 use std::mem::size_of;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use zerocopy::{AsBytes, FromBytes};
-use zerocopy_derive::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{FromBytes, IntoBytes};
+use zerocopy_derive::*;
 
 type Result<A> = std::result::Result<A, std::io::Error>;
 
@@ -53,8 +53,8 @@ type Result<A> = std::result::Result<A, std::io::Error>;
 /// * `sigfigs`: The accuracy of the timestamps.
 /// * `snaplen`: The maximum number of bytes captured from each packet.
 /// * `linktype`: The data link type of the network interface used to capture the packets.
+#[derive(IntoBytes, FromBytes, Immutable, Debug, PartialEq, Eq)]
 #[repr(C)]
-#[derive(AsBytes, FromBytes, FromZeroes)]
 /// Represents the global header of a pcap capture file.
 pub struct FileHeader {
     /// Magic number identifying the file format.
@@ -79,7 +79,7 @@ impl FileHeader {
     const VERSION_MINOR: u16 = 4u16;
     const RESERVED_1: i32 = 0;
     const RESERVED_2: u32 = 0;
-    const SNAP_LEN: u32 = u32::MAX;
+    const SNAP_LEN: u32 = u16::MAX as u32;
 }
 
 impl Default for FileHeader {
@@ -106,6 +106,7 @@ impl Default for FileHeader {
 /// refer to the tcpdump documentation:
 /// https://www.tcpdump.org/linktypes.html
 #[repr(u32)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum LinkType {
     /// Null link type (BSD loopback)
     Null = 0,
@@ -118,6 +119,19 @@ pub enum LinkType {
     BluetoothHciH4WithPhdr = 201,
     /// Ultra-wideband controller interface protocol
     FiraUci = 299,
+}
+
+impl From<u32> for LinkType {
+    fn from(val: u32) -> Self {
+        match val {
+            0 => LinkType::Null,
+            1 => LinkType::Ethernet,
+            127 => LinkType::Ieee80211RadioTap,
+            201 => LinkType::BluetoothHciH4WithPhdr,
+            299 => LinkType::FiraUci,
+            _ => panic!("Invalid link type: {}", val),
+        }
+    }
 }
 
 impl From<LinkType> for u32 {
@@ -157,8 +171,8 @@ impl From<LinkType> for u32 {
 /// * `caplen`: The number of bytes of packet data actually captured and saved in the file.
 /// * `len`: The original length of the packet on the network.
 //
+#[derive(IntoBytes, FromBytes, Immutable, Debug, PartialEq, Eq)]
 #[repr(C)]
-#[derive(AsBytes, FromBytes, FromZeroes)]
 /// Represents the header prepended to each packet in a pcap capture file.
 pub struct PacketHeader {
     /// Timestamp of the captured packet (seconds).
@@ -184,10 +198,9 @@ pub struct PacketHeader {
 pub async fn read_file_header(mut reader: impl AsyncRead + Unpin) -> Result<FileHeader> {
     let mut header_bytes = [0u8; size_of::<FileHeader>()];
     reader.read_exact(&mut header_bytes).await?;
-    let header = FileHeader::read_from(&header_bytes[..]).ok_or(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "Failed to parse pcap file header",
-    ))?;
+    let header = FileHeader::read_from_bytes(&header_bytes[..]).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to parse pcap file header")
+    })?;
     if header.magic != FileHeader::MAGIC {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -211,10 +224,9 @@ pub async fn read_file_header(mut reader: impl AsyncRead + Unpin) -> Result<File
 pub async fn read_record(mut reader: impl AsyncRead + Unpin) -> Result<(PacketHeader, Vec<u8>)> {
     let mut pkt_hdr_bytes = [0u8; std::mem::size_of::<PacketHeader>()];
     reader.read_exact(&mut pkt_hdr_bytes).await?;
-    let pkt_hdr = PacketHeader::read_from(&pkt_hdr_bytes[..]).ok_or(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "Failed to parse pcap record header",
-    ))?;
+    let pkt_hdr = PacketHeader::read_from_bytes(&pkt_hdr_bytes[..]).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to parse pcap record header")
+    })?;
     let mut packet_data = vec![0u8; pkt_hdr.caplen as usize];
     reader.read_exact(&mut packet_data).await?;
     Ok((pkt_hdr, packet_data))
@@ -274,9 +286,71 @@ pub async fn write_record(
         caplen: pkt_len as u32,
         len: pkt_len as u32,
     };
-    let mut bytes = Vec::<u8>::with_capacity(pkt_hdr_len + pkt_len);
-    bytes.extend(header.as_bytes());
-    bytes.extend(packet);
-    output.write_all(&bytes).await?;
+    output.write_all(header.as_bytes()).await?;
+    output.write_all(packet).await?;
+    output.flush().await?;
     Ok(pkt_hdr_len + pkt_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn test_read_file_header_success() {
+        let file_header = FileHeader {
+            magic: FileHeader::MAGIC,
+            version_major: FileHeader::VERSION_MAJOR,
+            version_minor: FileHeader::VERSION_MINOR,
+            thiszone: FileHeader::RESERVED_1,
+            sigfigs: FileHeader::RESERVED_2,
+            snaplen: FileHeader::SNAP_LEN,
+            linktype: LinkType::Null as u32,
+        };
+        let mut reader = BufReader::new(file_header.as_bytes());
+        let result = read_file_header(&mut reader).await;
+        assert!(result.is_ok());
+        let read_header = result.unwrap();
+        assert_eq!(read_header, file_header);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_header_invalid_magic() {
+        let file_header = FileHeader {
+            magic: 0, // Invalid magic number
+            version_major: FileHeader::VERSION_MAJOR,
+            version_minor: FileHeader::VERSION_MINOR,
+            thiszone: FileHeader::RESERVED_1,
+            sigfigs: FileHeader::RESERVED_2,
+            snaplen: FileHeader::SNAP_LEN,
+            linktype: LinkType::Null as u32,
+        };
+        let mut reader = BufReader::new(file_header.as_bytes());
+        let result = read_file_header(&mut reader).await;
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_read_record_success() {
+        let packet_header = PacketHeader { tv_sec: 1, tv_usec: 2, caplen: 4, len: 4 };
+        let packet_data = vec![1, 2, 3, 4];
+        let mut record_data = packet_header.as_bytes().to_vec();
+        record_data.extend_from_slice(&packet_data);
+
+        let mut reader = BufReader::new(&record_data[..]);
+        let result = read_record(&mut reader).await;
+        assert!(result.is_ok());
+        let (read_header, read_data) = result.unwrap();
+        assert_eq!(read_header, packet_header);
+        assert_eq!(read_data, packet_data);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Invalid link type: 999")]
+    async fn test_link_type_from_invalid() {
+        let _ = LinkType::from(999);
+    }
 }

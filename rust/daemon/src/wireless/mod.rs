@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,4 +25,4 @@ pub mod wireless_manager;
 pub use crate::wireless::packet::{handle_request, handle_request_cxx, handle_response_cxx};
 pub use crate::wireless::wireless_chip::WirelessChip;
 pub use crate::wireless::wireless_chip::WirelessChipImpl;
-pub use crate::wireless::wireless_manager::{add_chip, CreateParam};
+pub use crate::wireless::wireless_manager::{CreateParam, add_chip};

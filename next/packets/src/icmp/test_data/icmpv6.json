@@ -1,0 +1,144 @@
+[
+  {
+    "_index": "packets-2025-12-06",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame": {
+          "frame.section_number": "1",
+          "frame.interface_id": "0",
+          "frame.interface_id_tree": {
+            "frame.interface_name": "Fake IF, text2pcap"
+          },
+          "frame.encap_type": "1",
+          "frame.time": "Dec  6, 2025 22:58:40.000001000 UTC",
+          "frame.time_utc": "Dec  6, 2025 22:58:40.000001000 UTC",
+          "frame.time_epoch": "1765061920.000001000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "62",
+          "frame.cap_len": "62",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "eth:ethertype:ipv6:icmpv6"
+        },
+        "eth": {
+          "eth.dst": "00:11:22:33:44:55",
+          "eth.dst_tree": {
+            "eth.dst_resolved": "00:11:22:33:44:55",
+            "eth.dst.oui": "4386",
+            "eth.dst.oui_resolved": "CIMSYS Inc",
+            "eth.dst.lg": "0",
+            "eth.dst.ig": "0",
+            "eth.addr": "00:11:22:33:44:55",
+            "eth.addr_resolved": "00:11:22:33:44:55",
+            "eth.addr.oui": "4386",
+            "eth.addr.oui_resolved": "CIMSYS Inc",
+            "eth.lg": "0",
+            "eth.ig": "0"
+          },
+          "eth.src": "66:77:88:99:aa:bb",
+          "eth.src_tree": {
+            "eth.src_resolved": "66:77:88:99:aa:bb",
+            "eth.src.oui": "6715272",
+            "eth.src.lg": "1",
+            "eth.src.ig": "0",
+            "eth.addr": "66:77:88:99:aa:bb",
+            "eth.addr_resolved": "66:77:88:99:aa:bb",
+            "eth.addr.oui": "6715272",
+            "eth.lg": "1",
+            "eth.ig": "0"
+          },
+          "eth.type": "0x86dd",
+          "eth.stream": "0"
+        },
+        "ipv6": {
+          "ipv6.version": "6",
+          "ip.version": "6",
+          "ipv6.tclass": "0x00000000",
+          "ipv6.tclass_tree": {
+            "ipv6.tclass.dscp": "0",
+            "ipv6.tclass.ecn": "0"
+          },
+          "ipv6.flow": "0x000000",
+          "ipv6.plen": "8",
+          "ipv6.nxt": "58",
+          "ipv6.hlim": "64",
+          "ipv6.src": "fe80::1",
+          "ipv6.src_tree": {
+            "ipv6.src_addr_space": "Link-Local Unicast",
+            "ipv6.src_special_purpose": "Link-Local Unicast",
+            "ipv6.src_special_purpose_tree": {
+              "ipv6.src_special_purpose_source": "1",
+              "ipv6.src_special_purpose_destination": "1",
+              "ipv6.src_special_purpose_forwardable": "0",
+              "ipv6.src_special_purpose_global": "0",
+              "ipv6.src_special_purpose_reserved": "1"
+            }
+          },
+          "ipv6.addr": "fe80::1",
+          "ipv6.addr_tree": {
+            "ipv6.addr_space": "Link-Local Unicast",
+            "ipv6.addr_special_purpose": "Link-Local Unicast",
+            "ipv6.addr_special_purpose_tree": {
+              "ipv6.addr_special_purpose_source": "1",
+              "ipv6.addr_special_purpose_destination": "1",
+              "ipv6.addr_special_purpose_forwardable": "0",
+              "ipv6.addr_special_purpose_global": "0",
+              "ipv6.addr_special_purpose_reserved": "1"
+            }
+          },
+          "ipv6.src_host": "fe80::1",
+          "ipv6.host": "fe80::1",
+          "ipv6.dst": "ff02::1",
+          "ipv6.dst_tree": {
+            "ipv6.dst_addr_space": "Multicast",
+            "ipv6.dst_multicast_flags": "0x0000",
+            "ipv6.dst_multicast_flags_tree": {
+              "ipv6.dst_multicast_flags.reserved": "0",
+              "ipv6.dst_multicast_flags.embed_rp": "0",
+              "ipv6.dst_multicast_flags.network_prefix": "0",
+              "ipv6.dst_multicast_flags.transient": "0"
+            },
+            "ipv6.dst_multicast_scope": "0x0002"
+          },
+          "ipv6.addr": "ff02::1",
+          "ipv6.addr_tree": {
+            "ipv6.addr_space": "Multicast",
+            "ipv6.multicast_flags": "0x0000",
+            "ipv6.multicast_flags_tree": {
+              "ipv6.multicast_flags.reserved": "0",
+              "ipv6.multicast_flags.embed_rp": "0",
+              "ipv6.multicast_flags.network_prefix": "0",
+              "ipv6.multicast_flags.transient": "0"
+            },
+            "ipv6.multicast_scope": "0x0002"
+          },
+          "ipv6.dst_host": "ff02::1",
+          "ipv6.host": "ff02::1",
+          "ipv6.stream": "0"
+        },
+        "icmpv6": {
+          "icmpv6.type": "128",
+          "icmpv6.code": "0",
+          "icmpv6.checksum": "0x0000",
+          "icmpv6.checksum_tree": {
+            "_ws.expert": {
+              "icmpv6.checksum_bad.expert": "",
+              "_ws.expert.message": "Bad checksum [should be 0x8237]",
+              "_ws.expert.severity": "6291456",
+              "_ws.expert.group": "16777216"
+            }
+          },
+          "icmpv6.checksum.status": "0",
+          "icmpv6.echo.identifier": "0x0000",
+          "icmpv6.echo.sequence_number": "0"
+        }
+      }
+    }
+  }
+]

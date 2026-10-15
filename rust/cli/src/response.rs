@@ -1,10 +1,10 @@
-// Copyright 2022 Google LLC
+// Copyright 2022 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,8 +14,11 @@
 
 use std::cmp::max;
 
-use crate::args::{self, Beacon, BeaconCreate, BeaconPatch, Capture, Command, OnOffState};
-use crate::display::Displayer;
+use crate::args::{
+    self, Beacon, BeaconCreate, BeaconPatch, Capture, Command, Link, LinkDelete, LinkPatch,
+    OnOffState,
+};
+use crate::display::{Displayer, LinkChipIdDisplay};
 use crate::grpc_client::GrpcResponse;
 use netsim_common::util::time_display::TimeDisplay;
 use netsim_proto::{common::ChipKind, frontend, model};
@@ -26,7 +29,7 @@ impl args::Command {
         match self {
             Command::Version => {
                 let GrpcResponse::GetVersion(res) = response else {
-                    panic!("Expected to print VersionResponse. Got: {:?}", response);
+                    panic!("Expected to print VersionResponse. Got: {response:?}");
                 };
                 Self::print_version_response(res);
             }
@@ -53,7 +56,7 @@ impl args::Command {
             }
             Command::Devices(_) => {
                 let GrpcResponse::ListDevice(res) = response else {
-                    panic!("Expected to print ListDeviceResponse. Got: {:?}", response);
+                    panic!("Expected to print ListDeviceResponse. Got: {response:?}");
                 };
                 println!("{}", Displayer::new(res.clone(), verbose));
             }
@@ -64,7 +67,7 @@ impl args::Command {
             }
             Command::Capture(Capture::List(cmd)) => {
                 let GrpcResponse::ListCapture(res) = response else {
-                    panic!("Expected to print ListCaptureResponse. Got: {:?}", response);
+                    panic!("Expected to print ListCaptureResponse. Got: {response:?}");
                 };
                 Self::print_list_capture_response(
                     &mut res.clone(),
@@ -98,7 +101,7 @@ impl args::Command {
                             return;
                         }
                         let GrpcResponse::CreateDevice(res) = response else {
-                            panic!("Expected to print CreateDeviceResponse. Got: {:?}", response);
+                            panic!("Expected to print CreateDeviceResponse. Got: {response:?}");
                         };
                         let device = &res.device;
                         if device.chips.len() == 1 {
@@ -107,60 +110,62 @@ impl args::Command {
                                 device.name, device.chips[0].name
                             );
                         } else {
-                            panic!("the gRPC request completed successfully but the response contained an unexpected number of chips");
+                            panic!(
+                                "the gRPC request completed successfully but the response contained an unexpected number of chips"
+                            );
                         }
                     }
                 },
-                Beacon::Patch(kind) => {
-                    match kind {
-                        BeaconPatch::Ble(args) => {
-                            if !verbose {
-                                return;
-                            }
-                            if let Some(advertise_mode) = &args.settings.advertise_mode {
-                                match advertise_mode {
-                                    args::Interval::Mode(mode) => {
-                                        println!("Set advertise mode to {:#?}", mode)
-                                    }
-                                    args::Interval::Milliseconds(ms) => {
-                                        println!("Set advertise interval to {} ms", ms)
-                                    }
+                Beacon::Patch(kind) => match kind {
+                    BeaconPatch::Ble(args) => {
+                        if !verbose {
+                            return;
+                        }
+                        if let Some(advertise_mode) = &args.settings.advertise_mode {
+                            match advertise_mode {
+                                args::Interval::Mode(mode) => {
+                                    println!("Set advertise mode to {mode:#?}")
                                 }
-                            }
-                            if let Some(tx_power_level) = &args.settings.tx_power_level {
-                                match tx_power_level {
-                                    args::TxPower::Level(level) => {
-                                        println!("Set transmit power level to {:#?}", level)
-                                    }
-                                    args::TxPower::Dbm(dbm) => {
-                                        println!("Set transmit power level to {} dBm", dbm)
-                                    }
+                                args::Interval::Milliseconds(ms) => {
+                                    println!("Set advertise interval to {ms} ms")
                                 }
-                            }
-                            if args.settings.scannable {
-                                println!("Set scannable to true");
-                            }
-                            if let Some(timeout) = args.settings.timeout {
-                                println!("Set timeout to {} ms", timeout);
-                            }
-                            if args.advertise_data.include_device_name {
-                                println!("Added the device's name to the advertise packet")
-                            }
-                            if args.advertise_data.include_tx_power_level {
-                                println!("Added the beacon's transmit power level to the advertise packet")
-                            }
-                            if args.advertise_data.manufacturer_data.is_some() {
-                                println!("Added manufacturer data to the advertise packet")
-                            }
-                            if args.settings.scannable {
-                                println!("Set scannable to true");
-                            }
-                            if let Some(timeout) = args.settings.timeout {
-                                println!("Set timeout to {} ms", timeout);
                             }
                         }
+                        if let Some(tx_power_level) = &args.settings.tx_power_level {
+                            match tx_power_level {
+                                args::TxPower::Level(level) => {
+                                    println!("Set transmit power level to {level:#?}")
+                                }
+                                args::TxPower::Dbm(dbm) => {
+                                    println!("Set transmit power level to {dbm} dBm")
+                                }
+                            }
+                        }
+                        if args.settings.scannable {
+                            println!("Set scannable to true");
+                        }
+                        if let Some(timeout) = args.settings.timeout {
+                            println!("Set timeout to {timeout} ms");
+                        }
+                        if args.advertise_data.include_device_name {
+                            println!("Added the device's name to the advertise packet")
+                        }
+                        if args.advertise_data.include_tx_power_level {
+                            println!(
+                                "Added the beacon's transmit power level to the advertise packet"
+                            )
+                        }
+                        if args.advertise_data.manufacturer_data.is_some() {
+                            println!("Added manufacturer data to the advertise packet")
+                        }
+                        if args.settings.scannable {
+                            println!("Set scannable to true");
+                        }
+                        if let Some(timeout) = args.settings.timeout {
+                            println!("Set timeout to {timeout} ms");
+                        }
                     }
-                }
+                },
                 Beacon::Remove(args) => {
                     if !verbose {
                         return;
@@ -175,6 +180,39 @@ impl args::Command {
             Command::Bumble => {
                 unimplemented!("No Grpc Response for Bumble Command.");
             }
+            Command::Link(link_cmd) => match link_cmd {
+                Link::List => {
+                    let GrpcResponse::ListLink(res) = response else {
+                        panic!("Expected to print ListLinkResponse. Got: {response:?}");
+                    };
+                    println!("{}", Displayer::new(res.clone(), verbose));
+                }
+                Link::Patch(patch_struct) => match &patch_struct.command {
+                    LinkPatch::Rssi(args) => {
+                        if verbose {
+                            println!(
+                                "Successfully patched RSSI for link (Sender: {}, Receiver: {}, Type: {:?}) to {}.",
+                                LinkChipIdDisplay(args.sender_id.unwrap_or(0)),
+                                LinkChipIdDisplay(args.receiver_id.unwrap_or(0)),
+                                args.radio_type,
+                                args.value
+                            );
+                        }
+                    }
+                },
+                Link::Delete(delete_struct) => match &delete_struct.command {
+                    LinkDelete::Rssi(args) => {
+                        if verbose {
+                            println!(
+                                "Successfully deleted RSSI for link (Sender: {}, Receiver: {}, Type: {:?}).",
+                                LinkChipIdDisplay(args.sender_id.unwrap_or(0)),
+                                LinkChipIdDisplay(args.receiver_id.unwrap_or(0)),
+                                args.radio_type
+                            );
+                        }
+                    }
+                },
+            },
         }
     }
 
@@ -213,11 +251,11 @@ impl args::Command {
             Self::filter_captures(&mut response.captures, &patterns);
             if response.captures.is_empty() {
                 if verbose {
-                    println!("No available Capture found matching pattern(s) `{:?}`:", patterns);
+                    println!("No available Capture found matching pattern(s) `{patterns:?}`:");
                 }
                 return;
             }
-            println!("List of Captures matching pattern(s) `{:?}`:", patterns);
+            println!("List of Captures matching pattern(s) `{patterns:?}`:");
         }
         // Create the header row and determine column widths
         let id_hdr = "ID";
@@ -258,19 +296,12 @@ impl args::Command {
         println!(
             "{}",
             if verbose {
-                format!("{:id_width$} | {:name_width$} | {:chipkind_width$} | {:state_width$} | {:time_width$} | {:records_width$} | {:size_width$} |",
-                    id_hdr,
-                    name_hdr,
-                    chipkind_hdr,
-                    state_hdr,
-                    time_hdr,
-                    records_hdr,
-                    size_hdr,
+                format!(
+                    "{id_hdr:id_width$} | {name_hdr:name_width$} | {chipkind_hdr:chipkind_width$} | {state_hdr:state_width$} | {time_hdr:time_width$} | {records_hdr:records_width$} | {size_hdr:size_width$} |",
                 )
             } else {
                 format!(
-                    "{:name_width$} | {:chipkind_width$} | {:state_width$} | {:records_width$} |",
-                    name_hdr, chipkind_hdr, state_hdr, records_hdr
+                    "{name_hdr:name_width$} | {chipkind_hdr:chipkind_width$} | {state_hdr:state_width$} | {records_hdr:records_width$} |"
                 )
             }
         );
@@ -279,15 +310,21 @@ impl args::Command {
             println!(
                 "{}",
                 if verbose {
-                    format!("{:id_width$} | {:name_width$} | {:chipkind_width$} | {:state_width$} | {:time_width$} | {:records_width$} | {:size_width$} |",
+                    format!(
+                        "{:id_width$} | {:name_width$} | {:chipkind_width$} | {:state_width$} | {:time_width$} | {:records_width$} | {:size_width$} |",
                         capture.id.to_string(),
                         capture.device_name,
                         Self::chip_kind_to_string(capture.chip_kind.enum_value_or_default()),
-                        if capture.valid {Self::capture_state_to_string(capture.state)} else {"detached".to_string()},
+                        if capture.valid {
+                            Self::capture_state_to_string(capture.state)
+                        } else {
+                            "detached".to_string()
+                        },
                         TimeDisplay::new(
                             capture.timestamp.get_or_default().seconds,
                             capture.timestamp.get_or_default().nanos as u32,
-                        ).utc_display_hms(),
+                        )
+                        .utc_display_hms(),
                         capture.records,
                         capture.size,
                     )
@@ -296,7 +333,11 @@ impl args::Command {
                         "{:name_width$} | {:chipkind_width$} | {:state_width$} | {:records_width$} |",
                         capture.device_name,
                         Self::chip_kind_to_string(capture.chip_kind.enum_value_or_default()),
-                        if capture.valid {Self::capture_state_to_string(capture.state)} else {"detached".to_string()},
+                        if capture.valid {
+                            Self::capture_state_to_string(capture.state)
+                        } else {
+                            "detached".to_string()
+                        },
                         capture.records,
                     )
                 }
@@ -306,11 +347,13 @@ impl args::Command {
 
     pub fn chip_kind_to_string(chip_kind: ChipKind) -> String {
         match chip_kind {
-            ChipKind::UNSPECIFIED => "UNSPECIFIED".to_string(),
             ChipKind::BLUETOOTH => "BLUETOOTH".to_string(),
             ChipKind::WIFI => "WIFI".to_string(),
             ChipKind::UWB => "UWB".to_string(),
             ChipKind::BLUETOOTH_BEACON => "BLUETOOTH_BEACON".to_string(),
+            ChipKind::NFC => "NFC".to_string(),
+            ChipKind::CELLULAR => "CELLULAR".to_string(),
+            _ => "UNSPECIFIED".to_string(),
         }
     }
 

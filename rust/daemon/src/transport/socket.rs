@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +19,7 @@ use crate::devices::chip::{self, ChipIdentifier};
 use crate::devices::devices_handler::{add_chip, remove_chip};
 use crate::transport::h4;
 use crate::wireless;
-use crate::wireless::packet::{register_transport, unregister_transport, Response};
+use crate::wireless::packet::{Response, register_transport, unregister_transport};
 use bytes::Bytes;
 use log::{error, info, warn};
 use netsim_proto::common::ChipKind;
@@ -48,7 +48,7 @@ impl Response for SocketTransport {
         buffer.push(packet_type);
         buffer.extend(packet);
         if let Err(e) = self.stream.write_all(&buffer[..]) {
-            error!("error writing {}", e);
+            error!("error writing {e}");
         };
     }
 }
@@ -58,7 +58,7 @@ pub fn run_socket_transport(hci_port: u16) {
         .name("hci_transport".to_string())
         .spawn(move || {
             accept_incoming(hci_port)
-                .unwrap_or_else(|e| error!("Failed to accept incoming stream: {:?}", e));
+                .unwrap_or_else(|e| error!("Failed to accept incoming stream: {e:?}"));
         })
         .unwrap();
 }
@@ -69,7 +69,7 @@ fn accept_incoming(hci_port: u16) -> std::io::Result<()> {
             TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, hci_port)))
         }
     )?;
-    info!("Hci socket server is listening on: {}", hci_port);
+    info!("Hci socket server is listening on: {hci_port}");
 
     for stream in listener.incoming() {
         let stream = stream?;
@@ -148,7 +148,11 @@ fn reader(mut tcp_rx: TcpStream, kind: ChipKind, chip_id: ChipIdentifier) -> std
                     return Ok(());
                 }
                 Err(e) => {
-                    error!("End socket reader connection with {}. Failed to reading hci control packet: {:?}",  &tcp_rx.peer_addr().unwrap(), e);
+                    error!(
+                        "End socket reader connection with {}. Failed to reading hci control packet: {:?}",
+                        &tcp_rx.peer_addr().unwrap(),
+                        e
+                    );
                     return Ok(());
                 }
             }

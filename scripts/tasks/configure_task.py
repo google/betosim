@@ -1,64 +1,57 @@
 #!/usr/bin/env python3
+# Copyright 2024 The Android Open Source Project
 #
-# Copyright 2024 - The Android Open Source Project
-#
-# Licensed under the Apache License, Version 2.0 (the',  help="License");
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an',  help="AS IS" BASIS,
+# distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+#
 
 from pathlib import Path
 import platform
 import shutil
 from tasks.task import Task
-from utils import (AOSP_ROOT, cmake_toolchain, run)
+from utils import (
+    NETSIM_ROOT,
+    get_bazel_path,
+    get_bazel_startup_options,
+    run,
+)
 
 
 class ConfigureTask(Task):
-  BUILDCONFIG = {
-      "debug": "-DCMAKE_BUILD_TYPE=Debug",
-      "release": "-DCMAKE_BUILD_TYPE=Release",
-  }
 
   def __init__(self, args, env):
     super().__init__("Configure")
+    self.args = args
     self.out = Path(args.out_dir)
     self.env = env
-    if args.target:
-      self.target = args.target.lower()
-    else:
-      self.target = platform.system().lower()
-    self.build_config = self.BUILDCONFIG[args.config]
 
   def do_run(self):
-    if self.out.exists():
-      shutil.rmtree(self.out)
-    self.out.mkdir(exist_ok=True, parents=True)
-    cmake = shutil.which(
-        "cmake",
-        path=str(
-            AOSP_ROOT
-            / "prebuilts"
-            / "cmake"
-            / f"{platform.system().lower()}-x86"
-            / "bin"
-        ),
-    )
-    launcher = [
-        cmake,
-        f"-B{self.out}",
-        "-G Ninja",
-        self.build_config,
-        f"-DCMAKE_TOOLCHAIN_FILE={cmake_toolchain(self.target)}",
-        AOSP_ROOT / "tools" / "netsim",
-    ]
+    return self._run_bazel()
 
-    run(launcher, self.env, "bld")
+  def _run_bazel(self):
+    # For Bazel, we clean the distribution directory to ensure a fresh install.
+    # This prevents stale artifacts from previous builds from interfering.
+    dist_dir = self.out / "distribution"
+    if dist_dir.exists():
+      shutil.rmtree(dist_dir)
+
+    if self.args.clean:
+      bazel = get_bazel_path()
+      startup_options = get_bazel_startup_options()
+      run(
+          [bazel] + startup_options + ["clean", "--expunge"],
+          self.env,
+          "bazel clean",
+          NETSIM_ROOT,
+      )
     return True

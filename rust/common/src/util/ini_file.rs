@@ -1,25 +1,24 @@
+//  Copyright 2023 The Android Open Source Project
 //
-//  Copyright 2023 Google, Inc.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at:
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-//  http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! # IniFile class
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::BufReader;
+use std::io::prelude::*;
 use std::path::PathBuf;
 
 use log::error;
@@ -79,7 +78,7 @@ impl IniFile {
     fn write(&self) -> std::io::Result<()> {
         let mut f = create_new(self.filepath.clone())?;
         for (key, value) in &self.data {
-            writeln!(&mut f, "{}={}", key, value)?;
+            writeln!(&mut f, "{key}={value}")?;
         }
         f.flush()?;
         Ok(())
@@ -116,7 +115,12 @@ fn create_new<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<File> {
 }
 
 /// Write ports to ini file
-pub fn create_ini(instance_num: u16, grpc_port: u32, web_port: Option<u16>) -> std::io::Result<()> {
+pub fn create_ini(
+    instance_num: u16,
+    grpc_port: u32,
+    web_port: Option<u16>,
+    websocket_port: Option<u16>,
+) -> std::io::Result<()> {
     // Instantiate IniFile
     let filepath = get_ini_filepath(instance_num);
     let mut ini_file = IniFile::new(filepath);
@@ -124,6 +128,9 @@ pub fn create_ini(instance_num: u16, grpc_port: u32, web_port: Option<u16>) -> s
     // Write ports to ini file
     if let Some(num) = web_port {
         ini_file.insert("web.port", &num.to_string());
+    }
+    if let Some(num) = websocket_port {
+        ini_file.insert("ws.port", &num.to_string())
     }
     ini_file.insert("grpc.port", &grpc_port.to_string());
     ini_file.write()
@@ -162,25 +169,20 @@ pub fn get_server_address(instance_num: u16) -> Option<String> {
     if let Err(err) = ini_file.read() {
         error!("Error reading ini file: {err:?}");
     }
-    ini_file.get("grpc.port").map(|s: &str| {
-        if s.contains(':') {
-            s.to_string()
-        } else {
-            format!("localhost:{}", s)
-        }
-    })
+    ini_file
+        .get("grpc.port")
+        .map(|s: &str| if s.contains(':') { s.to_string() } else { format!("localhost:{s}") })
 }
 
 #[cfg(test)]
 mod tests {
-    use rand::{distributions::Alphanumeric, Rng};
-    use std::env;
     use std::fs::File;
     use std::io::{Read, Write};
     use std::path::PathBuf;
+    use std::{env, time::SystemTime};
 
-    use super::get_ini_filepath;
     use super::IniFile;
+    use super::get_ini_filepath;
 
     use crate::tests::ENV_MUTEX;
 
@@ -202,11 +204,13 @@ mod tests {
     fn get_temp_ini_filepath(prefix: &str) -> PathBuf {
         env::temp_dir().join(format!(
             "{prefix}_{}.ini",
-            rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(8)
-                .map(char::from)
-                .collect::<String>()
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string()
+                + "_"
+                + &rand::random::<u64>().to_string()
         ))
     }
 
@@ -390,7 +394,11 @@ mod tests {
         let _locked = ENV_MUTEX.lock();
 
         // Test with TMPDIR variable
-        std::env::set_var("TMPDIR", "/tmpdir");
+        // SAFETY: Test code
+        // Note: set_var and remove_var have always been unsound when called in
+        // a multi-threaded context. They are marked unsafe in edition 2024.
+        // See https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html#stdenvset_var-remove_var
+        unsafe { std::env::set_var("TMPDIR", "/tmpdir") };
 
         // Test get_netsim_ini_filepath
         assert_eq!(get_ini_filepath(1), PathBuf::from("/tmpdir/netsim.ini"));

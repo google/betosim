@@ -1,0 +1,153 @@
+# Copyright 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+openapi: 3.1.0
+info:
+  title: Netsim REST API
+  version: 1.0.0
+components:
+  schemas:
+    ErrorResponse: &ErrorResponse
+      properties:
+        error: &str
+          type: string
+    VersionResponse: &VersionResponse
+      properties:
+        version: *str
+    ChipKind: &ChipKind
+      enum: [UNSPECIFIED, BLUETOOTH, WIFI, UWB, NFC, CELLULAR, CELLULAR_DATA, ETHERNET]
+    WifiMode: &WifiMode
+      enum: [a, b, g, n, ac, ax]
+    Position: &Position
+      properties:
+        x: &num
+          type: number
+        y: *num
+        z: *num
+    Orientation: &Orientation
+      properties:
+        yaw: *num
+        pitch: *num
+        roll: *num
+    Pose: &Pose
+      properties:
+        position: *Position
+        orientation: *Orientation
+    DeviceInfo: &DeviceInfo
+      properties:
+        name: *str
+        kind: *str
+        version: *str
+        sdk_version: *str
+        build_id: *str
+        variant: *str
+        arch: *str
+        avd_path: *str
+    Chip: &Chip
+      properties:
+        id: &int
+          type: integer
+        kind: *ChipKind
+        name: *str
+        manufacturer: *str
+        product_name: *str
+        pose: *Pose
+        device_id: *int
+        enabled: &bool
+          type: boolean
+    Device: &Device
+      x-rust-type: netsim_model::Device
+      required: [id, name, visible, pose, builtin, chips]
+      properties:
+        id: *int
+        name: *str
+        visible: *bool
+        pose: *Pose
+        builtin: *bool
+        chips: [*Chip]
+        device_info: *DeviceInfo
+    ListDeviceResponse: &ListDeviceResponse
+      properties:
+        devices: [*Device]
+    Link: &Link
+      x-rust-type: netsim_model::Link
+      properties:
+        id: *int
+        sender: *int
+        receiver: *int
+        kind: *ChipKind
+        rssi: *int
+    ListLinkResponse: &ListLinkResponse
+      properties:
+        links: [*Link]
+    ApCreate: &ApCreate
+      properties:
+        ssid: *str
+        bssid: *str
+        channel: *int
+        hw_mode: *WifiMode
+        wpa_passphrase: &opt_str
+          type: [string, 'null']
+        beacon_interval: *int
+        country_code: *opt_str
+        dtim_period: *int
+        hidden_ssid: *bool
+        sae: *bool
+        wmm_enabled: *bool
+        enterprise_enabled: *bool
+        mac_acl_mode: *int
+        mac_acl_list: &str_arr [*str]
+        ftm_responder_enabled: *bool
+    Ap: &Ap
+      x-rust-type: netsim_model::Ap
+      properties:
+        id: *int
+        config: *ApCreate
+        associations: *str_arr
+    ListApResponse: &ListApResponse
+      properties:
+        aps: [*Ap]
+paths:
+  /v1/version:
+    get:
+      operationId: GetVersion
+      tags: [ConfigService]
+      summary: Returns the netsim daemon version.
+      responses: &err_resp
+        default: *ErrorResponse
+        '200': *VersionResponse
+  /v1/devices:
+    get:
+      operationId: ListDevices
+      tags: [DeviceService]
+      summary: Lists active simulated devices.
+      responses:
+        <<: *err_resp
+        '200': *ListDeviceResponse
+  /v1/links:
+    get:
+      operationId: ListLinks
+      tags: [LinkService]
+      summary: Lists active RF links between chips.
+      responses:
+        <<: *err_resp
+        '200': *ListLinkResponse
+  /v1/aps:
+    get:
+      operationId: ListAps
+      tags: [ApService]
+      summary: Lists active Wi-Fi access points.
+      responses:
+        <<: *err_resp
+        '200': *ListApResponse

@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
+use clap::{Args, Parser};
 
 #[derive(Debug, Parser)]
 pub struct NetsimdArgs {
@@ -65,7 +65,7 @@ pub struct NetsimdArgs {
     pub forward_host_mdns: bool,
 
     /// Set the vsock port number to be listened by the frontend grpc server
-    #[arg(short, long)]
+    #[arg(long)]
     pub vsock: Option<u16>,
 
     /// The name of a config file to load
@@ -115,4 +115,40 @@ pub struct NetsimdArgs {
     /// Print Netsimd version information
     #[arg(long)]
     pub version: bool,
+
+    #[command(flatten)]
+    pub debug: DebugArgs,
+
+    /// Set RSSI (in dBm) for all links on a specified PhyKind.
+    /// Accepts `PHY_KIND:RSSI_VALUE` (e.g., `BLE:-65`).
+    /// This flag can be specified multiple times for different PhyKinds (e.g., `--rssi=bt_classic:-65 --rssi=ble:-72`).
+    /// `PHY_KIND` is case-insensitive (aliases like "ble" supported). `RSSI_VALUE` must be an i8.
+    ///
+    /// # Limitations
+    /// * RSSI control is currently implemented for BLE and BT_CLASSIC only.
+    #[arg(long, value_name = "PHY_KIND:RSSI_VALUE", action = clap::ArgAction::Append, verbatim_doc_comment)]
+    pub rssi: Option<Vec<String>>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct DebugArgs {
+    /// Disable all packet processing and forwarding.
+    #[arg(long)]
+    pub debug_no_traffic: bool,
+
+    /// Disable forwarding packets to the external network.
+    #[arg(long)]
+    pub debug_no_network: bool,
+
+    /// Disable packet forwarding between simulated devices.
+    #[arg(long)]
+    pub debug_no_wmedium: bool,
+
+    /// Disable mDNS traffic between simulated devices.
+    #[arg(long)]
+    pub debug_no_mdns_wmedium: bool,
+
+    /// Disable mDNS traffic from guest to host.
+    #[arg(long)]
+    pub debug_no_guest_to_host_mdns: bool,
 }

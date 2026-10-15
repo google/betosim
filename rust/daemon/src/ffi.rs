@@ -1,10 +1,10 @@
-// Copyright 2023 Google LLC
+// Copyright 2023 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +15,9 @@
 //! Netsim daemon cxx libraries.
 
 use crate::bluetooth::chip::{
-    create_add_rust_device_result, AddRustDeviceResult, RustBluetoothChipCallbacks,
+    AddRustDeviceResult, RustBluetoothChipCallbacks, create_add_rust_device_result,
 };
-
-use crate::devices::devices_handler::get_distance_cxx;
-use crate::ranging::*;
+use crate::devices::devices_handler::get_rssi;
 use crate::wireless::{
     bluetooth::report_invalid_packet_cxx, handle_request_cxx, handle_response_cxx,
 };
@@ -72,6 +70,7 @@ pub mod ffi_transport {
 
 #[allow(clippy::needless_maybe_sized)]
 #[allow(unsafe_op_in_unsafe_fn)]
+#[allow(unused_attributes)]
 #[cxx::bridge(namespace = "netsim")]
 pub mod ffi_bluetooth {
     extern "Rust" {
@@ -197,24 +196,14 @@ pub mod ffi_bluetooth {
     }
 }
 
-#[allow(clippy::needless_maybe_sized)]
-#[allow(unsafe_op_in_unsafe_fn)]
-#[cxx::bridge(namespace = "netsim::device")]
-pub mod ffi_devices {
-    extern "Rust" {
-        #[cxx_name = GetDistanceCxx]
-        fn get_distance_cxx(a: u32, b: u32) -> f32;
-    }
-}
-
 #[allow(unsafe_op_in_unsafe_fn)]
 #[cxx::bridge(namespace = "netsim")]
 pub mod ffi_util {
     extern "Rust" {
         // Ranging
 
-        #[cxx_name = "DistanceToRssi"]
-        fn distance_to_rssi(tx_power: i8, distance: f32) -> i8;
+        #[cxx_name = "GetRssi"]
+        fn get_rssi(sender: u32, receiver: u32, link_kind: i32, tx_power: i8) -> i8;
     }
 
     #[allow(dead_code)]

@@ -1,0 +1,194 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::{
+    collections::HashMap,
+    future::ready,
+    io,
+    net::{SocketAddr, TcpStream},
+};
+
+use bytes::Bytes;
+use device_actor::DeviceClient;
+use device_api::DeviceId;
+use futures::{StreamExt, sink::unfold};
+use netsim_model::{
+    BluetoothCreate, BluetoothMode, Controller, DeviceParams, PacketSink, PacketStream,
+};
+use tokio::{sync::mpsc, task::JoinSet};
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::{info, warn};
+use tungstenite::{Message, WebSocket};
+
+use crate::error::ServerError;
+
+/// Configures and adds a virtual Bluetooth chip to the simulation.
+pub(crate) async fn setup_virtual_chip(
+    device_client: &DeviceClient,
+    mut query_params: HashMap<String, String>,
+    addr: SocketAddr,
+    stream_rx: mpsc::Receiver<Result<Bytes, io::Error>>,
+    sink_tx: mpsc::Sender<Bytes>,
+) -> Result<DeviceId, ServerError> {
+    let device_guid = addr.port().to_string();
+    let device_name =
+        query_params.remove("name").unwrap_or_else(|| format!("websocket-device-{addr}"));
+    let chip_name = format!("websocket-{addr}");
+    let address = query_params.remove("address").unwrap_or_default();
+
+    let chip_create_params = BluetoothCreate {
+        address,
+        bt_properties: Controller::default(),
+        mode: BluetoothMode::Device(DeviceParams {}),
+    };
+
+    let chip = netsim_model::Chip {
+        name: chip_name,
+        manufacturer: "Google".to_string(),
+        product_name: "Google".to_string(),
+        kind: netsim_model::ChipKind::BLUETOOTH,
+        variant: Some(netsim_model::ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
+            address: chip_create_params.address.clone(),
+            mode: chip_create_params.mode.clone(),
+            bt_properties: chip_create_params.bt_properties.clone(),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+
+    let (packet_stream, packet_sink) = packet_stream_and_sink(stream_rx, sink_tx);
+    let request = device_api::DeviceAddChip {
+        device_guid,
+        packet_stream: Some(packet_stream),
+        packet_sink: Some(packet_sink),
+        device_config: device_api::DeviceConfig {
+            name: device_name,
+            visible: true,
+            pose: Default::default(),
+            builtin: false,
+            device_info: None,
+        },
+        chip,
+    };
+
+    device_client.add_chip(request).await.map_err(ServerError::DeviceActor)
+}
+
+/// Echoes every packet back to the client until either side closes.
+///
+/// Uses the same stream/sink adapters as a registered chip, so a loopback
+/// stream exercises the same plumbing without creating a device.
+pub(crate) async fn run_loopback(
+    addr: SocketAddr,
+    stream_rx: mpsc::Receiver<Result<Bytes, io::Error>>,
+    sink_tx: mpsc::Sender<Bytes>,
+) {
+    let (packet_stream, packet_sink) = packet_stream_and_sink(stream_rx, sink_tx);
+    if let Err(e) = packet_stream.map(Ok).forward(packet_sink).await {
+        warn!("WebSocket loopback stream for {addr} failed: {e}");
+    }
+}
+
+/// Adapts the WebSocket transport channels to the device actor's packet types.
+fn packet_stream_and_sink(
+    stream_rx: mpsc::Receiver<Result<Bytes, io::Error>>,
+    sink_tx: mpsc::Sender<Bytes>,
+) -> (PacketStream, PacketSink) {
+    let packet_stream: PacketStream =
+        Box::new(ReceiverStream::new(stream_rx).filter_map(|res| ready(res.ok())));
+    let packet_sink: PacketSink =
+        Box::pin(unfold(sink_tx, |tx: mpsc::Sender<Bytes>, item: Bytes| async move {
+            tx.send(item).await.map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
+            Ok(tx)
+        }));
+    (packet_stream, packet_sink)
+}
+
+/// Spawns threads and tasks to manage WebSocket traffic and chip lifecycle.
+///
+/// `device` is the registered device to delete on close; `None` for loopback.
+pub(crate) async fn run_websocket_transport(
+    mut websocket_reader: WebSocket<TcpStream>,
+    mut websocket_writer: WebSocket<TcpStream>,
+    addr: SocketAddr,
+    stream_tx: mpsc::Sender<Result<Bytes, io::Error>>,
+    mut sink_rx: mpsc::Receiver<Bytes>,
+    device: Option<(DeviceId, DeviceClient)>,
+) {
+    let (outbound_msg_tx, mut outbound_msg_rx) = mpsc::unbounded_channel::<Message>();
+
+    // 1. Read Loop: WebSocket -> Packet Stream (HCI traffic from client)
+    let outbound_msg_tx_clone = outbound_msg_tx.clone();
+    let reader_task = tokio::task::spawn_blocking(move || {
+        loop {
+            // Ref: RFC 6455, Section 5.2 - Base Framing Protocol
+            match websocket_reader.read() {
+                Ok(Message::Binary(data)) => {
+                    if stream_tx.blocking_send(Ok(data)).is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Ping(data)) => {
+                    let _ = outbound_msg_tx_clone.send(Message::Pong(data));
+                }
+                Ok(Message::Close(close_frame)) => {
+                    let _ = outbound_msg_tx_clone.send(Message::Close(close_frame));
+                    break;
+                }
+                Ok(_) => {} // Ignore Text, Pong, Frame
+                Err(e) => {
+                    warn!("WebSocket read error for {addr}: {e}");
+                    break;
+                }
+            }
+        }
+        info!("WebSocket reader loop ended for {addr}");
+    });
+
+    // 2. Write Loop: ws_msg_rx -> WebSocket (HCI traffic to client)
+    let writer_task = tokio::task::spawn_blocking(move || {
+        while let Some(msg) = outbound_msg_rx.blocking_recv() {
+            let is_close = matches!(msg, Message::Close(_));
+            if let Err(e) = websocket_writer.send(msg) {
+                warn!("WebSocket write error for {addr}: {e}");
+                break;
+            }
+            if is_close {
+                break;
+            }
+        }
+        let _ = websocket_writer.flush();
+    });
+
+    // 3. Forward Task: Packet Sink -> WebSocket (Async to Sync bridge)
+    tokio::spawn(async move {
+        while let Some(packet) = sink_rx.recv().await {
+            if outbound_msg_tx.send(Message::Binary(packet)).is_err() {
+                break;
+            }
+        }
+        let _ = outbound_msg_tx.send(Message::Close(None));
+    });
+
+    // 4. Cleanup Task: Triggered when WebSocket reader or writer closes
+    JoinSet::from_iter([reader_task, writer_task]).join_next().await;
+    let Some((device_id, device_client)) = device else {
+        info!("WebSocket loopback stream for {addr} closed");
+        return;
+    };
+    info!("Cleaning up WebSocket device {device_id} for {addr}");
+    if let Err(e) = device_client.delete(device_id).await {
+        warn!("Failed to delete virtual WebSocket device {device_id}: {e}");
+    }
+}
