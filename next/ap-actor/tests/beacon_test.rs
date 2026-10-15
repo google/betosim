@@ -590,3 +590,68 @@ async fn test_wmm_ie_presence() {
     }
     assert!(found_wmm, "Beacon missing WMM IE");
 }
+
+#[tokio::test]
+async fn test_beacon_and_probe_response_frame_structure_parity() {
+    info!("Scenario: Verify structural parity between Beacon and Probe Response frames");
+    let mut world = ApWorld::new().await;
+    let bssid: MacAddr = "02:00:00:00:00:01".parse().unwrap();
+    let station_mac: MacAddr = "02:00:00:00:00:77".parse().unwrap();
+    world.given_a_registered_ap_with_wpa("ParityAP", "SecretKey123").await;
+
+    // 1. Receive Beacon frame
+    let rx = world.rx_from_ap.as_mut().expect("client registered");
+    let beacon_msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("Timeout receiving beacon")
+        .expect("Beacon channel closed");
+
+    // 2. Send Probe Request to elicit Probe Response
+    let tx = world.tx_to_ap.as_mut().expect("AP registered");
+    let header = MacHeader3Addr::new(
+        FrameControl::new(0x0040), // Mgmt(00), Probe Req(0100=4) -> 0x40
+        0,
+        MacAddr::BROADCAST,
+        station_mac,
+        MacAddr::BROADCAST,
+        SequenceControl::new(0),
+    );
+    let mut probe_req = header.as_bytes().to_vec();
+    probe_req.push(0); // Tag 0 (SSID)
+    probe_req.push(8); // Len
+    probe_req.extend_from_slice(b"ParityAP");
+    tx.send(bytes::Bytes::from(probe_req)).expect("Send Probe Req");
+
+    let probe_resp_msg =
+        world.recv_frame(|frame, _| frame.stype() == management_subtype::PROBE_RESPONSE).await;
+
+    // Verify Beacon Header & Addressing
+    let beacon_frame = Ieee80211::decode(&beacon_msg).expect("Decode Beacon");
+    assert_eq!(beacon_frame.stype(), management_subtype::BEACON);
+    assert_eq!(beacon_frame.get_addr1(), MacAddr::BROADCAST);
+    assert_eq!(beacon_frame.get_addr2(), bssid);
+    assert_eq!(beacon_frame.get_addr3(), bssid);
+
+    // Verify Probe Response Header & Addressing
+    let probe_resp_frame = Ieee80211::decode(&probe_resp_msg).expect("Decode Probe Response");
+    assert_eq!(probe_resp_frame.stype(), management_subtype::PROBE_RESPONSE);
+    assert_eq!(probe_resp_frame.get_addr1(), station_mac);
+    assert_eq!(probe_resp_frame.get_addr2(), bssid);
+    assert_eq!(probe_resp_frame.get_addr3(), bssid);
+
+    // Verify Fixed Fields: Capabilities at offset 34..36 match across both frames (ESS | Privacy)
+    assert!(beacon_msg.len() >= 36);
+    assert!(probe_resp_msg.len() >= 36);
+    let beacon_caps = u16::from_le_bytes([beacon_msg[34], beacon_msg[35]]);
+    let probe_resp_caps = u16::from_le_bytes([probe_resp_msg[34], probe_resp_msg[35]]);
+    assert_eq!(beacon_caps, probe_resp_caps, "Capabilities mismatch");
+    assert_eq!(beacon_caps & 0x0010, 0x0010, "Privacy bit must be set for WPA network");
+    assert_eq!(beacon_caps & 0x0401, 0x0401, "ESS and Short Slot Time must be set");
+
+    // Verify IEs payload (offset 36 onwards) is identical between Beacon and Probe Response
+    assert_eq!(
+        &beacon_msg[36..],
+        &probe_resp_msg[36..],
+        "IEs payload mismatch between Beacon and Probe Response"
+    );
+}

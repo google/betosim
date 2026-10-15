@@ -40,12 +40,26 @@ impl Ieee80211Manager {
         ap: &mut ApState,
         beacon_interval: u16,
     ) -> Result<Vec<bytes::Bytes>, ApError> {
-        // Beacon Header
+        let frame = self.build_beacon_or_probe_resp(
+            ap,
+            FrameControl::new(0x0080), /* Mgmt (00), Beacon (1000) -> 0x0080 (LE: 80 00) */
+            netsim_packets::MacAddr { bytes: [0xFF; 6] },
+            beacon_interval,
+        );
+        Ok(vec![bytes::Bytes::from(frame)])
+    }
+
+    fn build_beacon_or_probe_resp(
+        &self,
+        ap: &mut ApState,
+        frame_control: FrameControl,
+        dest: netsim_packets::MacAddr,
+        beacon_interval: u16,
+    ) -> Vec<u8> {
         let header = BeaconFrameHeader {
-            frame_control: FrameControl::new(0x0080), /* Mgmt (00), Beacon (1000) -> 0x0080 (LE:
-                                                       * 80 00) */
+            frame_control,
             duration: U16::new(0),
-            da: netsim_packets::MacAddr { bytes: [0xFF; 6] },
+            da: dest,
             sa: ap.config.bssid,
             bssid: ap.config.bssid,
             sequence_control: ap.next_seq_control(),
@@ -68,7 +82,7 @@ impl Ieee80211Manager {
         // IEs
         self.append_beacon_ies(&mut frame, ap);
 
-        Ok(vec![bytes::Bytes::from(frame)])
+        frame
     }
 
     fn append_beacon_ies(&self, body: &mut Vec<u8>, ap: &ApState) {
@@ -592,32 +606,12 @@ impl Ieee80211Manager {
 
         let src = frame.get_source();
 
-        // Construct Probe Response
-        let header = BeaconFrameHeader {
-            frame_control: FrameControl::new(0x0050), // Mgmt(00), ProbeResp(0101) -> 0x0050
-            duration: U16::new(0),
-            da: src,                // DA
-            sa: ap.config.bssid,    // SA
-            bssid: ap.config.bssid, // BSSID
-            sequence_control: ap.next_seq_control(),
-        };
-
-        let mut resp = header.as_bytes().to_vec();
-
-        // Fixed Fields (Same as Beacon)
-        let mut caps = 0x0401; // ESS | Short Slot Time
-        if ap.config.wpa_passphrase.is_some() || ap.config.enterprise_enabled {
-            caps |= 0x0010; // Privacy
-        }
-        let fixed = BeaconFixedFields {
-            timestamp: [0; 8],
-            beacon_interval: U16::new(beacon_interval),
-            capabilities: U16::new(caps),
-        };
-        resp.extend_from_slice(fixed.as_bytes());
-
-        // IEs (Same as Beacon)
-        self.append_beacon_ies(&mut resp, ap);
+        let resp = self.build_beacon_or_probe_resp(
+            ap,
+            FrameControl::new(0x0050), // Mgmt(00), ProbeResp(0101) -> 0x0050
+            src,
+            beacon_interval,
+        );
 
         Ok(vec![bytes::Bytes::from(resp)])
     }
