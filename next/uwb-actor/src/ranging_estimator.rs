@@ -20,10 +20,10 @@ use parking_lot::RwLock;
 use pica::{Handle, RangingEstimator, RangingMeasurement};
 use tracing::warn;
 
-use crate::{
-    ranging::{Pose, compute_range_azimuth_elevation},
-    uwb_actor::UwbChipState,
-};
+use crate::{ranging::Pose, uwb_actor::UwbChipState};
+
+/// UCI AoA azimuth is encoded in Q9.7 fixed-point format (7 fractional bits).
+const UCI_AOA_AZIMUTH_Q9_7_SHIFT: u32 = 7;
 
 /// UWB Ranging Estimator that uses shared chip state to calculate ranging
 /// measurements.
@@ -50,12 +50,16 @@ impl RangingEstimator for UwbRangingEstimator {
         let a_pose = Pose::from(&a_state.chip.pose);
         let b_pose = Pose::from(&b_state.chip.pose);
 
-        match compute_range_azimuth_elevation(&a_pose, &b_pose) {
+        match a_pose.compute_ranging(&b_pose) {
             Ok((range, azimuth, elevation)) => {
                 // TODO(b/484364478): sampled ranging support
                 // Pica forwards RangingMeasurement::azimuth (i16) unscaled into the UCI
                 // Q9.7 aoa_azimuth field; elevation (i8) is too narrow to hold Q9.7.
-                Some(RangingMeasurement { range: range as u16, azimuth: azimuth << 7, elevation })
+                Some(RangingMeasurement {
+                    range: range as u16,
+                    azimuth: azimuth << UCI_AOA_AZIMUTH_Q9_7_SHIFT,
+                    elevation,
+                })
             }
             Err(e) => {
                 warn!("Failed to estimate ranging measurement: {}", e);

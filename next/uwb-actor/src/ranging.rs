@@ -16,6 +16,14 @@
 
 use glam::{EulerRot, Quat, Vec3};
 
+use crate::UwbError;
+
+const CM_PER_METER: f32 = 100.0;
+const MIN_AZIMUTH_DEGREES: f32 = -180.0;
+const MAX_AZIMUTH_DEGREES: f32 = 180.0;
+const MIN_ELEVATION_DEGREES: f32 = -90.0;
+const MAX_ELEVATION_DEGREES: f32 = 90.0;
+
 /// helper function for performing division with zero division check
 fn checked_div(num: f32, den: f32) -> Option<f32> {
     (den != 0.).then_some(num / den)
@@ -46,8 +54,8 @@ fn elevation(delta: Vec3) -> f32 {
 
 /// Internal Pose struct for mathematical representation.
 pub(crate) struct Pose {
-    pub(crate) position: Vec3,
-    pub(crate) orientation: Quat,
+    position: Vec3,
+    orientation: Quat,
 }
 
 impl From<&netsim_model::Pose> for Pose {
@@ -55,9 +63,9 @@ impl From<&netsim_model::Pose> for Pose {
         Pose {
             // Converts x, y, z from meters to centimeters
             position: Vec3::new(
-                pose.position.x * 100.,
-                pose.position.y * 100.,
-                pose.position.z * 100.,
+                pose.position.x * CM_PER_METER,
+                pose.position.y * CM_PER_METER,
+                pose.position.z * CM_PER_METER,
             ),
             // Converts roll, pitch, yaw from degrees to radians
             orientation: Quat::from_euler(
@@ -70,34 +78,30 @@ impl From<&netsim_model::Pose> for Pose {
     }
 }
 
-use crate::UwbError;
+impl Pose {
+    /// Computes range, azimuth, and elevation between this pose and a target pose.
+    ///
+    /// The ranging model is adapted from https://github.com/google/pica.
+    pub(crate) fn compute_ranging(&self, target: &Pose) -> Result<(f32, i16, i8), UwbError> {
+        let delta = target.position - self.position;
+        let distance = delta.length().clamp(0.0, u16::MAX as f32);
+        let direction = self.orientation.mul_vec3(delta);
+        let azimuth = azimuth(direction).to_degrees().round();
+        let elevation = elevation(direction).to_degrees().round();
 
-/// UWB Ranging Model for computing range, azimuth, and elevation.
-/// The ranging model is adapted from https://github.com/google/pica.
-pub(crate) fn compute_range_azimuth_elevation(
-    a: &Pose,
-    b: &Pose,
-) -> Result<(f32, i16, i8), UwbError> {
-    let delta = b.position - a.position;
-    let distance = delta.length().clamp(0.0, u16::MAX as f32);
-    let direction = a.orientation.mul_vec3(delta);
-    let azimuth = azimuth(direction).to_degrees().round();
-    let elevation = elevation(direction).to_degrees().round();
-
-    if !(-180. ..=180.).contains(&azimuth) {
-        return Err(UwbError::InvalidAzimuth(azimuth));
+        if !(MIN_AZIMUTH_DEGREES..=MAX_AZIMUTH_DEGREES).contains(&azimuth) {
+            return Err(UwbError::InvalidAzimuth(azimuth));
+        }
+        if !(MIN_ELEVATION_DEGREES..=MAX_ELEVATION_DEGREES).contains(&elevation) {
+            return Err(UwbError::InvalidElevation(elevation));
+        }
+        Ok((distance, azimuth as i16, elevation as i8))
     }
-    if !(-90. ..=90.).contains(&elevation) {
-        return Err(UwbError::InvalidElevation(elevation));
-    }
-    Ok((distance, azimuth as i16, elevation as i8))
 }
 
 #[cfg(test)]
 mod tests {
     use netsim_model::{Orientation, Pose, Position};
-
-    use super::*;
 
     fn create_pose(x: f32, y: f32, z: f32, yaw: f32, pitch: f32, roll: f32) -> super::Pose {
         super::Pose::from(&Pose {
@@ -111,22 +115,22 @@ mod tests {
         let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         {
             let b_pose = create_pose(10.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-            let (range, _, _) = compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (range, _, _) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(range, 1000.);
         }
         {
             let b_pose = create_pose(-10.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-            let (range, _, _) = compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (range, _, _) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(range, 1000.);
         }
         {
             let b_pose = create_pose(10.0, 10.0, 0.0, 0.0, 0.0, 0.0);
-            let (range, _, _) = compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (range, _, _) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(range, f32::sqrt(2000000.));
         }
         {
             let b_pose = create_pose(-10.0, -10.0, -10.0, 0.0, 0.0, 0.0);
-            let (range, _, _) = compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (range, _, _) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(range, f32::sqrt(3000000.));
         }
     }
@@ -135,8 +139,7 @@ mod tests {
     fn range_zero_distance() {
         let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let b_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let (range, azimuth, elevation) =
-            compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+        let (range, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
         assert_eq!(range, 0.0);
         assert_eq!(azimuth, 0);
         assert_eq!(elevation, 0);
@@ -147,29 +150,25 @@ mod tests {
         let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         {
             let b_pose = create_pose(10.0, 0.0, 10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 45);
             assert_eq!(elevation, 0);
         }
         {
             let b_pose = create_pose(-10.0, 0.0, 10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, -45);
             assert_eq!(elevation, 0);
         }
         {
             let b_pose = create_pose(10.0, 0.0, -10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 135);
             assert_eq!(elevation, 0);
         }
         {
             let b_pose = create_pose(-10.0, 0.0, -10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, -135);
             assert_eq!(elevation, 0);
         }
@@ -180,29 +179,25 @@ mod tests {
         let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         {
             let b_pose = create_pose(0.0, 10.0, 10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 0);
             assert_eq!(elevation, 45);
         }
         {
             let b_pose = create_pose(0.0, -10.0, 10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 0);
             assert_eq!(elevation, -45);
         }
         {
             let b_pose = create_pose(0.0, 10.0, -10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert!(azimuth == 180 || azimuth == -180);
             assert_eq!(elevation, 45);
         }
         {
             let b_pose = create_pose(0.0, -10.0, -10.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert!(azimuth == 180 || azimuth == -180);
             assert_eq!(elevation, -45);
         }
@@ -213,29 +208,25 @@ mod tests {
         let b_pose = create_pose(0.0, 0.0, 10.0, 0.0, 0.0, 0.0);
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 0);
             assert_eq!(elevation, 0);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 45.0, 0.0, 0.0); // <=> azimuth = -45deg
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 45);
             assert_eq!(elevation, 0);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 45.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 0);
             assert_eq!(elevation, -45);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 45.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 0);
             assert_eq!(elevation, 0);
         }
@@ -246,36 +237,31 @@ mod tests {
         let b_pose = create_pose(10.0, 10.0, 10.0, 0.0, 0.0, 0.0);
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 45);
             assert_eq!(elevation, 35);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 90.0, 0.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 135);
             assert_eq!(elevation, 35);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 90.0, 0.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 45);
             assert_eq!(elevation, -35);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, 0.0, 0.0, 90.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, -45);
             assert_eq!(elevation, 35);
         }
         {
             let a_pose = create_pose(0.0, 0.0, 0.0, -45.0, 35.0, 42.0);
-            let (_, azimuth, elevation) =
-                compute_range_azimuth_elevation(&a_pose, &b_pose).unwrap();
+            let (_, azimuth, elevation) = a_pose.compute_ranging(&b_pose).unwrap();
             assert_eq!(azimuth, 0);
             assert_eq!(elevation, 0);
         }
