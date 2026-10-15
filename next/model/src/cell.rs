@@ -185,6 +185,7 @@ pub enum ModemAction {
     RemoteHangup { id: ChipId },
     IncomingSms { id: ChipId, sender: String, text: String },
     IncomingPdu { id: ChipId, pdu: String },
+    InjectCellBroadcast { id: ChipId, serial_number: u16, message_id: u16, dcs: u8, text: String },
     UpdatePhysicalChannelConfigs { id: ChipId },
     UpdateNetworkTime { id: ChipId },
     SetSimStatus { id: ChipId, present: bool },

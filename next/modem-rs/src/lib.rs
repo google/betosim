@@ -55,7 +55,9 @@ pub use misc_service::NitzTime;
 pub use modem::ModemEvent;
 pub use modem_network_simulator::{ModemNetworkSimulator, NetworkEvent, ScheduledEvent};
 pub use netsim_model::RegistrationStatus;
-pub use pdu::{EncodeError, ParseError, SubmitPdu};
+pub use pdu::{
+    CBS_CONTENT_LEN, CBS_HEADER_LEN, CBS_PDU_LEN, CbsPdu, EncodeError, ParseError, SubmitPdu,
+};
 pub use profiles::{
     SIM_TYPE_CTS, SIM_TYPE_DEFAULT, SIM_TYPE_TEL_ALASKA, XmlProfileError, get_builtin_profile,
     parse_xml_profile,

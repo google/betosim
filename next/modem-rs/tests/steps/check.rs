@@ -105,7 +105,8 @@ fn assert_no_trailing_response(handler: &mut modem_rs::test_utils::MockModemHand
     for trailing in handler.get_buffer() {
         if is_unsolicited_response(trailing) {
             let s = String::from_utf8_lossy(trailing);
-            prev_was_sms_urc_header = s.starts_with("+CMT:") || s.starts_with("+CDS:");
+            prev_was_sms_urc_header =
+                s.starts_with("+CMT:") || s.starts_with("+CDS:") || s.starts_with("+CBM:");
             continue;
         }
         if prev_was_sms_urc_header {
@@ -134,6 +135,7 @@ pub(crate) fn is_unsolicited_response(response: &[u8]) -> bool {
     s.starts_with("+CMT:")
         || s.starts_with("+CMTI:")
         || s.starts_with("+CDS:")
+        || s.starts_with("+CBM:")
         || s.starts_with("+CUSATP:")
         || s.starts_with("RING")
         || s.starts_with("BUSY")

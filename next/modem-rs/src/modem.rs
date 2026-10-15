@@ -206,6 +206,38 @@ impl ModemImpl {
         effects
     }
 
+    pub fn trigger_incoming_cell_broadcast(
+        &mut self,
+        serial_number: u16,
+        message_id: u16,
+        dcs: u8,
+        text: &str,
+    ) -> Vec<ModemEffect> {
+        if !self.network_service.can_terminate_sms()
+            || !self.sms_service.accepts_broadcast(message_id, dcs)
+        {
+            return Vec::new();
+        }
+        let Ok(pages) = crate::pdu::CbsPdu::encode_pages(serial_number, message_id, dcs, text)
+        else {
+            return Vec::new();
+        };
+        pages.into_iter().map(|page| ModemEffect::Response(page.to_urc().into_bytes())).collect()
+    }
+
+    pub fn trigger_incoming_cell_broadcast_pdu(&mut self, pdu: &str) -> Vec<ModemEffect> {
+        if !self.network_service.can_terminate_sms() {
+            return Vec::new();
+        }
+        let Ok(cbs_pdu) = crate::pdu::CbsPdu::parse(pdu) else {
+            return Vec::new();
+        };
+        if !self.sms_service.accepts_broadcast(cbs_pdu.message_id(), cbs_pdu.dcs()) {
+            return Vec::new();
+        }
+        vec![ModemEffect::Response(cbs_pdu.to_urc().into_bytes())]
+    }
+
     pub fn trigger_network_time_update(&mut self) -> Vec<ModemEffect> {
         let mut effects = Vec::new();
         let response = self.misc_service.current_time_update();

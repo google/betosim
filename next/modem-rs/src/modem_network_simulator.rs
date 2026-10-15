@@ -235,6 +235,9 @@ impl ModemNetworkSimulator {
                 self.send_incoming_sms(id.0, &sender, &text)
             }
             ModemAction::IncomingPdu { id, pdu } => self.send_incoming_pdu(id.0, &pdu),
+            ModemAction::InjectCellBroadcast { id, serial_number, message_id, dcs, text } => {
+                self.send_cell_broadcast(id.0, serial_number, message_id, dcs, &text)
+            }
             ModemAction::UpdateNetworkTime { id } => self.update_network_time(id.0),
             ModemAction::UpdatePhysicalChannelConfigs { id } => {
                 self.update_physical_channel_configs(id.0)
@@ -763,6 +766,23 @@ impl ModemNetworkSimulator {
 
     pub fn send_incoming_pdu(&mut self, id: ModemId, pdu: &str) -> Vec<NetworkEvent> {
         self.apply_to_modem(id, |modem| modem.trigger_incoming_pdu(pdu))
+    }
+
+    pub fn send_cell_broadcast(
+        &mut self,
+        id: ModemId,
+        serial_number: u16,
+        message_id: u16,
+        dcs: u8,
+        text: &str,
+    ) -> Vec<NetworkEvent> {
+        self.apply_to_modem(id, |modem| {
+            modem.trigger_incoming_cell_broadcast(serial_number, message_id, dcs, text)
+        })
+    }
+
+    pub fn send_cell_broadcast_pdu(&mut self, id: ModemId, pdu: &str) -> Vec<NetworkEvent> {
+        self.apply_to_modem(id, |modem| modem.trigger_incoming_cell_broadcast_pdu(pdu))
     }
 
     pub fn update_network_time(&mut self, id: ModemId) -> Vec<NetworkEvent> {

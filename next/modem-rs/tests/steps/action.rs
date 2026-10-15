@@ -81,6 +81,25 @@ pub fn when_incoming_pdu_received(world: &mut World, name: &str, pdu: &str) {
     world.manager.dispatch(action);
 }
 
+pub fn when_cell_broadcast_received(
+    world: &mut World,
+    name: &str,
+    serial_number: u16,
+    message_id: u16,
+    dcs: u8,
+    text: &str,
+) {
+    let (id, _) = world.get_modem(name);
+    let action = ModemAction::InjectCellBroadcast {
+        id: ChipId(id),
+        serial_number,
+        message_id,
+        dcs,
+        text: text.to_string(),
+    };
+    world.manager.dispatch(action);
+}
+
 pub fn when_incoming_call_received(world: &mut World, name: &str, number: &str) {
     let (id, _) = world.get_modem(name);
     let action = ModemAction::IncomingCall { target_id: ChipId(id), number: number.to_string() };

@@ -61,7 +61,7 @@ pub enum SmsCommand<'a> {
     QueryPreferredMessageStorage,
     /// 3GPP TS 27.005: Set broadcast config
     #[command(tag = "AT+CSCB=")]
-    BroadcastConfig(SmsBroadcastMode, QuotedString<'a>, QuotedString<'a>),
+    BroadcastConfig(SmsBroadcastMode, Option<QuotedString<'a>>, Option<QuotedString<'a>>),
     /// 3GPP TS 27.005: Query broadcast config
     #[command(tag = "AT+CSCB?")]
     QueryBroadcastConfig,
@@ -534,19 +534,23 @@ impl SmsService {
     pub fn handle_broadcast_config(
         &mut self,
         mode: SmsBroadcastMode,
-        mids: QuotedString,
-        dcss: QuotedString,
+        mids: Option<QuotedString>,
+        dcss: Option<QuotedString>,
     ) -> SmsResult {
         self.broadcast_config = BroadcastConfig {
             mode,
-            mids: mids.as_str().to_string(),
-            dcss: dcss.as_str().to_string(),
+            mids: mids.map(|s| s.as_str().to_string()).unwrap_or_default(),
+            dcss: dcss.map(|s| s.as_str().to_string()).unwrap_or_default(),
         };
         Ok(SmsSuccess::new(None))
     }
 
     pub fn handle_query_broadcast_config(&self) -> SmsResult {
         Ok(SmsSuccess::new(Some(SmsResponse::BroadcastConfig(self.broadcast_config.clone()))))
+    }
+
+    pub(crate) fn accepts_broadcast(&self, message_id: u16, dcs: u8) -> bool {
+        self.broadcast_config.accepts(message_id, dcs)
     }
 
     pub fn handle_set_smsc_address(

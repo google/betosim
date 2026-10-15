@@ -23,6 +23,9 @@ use tracing::{debug, warn};
 use crate::types::TypeOfAddress;
 
 pub(crate) mod bcd;
+pub(crate) mod cbs;
+
+pub use cbs::{CBS_CONTENT_LEN, CBS_HEADER_LEN, CBS_PDU_LEN, CbsPdu};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {

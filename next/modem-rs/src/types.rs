@@ -1622,6 +1622,51 @@ impl Default for BroadcastConfig {
     }
 }
 
+impl BroadcastConfig {
+    /// Returns `true` if a Cell Broadcast message with `(message_id, dcs)` should be accepted
+    /// according to the current `AT+CSCB` `<mode>`, `<mids>`, and `<dcss>` filter configuration
+    /// (3GPP TS 27.005 §3.3.4).
+    pub(crate) fn accepts(&self, message_id: u16, dcs: u8) -> bool {
+        match self.mode {
+            SmsBroadcastMode::Accept => {
+                matches_id_filter(&self.mids, message_id)
+                    && matches_id_filter(&self.dcss, u16::from(dcs))
+            }
+            SmsBroadcastMode::Discard => {
+                let mid_filter_active = !self.mids.trim().is_empty();
+                let dcs_filter_active = !self.dcss.trim().is_empty();
+
+                if !mid_filter_active && !dcs_filter_active {
+                    return true;
+                }
+
+                let mid_match = !mid_filter_active || matches_id_filter(&self.mids, message_id);
+                let dcs_match = !dcs_filter_active || matches_id_filter(&self.dcss, u16::from(dcs));
+
+                !(mid_match && dcs_match)
+            }
+        }
+    }
+}
+
+fn matches_id_filter(filter: &str, value: u16) -> bool {
+    let trimmed = filter.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Per 3GPP TS 27.005 §3.3.4, range tokens use contiguous bounds (e.g. "0-3", "4370-4379")
+    // without spaces around '-'.
+    trimmed.split(',').map(str::trim).filter(|s| !s.is_empty()).any(|token| {
+        if let Some((start_str, end_str)) = token.split_once('-')
+            && let (Ok(start), Ok(end)) =
+                (start_str.trim().parse::<u16>(), end_str.trim().parse::<u16>())
+        {
+            return (start..=end).contains(&value);
+        }
+        token.parse() == Ok(value)
+    })
+}
+
 /// Radio signal quality parameters (3GPP TS 27.007 §8.5 `+CSQ`: `<rssi>`,
 /// `<ber>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3409,5 +3454,58 @@ mod tests {
         assert_eq!(HangupReason::Busy.as_urc_str(true), "RING\r\n");
         assert_eq!(HangupReason::NoAnswer.as_urc_str(true), "RING\r\n");
         assert_eq!(HangupReason::Normal.as_urc_str(true), "RING\r\n");
+    }
+
+    #[test]
+    fn test_broadcast_config_accepts() {
+        let default_cfg = BroadcastConfig::default();
+        assert!(default_cfg.accepts(0x1112, 0x01));
+        assert!(default_cfg.accepts(50, 0x00));
+
+        let accept_cfg = BroadcastConfig {
+            mode: SmsBroadcastMode::Accept,
+            mids: "4370, 4372 - 4375".to_string(),
+            dcss: "0-1, 17".to_string(),
+        };
+        assert!(accept_cfg.accepts(4370, 1));
+        assert!(accept_cfg.accepts(4373, 17));
+        assert!(accept_cfg.accepts(4375, 17));
+        assert!(!accept_cfg.accepts(4371, 1));
+        assert!(!accept_cfg.accepts(4370, 2));
+
+        let empty_discard_cfg = BroadcastConfig {
+            mode: SmsBroadcastMode::Discard,
+            mids: String::new(),
+            dcss: String::new(),
+        };
+        assert!(empty_discard_cfg.accepts(50, 1));
+        assert!(empty_discard_cfg.accepts(4370, 0));
+
+        let discard_cfg = BroadcastConfig {
+            mode: SmsBroadcastMode::Discard,
+            mids: "50, 100-110".to_string(),
+            dcss: String::new(),
+        };
+        assert!(!discard_cfg.accepts(50, 1));
+        assert!(!discard_cfg.accepts(105, 0));
+        assert!(discard_cfg.accepts(4370, 1));
+
+        let discard_dcs_cfg = BroadcastConfig {
+            mode: SmsBroadcastMode::Discard,
+            mids: String::new(),
+            dcss: "17, 20-25".to_string(),
+        };
+        assert!(!discard_dcs_cfg.accepts(50, 17));
+        assert!(!discard_dcs_cfg.accepts(4370, 22));
+        assert!(discard_dcs_cfg.accepts(50, 1));
+
+        let discard_both_cfg = BroadcastConfig {
+            mode: SmsBroadcastMode::Discard,
+            mids: "50".to_string(),
+            dcss: "17".to_string(),
+        };
+        assert!(!discard_both_cfg.accepts(50, 17));
+        assert!(discard_both_cfg.accepts(50, 1));
+        assert!(discard_both_cfg.accepts(51, 17));
     }
 }

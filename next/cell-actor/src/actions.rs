@@ -22,6 +22,7 @@ pub enum CellAction {
     EndCall,
     ReceiveSms { sender: String, text: String },
     ReceivePdu { pdu: String },
+    InjectCellBroadcast { serial_number: u16, message_id: u16, dcs: u8, text: String },
     SetSignalStrength { rssi: u32, ber: u32 },
     SetVoiceRegistration { status: RegistrationStatus },
     SetDataRegistration { status: RegistrationStatus },

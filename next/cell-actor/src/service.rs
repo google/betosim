@@ -277,6 +277,15 @@ impl ActorService for CellActor {
                 ModemAction::IncomingSms { id: chip_id, sender, text }
             }
             CellAction::ReceivePdu { pdu } => ModemAction::IncomingPdu { id: chip_id, pdu },
+            CellAction::InjectCellBroadcast { serial_number, message_id, dcs, text } => {
+                ModemAction::InjectCellBroadcast {
+                    id: chip_id,
+                    serial_number,
+                    message_id,
+                    dcs,
+                    text,
+                }
+            }
             CellAction::SetSignalStrength { rssi, ber } => {
                 let rssi_u8 = u8::try_from(rssi).map_err(|e| {
                     CellError::Chip(ChipError::InvalidArguments(

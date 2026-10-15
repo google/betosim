@@ -974,3 +974,76 @@ fn test_receive_sms_suppressed_when_unregistered_or_radio_off() {
     when_incoming_pdu_received(&mut world, "A", TEST_SMS_PDU);
     world.then_no_response("A");
 }
+
+#[test]
+fn test_cell_broadcast_emits_cbm_urc() {
+    let mut world = World::new();
+    world.given_modem("A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x01, "Hello");
+
+    let expected_pdu = concat!(
+        "112311120111",
+        "C8329BFD6E341A8D46A3D168341A8D46A3D168341A8D46A3D168341A8D46A3D1",
+        "68341A8D46A3D168341A8D46A3D168341A8D46A3D168341A8D46A3D168341A8D",
+        "46A3D168341A8D46A3D168341A8D46A3D100"
+    );
+    world.then_response_is("A", "+CBM: 88");
+    world.then_response_is("A", expected_pdu);
+}
+
+#[test]
+fn test_cell_broadcast_cscb_channel_and_dcs_filtering() {
+    let mut world = World::new();
+    world.given_modem("A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    // Accept only CMAS Presidential Alert (4370 / 0x1112) and range 4372-4375 with DCS 1
+    world.send_and_expect_ok("A", "AT+CSCB=0,\"4370,4372-4375\",\"1\"");
+
+    // Matching MID (0x1112 = 4370) and DCS (0x01) -> emitted
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x01, "Hello");
+    world.then_response_is("A", "+CBM: 88");
+    world.then_response_contains("A", "112311120111C8329BFD6E");
+
+    // Non-matching MID (0x1113 = 4371) -> filtered out
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1113, 0x01, "Hello");
+    world.then_no_response("A");
+
+    // Non-matching DCS (0x00) -> filtered out
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x00, "Hello");
+    world.then_no_response("A");
+
+    // Discard mode (mode=1) for channel 50 -> discards 50, accepts 4370
+    world.send_and_expect_ok("A", "AT+CSCB=1,\"50\",\"\"");
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 50, 0x01, "Local Info");
+    world.then_no_response("A");
+
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x01, "Hello");
+    world.then_response_is("A", "+CBM: 88");
+    world.then_response_contains("A", "112311120111C8329BFD6E");
+
+    // Omitted <mids> and <dcss> parameters per 3GPP TS 27.005 §3.3.4
+    world.send_and_expect_ok("A", "AT+CSCB=0");
+    world.send_and_expect("A", "AT+CSCB?", &["+CSCB: 0,\"\",\"\"", "OK"]);
+
+    world.send_and_expect_ok("A", "AT+CSCB=1");
+    world.send_and_expect("A", "AT+CSCB?", &["+CSCB: 1,\"\",\"\"", "OK"]);
+}
+
+#[test]
+fn test_cell_broadcast_suppressed_when_unregistered_or_radio_off() {
+    let mut world = World::new();
+    world.given_modem("A");
+
+    // Unregistered -> suppressed
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x01, "Hello");
+    world.then_no_response("A");
+
+    // Registered but CFUN=0 -> suppressed
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+    world.send_and_expect_ok("A", "AT+CFUN=0");
+    when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x01, "Hello");
+    world.then_no_response("A");
+}
