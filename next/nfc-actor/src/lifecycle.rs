@@ -51,13 +51,16 @@ impl ActorLifecycle for NfcActor {
                     "Failed to decode DataPacket (invalid length), bytes: {:?}",
                     message
                 );
+                self.nfc_stats.incr_nci_error();
             } else if let Some(state) = self.active_chips.get(&id) {
                 match state.mode() {
                     NfcMode::Poll => {
                         self.nfc_stats.incr(NfcApi::TagTransceive);
+                        self.nfc_stats.incr_tag_emulation_count();
                     }
                     NfcMode::Listen => {
                         self.nfc_stats.incr(NfcApi::CardEmulationSendResponseApdu);
+                        self.nfc_stats.incr_card_emulation_count();
                     }
                     _ => {}
                 }
@@ -118,6 +121,7 @@ impl ActorLifecycle for NfcActor {
                 }
             } else {
                 tracing::warn!("Failed to decode ControlPacket, bytes: {:?}", message);
+                self.nfc_stats.incr_nci_error();
             }
         }
 
@@ -125,6 +129,7 @@ impl ActorLifecycle for NfcActor {
             && let Err(e) = state.nfc_writer.write_all(&message).await
         {
             error!("Failed to write guest packet to Casimir: {:?}", e);
+            self.nfc_stats.incr_casimir_error();
         }
     }
 
@@ -221,6 +226,7 @@ mod tests {
         actor.on_stream(chip_id, Bytes::from_static(&[0x00, 0x00, 0x03, 1, 2, 3]), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::TagTransceive), 0);
         assert_eq!(stats.get(NfcApi::CardEmulationSendResponseApdu), 0);
+        assert_eq!(stats.to_proto().nci_errors(), 1);
 
         // 4. CoreResetCommand -> does not increment AdapterDisable (standard
         //    boot/enable sequence)
@@ -249,6 +255,7 @@ mod tests {
             .on_stream(chip_id, Bytes::from_static(&[0x00, 0x00, 0x03, 0x00, 0xa4, 0x04]), &mut ctx)
             .await;
         assert_eq!(stats.get(NfcApi::TagTransceive), 1);
+        assert_eq!(stats.to_proto().tag_emulation_count(), 1);
 
         // 8. RfDiscoverSelectCommand -> TagConnect (maintains NFC_MODE_POLL)
         let cmd = RfDiscoverSelectCommand {
@@ -289,13 +296,15 @@ mod tests {
             .on_stream(chip_id, Bytes::from_static(&[0x00, 0x00, 0x02, 0x90, 0x00]), &mut ctx)
             .await;
         assert_eq!(stats.get(NfcApi::CardEmulationSendResponseApdu), 1);
+        assert_eq!(stats.to_proto().card_emulation_count(), 1);
 
         // 13. Other unhandled Core / Rf packets
         let get_cfg_cmd = CoreGetConfigCommand { parameters: vec![] };
         actor.on_stream(chip_id, Bytes::from(get_cfg_cmd.encode_to_vec().unwrap()), &mut ctx).await;
 
         // 14. Malformed control packet
-        actor.on_stream(chip_id, Bytes::from_static(&[0x20, 0xff, 0xff]), &mut ctx).await;
+        actor.on_stream(chip_id, Bytes::from_static(&[0x25, 0xff, 0xff]), &mut ctx).await;
+        assert_eq!(stats.to_proto().nci_errors(), 2);
 
         // 15. Stream and task closed
         actor.on_stream_closed(chip_id, &mut ctx).await;

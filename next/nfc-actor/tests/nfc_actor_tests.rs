@@ -621,6 +621,9 @@ async fn test_nfc_stats_counters() {
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(world.actor.nfc_stats.to_proto().nci_data_rx(), 1);
+    assert_eq!(world.actor.nfc_stats.to_proto().tag_emulation_count(), 1);
+    assert!(world.actor.nfc_stats.to_proto().rf_taps_tx() >= 2);
+    assert!(world.actor.nfc_stats.to_proto().rf_taps_rx() >= 2);
 
     // 6. DataPacket (Casimir -> Guest while in Listen Mode via mock peer) ->
     //    CardEmulationProcessCommandApdu
@@ -636,6 +639,7 @@ async fn test_nfc_stats_counters() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(world.actor.nfc_stats.get(NfcApi::CardEmulationProcessCommandApdu), 1);
     assert_eq!(world.actor.nfc_stats.to_proto().nci_data_tx(), 1);
+    assert_eq!(world.actor.nfc_stats.to_proto().card_emulation_count(), 1);
 
     // 7. RfDeactivate(SleepMode) -> TagClose
     let cmd = RfDeactivateCommand { deactivation_type: DeactivationType::SleepMode };
@@ -673,6 +677,12 @@ async fn test_nfc_stats_counters() {
         1,
     )
     .await;
+    assert_eq!(world.actor.nfc_stats.to_proto().card_emulation_count(), 2);
+    let ipc = world.actor.nfc_stats.to_ipc_proto();
+    assert_eq!(ipc.nfc_stats.card_emulation_count(), 2);
+    assert_eq!(ipc.nfc_stats.tag_emulation_count(), 1);
+    assert!(ipc.nfc_api_stats.nci_data.send() >= 1);
+    assert_eq!(ipc.nfc_api_stats.nci_data.receive(), 1);
 
     // 10. RfDeactivate(IdleMode) -> AdapterDisableReaderMode
     let cmd = RfDeactivateCommand { deactivation_type: DeactivationType::IdleMode };

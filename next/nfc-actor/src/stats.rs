@@ -247,8 +247,8 @@ impl NfcStats {
         nfc.nci_rf = netsim_proto::protobuf::MessageField::some(nci_rf);
 
         let mut nci_data = NciDataStats::new();
-        nci_data.send = Some(0);
-        nci_data.receive = Some(0);
+        nci_data.send = Some(saturate_i32(self.nci_data_rx.load(Ordering::Relaxed)));
+        nci_data.receive = Some(saturate_i32(self.nci_data_tx.load(Ordering::Relaxed)));
         nfc.nci_data = netsim_proto::protobuf::MessageField::some(nci_data);
 
         nfc
@@ -299,15 +299,32 @@ mod tests {
         stats.incr_nci_commands_rx();
         stats.incr_nci_responses_tx();
         stats.incr_nci_responses_tx();
+        stats.incr_nci_notifications_tx();
         stats.incr_nci_data_rx();
+        stats.incr_nci_data_tx();
+        stats.incr_rf_taps_tx();
+        stats.incr_rf_taps_rx();
+        stats.incr_card_emulation_count();
+        stats.incr_tag_emulation_count();
         stats.incr_nci_error();
+        stats.incr_casimir_error();
+        stats.incr_rf_error();
+        stats.incr_other_error();
 
         let proto = stats.to_proto();
         assert_eq!(proto.nci_commands_rx(), 1);
         assert_eq!(proto.nci_responses_tx(), 2);
+        assert_eq!(proto.nci_notifications_tx(), 1);
         assert_eq!(proto.nci_data_rx(), 1);
+        assert_eq!(proto.nci_data_tx(), 1);
+        assert_eq!(proto.rf_taps_tx(), 1);
+        assert_eq!(proto.rf_taps_rx(), 1);
+        assert_eq!(proto.card_emulation_count(), 1);
+        assert_eq!(proto.tag_emulation_count(), 1);
         assert_eq!(proto.nci_errors(), 1);
-        assert_eq!(proto.nci_data_tx(), 0);
+        assert_eq!(proto.casimir_errors(), 1);
+        assert_eq!(proto.rf_errors(), 1);
+        assert_eq!(proto.other_errors(), 1);
     }
 
     #[test]
@@ -346,6 +363,9 @@ mod tests {
         stats.incr(NfcApi::TagTransceive);
         stats.incr(NfcApi::CardEmulationProcessCommandApdu);
         stats.incr(NfcApi::CardEmulationSendResponseApdu);
+        stats.incr_nci_data_rx();
+        stats.incr_nci_data_tx();
+        stats.incr_nci_data_tx();
 
         let proto = stats.to_api_proto();
 
@@ -378,17 +398,26 @@ mod tests {
         assert_eq!(nci_rf.rf_set_listen_mode_routing, Some(1));
 
         let nci_data = proto.nci_data.as_ref().expect("nci_data missing");
-        assert_eq!(nci_data.send, Some(0));
-        assert_eq!(nci_data.receive, Some(0));
+        assert_eq!(nci_data.send, Some(1));
+        assert_eq!(nci_data.receive, Some(2));
     }
 
     #[test]
     fn test_to_ipc_proto() {
         let stats = NfcStats::new();
         stats.incr(NfcApi::AdapterEnable);
+        stats.incr_card_emulation_count();
+        stats.incr_tag_emulation_count();
+        stats.incr_rf_taps_tx();
+        stats.incr_rf_taps_rx();
         let ipc = stats.to_ipc_proto();
         assert!(ipc.nfc_stats.is_some());
         assert!(ipc.nfc_api_stats.is_some());
+        let nfc_stats = ipc.nfc_stats.as_ref().unwrap();
+        assert_eq!(nfc_stats.card_emulation_count(), 1);
+        assert_eq!(nfc_stats.tag_emulation_count(), 1);
+        assert_eq!(nfc_stats.rf_taps_tx(), 1);
+        assert_eq!(nfc_stats.rf_taps_rx(), 1);
         let api_stats = ipc.nfc_api_stats.as_ref().unwrap();
         assert_eq!(api_stats.nfc_adapter.as_ref().unwrap().enable, Some(1));
     }

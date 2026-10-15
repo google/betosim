@@ -148,16 +148,27 @@ impl ActorService for NfcActor {
         let (casimir_rx, casimir_tx) = tokio::io::split(casimir_io);
         let casimir_to_device = self.casimir_to_device.clone();
         let device_client = self.device_client.clone();
+        let nfc_stats_rf = self.nfc_stats.clone();
         let casimir_device_id = scene_client
-            .add_device(move |id, rf_tx| {
+            .add_device(move |id, scene_rf_tx| {
                 casimir_to_device.lock().insert(id, device_id);
-                let mut device = casimir::Device::nci(id, casimir_rx, casimir_tx, rf_tx);
-                let (my_rf_tx, mut my_rf_rx) = unbounded_channel();
-                let original_device_rf_tx = device.rf_tx;
-                device.rf_tx = my_rf_tx;
+                let (egress_rf_tx, mut egress_rf_rx) = unbounded_channel();
+                let mut device = casimir::Device::nci(id, casimir_rx, casimir_tx, egress_rf_tx);
+                let nfc_stats_rf_tx = nfc_stats_rf.clone();
+                tokio::spawn(async move {
+                    while let Some(packet) = egress_rf_rx.recv().await {
+                        nfc_stats_rf_tx.incr_rf_taps_tx();
+                        if scene_rf_tx.send(packet).is_err() {
+                            nfc_stats_rf_tx.incr_rf_error();
+                            break;
+                        }
+                    }
+                });
+                let (ingress_rf_tx, mut ingress_rf_rx) = unbounded_channel();
+                let controller_ingress_rf_tx = std::mem::replace(&mut device.rf_tx, ingress_rf_tx);
                 let map_clone = casimir_to_device.clone();
                 tokio::spawn(async move {
-                    while let Some(packet) = my_rf_rx.recv().await {
+                    while let Some(packet) = ingress_rf_rx.recv().await {
                         if packet.sender() == id
                             || is_within_nfc_proximity(
                                 packet.sender(),
@@ -167,14 +178,23 @@ impl ActorService for NfcActor {
                             )
                             .await
                         {
-                            let _ = original_device_rf_tx.send(packet);
+                            if packet.sender() != id {
+                                nfc_stats_rf.incr_rf_taps_rx();
+                            }
+                            if controller_ingress_rf_tx.send(packet).is_err() {
+                                nfc_stats_rf.incr_rf_error();
+                                break;
+                            }
                         }
                     }
                 });
                 device
             })
             .await
-            .map_err(|e| NfcError::IoError(std::io::Error::other(e)))?;
+            .map_err(|e| {
+                self.nfc_stats.incr_casimir_error();
+                NfcError::IoError(std::io::Error::other(e))
+            })?;
 
         info!("Added NFC device to Casimir scene with ID {}", casimir_device_id);
 
@@ -203,11 +223,15 @@ impl ActorService for NfcActor {
                             match (b0 >> 5) & 0x07 {
                                 NCI_MT_DATA => {
                                     nfc_stats_clone.incr_nci_data_tx();
-                                    if mode_clone.load(Ordering::Relaxed)
-                                        == crate::nfc_actor::NfcMode::Listen.as_u8()
-                                    {
+                                    let current_mode = mode_clone.load(Ordering::Relaxed);
+                                    if current_mode == crate::nfc_actor::NfcMode::Listen.as_u8() {
                                         nfc_stats_clone
                                             .incr(NfcApi::CardEmulationProcessCommandApdu);
+                                        nfc_stats_clone.incr_card_emulation_count();
+                                    } else if current_mode
+                                        == crate::nfc_actor::NfcMode::Poll.as_u8()
+                                    {
+                                        nfc_stats_clone.incr_tag_emulation_count();
                                     }
                                     rx_count_clone.fetch_add(1, Ordering::Relaxed);
                                 }
