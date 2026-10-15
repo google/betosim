@@ -24,8 +24,7 @@ use device_actor::DeviceClient;
 use device_api::DeviceId;
 use futures::{StreamExt, sink::unfold};
 use netsim_model::{
-    Bluetooth, BluetoothMode, Cell, CellularData, Chip, ChipKind, ChipVariant, Controller,
-    DeviceInfo, DeviceParams, Ethernet, Nfc, PacketSink, PacketStream, Quirks, Uwb, Wifi,
+    Chip, ChipError, ChipKind, ChipVariant, DeviceInfo, PacketSink, PacketStream, Quirks,
 };
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
@@ -69,7 +68,8 @@ pub(crate) async fn setup_virtual_chip(
         .or_else(|| chip_id.filter(|id| id.len() == 17))
         .unwrap_or_default();
 
-    let variant = build_chip_variant(chip_kind, address, device_info.as_ref());
+    let variant = build_chip_variant(chip_kind, address, device_info.as_ref())
+        .map_err(netsim_model::ClientError::from)?;
 
     let chip = Chip {
         name: chip_name,
@@ -126,19 +126,13 @@ fn build_chip_variant(
     chip_kind: ChipKind,
     address: String,
     device_info: Option<&DeviceInfo>,
-) -> ChipVariant {
-    match chip_kind {
-        ChipKind::BLUETOOTH => ChipVariant::Bluetooth(Box::new(Bluetooth {
-            address,
-            mode: BluetoothMode::Device(DeviceParams {}),
-            bt_properties: Controller::default(),
-            ..Default::default()
-        })),
-        ChipKind::WIFI => ChipVariant::Wifi(Wifi::default()),
-        ChipKind::UWB => ChipVariant::Uwb(Uwb { address, ..Default::default() }),
-        ChipKind::NFC => ChipVariant::Nfc(Nfc::default()),
-        ChipKind::CELLULAR => {
-            let quirks = device_info
+) -> Result<ChipVariant, ChipError> {
+    let mut variant = ChipVariant::try_from(chip_kind)?;
+    match &mut variant {
+        ChipVariant::Bluetooth(bt) => bt.address = address,
+        ChipVariant::Uwb(uwb) => uwb.address = address,
+        ChipVariant::Cell(cell) => {
+            cell.quirks = device_info
                 .map(|info| {
                     let is_cuttlefish = info.kind.eq_ignore_ascii_case("CUTTLEFISH");
                     let is_emulator = info.kind.eq_ignore_ascii_case("EMULATOR");
@@ -152,11 +146,13 @@ fn build_chip_variant(
                     }
                 })
                 .unwrap_or_default();
-            ChipVariant::Cell(Cell { quirks, ..Default::default() })
         }
-        ChipKind::CELLULAR_DATA => ChipVariant::CellularData(CellularData::default()),
-        ChipKind::ETHERNET | ChipKind::UNSPECIFIED => ChipVariant::Ethernet(Ethernet::default()),
+        ChipVariant::Wifi(_)
+        | ChipVariant::Nfc(_)
+        | ChipVariant::CellularData(_)
+        | ChipVariant::Ethernet(_) => {}
     }
+    Ok(variant)
 }
 
 /// Echoes every packet back to the client until either side closes.
@@ -264,5 +260,109 @@ pub(crate) async fn run_websocket_transport(
     info!("Cleaning up WebSocket device {device_id} for {addr}");
     if let Err(e) = device_client.delete(device_id).await {
         warn!("Failed to delete virtual WebSocket device {device_id}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_chip_variant_rejects_unspecified() {
+        assert!(matches!(
+            build_chip_variant(ChipKind::UNSPECIFIED, String::new(), None),
+            Err(ChipError::UnsupportedChipKind(ChipKind::UNSPECIFIED))
+        ));
+    }
+
+    #[test]
+    fn test_build_chip_variant_sets_address_and_cellular_quirks() {
+        let bt = build_chip_variant(ChipKind::BLUETOOTH, "00:11:22:33:44:55".to_string(), None)
+            .expect("bluetooth variant should build");
+        match bt {
+            ChipVariant::Bluetooth(bt) => assert_eq!(bt.address, "00:11:22:33:44:55"),
+            _ => panic!("expected bluetooth variant"),
+        }
+
+        let uwb = build_chip_variant(ChipKind::UWB, "00:11:22:33".to_string(), None)
+            .expect("uwb variant should build");
+        match uwb {
+            ChipVariant::Uwb(uwb) => assert_eq!(uwb.address, "00:11:22:33"),
+            _ => panic!("expected uwb variant"),
+        }
+
+        let emulator_info_37 = DeviceInfo {
+            kind: "EMULATOR".to_string(),
+            sdk_version: "37".to_string(),
+            ..Default::default()
+        };
+        let cell_37 =
+            build_chip_variant(ChipKind::CELLULAR, String::new(), Some(&emulator_info_37))
+                .expect("cell variant should build");
+        match cell_37 {
+            ChipVariant::Cell(cell) => {
+                assert!(cell.quirks.goldfish_ril_37_or_earlier);
+                assert!(!cell.quirks.is_cuttlefish);
+                assert!(cell.quirks.auto_ctzv);
+                assert!(cell.quirks.allow_ipv4_for_ipv6);
+                assert!(cell.quirks.dynamic_slirp_lease);
+            }
+            _ => panic!("expected cell variant"),
+        }
+
+        let emulator_info_38 = DeviceInfo {
+            kind: "EMULATOR".to_string(),
+            sdk_version: "38".to_string(),
+            ..Default::default()
+        };
+        let cell_38 =
+            build_chip_variant(ChipKind::CELLULAR, String::new(), Some(&emulator_info_38))
+                .expect("cell variant should build");
+        match cell_38 {
+            ChipVariant::Cell(cell) => {
+                assert!(!cell.quirks.goldfish_ril_37_or_earlier);
+                assert!(!cell.quirks.is_cuttlefish);
+                assert!(cell.quirks.auto_ctzv);
+                assert!(cell.quirks.allow_ipv4_for_ipv6);
+                assert!(cell.quirks.dynamic_slirp_lease);
+            }
+            _ => panic!("expected cell variant"),
+        }
+
+        let cuttlefish_info = DeviceInfo {
+            kind: "CUTTLEFISH".to_string(),
+            sdk_version: "35".to_string(),
+            ..Default::default()
+        };
+        let cell_cvd =
+            build_chip_variant(ChipKind::CELLULAR, String::new(), Some(&cuttlefish_info))
+                .expect("cell variant should build");
+        match cell_cvd {
+            ChipVariant::Cell(cell) => {
+                assert!(!cell.quirks.goldfish_ril_37_or_earlier);
+                assert!(cell.quirks.is_cuttlefish);
+                assert!(cell.quirks.auto_ctzv);
+                assert!(cell.quirks.allow_ipv4_for_ipv6);
+                assert!(!cell.quirks.dynamic_slirp_lease);
+            }
+            _ => panic!("expected cell variant"),
+        }
+
+        let cell_default = build_chip_variant(ChipKind::CELLULAR, String::new(), None)
+            .expect("cell variant should build");
+        match cell_default {
+            ChipVariant::Cell(cell) => {
+                assert!(!cell.quirks.goldfish_ril_37_or_earlier);
+                assert!(!cell.quirks.is_cuttlefish);
+                assert!(!cell.quirks.auto_ctzv);
+                assert!(!cell.quirks.allow_ipv4_for_ipv6);
+                assert!(!cell.quirks.dynamic_slirp_lease);
+            }
+            _ => panic!("expected cell variant"),
+        }
+
+        let ethernet = build_chip_variant(ChipKind::ETHERNET, String::new(), None)
+            .expect("ethernet variant should build");
+        assert!(matches!(ethernet, ChipVariant::Ethernet(_)));
     }
 }
