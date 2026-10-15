@@ -43,13 +43,13 @@ const CHIP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct InternalDevice {
-    pub device: device_api::Device,
-    pub create_params: Option<DeviceCreate>,
-    pub guid: Option<String>,
+    device: device_api::Device,
+    create_params: Option<DeviceCreate>,
+    guid: Option<String>,
     #[serde(skip)]
-    pub chip_stats: HashMap<ChipId, Arc<StreamStats>>,
+    chip_stats: HashMap<ChipId, Arc<StreamStats>>,
     #[serde(skip)]
-    pub last_known_stats: HashMap<ChipId, Vec<netsim_model::NetsimRadioStats>>,
+    last_known_stats: HashMap<ChipId, Vec<netsim_model::NetsimRadioStats>>,
 }
 
 impl InternalDevice {

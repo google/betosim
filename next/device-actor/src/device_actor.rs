@@ -24,22 +24,22 @@ use netsim_model::{ChipClient, ChipKind};
 use crate::DeviceClient;
 
 pub struct DeviceActor {
-    pub chip_clients: HashMap<ChipKind, Box<dyn ChipClient>>,
-    pub next_chip_id: Arc<AtomicU32>,
-    pub capture_client: Option<Arc<dyn CaptureSender>>,
+    pub(crate) chip_clients: HashMap<ChipKind, Box<dyn ChipClient>>,
+    pub(crate) next_chip_id: Arc<AtomicU32>,
+    pub(crate) capture_client: Option<Arc<dyn CaptureSender>>,
     pub(crate) devices: HashMap<device_api::DeviceId, crate::service::InternalDevice>,
-    pub next_device_id: u32,
-    pub link_client: Box<dyn link_api::LinkClient>,
-    pub startup_timeout: Option<std::time::Duration>,
-    pub idle_timeout: Option<std::time::Duration>,
+    pub(crate) next_device_id: u32,
+    pub(crate) link_client: Box<dyn link_api::LinkClient>,
+    pub(crate) startup_timeout: Option<std::time::Duration>,
+    pub(crate) idle_timeout: Option<std::time::Duration>,
 
-    pub startup_timer: Option<TimerKey>,
+    pub(crate) startup_timer: Option<TimerKey>,
     pub(crate) idle_timer: Option<TimerKey>,
-    pub has_seen_device: bool,
-    pub guid_to_id: HashMap<String, device_api::DeviceId>,
-    pub stats_write_task: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) has_seen_device: bool,
+    pub(crate) guid_to_id: HashMap<String, device_api::DeviceId>,
+    pub(crate) stats_write_task: Option<tokio::task::JoinHandle<()>>,
     pub(crate) stats: crate::stats::Stats,
-    pub stats_interval: std::time::Duration,
+    pub(crate) stats_interval: std::time::Duration,
     // Client to send messages to self (e.g. for periodic stats)
     pub(crate) self_client: Option<DeviceClient>,
 }

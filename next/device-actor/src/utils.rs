@@ -38,14 +38,14 @@ use tracing::warn;
 #[derive(Debug)]
 pub(crate) struct StreamStats {
     /// Total packets transmitted by the chip (RX from transport perspective)
-    pub tx_packets: AtomicU64,
+    tx_packets: AtomicU64,
     /// Total packets received by the chip (TX from transport perspective)
-    pub rx_packets: AtomicU64,
+    rx_packets: AtomicU64,
     /// Total bytes transmitted by the chip
-    pub tx_bytes: AtomicU64,
+    tx_bytes: AtomicU64,
     /// Total bytes received by the chip
-    pub rx_bytes: AtomicU64,
-    pub start_time: Instant,
+    rx_bytes: AtomicU64,
+    pub(crate) start_time: Instant,
 }
 
 impl PartialEq for StreamStats {

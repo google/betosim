@@ -28,13 +28,13 @@ const STATS_PRINT_OPTIONS: PrintOptions = PrintOptions {
 const DEFAULT_STATS_FILENAME: &str = "netsim_session_stats.json";
 
 pub(crate) struct CombinedStatsInputs {
-    pub active_stats: Vec<netsim_proto::stats::NetsimRadioStats>,
-    pub wifi_stats: Option<netsim_proto::stats::WifiStats>,
-    pub wifi_api: Option<netsim_proto::stats::WifiApiStats>,
-    pub uwb_api: Option<netsim_proto::stats::UwbApiStats>,
-    pub nfc_api: Option<netsim_proto::stats::NfcApiStats>,
-    pub nfc_stats: Option<netsim_proto::stats::NfcStats>,
-    pub nfc_service_stats: Option<netsim_proto::stats::NfcServiceStats>,
+    pub(crate) active_stats: Vec<netsim_proto::stats::NetsimRadioStats>,
+    pub(crate) wifi_stats: Option<netsim_proto::stats::WifiStats>,
+    pub(crate) wifi_api: Option<netsim_proto::stats::WifiApiStats>,
+    pub(crate) uwb_api: Option<netsim_proto::stats::UwbApiStats>,
+    pub(crate) nfc_api: Option<netsim_proto::stats::NfcApiStats>,
+    pub(crate) nfc_stats: Option<netsim_proto::stats::NfcStats>,
+    pub(crate) nfc_service_stats: Option<netsim_proto::stats::NfcServiceStats>,
 }
 
 #[derive(Debug)]
@@ -46,7 +46,7 @@ pub(crate) struct Stats {
     // For typical usage (< 10,000 devices/session), memory overhead is negligible (~1MB).
     // For long-running stress tests, this may need a cap or disk-offload.
     archived_radio_stats: Vec<netsim_proto::stats::NetsimRadioStats>,
-    pub stats_path: std::path::PathBuf,
+    pub(crate) stats_path: std::path::PathBuf,
     frontend_stats: std::sync::Arc<netsim_model::FrontendStats>,
 }
 
