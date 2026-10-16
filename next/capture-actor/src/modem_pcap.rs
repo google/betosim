@@ -124,8 +124,8 @@ impl ModemPcapWriter {
         let fcs = compute_fcs([addr, ctrl].into_iter().chain(len_bytes.iter().copied()));
 
         // Frame structure:
-        // [Ext Header Size (0x00)][Direction (0x00 Tx / 0x01
-        // Rx)][0xF9][Addr][Ctrl][Len...][Payload][FCS][0xF9]
+        // [Ext Header Size (0x00)][Direction (0x00 App->Module (Received) / 0x01
+        // Module->App (Sent))][0xF9][Addr][Ctrl][Len...][Payload][FCS][0xF9]
         let dir_byte = if matches!(direction, Direction::Received) { 0x00 } else { 0x01 };
         let header = [0x00, dir_byte, GSM0710_FLAG, addr, ctrl];
         let footer = [fcs, GSM0710_FLAG];
@@ -165,5 +165,99 @@ impl CaptureWriter for ModemPcapWriter {
 
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use netsim_packets::{PcapHeader, PcapRecordHeader};
+
+    use super::*;
+
+    const PCAP_GLOBAL_HEADER_SIZE: usize = size_of::<PcapHeader>();
+    const PCAP_RECORD_HEADER_SIZE: usize = size_of::<PcapRecordHeader>();
+
+    fn check_frame<'a>(frame: &'a [u8], direction: Direction, payload: &[u8]) -> &'a [u8] {
+        let dir_byte = if matches!(direction, Direction::Received) { 0x00 } else { 0x01 };
+        let len_field_size = if payload.len() <= 127 { 1 } else { 2 };
+        assert_eq!(frame.len(), 5 + len_field_size + payload.len() + 2);
+        assert_eq!(&frame[0..5], &[0x00, dir_byte, GSM0710_FLAG, 0x07, 0xEF]);
+        let len_bytes = &frame[5..5 + len_field_size];
+        assert_eq!(&frame[5 + len_field_size..5 + len_field_size + payload.len()], payload);
+        let expected_fcs = compute_fcs([0x07, 0xEF].into_iter().chain(len_bytes.iter().copied()));
+        assert_eq!(frame[frame.len() - 2], expected_fcs);
+        assert_eq!(frame[frame.len() - 1], GSM0710_FLAG);
+        len_bytes
+    }
+
+    #[test]
+    fn test_compute_fcs() {
+        let input = [0x07, 0xEF, 0x13];
+        let fcs = compute_fcs(input);
+        assert_eq!(fcs, 0xC8);
+    }
+
+    #[test]
+    fn test_frame_gsm0710_empty_payload() {
+        let frame_rx = ModemPcapWriter::frame_gsm0710(Direction::Received, &[]);
+        assert_eq!(check_frame(&frame_rx, Direction::Received, &[]), &[0x01]);
+
+        let frame_tx = ModemPcapWriter::frame_gsm0710(Direction::Sent, &[]);
+        assert_eq!(check_frame(&frame_tx, Direction::Sent, &[]), &[0x01]);
+    }
+
+    #[test]
+    fn test_frame_gsm0710_short_payload() {
+        let payload = b"AT+CSQ\r";
+        let frame = ModemPcapWriter::frame_gsm0710(Direction::Sent, payload);
+        assert_eq!(check_frame(&frame, Direction::Sent, payload), &[0x0F]);
+    }
+
+    #[test]
+    fn test_frame_gsm0710_length_boundary_127_bytes() {
+        let payload = vec![0x41; 127];
+        let frame = ModemPcapWriter::frame_gsm0710(Direction::Received, &payload);
+        assert_eq!(check_frame(&frame, Direction::Received, &payload), &[0xFF]);
+    }
+
+    #[test]
+    fn test_frame_gsm0710_long_payload_two_byte_length() {
+        let payload = vec![0x42; 128];
+        let frame = ModemPcapWriter::frame_gsm0710(Direction::Received, &payload);
+        assert_eq!(check_frame(&frame, Direction::Received, &payload), &[0x00, 0x01]);
+    }
+
+    #[test]
+    fn test_frame_gsm0710_large_multibyte_payload() {
+        let payload = vec![0x43; 300];
+        let frame = ModemPcapWriter::frame_gsm0710(Direction::Sent, &payload);
+        assert_eq!(check_frame(&frame, Direction::Sent, &payload), &[0x58, 0x02]);
+    }
+
+    #[tokio::test]
+    async fn test_modem_pcap_writer_stream_and_write_packet() {
+        let (mut writer, mut rx) = ModemPcapWriter::new_stream();
+        assert!(!writer.is_file());
+        assert!(!writer.is_closed());
+        assert_eq!(writer.get_stats(), (0, 0));
+
+        let payload = b"AT\r";
+        let expected_frame = ModemPcapWriter::frame_gsm0710(Direction::Sent, payload);
+        assert_eq!(expected_frame.len(), 11);
+
+        writer.write_packet(SystemTime::now(), Direction::Sent, payload).await.unwrap();
+        assert_eq!(writer.get_stats(), (1, 11));
+
+        let header_bytes = rx.recv().await.unwrap();
+        assert_eq!(header_bytes.len(), PCAP_GLOBAL_HEADER_SIZE);
+
+        let record_bytes = rx.recv().await.unwrap();
+        assert_eq!(record_bytes.len(), PCAP_RECORD_HEADER_SIZE + 11);
+        assert_eq!(&record_bytes[PCAP_RECORD_HEADER_SIZE..], &expected_frame[..]);
+
+        assert!(writer.flush().await.is_ok());
+
+        drop(rx);
+        assert!(writer.is_closed());
     }
 }
