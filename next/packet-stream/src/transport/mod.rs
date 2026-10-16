@@ -42,15 +42,13 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
 pub use dual_fd::{DualFdConfig, DualFdListener};
-use futures::{SinkExt, StreamExt};
 pub use h4::H4Codec;
 pub use modem::ModemCodec;
 pub use nci::NciCodec;
 use serde::{Deserialize, Serialize};
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 #[cfg(windows)]
 use tracing::warn;
-use traits::{PacketSink, PacketStream, TransportListener};
+use traits::{PacketSink, PacketStream, TransportListener, into_packet_stream_sink};
 pub use types::{ListenerConfig, TransportType};
 pub use uci::UciCodec;
 
@@ -202,31 +200,16 @@ impl CrossPlatformListener {
             #[cfg(unix)]
             CrossPlatformListener::Unix(listener) => {
                 let stream = listener.accept().await?;
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let (sink, stream) = framed.split();
-                let stream =
-                    stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-                let sink = sink.sink_map_err(PacketStreamError::Io);
-                Ok((Box::pin(stream), Box::pin(sink)))
+                Ok(into_packet_stream_sink(stream))
             }
             #[cfg(windows)]
             CrossPlatformListener::Windows(listener) => {
                 let stream = listener.accept().await?;
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let (sink, stream) = framed.split();
-                let stream =
-                    stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-                let sink = sink.sink_map_err(PacketStreamError::Io);
-                Ok((Box::pin(stream), Box::pin(sink)))
+                Ok(into_packet_stream_sink(stream))
             }
             CrossPlatformListener::Tcp(listener) => {
                 let (stream, _) = listener.accept().await?;
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let (sink, stream) = framed.split();
-                let stream =
-                    stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-                let sink = sink.sink_map_err(PacketStreamError::Io);
-                Ok((Box::pin(stream), Box::pin(sink)))
+                Ok(into_packet_stream_sink(stream))
             }
         }
     }

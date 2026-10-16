@@ -34,3 +34,18 @@ pub trait TransportListener: Send {
     fn local_addr(&self) -> Result<StreamAddress>;
     async fn shutdown(&mut self) -> Result<()>;
 }
+
+/// Converts an asynchronous byte stream into framed packet stream and sink.
+pub(crate) fn into_packet_stream_sink<S>(stream: S) -> (PacketStream, PacketSink)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    use futures::{SinkExt, StreamExt};
+    use tokio_util::codec::{Framed, LengthDelimitedCodec};
+
+    let framed = Framed::new(stream, LengthDelimitedCodec::new());
+    let (sink, stream) = framed.split();
+    let stream = stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
+    let sink = sink.sink_map_err(PacketStreamError::Io);
+    (Box::pin(stream), Box::pin(sink))
+}

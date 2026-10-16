@@ -17,16 +17,14 @@
 
 use std::collections::HashMap;
 
-use futures::{SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::{
     error::{PacketStreamError, Result},
     transport::{
         adapters::TcpTransportListener,
-        traits::{PacketSink, PacketStream},
+        traits::{PacketSink, PacketStream, into_packet_stream_sink},
     },
 };
 
@@ -83,22 +81,12 @@ impl TransportType {
         match self {
             TransportType::Tcp { addr, port } => {
                 let stream = TcpStream::connect(format!("{addr}:{port}")).await?;
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let (sink, stream) = framed.split();
-                let stream =
-                    stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-                let sink = sink.sink_map_err(PacketStreamError::Io);
-                Ok((Box::pin(stream), Box::pin(sink)))
+                Ok(into_packet_stream_sink(stream))
             }
             #[cfg(unix)]
             TransportType::Uds { path } => {
                 let stream = tokio::net::UnixStream::connect(path).await?;
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let (sink, stream) = framed.split();
-                let stream =
-                    stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-                let sink = sink.sink_map_err(PacketStreamError::Io);
-                Ok((Box::pin(stream), Box::pin(sink)))
+                Ok(into_packet_stream_sink(stream))
             }
             TransportType::Fd { .. } => Err(PacketStreamError::InvalidConfig(
                 "FD transport cannot be created directly, it must be inherited".to_string(),
