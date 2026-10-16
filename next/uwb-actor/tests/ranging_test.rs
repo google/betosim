@@ -144,9 +144,9 @@ async fn test_ranging_between_chip_and_anchor() {
     let m = world.then_single_ranging_measurement_is_received(chip_a).await;
     assert_eq!(m.distance, 500);
     assert_eq!(m.aoa_azimuth, (90i16 << 7) as u16);
-    assert_eq!(m.aoa_elevation, 53);
+    assert_eq!(m.aoa_elevation, (53i16 << 7) as u16);
     assert_eq!(m.aoa_destination_azimuth, (-90i16 << 7) as u16);
-    assert_eq!(m.aoa_destination_elevation, (-53i16) as u16);
+    assert_eq!(m.aoa_destination_elevation, (-53i16 << 7) as u16);
 
     world
         .client
@@ -176,7 +176,8 @@ async fn test_ranging_between_chip_and_anchor() {
     assert_eq!(world.client.read_count_for_testing().await.unwrap(), 1);
 
     world.when_ranging_is_triggered(chip_a, 1).await;
-    world.then_no_ranging_measurement_is_received(chip_a).await;
+    let m3 = world.then_single_ranging_measurement_is_received(chip_a).await;
+    assert_eq!(m3.status, uci::Status::RangingRxTimeout);
 }
 
 #[tokio::test]

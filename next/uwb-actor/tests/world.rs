@@ -364,16 +364,4 @@ impl World {
         assert_eq!(ntf.two_way_ranging_measurements.len(), 1, "Expected exactly one measurement");
         ntf.two_way_ranging_measurements[0].clone()
     }
-
-    pub async fn then_no_ranging_measurement_is_received(&mut self, chip_id: u32) {
-        let packet = self.then_packet_is_received(chip_id).await;
-        let (ntf, _) =
-            uci::ShortMacTwoWaySessionInfoNtf::decode(&packet).expect("ranging info notification");
-
-        assert!(
-            ntf.two_way_ranging_measurements.is_empty(),
-            "Expected no ranging measurements, found {}",
-            ntf.two_way_ranging_measurements.len()
-        );
-    }
 }

@@ -135,7 +135,7 @@ pub fn add_chip(_create_params: &CreateParams, chip_id: ChipIdentifier) -> Wirel
     let pica_id = get_pica()
         .lock()
         .unwrap()
-        .add_device(Box::pin(uci_stream_receiver), Box::pin(uci_sink_sender.sink_err_into()))
+        .add_device(Box::pin(uci_stream_receiver), Box::pin(uci_sink_sender.sink_map_err(|_| ())))
         .unwrap();
     get_pica_handle_to_state().insert(pica_id, chip_id);
 

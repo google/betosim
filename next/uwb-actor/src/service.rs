@@ -116,19 +116,22 @@ impl UwbActor {
         // Pica wants a Sink<Vec<u8>>.
         let stats_clone_sink = self.uwb_stats.clone();
         let sink =
-            Box::pin(packet_sink.ok_or(UwbError::PacketSinkMissing)?.with(move |v: Vec<u8>| {
-                if let Some(count) = count_p2p_ranging_measurements(&v).ok().filter(|&c| c > 0) {
-                    // A single ranging cycle involves multiple packets transmitted and
-                    // received. Incrementing both TX and RX by the same
-                    // cycle count is a reasonable proxy for activity,
-                    // but it's an approximation of P2P activity.
-                    tx_clone.fetch_add(count, Ordering::Relaxed);
-                    rx_clone.fetch_add(count, Ordering::Relaxed);
-                }
-                rx_sink_clone.fetch_add(1, Ordering::Relaxed);
-                parse_and_count_uci_data_receive(&v, &stats_clone_sink);
-                async move { Ok(Bytes::from(v)) }
-            }));
+            Box::pin(packet_sink.ok_or(UwbError::PacketSinkMissing)?.sink_map_err(|_| ()).with(
+                move |v: Vec<u8>| {
+                    if let Some(count) = count_p2p_ranging_measurements(&v).ok().filter(|&c| c > 0)
+                    {
+                        // A single ranging cycle involves multiple packets transmitted and
+                        // received. Incrementing both TX and RX by the same
+                        // cycle count is a reasonable proxy for activity,
+                        // but it's an approximation of P2P activity.
+                        tx_clone.fetch_add(count, Ordering::Relaxed);
+                        rx_clone.fetch_add(count, Ordering::Relaxed);
+                    }
+                    rx_sink_clone.fetch_add(1, Ordering::Relaxed);
+                    parse_and_count_uci_data_receive(&v, &stats_clone_sink);
+                    async move { Ok(Bytes::from(v)) }
+                },
+            ));
 
         // Clear unrelated events to prevent a lagged error
         self.pica_connect_events = self.pica_connect_events.resubscribe();
