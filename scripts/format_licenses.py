@@ -30,7 +30,7 @@ SPDX_TAG = "-".join(("SPDX", "License", "Identifier"))
 SPDX_APACHE = f"{SPDX_TAG}: Apache-2.0"
 
 # Headers are normalized through the SPDX form, then expanded to the full
-# Apache 2.0 notice, which OSPO Cross (go/cross) requires for open source.
+# Apache 2.0 notice required for open source.
 APACHE_NOTICE = (
     "",
     'Licensed under the Apache License, Version 2.0 (the "License");',

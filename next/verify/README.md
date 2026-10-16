@@ -118,10 +118,9 @@ On the host, you can verify these counters using Gherkin steps:
 ### Host-side (gRPC) [DISABLED]
 
 > [!WARNING]
-> Host-side observables via gRPC have been disabled to remove the `grpcio` dependency for Google3.
+> Host-side observables via gRPC have been disabled to remove the `grpcio` dependency.
 > We are transitioning to use direct calls to the `netsim` CLI binary.
 > Scenarios using `@netsim observes` will not work with real data until CLI support for state queries is added.
-> Tracked in [b/508335216](http://b/508335216).
 
 Previously, you could query `netsimd` directly via gRPC to check for host-side observables, such as the number of connected devices and version:
 

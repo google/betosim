@@ -13,9 +13,9 @@
 // limitations under the License.
 
 // This file is currently disabled because all steps in it rely on gRPC for link
-// management. We are removing gRPC to eliminate the grpcio dependency for
-// Google3. These steps will be refactored to use the Netsim CLI once link
-// management is supported in the CLI. Tracked in b/508244289.
+// management. We are removing gRPC to eliminate the grpcio dependency. These
+// steps will be refactored to use the Netsim CLI once link management is
+// supported in the CLI.
 
 /*
 use netsim_proto::frontend;
