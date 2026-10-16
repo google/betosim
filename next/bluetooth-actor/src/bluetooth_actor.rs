@@ -23,6 +23,9 @@ use tracing::warn;
 
 use crate::{BluetoothEvent, ranging};
 
+const CENTIMETERS_PER_METER: f32 = 100.0;
+const DEFAULT_DISTANCE_CM: u32 = 100;
+
 /// A thread-safe map of chip states.
 type ChipMap = Arc<RwLock<HashMap<ChipId, Chip>>>;
 
@@ -58,13 +61,13 @@ impl RootcanalCallbacks for RootcanalCallbacksImpl {
                 return None;
             }
 
-            let dist = ranging::distance(&src.pose.position, &dst.pose.position);
+            let dist = src.pose.position.distance(&dst.pose.position);
 
             // Check for link override
             let rssi = src
                 .links
                 .iter()
-                .find_map(|(id, rssi)| (*id == ChipId(dst.id)).then_some(*rssi as i32))
+                .find_map(|(id, rssi)| (*id == dst_id).then_some(*rssi as i32))
                 .unwrap_or_else(|| ranging::distance_to_rssi(tx_power as i8, dist) as i32);
             Some(rssi)
         } else {
@@ -87,10 +90,10 @@ impl RootcanalCallbacks for RootcanalCallbacksImpl {
         let src_chip = chips.get(&src_id);
         let dst_chip = chips.get(&dst_id);
         if let (Some(src), Some(dst)) = (src_chip, dst_chip) {
-            let dist = ranging::distance(&src.pose.position, &dst.pose.position);
-            (dist * 100.0).round() as u32
+            let dist = src.pose.position.distance(&dst.pose.position);
+            (dist * CENTIMETERS_PER_METER).round() as u32
         } else {
-            100
+            DEFAULT_DISTANCE_CM
         }
     }
 }

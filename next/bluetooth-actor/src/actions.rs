@@ -25,19 +25,13 @@ pub enum BluetoothAction {
     },
     /// Retrieves statistics for all chips.
     GetStatistics,
-    /// Retrieves the total number of chips for testing.
-    GetCountForTesting,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// The result of a Bluetooth action.
 pub enum BluetoothActionResult {
-    /// The action succeeded with no return value.
-    Success,
     /// The action returned statistics.
     Statistics(Box<[NetsimRadioStats]>),
-    /// The action returned a count.
-    Count(usize),
     /// The action returned the updated chip state.
     Chip(Box<netsim_model::Chip>),
 }

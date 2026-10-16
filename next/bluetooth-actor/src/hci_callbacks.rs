@@ -27,12 +27,26 @@ use tracing::{debug, error};
 /// Callbacks for handling HCI and Link Layer packets from Rootcanal.
 pub(crate) struct HciCallbacks {
     /// The ID of the chip associated with these callbacks.
-    pub id: ChipId,
+    id: ChipId,
     /// Channel to send HCI packets to the sink task.
-    pub hci_tx: Option<mpsc::Sender<Bytes>>,
+    hci_tx: Option<mpsc::Sender<Bytes>>,
     /// Channel to send LL packets (not currently used in this path, usually for
     /// sniffer/link bridging).
-    pub ll_tx: Option<mpsc::Sender<Bytes>>,
+    ll_tx: Option<mpsc::Sender<Bytes>>,
+}
+
+impl HciCallbacks {
+    pub(crate) fn new(id: ChipId) -> Self {
+        Self { id, hci_tx: None, ll_tx: None }
+    }
+
+    pub(crate) fn with_hci(id: ChipId, hci_tx: mpsc::Sender<Bytes>) -> Self {
+        Self { id, hci_tx: Some(hci_tx), ll_tx: None }
+    }
+
+    pub(crate) fn with_ll(id: ChipId, ll_tx: mpsc::Sender<Bytes>) -> Self {
+        Self { id, hci_tx: None, ll_tx: Some(ll_tx) }
+    }
 }
 
 impl ControllerCallbacks for HciCallbacks {
@@ -102,7 +116,7 @@ mod tests {
         // before tokio executors could awake `sink_loop` to drain the packets.
         let (hci_tx, mut hci_rx) = mpsc::channel(2);
 
-        let callbacks = HciCallbacks { id: ChipId::from(1), hci_tx: Some(hci_tx), ll_tx: None };
+        let callbacks = HciCallbacks::with_hci(ChipId::from(1), hci_tx);
 
         // Rootcanal produces packets synchronously and rapidly back-to-back:
         callbacks.send_hci(0, Bytes::from_static(b"req1")); // Success
@@ -129,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_invalid_packet_received() {
-        let callbacks = HciCallbacks { id: ChipId::from(1), hci_tx: None, ll_tx: None };
+        let callbacks = HciCallbacks::new(ChipId::from(1));
         callbacks.invalid_packet_received(0, 1, "test error message", &[0xde, 0xad, 0xbe, 0xef]);
     }
 }

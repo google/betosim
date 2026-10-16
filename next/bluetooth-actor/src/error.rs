@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_model::ChipError;
+use netsim_model::{ChipError, ChipId};
 use thiserror::Error;
 
 /// Errors that can occur within the Bluetooth actor.
@@ -21,10 +21,6 @@ pub enum BluetoothError {
     /// Errors related to general chip operations.
     #[error("Chip error: {0}")]
     Chip(#[from] ChipError),
-
-    /// Errors related to the device client.
-    #[error("Device client error: {0}")]
-    DeviceClient(Box<dyn std::error::Error + Send + Sync>),
 
     /// Errors originating from the Rootcanal simulation.
     #[error("Rootcanal error: {0}")]
@@ -39,5 +35,10 @@ impl BluetoothError {
     /// Helper to create an InvalidArguments error.
     pub(crate) fn invalid_arg(msg: impl Into<String>) -> Self {
         Self::Chip(ChipError::InvalidArguments(Box::from(msg.into())))
+    }
+
+    /// Helper to create a ChipNotFound error.
+    pub(crate) fn not_found(id: ChipId) -> Self {
+        Self::Chip(ChipError::ChipNotFound(id))
     }
 }

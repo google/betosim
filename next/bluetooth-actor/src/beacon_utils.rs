@@ -13,7 +13,11 @@
 // limitations under the License.
 
 // BLE Constants
-const MAX_AD_PAYLOAD_LEN: usize = 31;
+pub(crate) const MAX_AD_PAYLOAD_LEN: usize = 31;
+const AD_HEADER_LEN: usize = 2;
+const TX_POWER_AD_LEN: u8 = 2;
+const TX_POWER_TOTAL_LEN: usize = TX_POWER_AD_LEN as usize + 1;
+const DEFAULT_TX_POWER_DBM: i8 = 20;
 
 // AD Structure Types
 const AD_TYPE_FLAGS: u8 = 0x01;
@@ -58,8 +62,8 @@ pub(crate) fn construct_data(
     // Local Name
     if let Some(name) = device_name {
         let name_bytes = name.as_bytes();
-        if data.len() + 2 < MAX_AD_PAYLOAD_LEN {
-            let max_len = MAX_AD_PAYLOAD_LEN - data.len() - 2;
+        if data.len() + AD_HEADER_LEN < MAX_AD_PAYLOAD_LEN {
+            let max_len = MAX_AD_PAYLOAD_LEN - data.len() - AD_HEADER_LEN;
             let sub = name_bytes.get(..max_len).unwrap_or(name_bytes);
             if !sub.is_empty() {
                 let name_type = if sub.len() == name_bytes.len() {
@@ -74,13 +78,8 @@ pub(crate) fn construct_data(
         }
     }
     // Tx Power Level
-    if adv_data.include_tx_power_level {
-        let max_tx_power = 20; // 20 dBm (Standard default mock power)
-        if data.len() + 3 <= MAX_AD_PAYLOAD_LEN {
-            data.push(2);
-            data.push(AD_TYPE_TX_POWER_LEVEL);
-            data.push(max_tx_power as u8);
-        }
+    if adv_data.include_tx_power_level && data.len() + TX_POWER_TOTAL_LEN <= MAX_AD_PAYLOAD_LEN {
+        data.extend([TX_POWER_AD_LEN, AD_TYPE_TX_POWER_LEVEL, DEFAULT_TX_POWER_DBM as u8]);
     }
 
     // Service UUIDs (Grouped by length into single AD structures)
@@ -109,8 +108,8 @@ pub(crate) fn construct_data(
     for (complete_id, incomplete_id, uuid_size, uuids) in
         [(0x03, 0x02, 2, uuids_16), (0x05, 0x04, 4, uuids_32), (0x07, 0x06, 16, uuids_128)]
     {
-        if data.len() + 2 < MAX_AD_PAYLOAD_LEN {
-            let max_space = MAX_AD_PAYLOAD_LEN - data.len() - 2;
+        if data.len() + AD_HEADER_LEN < MAX_AD_PAYLOAD_LEN {
+            let max_space = MAX_AD_PAYLOAD_LEN - data.len() - AD_HEADER_LEN;
             let max_uuid_bytes = (max_space / uuid_size) * uuid_size;
             let sub = uuids.get(..max_uuid_bytes).unwrap_or(&uuids);
             if !sub.is_empty() {
@@ -130,7 +129,8 @@ pub(crate) fn construct_data(
 /// the address is derived from the ID.
 /// Example: ID 1000 -> 00:00:00:00:03:e8
 pub(crate) fn generate_legacy_address(chip_id: u32) -> String {
-    format!("00:00:00:00:{:02x}:{:02x}", (chip_id >> 8) & 0xFF, chip_id & 0xFF)
+    let [b0, b1] = (chip_id as u16).to_be_bytes();
+    format!("00:00:00:00:{b0:02x}:{b1:02x}")
 }
 
 /// Generates a default name for a beacon from a Chip ID.

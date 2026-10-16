@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use actor_framework::{ActorService, DynContext};
-use netsim_model::{BluetoothMode, Chip, ChipCreate, ChipError, ChipId, ChipUpdate, ChipVariant};
+use netsim_model::{BluetoothMode, Chip, ChipCreate, ChipId, ChipUpdate, ChipVariant};
 use tracing::{info, warn};
 
 use crate::{
@@ -24,6 +24,8 @@ use crate::{
     hci_callbacks::HciCallbacks,
     utils::ToChipError,
 };
+
+const SINK_CHANNEL_CAPACITY: usize = 100;
 
 impl ActorService for BluetoothActor {
     type Id = ChipId;
@@ -127,22 +129,22 @@ impl ActorService for BluetoothActor {
 
         // 2. Setup Sink and Callbacks
         let callback = if let Some(sink) = params.packet_sink {
-            // Bounded to 100 packets (~100ms of lag absorption at 2Mbps) to:
+            // Bounded to SINK_CHANNEL_CAPACITY packets (~100ms of lag absorption at 2Mbps) to:
             // - Tolerate transient guest lag.
             // - Protect netsimd from OOM crashes if the client becomes unresponsive.
-            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            let (tx, rx) = tokio::sync::mpsc::channel(SINK_CHANNEL_CAPACITY);
 
             // Spawn the sink task which forwards packets from the channel to the sink.
             let sink_id = chip_id;
             _ctx.spawn(sink_id, Box::pin(crate::hci_callbacks::sink_loop(sink, rx, sink_id)));
 
             if let BluetoothMode::Sniffer(_) = &mode {
-                HciCallbacks { id: chip_id, hci_tx: None, ll_tx: Some(tx) }
+                HciCallbacks::with_ll(chip_id, tx)
             } else {
-                HciCallbacks { id: chip_id, hci_tx: Some(tx), ll_tx: None }
+                HciCallbacks::with_hci(chip_id, tx)
             }
         } else {
-            HciCallbacks { id: chip_id, hci_tx: None, ll_tx: None }
+            HciCallbacks::new(chip_id)
         };
 
         // 3. Create Rootcanal Controller
@@ -227,8 +229,7 @@ impl ActorService for BluetoothActor {
 
         let chip = {
             let mut chips = self.chips.write();
-            let mut chip =
-                chips.get(&id).cloned().ok_or(BluetoothError::Chip(ChipError::ChipNotFound(id)))?;
+            let mut chip = chips.get(&id).cloned().ok_or(BluetoothError::not_found(id))?;
 
             update.apply(&mut chip);
             chips.insert(id, chip.clone());
@@ -263,7 +264,7 @@ impl ActorService for BluetoothActor {
             }
             Ok(())
         } else {
-            Err(BluetoothError::Chip(ChipError::ChipNotFound(id)))
+            Err(BluetoothError::not_found(id))
         }
     }
 
@@ -280,13 +281,9 @@ impl ActorService for BluetoothActor {
 
                 let chip = {
                     let mut chips = self.chips.write();
-                    let initial_chip = self
-                        .initial_chips
-                        .get(&id)
-                        .ok_or(BluetoothError::Chip(ChipError::ChipNotFound(id)))?;
-                    let chip = chips
-                        .get_mut(&id)
-                        .ok_or(BluetoothError::Chip(ChipError::ChipNotFound(id)))?;
+                    let initial_chip =
+                        self.initial_chips.get(&id).ok_or(BluetoothError::not_found(id))?;
+                    let chip = chips.get_mut(&id).ok_or(BluetoothError::not_found(id))?;
                     *chip = initial_chip.clone();
                     chip.clone()
                 };
@@ -324,10 +321,6 @@ impl ActorService for BluetoothActor {
                     }
                 }
                 Ok(BluetoothActionResult::Statistics(stats_list.into_boxed_slice()))
-            }
-            BluetoothAction::GetCountForTesting => {
-                let count = self.chips.read().len();
-                Ok(BluetoothActionResult::Count(count))
             }
         }
     }

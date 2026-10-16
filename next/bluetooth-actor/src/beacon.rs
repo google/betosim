@@ -22,16 +22,19 @@
 //! NOTE: This module is currently missing the complete setup for converting
 //! `BeaconParams` into the appropriate HCI commands for full configuration.
 
-use netsim_model::{BeaconParams, ChipError, ChipId, Interval, PacketType};
+use netsim_model::{BeaconParams, ChipError, ChipId, Interval};
 use netsim_packets::{
-    Address as PacketsAddress, AdvertisingFilterPolicy, AdvertisingType, Enable, HciCommand,
-    HciCommandHeader, LeSetAdvertisingData, LeSetAdvertisingEnable, LeSetAdvertisingParameters,
+    Address as PacketsAddress, AdvertisingFilterPolicy, AdvertisingType, Enable,
+    LeSetAdvertisingData, LeSetAdvertisingEnable, LeSetAdvertisingParameters,
     LeSetScanResponseData, OwnAddressType, PeerAddressType, Reset,
 };
 use rootcanal::{Address, Rootcanal};
-use zerocopy::{Immutable, IntoBytes, KnownLayout, U16};
+use zerocopy::U16;
 
-use crate::{beacon_utils::construct_data, utils::ToChipError};
+use crate::{
+    beacon_utils::{MAX_AD_PAYLOAD_LEN, construct_data},
+    utils::send_hci_command,
+};
 
 const DEFAULT_BEACON_INTERVAL_MS: u64 = 1000;
 const MODE_LOW_POWER_MS: u64 = 1000;
@@ -40,23 +43,9 @@ const MODE_LOW_LATENCY_MS: u64 = 100;
 
 const ADV_INTERVAL_MIN_SLOTS: u64 = 0x0020;
 const ADV_INTERVAL_MAX_SLOTS: u64 = 0x4000;
-
-/// Send an HCI command to the controller.
-fn send_hci_command<T: HciCommand + IntoBytes + Immutable + KnownLayout>(
-    rootcanal: &Rootcanal,
-    chip_id: ChipId,
-    payload: T,
-) -> Result<(), ChipError> {
-    let header = HciCommandHeader {
-        op_code: T::OP_CODE,
-        parameter_total_length: payload.as_bytes().len() as u8,
-    };
-    let h4_packet = std::iter::once(u8::from(PacketType::Command))
-        .chain(header.as_bytes().iter().copied())
-        .chain(payload.as_bytes().iter().copied())
-        .collect();
-    rootcanal.receive_hci(chip_id.into(), h4_packet).to_chip_error()
-}
+const BLE_SLOT_NUMERATOR: u64 = 8;
+const BLE_SLOT_DENOMINATOR: u64 = 5;
+const ADV_CHANNELS_ALL: u8 = 0x07;
 
 /// Creates a new `BeaconChip`.
 pub(crate) fn create(
@@ -89,7 +78,8 @@ pub(crate) fn create(
             },
         })
         .unwrap_or(DEFAULT_BEACON_INTERVAL_MS);
-    let slots = (interval_ms * 8 / 5).clamp(ADV_INTERVAL_MIN_SLOTS, ADV_INTERVAL_MAX_SLOTS) as u16;
+    let slots = (interval_ms * BLE_SLOT_NUMERATOR / BLE_SLOT_DENOMINATOR)
+        .clamp(ADV_INTERVAL_MIN_SLOTS, ADV_INTERVAL_MAX_SLOTS) as u16;
 
     let scannable = params.ble_beacon.settings.as_ref().map(|s| s.scannable).unwrap_or_default();
     let advertising_type =
@@ -106,7 +96,7 @@ pub(crate) fn create(
             own_address_type: OwnAddressType::PUBLIC_DEVICE_ADDRESS,
             peer_address_type: PeerAddressType::PUBLIC_DEVICE_OR_IDENTITY_ADDRESS,
             peer_address: PacketsAddress { bytes: address.address },
-            advertising_channel_map: 0x07,
+            advertising_channel_map: ADV_CHANNELS_ALL,
             advertising_filter_policy: AdvertisingFilterPolicy::ALL_DEVICES,
         },
     )?;
@@ -117,11 +107,11 @@ pub(crate) fn create(
         construct_data(&netsim_model::AdvertiseData::default(), None, true)
     };
 
-    let mut adv_data_payload = [0u8; 31];
+    let mut adv_data_payload = [0u8; MAX_AD_PAYLOAD_LEN];
     let Some(dest) = adv_data_payload.get_mut(..adv_data.len()) else {
-        return Err(ChipError::InvalidArguments(Box::from(
-            "Advertising data exceeds maximum payload size of 31 bytes".to_string(),
-        )));
+        return Err(ChipError::InvalidArguments(Box::from(format!(
+            "Advertising data exceeds maximum payload size of {MAX_AD_PAYLOAD_LEN} bytes"
+        ))));
     };
     dest.copy_from_slice(&adv_data);
 
@@ -141,11 +131,11 @@ pub(crate) fn create(
         vec![]
     };
 
-    let mut scan_resp_payload = [0u8; 31];
+    let mut scan_resp_payload = [0u8; MAX_AD_PAYLOAD_LEN];
     let Some(dest) = scan_resp_payload.get_mut(..scan_resp_data.len()) else {
-        return Err(ChipError::InvalidArguments(Box::from(
-            "Scan response data exceeds maximum payload size of 31 bytes".to_string(),
-        )));
+        return Err(ChipError::InvalidArguments(Box::from(format!(
+            "Scan response data exceeds maximum payload size of {MAX_AD_PAYLOAD_LEN} bytes"
+        ))));
     };
     dest.copy_from_slice(&scan_resp_data);
 

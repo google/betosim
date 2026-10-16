@@ -14,12 +14,15 @@
 
 //! Ranging library for Bluetooth RSSI calculation.
 
-use netsim_model::Position;
-
 /// The Free Space Path Loss (FSPL) model is considered as the standard
 /// under the ideal scenario.
 /// (dBm) PATH_LOSS at 1m for isotropic antenna transmitting BLE.
 const PATH_LOSS_AT_1M: f32 = 40.20;
+
+const NEARBY_SHARE_TX_POWER_DEFAULT: i8 = -49;
+const RSSI_MIN_DBM: f32 = -120.0;
+const RSSI_MAX_DBM: f32 = 20.0;
+const FSPL_MULTIPLIER: f32 = 20.0;
 
 /// Convert distance to RSSI using the free space path loss equation.
 /// See [Free-space_path_loss][1].
@@ -38,33 +41,19 @@ const PATH_LOSS_AT_1M: f32 = 40.20;
 pub(crate) fn distance_to_rssi(tx_power: i8, distance: f32) -> i8 {
     // Rootcanal reporting tx_power of 0 or 1 during Nearby Share
     let new_tx_power = match tx_power {
-        0 | 1 => -49,
+        0 | 1 => NEARBY_SHARE_TX_POWER_DEFAULT,
         _ => tx_power,
     };
     match distance == 0.0 {
-        true => (new_tx_power as f32 + PATH_LOSS_AT_1M).clamp(-120.0, 20.0) as i8,
-        false => (new_tx_power as f32 - 20.0 * distance.log10()).clamp(-120.0, 20.0) as i8,
+        true => (new_tx_power as f32 + PATH_LOSS_AT_1M).clamp(RSSI_MIN_DBM, RSSI_MAX_DBM) as i8,
+        false => (new_tx_power as f32 - FSPL_MULTIPLIER * distance.log10())
+            .clamp(RSSI_MIN_DBM, RSSI_MAX_DBM) as i8,
     }
-}
-
-/// Calculate the Euclidean distance between two positions.
-pub(crate) fn distance(p1: &Position, p2: &Position) -> f32 {
-    let dx = p1.x - p2.x;
-    let dy = p1.y - p2.y;
-    let dz = p1.z - p2.z;
-    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_distance() {
-        let p1 = Position { x: 0.0, y: 0.0, z: 0.0 };
-        let p2 = Position { x: 3.0, y: 4.0, z: 0.0 };
-        assert_eq!(distance(&p1, &p2), 5.0);
-    }
 
     #[test]
     fn rssi_at_0m() {

@@ -125,16 +125,16 @@ use rootcanal::Phy;
 
 mod actions;
 mod beacon;
-mod bluetooth_actor; // Renamed from actor
+mod bluetooth_actor;
 mod device;
 mod error;
-mod hci_callbacks; // Added
+mod hci_callbacks;
 
 mod actor_service;
-mod lifecycle; // Added
+mod lifecycle;
 mod ranging;
 mod scanner;
-mod sniffer; // Added
+mod sniffer;
 mod utils;
 
 mod beacon_utils;
@@ -145,6 +145,8 @@ pub use beacon_utils::{REPORT_ADDR_OFFSET, REPORT_NUM_REPORTS_OFFSET, is_le_adve
 pub use bluetooth_actor::BluetoothActor;
 pub use client::BluetoothClient;
 pub use error::BluetoothError;
+
+const DEFAULT_ACTOR_CHANNEL_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone)]
 /// Events that can be sent to the Bluetooth actor via typed stream.
@@ -166,9 +168,6 @@ use actor_framework::ResourceActor;
 
 /// Creates a new Bluetooth actor and its client.
 pub fn new() -> (ResourceActor<BluetoothActor>, BluetoothClient) {
-    let (actor, resource_client) = ResourceActor::new(32);
+    let (actor, resource_client) = ResourceActor::new(DEFAULT_ACTOR_CHANNEL_CAPACITY);
     (actor, BluetoothClient(resource_client))
 }
-
-// TODO: Consider generic impl<T> ChipClient for ResourceClient<T>.
-// Implementation moved to client.rs

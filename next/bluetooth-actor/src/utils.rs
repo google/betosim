@@ -18,8 +18,27 @@
 //! which simplifies the mapping of `rootcanal` emulator errors to the
 //! `ChipError` type.
 
-use netsim_model::ChipError;
-use rootcanal::error::Error as RadioError;
+use netsim_model::{ChipError, ChipId, PacketType};
+use netsim_packets::{HciCommand, HciCommandHeader};
+use rootcanal::{Rootcanal, error::Error as RadioError};
+use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
+/// Send an HCI command to the controller.
+pub(crate) fn send_hci_command<T: HciCommand + IntoBytes + Immutable + KnownLayout>(
+    rootcanal: &Rootcanal,
+    chip_id: ChipId,
+    payload: T,
+) -> Result<(), ChipError> {
+    let header = HciCommandHeader {
+        op_code: T::OP_CODE,
+        parameter_total_length: payload.as_bytes().len() as u8,
+    };
+    let h4_packet = std::iter::once(u8::from(PacketType::Command))
+        .chain(header.as_bytes().iter().copied())
+        .chain(payload.as_bytes().iter().copied())
+        .collect();
+    rootcanal.receive_hci(chip_id.into(), h4_packet).to_chip_error()
+}
 
 /// A helper trait to simplify error conversion from `RadioError` to
 /// `ChipError`.
