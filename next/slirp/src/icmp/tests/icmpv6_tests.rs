@@ -157,3 +157,37 @@ fn test_packet_too_big() {
     // Verify offending packet is copied back in payload
     assert_eq!(&reply_icmp_payload[..ip_buf.len()], &ip_buf[..]);
 }
+
+#[test]
+fn test_host_unreachable() {
+    let mut icmpv6_manager = Icmpv6Manager::new();
+    let config = Config::default();
+    let payload = b"hello";
+    let (ipv6_header, icmp_packet) =
+        create_icmpv6_echo_request(config.guest_ipv6, config.host_ipv6, payload, 64);
+    let mut responses = Vec::new();
+
+    let mut ip_buf = vec![0u8; 40 + icmp_packet.len()];
+    ip_buf[..40].copy_from_slice(ipv6_header.as_bytes());
+    ip_buf[40..].copy_from_slice(&icmp_packet);
+
+    icmpv6_manager.send_host_unreachable(&mut responses, &config, &ip_buf);
+
+    assert_eq!(responses.len(), 1);
+    let reply_packet = match responses.pop().unwrap() {
+        SlirpResponse::Packet(packet) => packet,
+        _ => panic!("Expected a packet response"),
+    };
+
+    let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();
+    let (reply_ip_header, reply_icmp) = Ipv6Header::parse(reply_ip).unwrap();
+    let (reply_icmp_header, reply_icmp_payload) = Icmpv6Header::parse(reply_icmp).unwrap();
+
+    assert_eq!(reply_icmp_header.icmpv6_type, Icmpv6Type::DestinationUnreachable as u8);
+    assert_eq!(reply_icmp_header.icmpv6_code, Icmpv6UnreachableCode::AddressUnreachable as u8);
+    assert_eq!(Ipv6Addr::from(reply_ip_header.source_addr), config.host_ipv6);
+    assert_eq!(Ipv6Addr::from(reply_ip_header.dest_addr), Ipv6Addr::from(ipv6_header.source_addr));
+
+    // Verify offending packet is copied back in payload
+    assert_eq!(&reply_icmp_payload[..ip_buf.len()], &ip_buf[..]);
+}

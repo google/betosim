@@ -239,13 +239,11 @@ impl Icmpv6Manager {
         config: &Config,
         offending_packet: &[u8],
     ) {
-        self.send_error_packet(
+        self.send_destination_unreachable(
             responses,
             config,
             offending_packet,
-            Icmpv6Type::DestinationUnreachable,
-            Icmpv6UnreachableCode::PortUnreachable as u8,
-            0, // rest is unused
+            Icmpv6UnreachableCode::PortUnreachable,
         );
     }
 
@@ -255,12 +253,27 @@ impl Icmpv6Manager {
         config: &Config,
         offending_packet: &[u8],
     ) {
+        self.send_destination_unreachable(
+            responses,
+            config,
+            offending_packet,
+            Icmpv6UnreachableCode::AddressUnreachable,
+        );
+    }
+
+    fn send_destination_unreachable(
+        &mut self,
+        responses: &mut Vec<SlirpResponse>,
+        config: &Config,
+        offending_packet: &[u8],
+        code: Icmpv6UnreachableCode,
+    ) {
         self.send_error_packet(
             responses,
             config,
             offending_packet,
             Icmpv6Type::DestinationUnreachable,
-            Icmpv6UnreachableCode::AddressUnreachable as u8,
+            code as u8,
             0, // rest is unused
         );
     }
