@@ -603,10 +603,17 @@ mod tests {
         assert_eq!(set.hwsim_attr_frame_data, parsed_set.hwsim_attr_frame_data);
     }
 
+    fn load_hwsim_cmd_frame() -> Vec<u8> {
+        include_str!("test_data/hwsim_cmd_frame.csv")
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect()
+    }
+
     // Validate `Nl80211AttrSet` attribute parsing from byte vector.
     #[test]
     fn test_attr_set_parse() {
-        let packet: Vec<u8> = include_bytes!("test_data/hwsim_cmd_frame.bin").to_vec();
+        let packet = load_hwsim_cmd_frame();
         let payload = &packet[20..];
         let attrs = Nl80211AttrSet::parse_hwsim(payload).unwrap();
 
@@ -622,7 +629,7 @@ mod tests {
 
     #[test]
     fn test_nl80211_attr_set_display() {
-        let packet: Vec<u8> = include_bytes!("test_data/hwsim_cmd_frame.bin").to_vec();
+        let packet = load_hwsim_cmd_frame();
         let payload = &packet[20..];
         let attrs = Nl80211AttrSet::parse_hwsim(payload).unwrap();
 
