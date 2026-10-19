@@ -27,7 +27,8 @@ use std::{
 };
 
 /// Callback signature for rootcanal log interception.
-type FfiLogCallback = extern "C" fn(level: c_int, message: *const c_char);
+type FfiLogCallback =
+    extern "C" fn(level: c_int, file: *const c_char, line: c_int, message: *const c_char);
 
 unsafe extern "C" {
     /// Creates a new Bluetooth controller.

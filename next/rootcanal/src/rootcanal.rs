@@ -109,6 +109,8 @@ impl BtOps for BtOpsWrapper {
 
 extern "C" fn rootcanal_log_callback(
     level: std::os::raw::c_int,
+    _file: *const std::os::raw::c_char,
+    _line: std::os::raw::c_int,
     message: *const std::os::raw::c_char,
 ) {
     if message.is_null() {
@@ -136,7 +138,7 @@ extern "C" fn rootcanal_log_callback(
 ///
 /// This routes rootcanal logs through active tracing subscribers and test
 /// writers, preventing direct stdout/stderr pollution.
-fn init_rootcanal_logging() {
+pub(crate) fn init_rootcanal_logging() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         // SAFETY: `ffi_set_log_callback` registers a static extern "C" function

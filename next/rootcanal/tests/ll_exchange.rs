@@ -41,7 +41,9 @@ static INIT: Once = Once::new();
 
 /// Set up the logger for the test.
 fn setup() {
-    INIT.call_once(tracing_subscriber::fmt::init);
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    });
 }
 
 /// Main callbacks for the rootcanal Bluetooth instance.

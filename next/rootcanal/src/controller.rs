@@ -140,6 +140,7 @@ impl ControllerImpl {
         bt_ops: Box<dyn BtOps>,
         properties: Option<&[u8]>,
     ) -> Controller {
+        crate::rootcanal::init_rootcanal_logging();
         Arc::new_cyclic(|weak| {
             // Create the context for the C++ side, using a Weak pointer to avoid cycles.
             let context = Box::new(weak.clone());
