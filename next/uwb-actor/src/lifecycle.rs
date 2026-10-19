@@ -31,8 +31,8 @@ impl ActorLifecycle for UwbActor {
         ctx.spawn(
             PICA_SENTINEL_CHIP_ID,
             async move {
-                if let Err(err) = pica.run().await {
-                    error!("Pica run loop failed: {err}");
+                if let Err(error) = pica.run().await {
+                    error!(%error, "Pica run loop failed");
                 }
                 PICA_SENTINEL_CHIP_ID
             }

@@ -236,8 +236,8 @@ impl Medium {
         if let Some(encrypted_bytes) = self.key_store.try_encrypt(frame) {
             match Ieee80211::decode(&encrypted_bytes) {
                 Ok(decoded) => Some(decoded),
-                Err(e) => {
-                    tracing::error!("Failed to decode encrypted frame: {e}");
+                Err(error) => {
+                    tracing::error!(%error, "Failed to decode encrypted frame");
                     None
                 }
             }

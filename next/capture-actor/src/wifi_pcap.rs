@@ -70,14 +70,14 @@ impl CaptureWriter for WifiPcapWriter {
                         let radiotap_packet = create_radiotap_packet(&frame);
                         self.inner.write_packet(timestamp, direction, &radiotap_packet).await
                     }
-                    Err(e) => {
-                        warn!("WifiPcapWriter: Failed to parse HwsimFrame from HwsimMsg: {:?}", e);
+                    Err(error) => {
+                        warn!(?error, "WifiPcapWriter: Failed to parse HwsimFrame from HwsimMsg");
                         Ok(())
                     }
                 }
             }
-            Err(e) => {
-                warn!("WifiPcapWriter: Failed to decode HwsimMsg: {:?}", e);
+            Err(error) => {
+                warn!(?error, "WifiPcapWriter: Failed to decode HwsimMsg");
                 Ok(())
             }
         }

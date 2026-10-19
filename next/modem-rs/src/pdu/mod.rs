@@ -403,14 +403,14 @@ pub fn process_outgoing_sms(
                 Ok(rx_pdu_hex) => {
                     return ProcessedSms { to, pdu: rx_pdu_hex.into_bytes(), status_report };
                 }
-                Err(e) => {
-                    warn!("Failed to encode DELIVER PDU: {:?}", e);
+                Err(error) => {
+                    warn!(?error, "Failed to encode DELIVER PDU");
                 }
             }
         }
-        Err(e) => {
+        Err(error) => {
             if decoded.is_some() {
-                warn!("Failed to parse PDU: {:?}", e);
+                warn!(?error, "Failed to parse PDU");
             } else {
                 debug!("PDU is not valid hex, forwarding as raw");
             }

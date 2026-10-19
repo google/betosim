@@ -410,8 +410,8 @@ impl World {
             let packet = self.receive_packet(name).await;
             match parse_hci_scan_report(&packet) {
                 Ok(reports) => return reports,
-                Err(e) => {
-                    warn!("Ignored packet from {}: {:?} (Error: {})", name, packet, e);
+                Err(error) => {
+                    warn!(%error, "Ignored packet from {}: {:?}", name, packet);
                 }
             }
         }

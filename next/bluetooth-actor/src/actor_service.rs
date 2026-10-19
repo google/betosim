@@ -340,8 +340,8 @@ impl BluetoothActor {
         let dc = self.device_client.clone();
         tokio::spawn(async move {
             let update = netsim_model::DeviceUpdate { name: Some(name), ..Default::default() };
-            if let Err(e) = dc.update(device_id, update).await {
-                warn!("Failed to sync device name for device {}: {:?}", device_id, e);
+            if let Err(error) = dc.update(device_id, update).await {
+                warn!(?error, "Failed to sync device name for device {}", device_id);
             }
         });
     }

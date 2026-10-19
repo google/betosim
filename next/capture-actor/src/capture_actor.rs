@@ -62,8 +62,8 @@ impl CaptureActor {
         });
         for (chip_id, chip_writers) in &mut self.writers {
             for writer in chip_writers {
-                if let Err(err) = writer.flush().await {
-                    warn!("Failed to flush writer for chip {chip_id}: {err}");
+                if let Err(error) = writer.flush().await {
+                    warn!(%error, "Failed to flush writer for chip {chip_id}");
                 }
             }
         }

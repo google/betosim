@@ -153,8 +153,8 @@ impl LinkActor {
 
         let update = netsim_model::ChipUpdate { links: Some(links), ..Default::default() };
 
-        if let Err(e) = client.update(chip_id, update).await {
-            error!("Failed to update links for chip {}: {:?}", chip_id, e);
+        if let Err(error) = client.update(chip_id, update).await {
+            error!(?error, "Failed to update links for chip {}", chip_id);
         }
     }
 }

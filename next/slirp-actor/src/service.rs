@@ -80,9 +80,9 @@ impl SlirpActor {
         if let Some(ref proxy) = self.http_proxy {
             let (tx, rx) = std::sync::mpsc::channel();
             config.http_proxy_on = true;
-            let manager = http_proxy::Manager::new(proxy, rx).map_err(|e| {
-                tracing::error!("Failed to initialize HTTP proxy '{proxy}': {e}");
-                crate::error::SlirpError::Internal(e.to_string())
+            let manager = http_proxy::Manager::new(proxy, rx).map_err(|error| {
+                tracing::error!(%error, "Failed to initialize HTTP proxy '{proxy}'");
+                crate::error::SlirpError::Internal(error.to_string())
             })?;
             proxy_manager = Some(Box::new(manager) as Box<dyn ProxyManager>);
             tx_proxy_bytes = Some(tx);
@@ -125,9 +125,10 @@ impl SlirpActor {
                         native_config.proxy_tx =
                             Some(std::sync::Arc::new(std::sync::Mutex::new(tx)));
                     }
-                    Err(e) => {
+                    Err(error) => {
                         tracing::warn!(
-                            "Failed to initialize HTTP Proxy Manager for Native backend: {e}"
+                            %error,
+                            "Failed to initialize HTTP Proxy Manager for Native backend"
                         );
                     }
                 }

@@ -146,21 +146,21 @@ impl DeviceActor {
         // conditions.
         let task = tokio::spawn(async move {
             if let Some(t) = previous_task
-                && let Err(e) = t.await
+                && let Err(error) = t.await
             {
-                warn!("DeviceActor: Previous stats write failed: {}", e);
+                warn!(%error, "DeviceActor: Previous stats write failed");
             }
 
             // Spawn blocking write for disk I/O
             let res = tokio::task::spawn_blocking(move || {
-                if let Err(e) = crate::stats::write_combined_stats(combined_stats, path) {
-                    error!("Failed to write stats: {}", e);
+                if let Err(error) = crate::stats::write_combined_stats(combined_stats, path) {
+                    error!(%error, "Failed to write stats");
                 }
             })
             .await;
 
-            if let Err(e) = res {
-                error!("DeviceActor: Stats write task panicked: {}", e);
+            if let Err(error) = res {
+                error!(%error, "DeviceActor: Stats write task panicked");
             }
         });
 
@@ -331,13 +331,17 @@ impl DeviceActor {
         let client = self.chip_clients.get(&kind)?;
         let stats_bytes = tokio::time::timeout(CHIP_READ_TIMEOUT, client.get_global_stats())
             .await
-            .inspect_err(|e| debug!("DeviceActor: Timeout getting {:?} global stats: {}", kind, e))
+            .inspect_err(
+                |error| debug!(%error, "DeviceActor: Timeout getting {:?} global stats", kind),
+            )
             .ok()?
-            .inspect_err(|e| warn!("DeviceActor: Failed to get global stats for {:?}: {}", kind, e))
+            .inspect_err(
+                |error| warn!(%error, "DeviceActor: Failed to get global stats for {:?}", kind),
+            )
             .ok()??;
 
         T::parse_from_bytes(&stats_bytes)
-            .inspect_err(|e| error!("DeviceActor: Failed to parse {:?}Stats: {}", kind, e))
+            .inspect_err(|error| error!(%error, "DeviceActor: Failed to parse {:?}Stats", kind))
             .ok()
     }
 
@@ -349,15 +353,15 @@ impl DeviceActor {
             Ok(Ok(Some(stats_bytes))) => {
                 match netsim_proto::stats::NfcServiceStats::parse_from_bytes(&stats_bytes) {
                     Ok(stats) => Some(stats),
-                    Err(e) => {
-                        error!("DeviceActor: Failed to parse NfcServiceStats: {}", e);
+                    Err(error) => {
+                        error!(%error, "DeviceActor: Failed to parse NfcServiceStats");
                         None
                     }
                 }
             }
             Ok(Ok(None)) => None,
-            Ok(Err(e)) => {
-                warn!("DeviceActor: Failed to get NFC service stats: {}", e);
+            Ok(Err(error)) => {
+                warn!(%error, "DeviceActor: Failed to get NFC service stats");
                 None
             }
             Err(_) => {
@@ -427,13 +431,14 @@ impl DeviceActor {
             let chip_id = ChipId(chip.id);
             self.archive_chip_stats(id, &chip, stream_stats, cached_stats.as_ref()).await;
             if let Some(chip_client) = self.chip_clients.get(&chip.kind)
-                && let Err(err) = chip_client.delete(chip_id).await
+                && let Err(error) = chip_client.delete(chip_id).await
             {
-                warn!("Failed to delete chip {chip_id} of device {id}: {err}; continuing");
+                warn!(%error, "Failed to delete chip {chip_id} of device {id}; continuing");
             }
-            if let Err(err) = self.link_client.notify_chip_removed(chip_id).await {
+            if let Err(error) = self.link_client.notify_chip_removed(chip_id).await {
                 warn!(
-                    "Failed to notify link actor about chip {chip_id} removal: {err}; continuing"
+                    %error,
+                    "Failed to notify link actor about chip {chip_id} removal; continuing"
                 );
             }
         }
@@ -485,8 +490,8 @@ impl DeviceActor {
         };
 
         // Notify Link Actor
-        if let Err(e) = self.link_client.notify_chip_removed(chip_id).await {
-            warn!("DeviceActor: Failed to notify LinkActor of chip remove: {e}");
+        if let Err(error) = self.link_client.notify_chip_removed(chip_id).await {
+            warn!(%error, "DeviceActor: Failed to notify LinkActor of chip remove");
         }
 
         if should_delete {
@@ -638,8 +643,8 @@ impl DeviceActor {
         chip_client.create(chip_id, chip_create_params).await?;
         entity.device.chips.push(chip);
 
-        if let Err(e) = link_client.notify_chip_added(chip_id, chip_kind).await {
-            warn!("DeviceActor: Failed to notify LinkActor of chip add: {e}");
+        if let Err(error) = link_client.notify_chip_added(chip_id, chip_kind).await {
+            warn!(%error, "DeviceActor: Failed to notify LinkActor of chip add");
         }
 
         Ok(chip_id)
@@ -787,12 +792,12 @@ impl DeviceActor {
         if let Some(client) = self.self_client.clone() {
             tokio::spawn(async move {
                 if let Some(t) = stats_task
-                    && let Err(e) = t.await
+                    && let Err(error) = t.await
                 {
-                    warn!("DeviceActor: Stats write failed during shutdown flush: {}", e);
+                    warn!(%error, "DeviceActor: Stats write failed during shutdown flush");
                 }
-                if let Err(e) = client.shutdown().await {
-                    error!("DeviceActor: Failed to shutdown: {}", e);
+                if let Err(error) = client.shutdown().await {
+                    error!(%error, "DeviceActor: Failed to shutdown");
                 }
             });
         } else {
@@ -828,9 +833,9 @@ impl DeviceActor {
         let mut device_delete_errors = Vec::new();
         for device_id in devices_to_delete {
             info!("DeviceActor: Deleting internal device {}", device_id);
-            if let Err(err) = self.perform_device_deletion(device_id, ctx).await {
-                warn!("DeviceActor: Failed to reset chip device {}: {}", device_id, err);
-                device_delete_errors.push((device_id, err));
+            if let Err(error) = self.perform_device_deletion(device_id, ctx).await {
+                warn!(%error, "DeviceActor: Failed to reset chip device {}", device_id);
+                device_delete_errors.push((device_id, error));
             }
         }
 
@@ -858,12 +863,13 @@ impl DeviceActor {
                         Ok(updated_chip) => {
                             *chip = updated_chip;
                         }
-                        Err(e) => {
+                        Err(error) => {
                             warn!(
-                                "DeviceActor: Failed to reset chip {} kind {:?}: {}",
-                                chip.id, chip.kind, e
+                                %error,
+                                "DeviceActor: Failed to reset chip {} kind {:?}",
+                                chip.id, chip.kind
                             );
-                            chip_reset_errors.push((chip.id, e));
+                            chip_reset_errors.push((chip.id, error));
                         }
                     }
                 }
@@ -872,9 +878,9 @@ impl DeviceActor {
 
         let link_client_error = if target_id.is_none() {
             info!("DeviceActor: Resetting all links");
-            if let Err(err) = self.link_client.reset().await {
-                warn!("DeviceActor: Failed to reset links: {}", err);
-                Some(err)
+            if let Err(error) = self.link_client.reset().await {
+                warn!(%error, "DeviceActor: Failed to reset links");
+                Some(error)
             } else {
                 None
             }

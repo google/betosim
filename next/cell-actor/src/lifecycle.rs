@@ -61,8 +61,8 @@ impl CellActor {
         message: Bytes,
         _ctx: &mut DynContext<Self>,
     ) {
-        if let Err(e) = self.controller.send_data(id.0, &message) {
-            error!("Failed to send data to controller for chip {}: {:?}", id, e);
+        if let Err(error) = self.controller.send_data(id.0, &message) {
+            error!(?error, "Failed to send data to controller for chip {}", id);
         }
     }
 
@@ -80,8 +80,8 @@ impl CellActor {
                 ctx.run_later(
                     duration,
                     Box::new(move |actor, _ctx| {
-                        if let Err(e) = actor.controller.on_timer(id) {
-                            error!("Timer error for chip {}: {:?}", id, e);
+                        if let Err(error) = actor.controller.on_timer(id) {
+                            error!(?error, "Timer error for chip {}", id);
                         }
                     }),
                 );

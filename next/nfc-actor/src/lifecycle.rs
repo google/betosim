@@ -126,9 +126,9 @@ impl ActorLifecycle for NfcActor {
         }
 
         if let Some(state) = self.active_chips.get_mut(&id)
-            && let Err(e) = state.nfc_writer.write_all(&message).await
+            && let Err(error) = state.nfc_writer.write_all(&message).await
         {
-            error!("Failed to write guest packet to Casimir: {:?}", e);
+            error!(?error, "Failed to write guest packet to Casimir");
             self.nfc_stats.incr_casimir_error();
         }
     }

@@ -249,10 +249,10 @@ impl Stats {
             }
         }
 
-        if let Err(e) = rename_res {
-            warn!("Failed to replace stats file {:?} with {:?}: {}", tmp_path, path, e);
+        if let Err(error) = rename_res {
+            warn!(%error, "Failed to replace stats file {:?} with {:?}", tmp_path, path);
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
+            return Err(error);
         }
         Ok(())
     }

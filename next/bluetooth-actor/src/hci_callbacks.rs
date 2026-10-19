@@ -53,8 +53,8 @@ impl ControllerCallbacks for HciCallbacks {
     fn send_hci(&self, _source_id: Id, h4_packet: Bytes) {
         if let Some(hci_tx) = self.hci_tx.as_ref() {
             debug!("send_hci: Sending packet len={}", h4_packet.len());
-            if let Err(e) = hci_tx.try_send(h4_packet) {
-                error!("Failed to send HCI packet: {e}, dropping.");
+            if let Err(error) = hci_tx.try_send(h4_packet) {
+                error!(%error, "Failed to send HCI packet, dropping.");
             }
         }
     }
@@ -63,8 +63,8 @@ impl ControllerCallbacks for HciCallbacks {
         debug!("[{}] Received {:?} LL packet", self.id, phy);
         if let Some(ll_tx) = self.ll_tx.as_ref() {
             let packet = Bytes::copy_from_slice(packet);
-            if let Err(e) = ll_tx.try_send(packet) {
-                error!("Failed to send LL packet: {e}, dropping.");
+            if let Err(error) = ll_tx.try_send(packet) {
+                error!(%error, "Failed to send LL packet, dropping.");
             }
         }
     }

@@ -276,11 +276,16 @@ impl ActorService for UwbActor {
                 self.pica_commands.send(PicaCommand::DestroyAnchor(state.mac_address, tx)).await;
             match rx.await {
                 Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!("Failed to destroy Pica anchor {}: {e}", state.mac_address)
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        %error,
+                        "Failed to destroy Pica anchor {}",
+                        state.mac_address
+                    )
                 }
-                Err(e) => tracing::warn!(
-                    "Failed to receive Pica DestroyAnchor response for {}: {e}",
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Failed to receive Pica DestroyAnchor response for {}",
                     state.mac_address
                 ),
             }

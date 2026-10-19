@@ -287,12 +287,12 @@ impl TapGateway {
         // but we keep this log for debugging context.
         #[cfg(target_os = "linux")]
         {
-            if let Err(e) = nix::fcntl::open(
+            if let Err(error) = nix::fcntl::open(
                 "/dev/net/tun",
                 nix::fcntl::OFlag::O_RDWR,
                 nix::sys::stat::Mode::empty(),
             ) {
-                error!("TAP configuration enabled, but failed to open /dev/net/tun: {}", e);
+                error!(%error, "TAP configuration enabled, but failed to open /dev/net/tun");
                 error!(
                     "Please ensure you have CAP_NET_ADMIN capabilities or access to /dev/net/tun."
                 );
@@ -440,8 +440,8 @@ If using a TAP pool (e.g. cvd-etap), ensure the interfaces are created.
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("TapGateway: Error reading from tap: {}", e);
+                    Err(error) => {
+                        error!(%error, "TapGateway: Error reading from tap");
                         break;
                     }
                 }
@@ -463,8 +463,8 @@ If using a TAP pool (e.g. cvd-etap), ensure the interfaces are created.
                     info!("Attached TAP {} to chip {}", tap.name(), chip_id);
                 }
             }
-            Err(e) => {
-                error!("Failed to attach TAP for chip {}: {}", chip_id, e);
+            Err(error) => {
+                error!(%error, "Failed to attach TAP for chip {}", chip_id);
             }
         }
         #[cfg(not(target_os = "linux"))]

@@ -26,8 +26,8 @@ impl ActorLifecycle for DeviceActor {
                 Box::pin(async move {
                     loop {
                         tokio::time::sleep(interval).await;
-                        if let Err(e) = client.save_stats().await {
-                            warn!("Failed to auto-save stats: {}", e);
+                        if let Err(error) = client.save_stats().await {
+                            warn!(%error, "Failed to auto-save stats");
                         }
                     }
                     #[allow(unreachable_code)]

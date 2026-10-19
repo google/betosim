@@ -186,8 +186,8 @@ impl GatewayTrait for SlirpGateway {
                         Ok(tx)
                     }));
 
-                if let Err(e) = client.register(SLIRP_ID.0, stream, sink, None, false).await {
-                    warn!("Failed to register with SlirpActor: {}", e);
+                if let Err(error) = client.register(SLIRP_ID.0, stream, sink, None, false).await {
+                    warn!(%error, "Failed to register with SlirpActor");
                 }
 
                 // Add downlink stream to context

@@ -207,14 +207,14 @@ pub(crate) async fn run_mdns_forwarder(tx: UnboundedSender<Bytes>) -> Result<(),
                                 break;
                             }
                         }
-                        Err(e) => warn!("Failed to create ethernet frame: {}", e),
+                        Err(error) => warn!(%error, "Failed to create ethernet frame"),
                     }
                 } else {
                     warn!("Forwarding mDNS from IPv6 is not supported: {:?}", src_addr);
                 }
             }
-            Err(e) => {
-                warn!("recv_from failed: {:?}", e);
+            Err(error) => {
+                warn!(?error, "recv_from failed");
             }
         }
     }

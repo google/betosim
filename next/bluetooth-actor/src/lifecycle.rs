@@ -47,8 +47,8 @@ impl ActorLifecycle for BluetoothActor {
         message: bytes::Bytes,
         _ctx: &mut DynContext<Self>,
     ) {
-        if let Err(e) = self.rootcanal.receive_hci(id.0, message) {
-            error!("Receive HCI error for chip {id}: {e}");
+        if let Err(error) = self.rootcanal.receive_hci(id.0, message) {
+            error!(%error, "Receive HCI error for chip {id}");
         }
     }
 
@@ -56,8 +56,8 @@ impl ActorLifecycle for BluetoothActor {
         info!("Stream closed for chip {id}");
         // If the stream closes, we should also ensure the sink task is aborted.
         ctx.abort(id);
-        if let Err(e) = self.handle_delete(id, ctx).await {
-            error!("Failed to delete chip {id} after stream closed: {e}");
+        if let Err(error) = self.handle_delete(id, ctx).await {
+            error!(%error, "Failed to delete chip {id} after stream closed");
         }
     }
 
@@ -65,8 +65,8 @@ impl ActorLifecycle for BluetoothActor {
         info!("Sink task closed for chip {id}");
         // If the sink task closes, we should also ensure the stream is removed.
         ctx.remove_stream(id);
-        if let Err(e) = self.handle_delete(id, ctx).await {
-            error!("Failed to delete chip {id} after sink task closed: {e}");
+        if let Err(error) = self.handle_delete(id, ctx).await {
+            error!(%error, "Failed to delete chip {id} after sink task closed");
         }
     }
 

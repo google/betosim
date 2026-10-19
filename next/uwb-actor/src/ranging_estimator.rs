@@ -52,8 +52,8 @@ impl RangingEstimator for UwbRangingEstimator {
                 // TODO(b/484364478): sampled ranging support
                 Some(RangingMeasurement { range: range as u16, azimuth, elevation })
             }
-            Err(e) => {
-                warn!("Failed to estimate ranging measurement: {}", e);
+            Err(error) => {
+                warn!(%error, "Failed to estimate ranging measurement");
                 None
             }
         }

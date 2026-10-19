@@ -241,8 +241,8 @@ async fn resolve_dns_servers(host_dns: &str) -> Vec<IpAddr> {
             let host_port = if addr.contains(':') { addr.clone() } else { format!("{}:53", addr) };
             match tokio::net::lookup_host(host_port).await {
                 Ok(addrs) => addrs.map(|s| s.ip()).collect::<Vec<_>>(),
-                Err(e) => {
-                    tracing::warn!("Failed to resolve DNS host '{}': {}", addr, e);
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to resolve DNS host '{addr}'");
                     vec![]
                 }
             }

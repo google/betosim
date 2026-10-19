@@ -43,7 +43,7 @@ impl ActorLifecycle for WifiActor {
             ctx.add_typed_stream(AP_SUBSCRIPTION_ID, Box::pin(ap_downlink_rx));
 
             // Set initial beacon interval to 100ms
-            if let Err(e) = ap_client
+            if let Err(error) = ap_client
                 .register(
                     Box::pin(ap_uplink_rx),
                     ap_downlink_tx,
@@ -52,7 +52,7 @@ impl ActorLifecycle for WifiActor {
                 )
                 .await
             {
-                error!("Failed to register with AP client: {}", e);
+                error!(%error, "Failed to register with AP client");
             }
             self.to_ap = Some(ap_uplink_tx);
         }
@@ -61,8 +61,8 @@ impl ActorLifecycle for WifiActor {
             ctx.add_typed_stream(MDNS_SUBSCRIPTION_ID, Box::pin(mdns_rx));
 
             tokio::spawn(async move {
-                if let Err(e) = crate::mdns_forwarder::run_mdns_forwarder(mdns_tx).await {
-                    tracing::error!("mDNS Forwarder failed: {}", e);
+                if let Err(error) = crate::mdns_forwarder::run_mdns_forwarder(mdns_tx).await {
+                    tracing::error!(%error, "mDNS Forwarder failed");
                 }
             });
         }
@@ -98,16 +98,16 @@ impl ActorLifecycle for WifiActor {
     async fn on_stream_closed(&mut self, id: Self::Id, ctx: &mut DynContext<Self>) {
         info!("Stream closed for chip {id}");
         ctx.abort(id);
-        if let Err(e) = self.handle_delete_impl(id, ctx).await {
-            error!("Failed to delete chip {id} after stream closed: {e}");
+        if let Err(error) = self.handle_delete_impl(id, ctx).await {
+            error!(%error, "Failed to delete chip {id} after stream closed");
         }
     }
 
     async fn on_task_closed(&mut self, id: Self::Id, ctx: &mut DynContext<Self>) {
         info!("Sink task closed for chip {id}");
         ctx.remove_stream(id);
-        if let Err(e) = self.handle_delete_impl(id, ctx).await {
-            error!("Failed to delete chip {id} after sink task closed: {e}");
+        if let Err(error) = self.handle_delete_impl(id, ctx).await {
+            error!(%error, "Failed to delete chip {id} after sink task closed");
         }
     }
 

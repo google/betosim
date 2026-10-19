@@ -23,6 +23,9 @@ use crate::{
 // 1024 microseconds per Time Unit (TU)
 const TU_INTERVAL_US: u128 = 1024;
 
+// Reason Code 3: deauthenticated because sending STA is leaving (or has left) IBSS or ESS.
+const DEAUTH_REASON_STA_LEAVING: u16 = 3;
+
 impl ActorService for ApActor {
     type Id = ApId;
     type Create = crate::ap_actor::ApConfig;
@@ -118,14 +121,7 @@ impl ActorService for ApActor {
                 self.shared_keys.remove_station_bssid(&mac);
 
                 // Send Deauth Frame
-                if let Some(sink) = &self.sink {
-                    // Reason Code 3 (Deauthenticated because sending STA is leaving (or has left)
-                    // IBSS or ESS)
-                    let frame = self.manager.build_deauth_frame(ap_state, mac, 3);
-                    if let Err(e) = sink.send(bytes::Bytes::from(frame)) {
-                        error!("Failed to send Deauth frame: {}", e);
-                    }
-                }
+                send_deauth(self.sink.as_ref(), &self.manager, ap_state, mac);
             }
         }
 
@@ -224,17 +220,26 @@ impl ActorService for ApActor {
                     self.shared_keys.remove_station_bssid(&mac);
 
                     // Send Deauth Frame
-                    if let Some(sink) = &self.sink {
-                        let frame = self.manager.build_deauth_frame(ap_state, mac, 3);
-                        if let Err(e) = sink.send(bytes::Bytes::from(frame)) {
-                            error!("Failed to send Deauth frame: {}", e);
-                        }
-                    }
+                    send_deauth(self.sink.as_ref(), &self.manager, ap_state, mac);
                 } else {
                     warn!("ApActor: Requested disconnect for unknown MAC {} on AP {}", mac, id);
                 }
                 Ok(ApResponse::Ok)
             }
+        }
+    }
+}
+
+fn send_deauth(
+    sink: Option<&tokio::sync::mpsc::UnboundedSender<bytes::Bytes>>,
+    manager: &crate::ieee802_11::Ieee80211Manager,
+    ap_state: &mut ApState,
+    mac: netsim_packets::MacAddr,
+) {
+    if let Some(sink) = sink {
+        let frame = manager.build_deauth_frame(ap_state, mac, DEAUTH_REASON_STA_LEAVING);
+        if let Err(error) = sink.send(bytes::Bytes::from(frame)) {
+            error!(%error, "Failed to send Deauth frame");
         }
     }
 }

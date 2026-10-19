@@ -167,8 +167,8 @@ impl Ieee80211Manager {
     ) -> Result<Vec<bytes::Bytes>, ApError> {
         let ieee80211_frame = match Ieee80211::decode(frame) {
             Ok(f) => f,
-            Err(e) => {
-                warn!("ApActor: Failed to decode 802.11 frame: {}", e);
+            Err(error) => {
+                warn!(%error, "ApActor: Failed to decode 802.11 frame");
                 return Ok(vec![]);
             }
         };
@@ -730,8 +730,8 @@ impl Ieee80211Manager {
                     ap.eap_sessions.insert(ieee80211_frame.get_source(), auth);
                     return Ok(frames);
                 }
-                Err(e) => {
-                    error!("ApActor: Failed to start EAP: {:?}", e);
+                Err(error) => {
+                    error!(?error, "ApActor: Failed to start EAP");
                     return Ok(vec![]);
                 }
             }
@@ -762,8 +762,8 @@ impl Ieee80211Manager {
                         }
                         return Ok(frames);
                     }
-                    Err(e) => {
-                        warn!("EAP Error: {:?}", e);
+                    Err(error) => {
+                        warn!(?error, "EAP Error");
                         return Ok(vec![]);
                     }
                 }

@@ -246,13 +246,13 @@ impl ActorService for NfcActor {
                                 _ => {}
                             }
                         }
-                        if let Err(e) = packet_sink.send(bytes).await {
-                            error!("Failed to send packet to guest: {:?}", e);
+                        if let Err(error) = packet_sink.send(bytes).await {
+                            error!(?error, "Failed to send packet to guest");
                             break;
                         }
                     }
-                    Err(e) => {
-                        error!("NFC reader error: {:?}", e);
+                    Err(error) => {
+                        error!(?error, "NFC reader error");
                         nfc_stats_clone.incr_nci_error();
                         break;
                     }
@@ -325,11 +325,11 @@ impl ActorService for NfcActor {
             // Remove device mapping and Casimir scene device
             self.casimir_to_device.lock().remove(&state.casimir_device_id);
             if let Some(ref scene_client) = self.scene_client
-                && let Err(e) = scene_client.remove_device(state.casimir_device_id).await
+                && let Err(error) = scene_client.remove_device(state.casimir_device_id).await
             {
                 error!(
-                    "Failed to remove device {} from Casimir scene: {:?}",
-                    state.casimir_device_id, e
+                    ?error,
+                    "Failed to remove device {} from Casimir scene", state.casimir_device_id
                 );
             }
         }
@@ -426,9 +426,9 @@ impl ActorService for NfcActor {
                             let _ = respond_to.send(Ok((grpc_io, id)));
                             Ok(crate::nfc_actor::NfcActionResult::Ok)
                         }
-                        Err(e) => {
-                            let err_msg = format!("Failed to add RF device to Casimir: {e}");
-                            error!("NfcActor: {}", err_msg);
+                        Err(error) => {
+                            let err_msg = format!("Failed to add RF device to Casimir: {error}");
+                            error!(%error, "NfcActor: Failed to add RF device to Casimir");
                             self.nfc_stats.incr_casimir_error();
                             let _ = respond_to.send(Err(NfcError::Internal(err_msg)));
                             Ok(crate::nfc_actor::NfcActionResult::Ok)

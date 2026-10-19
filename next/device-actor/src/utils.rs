@@ -102,8 +102,8 @@ pub(crate) async fn create_capture_and_wrap_streams(
                     Ok(s) => {
                         sender = Some(s);
                     }
-                    Err(err) => {
-                        warn!("Failed to start capture for chip {}: {}", chip_id, err);
+                    Err(error) => {
+                        warn!(%error, "Failed to start capture for chip {}", chip_id);
                     }
                 }
             }

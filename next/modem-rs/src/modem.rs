@@ -747,11 +747,11 @@ impl ModemImpl {
                         }
                     }
                 }
-                Err(e) => {
+                Err(error) => {
                     error!(
-                        "Failed to parse AT command {:?}: {:?}",
-                        String::from_utf8_lossy(cmd_bytes),
-                        e
+                        ?error,
+                        "Failed to parse AT command {:?}",
+                        String::from_utf8_lossy(cmd_bytes)
                     );
                     all_responses.push("ERROR\r\n".to_string());
                     stop_chain = true;

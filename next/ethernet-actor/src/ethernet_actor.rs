@@ -84,12 +84,12 @@ impl ActorService for EthernetActor {
                 tokio::sync::mpsc::unbounded_channel::<netsim_model::ChipId>();
 
             let isolated = chip_kind == ChipKind::CELLULAR_DATA;
-            if let Err(e) = self
+            if let Err(error) = self
                 .slirp_client
                 .register(id.0, Box::pin(stream), sink, Some(notifier_tx), isolated)
                 .await
             {
-                tracing::warn!("EthernetActor: Failed to register with SlirpActor: {}", e);
+                tracing::warn!(%error, "EthernetActor: Failed to register with SlirpActor");
             }
 
             ctx.add_typed_stream(

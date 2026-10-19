@@ -239,7 +239,7 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                 Some(res) = self.ctx.tasks.join_next(), if !self.ctx.tasks.is_empty() => {
                     match res {
                         Ok(id) => Self::handle_task_closed(&mut actor, id, &mut self.ctx).await,
-                        Err(e) => error!("Monitored task failed: {e}"),
+                        Err(error) => error!(%error, "Monitored task failed"),
                     }
                 }
                 _ = &mut self.shutdown_rx => {

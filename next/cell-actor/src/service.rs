@@ -123,8 +123,8 @@ impl ActorService for CellActor {
                     // is disabled on the PTY descriptor (e.g. at PTY creation site when opened
                     // via openpty/tcsetattr for Casimir or emulator bridge) to prevent '\n' to
                     // '\r\n' expansion which corrupts the packet framing.
-                    if let Err(e) = sink.send(packet).await {
-                        error!("PacketSink send error: {}", e);
+                    if let Err(error) = sink.send(packet).await {
+                        error!(%error, "PacketSink send error");
                     }
                 }
                 chip_id
@@ -164,8 +164,8 @@ impl ActorService for CellActor {
             info!("Deleting chip {}", id);
             let _ = self.slirp_client.release_lease(id).await;
             // Remove from controller
-            if let Err(e) = self.controller.remove_modem(id.0) {
-                error!("Failed to remove modem: {:?}", e);
+            if let Err(error) = self.controller.remove_modem(id.0) {
+                error!(?error, "Failed to remove modem");
             }
 
             // Notify DeviceClient asynchronously
@@ -233,10 +233,10 @@ impl ActorService for CellActor {
         }
         if let Some(ChipVariantUpdate::Cell(cell_update)) = &update.variant {
             if let Some(configs) = &cell_update.network_configs
-                && let Err(e) = self.controller.update_network_configs(id.0, configs.clone())
+                && let Err(error) = self.controller.update_network_configs(id.0, configs.clone())
             {
-                error!("Failed to update network configs for chip {id}: {e:?}");
-                return Err(CellError::ModemError(e));
+                error!(?error, "Failed to update network configs for chip {id}");
+                return Err(CellError::ModemError(error));
             }
             if let Some(s) = &cell_update.state {
                 state.enabled = s != "down";

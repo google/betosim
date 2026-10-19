@@ -163,9 +163,9 @@ impl CaptureActor {
             }
         } else if let Some(writers) = self.writers.get_mut(&entity.info.chip_id) {
             if let Some(i) = writers.iter().position(|w| w.is_file())
-                && let Err(err) = writers.swap_remove(i).flush().await
+                && let Err(error) = writers.swap_remove(i).flush().await
             {
-                warn!("Failed to flush writer for chip {}: {err}", entity.info.chip_id);
+                warn!(%error, "Failed to flush writer for chip {}", entity.info.chip_id);
             }
             if writers.is_empty() {
                 self.writers.remove(&entity.info.chip_id);
@@ -185,8 +185,8 @@ impl CaptureActor {
         // subscriber's channel.
         if let Some(writers) = self.writers.remove(&entity.info.chip_id) {
             for mut writer in writers {
-                if let Err(err) = writer.flush().await {
-                    warn!("Failed to flush writer for chip {}: {err}", entity.info.chip_id);
+                if let Err(error) = writer.flush().await {
+                    warn!(%error, "Failed to flush writer for chip {}", entity.info.chip_id);
                 }
             }
         }
@@ -202,9 +202,9 @@ impl CaptureActor {
             self.get_filepath(entity.info.chip_id, &entity.info.device_name, entity.info.chip_kind)
         });
         if let Some(pcap_dir) = filepath.parent()
-            && let Err(e) = std::fs::create_dir_all(pcap_dir)
+            && let Err(error) = std::fs::create_dir_all(pcap_dir)
         {
-            warn!("Failed to create pcap directory {}: {}", pcap_dir.display(), e);
+            warn!(%error, "Failed to create pcap directory {}", pcap_dir.display());
         }
         info!("Creating capture file: {}", filepath.display());
         let writer: Box<dyn CaptureWriter> = match entity.info.chip_kind {

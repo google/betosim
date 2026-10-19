@@ -187,7 +187,7 @@ impl WifiStats {
     }
 
     pub fn log_and_incr_err_count(&mut self, error: &WifiError) {
-        warn!("{error}");
+        warn!(%error);
         match error {
             WifiError::Hostapd(_) => self.counts.hostapd_error += 1,
             WifiError::Network(_) => self.counts.network_error += 1,

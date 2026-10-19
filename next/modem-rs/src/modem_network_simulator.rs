@@ -461,8 +461,8 @@ impl ModemNetworkSimulator {
             match effect {
                 ModemEffect::Schedule { delay, event } => {
                     let msg = HostEvent::TimerRequest { chip_id: id, duration: delay };
-                    if let Err(e) = self.host_event_tx.send(msg) {
-                        error!("Failed to send timer request: {}", e);
+                    if let Err(error) = self.host_event_tx.send(msg) {
+                        error!(%error, "Failed to send timer request");
                     }
                     self.schedule_event(id, delay, event);
                 }
@@ -480,12 +480,12 @@ impl ModemNetworkSimulator {
                     }
                     debug!("Sending response to {}: {:?}", id, std::str::from_utf8(&packet));
                     if let Some(sink) = self.sinks.get_mut(&id)
-                        && let Err(e) = sink.send(Bytes::from(packet))
+                        && let Err(error) = sink.send(Bytes::from(packet))
                     {
-                        error!("Failed to send response to modem {}: {}", id, e);
+                        error!(%error, "Failed to send response to modem {}", id);
                         let event = HostEvent::SinkError(id);
-                        if let Err(e) = self.host_event_tx.send(event) {
-                            error!("Failed to send client sink error: {}", e);
+                        if let Err(error) = self.host_event_tx.send(event) {
+                            error!(%error, "Failed to send client sink error");
                         }
                         network_events.push(NetworkEvent::SinkError { id });
                     }
