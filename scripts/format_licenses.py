@@ -198,11 +198,11 @@ def process_file(filepath):
   if not has_copyright and not any(SPDX_TAG in line for line in top_lines):
     basename = os.path.basename(filepath)
     ext = os.path.splitext(filepath)[1]
-    if ext in [".rs", ".java", ".ts", ".cc", ".h", ".kt", ".proto"]:
+    if ext in [".rs", ".java", ".cc", ".h", ".kt", ".proto"]:
       prefix = "//"
     elif ext in [".py", ".toml", ".sh", ".bzl", ".bazel", ".yaml", ".yml"]:
       prefix = "#"
-    elif basename.startswith("BUILD") or basename == "CMakeLists.txt":
+    elif basename.startswith("BUILD"):
       prefix = "#"
     else:
       prefix = "//"  # Default

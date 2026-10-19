@@ -86,13 +86,13 @@ EXCLUDES=(
 
 # Clang
 Clang_CMD="clang-format -i"
-Clang_DIRS="src rust next proto ui/ts"
-Clang_EXTS="-name *.cc -o -name *.h -o -name *.proto -o -name *.ts"
-Clang_REGEX="\.(cc|h|proto|ts)$"
+Clang_DIRS="next proto"
+Clang_EXTS="-name *.cc -o -name *.h -o -name *.proto"
+Clang_REGEX="\.(cc|h|proto)$"
 
 # Rust
 Rust_CMD="$RUSTFMT --files-with-diff"
-Rust_DIRS="rust next proto"
+Rust_DIRS="next proto"
 Rust_EXTS="-name *.rs"
 Rust_REGEX="\.rs$"
 
@@ -107,12 +107,6 @@ Python_CMD="pyformat --in_place --alsologtostderr --noshowprefixforinfo"
 Python_DIRS="."
 Python_EXTS="-name *.py"
 Python_REGEX="\.py$"
-
-# CMake
-CMake_CMD="cmake-format -i"
-CMake_DIRS="."
-CMake_EXTS="-name CMakeLists.txt -o -name *.cmake"
-CMake_REGEX="CMakeLists\.txt$|\.cmake$"
 
 # Blueprint
 Blueprint_CMD="$BPFMT -w"
@@ -129,7 +123,7 @@ Bazel_REGEX="BUILD$|MODULE\.bazel$|BUILD\.bazel$|\.bzl$"
 
 # Toml
 Toml_CMD="env RUST_LOG=warn taplo fmt --config $TAPLO_CONFIG"
-Toml_DIRS="rust next proto"
+Toml_DIRS="next proto"
 Toml_EXTS="-name Cargo.toml"
 Toml_FLAGS="-not -path */bazel-bin/* -not -path */bazel-netsim/*"
 Toml_REGEX="Cargo\.toml$"
@@ -143,11 +137,11 @@ Kotlin_REGEX="\.kt$"
 # License Headers
 License_CMD="$SCRIPT_DIR/format_licenses.py"
 License_DIRS="."
-License_EXTS="-name *.rs -o -name *.toml -o -name BUILD* -o -name *.bzl -o -name *.cc -o -name *.h -o -name *.py -o -name *.java -o -name *.ts -o -name *.proto -o -name *.kt -o -name CMakeLists.txt"
-License_REGEX="\.(rs|toml|bzl|cc|h|py|java|ts|proto|kt)$|^BUILD|^CMakeLists\.txt$"
+License_EXTS="-name *.rs -o -name *.toml -o -name BUILD* -o -name *.bzl -o -name *.cc -o -name *.h -o -name *.py -o -name *.java -o -name *.proto -o -name *.kt"
+License_REGEX="\.(rs|toml|bzl|cc|h|py|java|proto|kt)$|^BUILD"
 
 # Ordered list of languages to process
-LANGS=(License Clang Rust Java Python CMake Blueprint Bazel Toml Kotlin)
+LANGS=(License Clang Rust Java Python Blueprint Bazel Toml Kotlin)
 
 # --- Helpers ---
 

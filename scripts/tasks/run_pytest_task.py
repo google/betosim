@@ -85,7 +85,7 @@ class RunPytestManager:
     elif buildbot:
       self.dir = EMULATOR_ARTIFACT_PATH / "emulator"
     else:
-      # For both Bazel and CMake, we use the distribution directory for local runs
+      # For Bazel, we use the distribution directory for local runs
       self.dir = out_dir / "distribution" / "emulator"
 
   def _run_with_n_attempts(cmd, n):

@@ -25,4 +25,4 @@ Third-party Rust dependencies are imported via a custom module extension:
 - Run builds from `tools/netsim` using Bazel or `python3 scripts/build_tools.py`:
   - `python3 scripts/build_tools.py --task build`
   - `python3 scripts/build_tools.py --task test`
-- Targets are referenced directly within the workspace root, e.g. `//proto:all`, `//rust/daemon:netsimd`.
+- Targets are referenced directly within the workspace root, e.g. `//proto:all`, `//next/daemon:daemon`.

@@ -1,7 +1,0 @@
-/node_modules
-/test
-web-test-runner.config.mjs
-web/js
-web/assets
-web/tsconfig.tsbuildinfo
-CDNURL.txt

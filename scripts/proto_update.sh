@@ -38,7 +38,7 @@ echo "Starting Rust protobuf file update process..."
 # --- Configuration ---
 # Absolute path to tools/netsim using this scripts directory
 REPO_NETSIM=$(dirname "$0")/..
-PROTO_SRC_DIR="$REPO_NETSIM/rust/proto-cf/src"
+PROTO_SRC_DIR="$REPO_NETSIM/proto/proto-cf/src"
 if [[ "$(uname)" != "Linux" ]]; then
     echo "Error: This script only supports Linux."
     exit 1

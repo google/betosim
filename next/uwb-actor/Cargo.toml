@@ -25,7 +25,7 @@ device-actor = { path = "../device-actor" }
 futures = "0.3"
 glam = "0.25"
 netsim-model = { path = "../model" }
-netsim-proto = { path = "../../rust/proto-cf" }
+netsim-proto = { path = "../../proto/proto-cf" }
 pica = { version = "0.1", default-features = false }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

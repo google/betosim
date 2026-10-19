@@ -20,14 +20,12 @@ repos:
         entry: scripts/format_code.sh
         args: ["--hook"]
         language: script
-        files: \.(cc|h|proto|ts|rs|java|py|cmake|bp|bazel)$|CMakeLists\.txt$|BUILD$|Cargo\.toml$
+        files: \.(cc|h|proto|rs|java|py|bp|bazel)$|BUILD$|Cargo\.toml$
         # The regex above covers:
-        # .cc, .h, .proto, .ts (C/C++/Proto/TS)
+        # .cc, .h, .proto (C/C++/Proto)
         # .rs (Rust)
         # .java (Java)
         # .py (Python)
-        # .cmake (CMake)
         # .bp (Android.bp)
         # Files ending in .bazel (e.g., MODULE.bazel)
-        # CMakeLists.txt
         # BUILD

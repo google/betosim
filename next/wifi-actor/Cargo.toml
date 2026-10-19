@@ -28,7 +28,7 @@ futures = "0.3"
 libc = "0.2"
 netsim-model = { path = "../model" }
 netsim-packets = { path = "../packets" }
-netsim-proto = { path = "../../rust/proto-cf" }
+netsim-proto = { path = "../../proto/proto-cf" }
 nix = { version = "0.28", features = ["ioctl", "fs"] }
 slirp-actor = { path = "../slirp-actor" }
 socket2 = { version = "0.5", features = ["all"] }
