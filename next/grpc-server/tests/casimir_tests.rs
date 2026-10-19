@@ -89,8 +89,8 @@ mod tests {
                                         let _ = scene_rf_tx.send(rf_packet);
                                         continue;
                                     }
-                                    Err(e) => {
-                                        tracing::error!("MockTag: Failed to decode IsoDepT4ATSelectCommand: {:?}", e);
+                                    Err(error) => {
+                                        tracing::error!(?error, "MockTag: Failed to decode IsoDepT4ATSelectCommand");
                                     }
                                 }
                             }

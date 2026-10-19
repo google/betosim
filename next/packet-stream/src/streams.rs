@@ -114,8 +114,8 @@ impl Streams {
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                error!("Listener {listener_name} accept error: {e}");
+                            Err(error) => {
+                                error!(%error, "Listener {listener_name} accept error");
                             }
                         }
                     }
@@ -157,8 +157,8 @@ impl Streams {
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                error!("Listener {listener_name} accept error: {e}");
+                            Err(error) => {
+                                error!(%error, "Listener {listener_name} accept error");
                             }
                         }
                     }

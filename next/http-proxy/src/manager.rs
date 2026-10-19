@@ -126,8 +126,8 @@ impl ProxyManager for Manager {
         self.runtime.handle().spawn(async move {
             let fd = match connector.connect(sockaddr).await.and_then(into_raw_descriptor) {
                 Ok(fd) => fd,
-                Err(e) => {
-                    warn!("Failed to connect to proxy {}. {}", sockaddr, e);
+                Err(error) => {
+                    warn!(%error, "Failed to connect to proxy {}", sockaddr);
                     -1
                 }
             };

@@ -148,8 +148,8 @@ impl CrossPlatformListener {
                 "localhost:0".parse().map_err(SocketError::from)?;
             match windows::WindowsListener::bind_named_pipe(pipe_name) {
                 Ok(listener) => Ok(CrossPlatformListener::Windows(listener)),
-                Err(err) => {
-                    warn!("Failed to create named pipe, falling back to tcp: {err}");
+                Err(error) => {
+                    warn!(%error, "Failed to create named pipe, falling back to tcp");
                     let listener = tokio::net::TcpListener::bind(fallback_addr).await?;
                     Ok(CrossPlatformListener::Tcp(listener))
                 }

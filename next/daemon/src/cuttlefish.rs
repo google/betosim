@@ -70,16 +70,16 @@ async fn resolve_cuttlefish_network_config_from_file(
 
     let bytes = match tokio::fs::read(config_path).await {
         Ok(b) => b,
-        Err(e) => {
-            warn!("Failed to read Cuttlefish config {config_path:?}: {e}");
+        Err(error) => {
+            warn!(%error, "Failed to read Cuttlefish config {config_path:?}");
             return None;
         }
     };
 
     let config: CuttlefishConfig = match serde_json::from_slice(&bytes) {
         Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to parse Cuttlefish config {config_path:?}: {e}");
+        Err(error) => {
+            warn!(%error, "Failed to parse Cuttlefish config {config_path:?}");
             return None;
         }
     };
@@ -102,10 +102,10 @@ fn find_instance_network_config(
 
     let ril = match InstanceRilConfig::deserialize(inst) {
         Ok(ril) => ril,
-        Err(e) => {
+        Err(error) => {
             warn!(
-                "Cuttlefish device {device_name:?} has no usable RIL network config \
-                 ({e}); cellular data will be unconfigured"
+                %error,
+                "Cuttlefish device {device_name:?} has no usable RIL network config; cellular data will be unconfigured"
             );
             return None;
         }

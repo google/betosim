@@ -320,8 +320,8 @@ fn spawn_writer(
         let mut close_sent = false;
         while let Some(msg) = outbound_rx.blocking_recv() {
             let is_close = matches!(msg, Message::Close(_));
-            if let Err(e) = writer.send(msg) {
-                warn!("WebSocket packet stream write error: {e}");
+            if let Err(error) = writer.send(msg) {
+                warn!(%error, "WebSocket packet stream write error");
                 return;
             }
             if is_close {

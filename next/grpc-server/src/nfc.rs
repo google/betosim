@@ -56,12 +56,12 @@ impl NfcService for NfcServiceImpl {
                         }
                         let _ = sink.success(resp).await;
                     }
-                    Err(e) => {
-                        error!("GetStatus list failed: {}", e);
+                    Err(error) => {
+                        error!(%error, "GetStatus list failed");
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::INTERNAL,
-                                format!("Failed to list NFC chips: {}", e),
+                                format!("Failed to list NFC chips: {}", error),
                             ))
                             .await;
                     }
@@ -72,12 +72,12 @@ impl NfcService for NfcServiceImpl {
                         resp.chips.push(to_proto_chip(chip));
                         let _ = sink.success(resp).await;
                     }
-                    Err(e) => {
-                        error!("GetStatus read failed: {}", e);
+                    Err(error) => {
+                        error!(%error, "GetStatus read failed");
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::NOT_FOUND,
-                                format!("Failed to get NFC chip {}: {}", req.chip_id, e),
+                                format!("Failed to get NFC chip {}: {}", req.chip_id, error),
                             ))
                             .await;
                     }
@@ -102,7 +102,7 @@ impl NfcService for NfcServiceImpl {
                     resp.chip = protobuf::MessageField::some(to_proto_chip(chip));
                     let _ = sink.success(resp).await;
                 }
-                Err(e) => {
+                Err(error) => {
                     if req.chip_id == 0 {
                         // Return simulated chip 0 for default/mock CLI operations when no guest is
                         // attached
@@ -123,11 +123,14 @@ impl NfcService for NfcServiceImpl {
                         resp.chip = protobuf::MessageField::some(to_proto_chip(mock_chip));
                         let _ = sink.success(resp).await;
                     } else {
-                        error!("SetPower failed: {}", e);
+                        error!(%error, "SetPower failed");
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::INTERNAL,
-                                format!("Failed to set power for NFC chip {}: {}", req.chip_id, e),
+                                format!(
+                                    "Failed to set power for NFC chip {}: {}",
+                                    req.chip_id, error
+                                ),
                             ))
                             .await;
                     }

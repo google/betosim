@@ -165,8 +165,8 @@ pub(crate) async fn run_loopback(
     sink_tx: mpsc::Sender<Bytes>,
 ) {
     let (packet_stream, packet_sink) = packet_stream_and_sink(stream_rx, sink_tx);
-    if let Err(e) = packet_stream.map(Ok).forward(packet_sink).await {
-        warn!("WebSocket loopback stream for {addr} failed: {e}");
+    if let Err(error) = packet_stream.map(Ok).forward(packet_sink).await {
+        warn!(%error, "WebSocket loopback stream for {addr} failed");
     }
 }
 
@@ -217,8 +217,8 @@ pub(crate) async fn run_websocket_transport(
                     break;
                 }
                 Ok(_) => {} // Ignore Text, Pong, Frame
-                Err(e) => {
-                    warn!("WebSocket read error for {addr}: {e}");
+                Err(error) => {
+                    warn!(%error, "WebSocket read error for {addr}");
                     break;
                 }
             }
@@ -230,8 +230,8 @@ pub(crate) async fn run_websocket_transport(
     let writer_task = tokio::task::spawn_blocking(move || {
         while let Some(msg) = outbound_msg_rx.blocking_recv() {
             let is_close = matches!(msg, Message::Close(_));
-            if let Err(e) = websocket_writer.send(msg) {
-                warn!("WebSocket write error for {addr}: {e}");
+            if let Err(error) = websocket_writer.send(msg) {
+                warn!(%error, "WebSocket write error for {addr}");
                 break;
             }
             if is_close {
@@ -258,8 +258,8 @@ pub(crate) async fn run_websocket_transport(
         return;
     };
     info!("Cleaning up WebSocket device {device_id} for {addr}");
-    if let Err(e) = device_client.delete(device_id).await {
-        warn!("Failed to delete virtual WebSocket device {device_id}: {e}");
+    if let Err(error) = device_client.delete(device_id).await {
+        warn!(%error, "Failed to delete virtual WebSocket device {device_id}");
     }
 }
 

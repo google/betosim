@@ -434,8 +434,8 @@ extern "C" fn send_ll_trampoline(
     if let Some(controller) = context.upgrade() {
         let phy = match Phy::try_from(phy) {
             Ok(phy) => phy,
-            Err(err) => {
-                warn!("Unknown PHY {err}");
+            Err(error) => {
+                warn!(%error, "Unknown PHY");
                 return;
             }
         };

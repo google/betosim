@@ -135,8 +135,8 @@ impl FrontendClient {
 
     async fn handle_list_device(client: DeviceClient) -> Result<ListDeviceResponse, RpcStatus> {
         // Trigger stats collection to update internal cache
-        if let Err(e) = client.get_radio_stats().await {
-            tracing::warn!("Failed to get radio stats: {}", e);
+        if let Err(error) = client.get_radio_stats().await {
+            tracing::warn!(%error, "Failed to get radio stats");
         }
 
         let devices = client.list().await.map_err(|e| {
@@ -451,13 +451,13 @@ impl FrontendClient {
             };
             let mut response = GetCaptureResponse::new();
             response.capture_stream = chunk.to_vec();
-            if let Err(e) = sink.send((response, WriteFlags::default())).await {
-                tracing::warn!("Failed to send get_capture response chunk: {e:?}");
+            if let Err(error) = sink.send((response, WriteFlags::default())).await {
+                tracing::warn!(%error, "Failed to send get_capture response chunk");
                 return;
             }
         }
-        if let Err(e) = sink.close().await {
-            tracing::warn!("Failed to close get_capture sink: {e:?}");
+        if let Err(error) = sink.close().await {
+            tracing::warn!(%error, "Failed to close get_capture sink");
         }
     }
 }

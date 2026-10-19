@@ -52,12 +52,12 @@ impl WifiService for WifiServiceImpl {
                         }
                         let _ = sink.success(resp).await;
                     }
-                    Err(e) => {
-                        error!("GetStatus list failed: {}", e);
+                    Err(error) => {
+                        error!(%error, "GetStatus list failed");
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::INTERNAL,
-                                format!("Failed to list Wifi chips: {}", e),
+                                format!("Failed to list Wifi chips: {}", error),
                             ))
                             .await;
                     }
@@ -68,12 +68,12 @@ impl WifiService for WifiServiceImpl {
                         resp.chips.push(to_proto_chip(chip));
                         let _ = sink.success(resp).await;
                     }
-                    Err(e) => {
-                        error!("GetStatus read failed: {}", e);
+                    Err(error) => {
+                        error!(%error, "GetStatus read failed");
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::NOT_FOUND,
-                                format!("Failed to get Wifi chip {}: {}", req.chip_id, e),
+                                format!("Failed to get Wifi chip {}: {}", req.chip_id, error),
                             ))
                             .await;
                     }
@@ -134,12 +134,12 @@ impl WifiService for WifiServiceImpl {
                         resp.chip = protobuf::MessageField::some(to_proto_chip(chip));
                         let _ = sink.success(resp).await;
                     }
-                    Err(e) => {
-                        error!("SetPower failed: {}", e);
+                    Err(error) => {
+                        error!(%error, "SetPower failed");
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::NOT_FOUND,
-                                format!("Failed to power Wifi chip {}: {}", req.chip_id, e),
+                                format!("Failed to power Wifi chip {}: {}", req.chip_id, error),
                             ))
                             .await;
                     }

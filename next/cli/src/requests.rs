@@ -433,11 +433,11 @@ impl Command {
         let mut result = match client.send_grpc(&GrpcRequest::ListCapture) {
             Ok(GrpcResponse::ListCapture(response)) => response.captures,
             Ok(grpc_response) => {
-                error!("Unexpected GrpcResponse: {grpc_response:?}");
+                error!(response = ?grpc_response, "Unexpected GrpcResponse");
                 return Vec::new();
             }
-            Err(err) => {
-                error!("ListCapture Grpc call error: {err}");
+            Err(error) => {
+                error!(%error, "ListCapture Grpc call error");
                 return Vec::new();
             }
         };

@@ -208,7 +208,7 @@ impl ServerReflection for ServerReflectionImpl {
     ) {
         let inner = self.inner.clone();
         ctx.spawn(async move {
-            let mut sink = sink.sink_map_err(|e| warn!("Reflection sink error: {e}"));
+            let mut sink = sink.sink_map_err(|error| warn!(%error, "Reflection sink error"));
             while let Some(req_res) = stream.next().await {
                 match req_res {
                     Ok(req) => {
@@ -300,8 +300,8 @@ impl ServerReflection for ServerReflectionImpl {
                             break;
                         }
                     }
-                    Err(e) => {
-                        warn!("Error in reflection stream: {e}");
+                    Err(error) => {
+                        warn!(%error, "Error in reflection stream");
                         break;
                     }
                 }

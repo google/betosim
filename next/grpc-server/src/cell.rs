@@ -154,11 +154,11 @@ impl CellService for CellServiceImpl {
                         };
                     let _ = sink.success(cell).await;
                 }
-                Err(e) => {
-                    error!("Get cell failed: {}", e);
+                Err(error) => {
+                    error!(%error, "Get cell failed");
                     let status = grpcio::RpcStatus::with_message(
                         grpcio::RpcStatusCode::NOT_FOUND,
-                        format!("Failed to get cell: {}", e),
+                        format!("Failed to get cell: {}", error),
                     );
                     let _ = sink.fail(status).await;
                 }
@@ -184,11 +184,11 @@ impl CellService for CellServiceImpl {
                     }
                     let _ = sink.success(response).await;
                 }
-                Err(e) => {
-                    error!("List cells failed: {}", e);
+                Err(error) => {
+                    error!(%error, "List cells failed");
                     let status = grpcio::RpcStatus::with_message(
                         grpcio::RpcStatusCode::INTERNAL,
-                        format!("Failed to list cells: {}", e),
+                        format!("Failed to list cells: {}", error),
                     );
                     let _ = sink.fail(status).await;
                 }
@@ -283,12 +283,12 @@ impl CellService for CellServiceImpl {
                 Ok(_) => {
                     let _ = sink.success(Empty::new()).await;
                 }
-                Err(e) => {
-                    error!("Execute cell action failed: {}", e);
+                Err(error) => {
+                    error!(%error, "Execute cell action failed");
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to execute action: {}", e),
+                            format!("Failed to execute action: {}", error),
                         ))
                         .await;
                 }

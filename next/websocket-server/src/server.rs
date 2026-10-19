@@ -47,8 +47,8 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
                     handle_websocket_client(stream, addr, device_client).await;
                 });
             }
-            Err(e) => {
-                warn!("Error accepting WebSocket connection: {e}");
+            Err(error) => {
+                warn!(%error, "Error accepting WebSocket connection");
             }
         }
     }
@@ -59,8 +59,8 @@ async fn handle_websocket_client(stream: TcpStream, addr: SocketAddr, device_cli
     let (websocket_reader, websocket_writer, chip_kind, queries) =
         match perform_handshake(stream).await {
             Ok(res) => res,
-            Err(e) => {
-                warn!("WebSocket handshake failed for {addr}: {e}");
+            Err(error) => {
+                warn!(%error, "WebSocket handshake failed for {addr}");
                 return;
             }
         };
@@ -80,8 +80,8 @@ async fn handle_websocket_client(stream: TcpStream, addr: SocketAddr, device_cli
         match setup_virtual_chip(&device_client, chip_kind, queries, addr, stream_rx, sink_tx).await
         {
             Ok(id) => Some((id, device_client)),
-            Err(e) => {
-                warn!("Failed to setup virtual chip for {addr}: {e}");
+            Err(error) => {
+                warn!(%error, "Failed to setup virtual chip for {addr}");
                 return;
             }
         }
@@ -194,9 +194,9 @@ async fn perform_handshake(
 
     // Transition to standard blocking stream for tungstenite
     let std_stream = stream.into_std()?;
-    if let Err(e) = std_stream.set_nonblocking(false) {
-        error!("Failed to set std stream to blocking: {e}");
-        return Err(ServerError::Io(e));
+    if let Err(error) = std_stream.set_nonblocking(false) {
+        error!(%error, "Failed to set std stream to blocking");
+        return Err(ServerError::Io(error));
     }
 
     // Initialize WebSocket readers and writers

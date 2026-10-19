@@ -54,15 +54,15 @@ async fn handle_grpc_initial_info(
 {
     let initial_info_req = match stream.next().await {
         Some(Ok(req)) => req,
-        Some(Err(e)) => {
-            error!("gRPC stream error on initial info: {e}");
+        Some(Err(error)) => {
+            error!(%error, "gRPC stream error on initial info");
             let _ = sink
                 .fail(grpcio::RpcStatus::with_message(
                     grpcio::RpcStatusCode::INVALID_ARGUMENT,
-                    format!("Error receiving initial info: {e}"),
+                    format!("Error receiving initial info: {error}"),
                 ))
                 .await;
-            return Err(grpc_error_to_packet_error(e));
+            return Err(grpc_error_to_packet_error(error));
         }
         None => {
             error!("gRPC stream closed before initial info");
@@ -135,8 +135,8 @@ impl PacketStreamer for PacketStreamerService {
                                 .buffer_hint(false)
                                 .force_no_compress(true),
                         ))]),
-                        Err(err) => {
-                            warn!("Error converting bytes to packet response: {err:?}");
+                        Err(error) => {
+                            warn!(%error, "Error converting bytes to packet response");
                             futures::stream::iter(vec![])
                         }
                     }

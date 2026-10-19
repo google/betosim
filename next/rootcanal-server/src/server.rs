@@ -39,14 +39,14 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
                 info!("Accepted Rootcanal control connection from {addr}");
                 let client = device_client.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, client).await {
-                        error!("Error handling Rootcanal client {addr}: {e}");
+                    if let Err(error) = handle_client(stream, client).await {
+                        error!(%error, "Error handling Rootcanal client {addr}");
                     }
                     info!("Rootcanal control connection closed for {addr}");
                 });
             }
-            Err(e) => {
-                error!("Error accepting Rootcanal control connection: {e}");
+            Err(error) => {
+                error!(%error, "Error accepting Rootcanal control connection");
                 // Mitigate tight CPU spin in case of persistent accept errors (e.g. EMFILE)
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
@@ -211,10 +211,10 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
 
         let command = match parse_command(&name_str, &args) {
             Ok(cmd) => cmd,
-            Err(err_msg) => {
-                error!("Command '{name_str}' parse failed: {err_msg}");
+            Err(error) => {
+                error!(%error, "Command '{name_str}' parse failed");
                 // Write the parser error back to the client and continue
-                let response_bytes = err_msg.as_bytes();
+                let response_bytes = error.as_bytes();
                 let resp_size = response_bytes.len() as u32;
                 stream.write_all(&resp_size.to_le_bytes()).await?;
                 stream.write_all(response_bytes).await?;
@@ -257,9 +257,9 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
         let response_str = match result {
             Ok(Some(resp)) => resp,
             Ok(None) => "OK".to_string(),
-            Err(err_msg) => {
-                error!("Command '{name_str}' execution failed: {err_msg}");
-                err_msg
+            Err(error) => {
+                error!(%error, "Command '{name_str}' execution failed");
+                error
             }
         };
 

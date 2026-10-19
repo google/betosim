@@ -118,11 +118,11 @@ pub fn start(
             Ok(0) | Err(_) => warn!("Failed to bind Rust gRPC on UDS {unix_addr}"),
             Ok(_) => {
                 info!("Rust gRPC listening on UDS {unix_addr}");
-                if let Err(e) = std::fs::set_permissions(
+                if let Err(error) = std::fs::set_permissions(
                     uds_path,
                     std::os::unix::fs::PermissionsExt::from_mode(0o777),
                 ) {
-                    warn!("Failed to set permissions on UDS {unix_addr}: {e}");
+                    warn!(%error, %unix_addr, "Failed to set permissions on UDS");
                 }
             }
         }
@@ -134,8 +134,8 @@ pub fn start(
             info!("Rust gRPC listening on {addr}");
             Ok(p)
         }
-        err => {
-            error!("Failed to bind Rust gRPC on {addr}. Status: {:?}", err);
+        error => {
+            error!(?error, %addr, "Failed to bind Rust gRPC");
             Err(grpcio::Error::BindFail(
                 std::ffi::CString::new("Failed to bind Rust gRPC server to any interface.")
                     .unwrap_or_default(),

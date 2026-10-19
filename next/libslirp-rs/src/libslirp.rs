@@ -219,8 +219,8 @@ impl LibSlirp {
                 slirp_poll_thread(rx_poll, tx_cmds_poll, signal_rx);
             }) {
                 Ok(handle) => Some(handle),
-                Err(e) => {
-                    warn!("Failed to start slirp poll thread: {}", e);
+                Err(error) => {
+                    warn!(%error, "Failed to start slirp poll thread");
                     None
                 }
             };
@@ -240,8 +240,8 @@ impl LibSlirp {
                 )
             }) {
                 Ok(handle) => Some(handle),
-                Err(e) => {
-                    warn!("Failed to start slirp poll thread: {}", e);
+                Err(error) => {
+                    warn!(%error, "Failed to start slirp thread");
                     None
                 }
             };
@@ -251,25 +251,25 @@ impl LibSlirp {
 
     /// Shuts down the `LibSlirp` instance.
     pub fn shutdown(mut self) {
-        if let Err(e) = self.tx_cmds.send(SlirpCmd::Shutdown) {
-            warn!("Failed to send Shutdown cmd: {}", e);
+        if let Err(error) = self.tx_cmds.send(SlirpCmd::Shutdown) {
+            warn!(%error, "Failed to send Shutdown cmd");
         }
         if let Some(handle) = self.slirp_thread_handle.take()
-            && let Err(e) = handle.join()
+            && let Err(error) = handle.join()
         {
-            warn!("Failed to join slirp thread: {e:?}");
+            warn!(?error, "Failed to join slirp thread");
         }
         if let Some(handle) = self.poll_thread_handle.take()
-            && let Err(e) = handle.join()
+            && let Err(error) = handle.join()
         {
-            warn!("Failed to join poll thread: {e:?}");
+            warn!(?error, "Failed to join poll thread");
         }
     }
 
     /// Inputs network data into the `LibSlirp` instance.
     pub fn input(&self, bytes: Bytes) {
-        if let Err(e) = self.tx_cmds.send(SlirpCmd::Input(bytes)) {
-            warn!("Failed to send Input cmd: {}", e);
+        if let Err(error) = self.tx_cmds.send(SlirpCmd::Input(bytes)) {
+            warn!(%error, "Failed to send Input cmd");
         }
     }
 
@@ -287,8 +287,8 @@ pub struct LibSlirpInputHandle {
 
 impl LibSlirpInputHandle {
     pub fn input(&self, bytes: Bytes) {
-        if let Err(e) = self.tx_cmds.send(SlirpCmd::Input(bytes)) {
-            warn!("Failed to send Input cmd: {}", e);
+        if let Err(error) = self.tx_cmds.send(SlirpCmd::Input(bytes)) {
+            warn!(%error, "Failed to send Input cmd");
         }
     }
 }
@@ -488,8 +488,8 @@ fn slirp_thread(
 
             // A notification to wake up the poll thread
             Ok(SlirpCmd::Notify) => {
-                if let Err(e) = signal_tx.write(&[0]) {
-                    warn!("Failed to signal poll thread: {}", e);
+                if let Err(error) = signal_tx.write(&[0]) {
+                    warn!(%error, "Failed to signal poll thread");
                 }
                 continue;
             }
@@ -586,8 +586,8 @@ impl Slirp {
                 &*self.callback_context as *const CallbackContext as *mut c_void,
             );
         }
-        if let Err(e) = tx.send((poll_fds.borrow().to_vec(), timeout)) {
-            warn!("Failed to send poll fds: {}", e);
+        if let Err(error) = tx.send((poll_fds.borrow().to_vec(), timeout)) {
+            warn!(%error, "Failed to send poll fds");
         }
     }
 }
@@ -799,8 +799,9 @@ fn slirp_poll_thread(
         }
 
         // 'select_error' should be 1 if poll() returned an error, else 0.
-        if let Err(e) = tx.send(SlirpCmd::PollResult(slirp_poll_fds, (poll_result < 0) as i32)) {
-            warn!("Failed to send slirp PollResult cmd: {}", e);
+        if let Err(error) = tx.send(SlirpCmd::PollResult(slirp_poll_fds, (poll_result < 0) as i32))
+        {
+            warn!(%error, "Failed to send slirp PollResult cmd");
         }
     }
 }
@@ -1069,8 +1070,8 @@ impl CallbackContext {
     }
 
     fn notify(&self) {
-        if let Err(e) = self.tx_cmds.send(SlirpCmd::Notify) {
-            warn!("Failed to send Notify cmd: {}", e);
+        if let Err(error) = self.tx_cmds.send(SlirpCmd::Notify) {
+            warn!(%error, "Failed to send Notify cmd");
         }
     }
 }

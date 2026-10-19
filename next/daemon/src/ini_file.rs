@@ -142,8 +142,8 @@ fn file_inode(file: &File) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     match file.metadata() {
         Ok(m) => Some((m.dev(), m.ino())),
-        Err(err) => {
-            warn!("Failed to query lock file identity: {err}");
+        Err(error) => {
+            warn!(%error, "Failed to query lock file identity");
             None
         }
     }
@@ -156,8 +156,8 @@ fn file_inode(file: &File) -> Option<FileIdentity> {
     // the unstable `windows_by_handle` feature (rust-lang/rust#63010).
     let info = match winapi_util::file::information(file) {
         Ok(info) => info,
-        Err(err) => {
-            warn!("Failed to query lock file identity: {err}");
+        Err(error) => {
+            warn!(%error, "Failed to query lock file identity");
             return None;
         }
     };
@@ -250,11 +250,12 @@ impl IniFileInitialized {
         let init_lock =
             match open_lock_file(&init_lock_path).and_then(|file| file.lock().map(|()| file)) {
                 Ok(file) => file,
-                Err(err) => {
+                Err(error) => {
                     warn!(
-                        "Skipping unlink of {} because {} could not be acquired: {err}",
-                        ini_path.display(),
-                        init_lock_path.display()
+                        %error,
+                        path = %ini_path.display(),
+                        lock = %init_lock_path.display(),
+                        "Skipping unlink because lock could not be acquired"
                     );
                     return;
                 }
@@ -282,10 +283,10 @@ impl IniFileInitialized {
     /// Note: `netsim.ini.init.lock` is intentionally kept on disk so all
     /// processes always contend on the same coordination lock file.
     fn unlink_discovery_file(ini_path: &Path) {
-        if let Err(err) = fs::remove_file(ini_path)
-            && err.kind() != io::ErrorKind::NotFound
+        if let Err(error) = fs::remove_file(ini_path)
+            && error.kind() != io::ErrorKind::NotFound
         {
-            warn!("Failed to remove {}: {err}", ini_path.display());
+            warn!(%error, "Failed to remove {}", ini_path.display());
         }
     }
 }
@@ -515,10 +516,10 @@ impl IniFile {
             lock_path.with_added_extension(format!("retired.{}.{nanos}.{seq}", std::process::id()));
         match fs::rename(&lock_path, &retired_lock_path) {
             Ok(()) => {
-                if let Err(err) = fs::remove_file(&retired_lock_path)
-                    && err.kind() != io::ErrorKind::NotFound
+                if let Err(error) = fs::remove_file(&retired_lock_path)
+                    && error.kind() != io::ErrorKind::NotFound
                 {
-                    warn!("Failed to remove {}: {err}", retired_lock_path.display());
+                    warn!(%error, "Failed to remove {}", retired_lock_path.display());
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}

@@ -154,11 +154,11 @@ fn read_all_bluetooth_addresses(avd_root: &Path) -> Result<HashSet<String>, Box<
                     used_addresses.insert(address);
                 }
             }
-            Err(e) => {
+            Err(error) => {
                 warn!(
-                    "Failed to read netsim.ini for {}: {}, skipping address scan",
-                    ini_path.display(),
-                    e
+                    %error,
+                    path = %ini_path.display(),
+                    "Failed to read netsim.ini, skipping address scan"
                 )
             }
         }
@@ -197,12 +197,13 @@ fn get_or_create_bluetooth_mac(avd_ini_path: &str) -> Result<String, Box<dyn Err
                 return Ok(address);
             }
         }
-        Err(e) => {
+        Err(error) => {
             // Log error, but proceed to generate a new MAC as the file might be missing or
             // corrupt.
             warn!(
-                "Error reading config for {}: {}. Will attempt to create/overwrite.",
-                avd_ini_path, e
+                %error,
+                "Error reading config for {}. Will attempt to create/overwrite.",
+                avd_ini_path
             );
         }
     }
@@ -256,8 +257,8 @@ pub async fn resolve_bluetooth_mac(avd_path: &str, provided_address: &str) -> St
                     info!("Assigned persistent MAC {addr} to AVD {avd_path}");
                     addr
                 }
-                Err(e) => {
-                    warn!("Failed to get/create MAC for {avd_path}: {e}");
+                Err(error) => {
+                    warn!(%error, "Failed to get/create MAC for {avd_path}");
                     String::new()
                 }
             }
@@ -266,16 +267,16 @@ pub async fn resolve_bluetooth_mac(avd_path: &str, provided_address: &str) -> St
                 warn!("Refusing to persist invalid MAC address '{address}' for AVD {avd_path}");
                 return String::new();
             }
-            if let Err(e) = set_bluetooth_mac(&avd_path, &address) {
-                warn!("Failed to persist MAC {address} for AVD {avd_path}: {e}");
+            if let Err(error) = set_bluetooth_mac(&avd_path, &address) {
+                warn!(%error, "Failed to persist MAC {address} for AVD {avd_path}");
                 return String::new();
             }
             address
         }
     })
     .await
-    .unwrap_or_else(|e| {
-        warn!("Failed to join spawn_blocking for resolve_bluetooth_mac: {e}");
+    .unwrap_or_else(|error| {
+        warn!(%error, "Failed to join spawn_blocking for resolve_bluetooth_mac");
         String::new()
     })
 }

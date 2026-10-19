@@ -54,7 +54,7 @@ pub async fn run(
 ) {
     match listener.local_addr() {
         Ok(addr) => info!("REST API server is listening on: {addr}"),
-        Err(e) => warn!("REST API server failed to read local address: {e}"),
+        Err(error) => warn!(%error, "REST API server failed to read local address"),
     }
 
     let server =
@@ -92,8 +92,8 @@ pub async fn run(
                     {
                         debug!("Transient error accepting connection on HTTP listener: {e}");
                     }
-                    Err(e) => {
-                        warn!("Error accepting connection on HTTP listener: {e}");
+                    Err(error) => {
+                        warn!(%error, "Error accepting connection on HTTP listener");
                         // Back off so a persistent accept error, such as running out
                         // of file descriptors, does not spin the task at full speed.
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

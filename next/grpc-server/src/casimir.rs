@@ -140,8 +140,8 @@ async fn run_reader(mut reader: RfReader, state: Arc<Mutex<ServiceState>>) {
 async fn run_writer(mut writer: RfWriter, mut rx: mpsc::UnboundedReceiver<rf::RfPacket>) {
     while let Some(packet) = rx.recv().await {
         if let Ok(bytes) = packet.encode_to_vec() {
-            if let Err(e) = writer.write(&bytes).await {
-                error!("RF Writer error: {}", e);
+            if let Err(error) = writer.write(&bytes).await {
+                error!(%error, "RF Writer error");
                 break;
             }
         } else {

@@ -58,7 +58,7 @@ async fn spawn_beacon(idx: u32, interval: u64, device_client: &DeviceClient) {
         },
     };
 
-    if let Err(err) = device_client.create_device(device_create).await {
-        warn!("Failed to create beacon device {idx}: {err}");
+    if let Err(error) = device_client.create_device(device_create).await {
+        warn!(%error, "Failed to create beacon device {idx}");
     }
 }

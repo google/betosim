@@ -102,8 +102,8 @@ impl BleService for BleServiceImpl {
                 chip,
             };
 
-            if let Err(e) = device_client.add_chip(add_chip).await {
-                error!("Failed to create scanner chip: {}", e);
+            if let Err(error) = device_client.add_chip(add_chip).await {
+                error!(%error, "Failed to create scanner chip");
                 return;
             }
 
@@ -120,8 +120,8 @@ impl BleService for BleServiceImpl {
             while let Some(packet) = packet_rx.recv().await {
                 let mut resp = ScanResponse::new();
                 resp.packet = packet.to_vec();
-                if let Err(e) = stream_sink.send((resp, WriteFlags::default())).await {
-                    warn!("Scan stream disconnected or error: {}", e);
+                if let Err(error) = stream_sink.send((resp, WriteFlags::default())).await {
+                    warn!(%error, "Scan stream disconnected or error");
                     break;
                 }
             }
@@ -189,8 +189,8 @@ impl BleService for BleServiceImpl {
                 chip,
             };
 
-            if let Err(e) = device_client.add_chip(add_chip).await {
-                error!("Failed to create sniffer chip: {}", e);
+            if let Err(error) = device_client.add_chip(add_chip).await {
+                error!(%error, "Failed to create sniffer chip");
                 return;
             }
 
@@ -202,8 +202,8 @@ impl BleService for BleServiceImpl {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
                 resp.timestamp = now.as_micros() as i64;
-                if let Err(e) = stream_sink.send((resp, WriteFlags::default())).await {
-                    warn!("Sniff stream disconnected or error: {}", e);
+                if let Err(error) = stream_sink.send((resp, WriteFlags::default())).await {
+                    warn!(%error, "Sniff stream disconnected or error");
                     break;
                 }
             }

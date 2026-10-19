@@ -108,8 +108,8 @@ pub enum StartUpMode {
 /// only the packet-stream path: transport framing plus stream plumbing.
 async fn run_loopback(stream: PacketStream, sink: PacketSink, device_name: &str) {
     info!("Loopback packet stream for {device_name}");
-    if let Err(e) = stream.forward(sink).await {
-        warn!("Loopback packet stream for {device_name} failed: {e}");
+    if let Err(error) = stream.forward(sink).await {
+        warn!(%error, %device_name, "Loopback packet stream failed");
     }
     info!("Loopback packet stream for {device_name} closed");
 }
@@ -234,8 +234,8 @@ async fn handle_new_connection(
         Box::pin(async move {
             match item {
                 Ok(bytes) => Some(bytes),
-                Err(e) => {
-                    error!("Error in packet stream: {e}");
+                Err(error) => {
+                    error!(%error, "Error in packet stream");
                     None
                 }
             }
@@ -252,8 +252,8 @@ async fn handle_new_connection(
         chip: chip_instance,
     };
 
-    if let Err(e) = device_client.add_chip(request).await {
-        error!("Failed to register stream for {}: {e}", chip_info.name);
+    if let Err(error) = device_client.add_chip(request).await {
+        error!(%error, name = %chip_info.name, "Failed to register stream");
     }
 }
 
@@ -265,8 +265,13 @@ where
         let trimmed = val.trim();
         match trimmed.parse::<u16>() {
             Ok(port) => Some(port),
-            Err(e) => {
-                warn!("Environment variable {var_name} value '{val}' could not be parsed as a port: {e}");
+            Err(error) => {
+                warn!(
+                    %error,
+                    %var_name,
+                    %val,
+                    "Environment variable value could not be parsed as a port"
+                );
                 None
             }
         }
@@ -323,12 +328,12 @@ where
     };
     match join_result {
         Ok(Ok(())) => true,
-        Ok(Err(err)) => {
-            error!("Failed to zip artifacts: {err:?}");
+        Ok(Err(error)) => {
+            error!(?error, "Failed to zip artifacts");
             true
         }
-        Err(err) => {
-            error!("Artifact zip task panicked: {err}");
+        Err(error) => {
+            error!(%error, "Artifact zip task panicked");
             false
         }
     }
@@ -609,10 +614,10 @@ impl NetsimDaemon {
 
     fn redirect_daemon_logs(args: &Args, connector_instance: Option<u16>) {
         if !args.logtostderr {
-            if let Err(err) =
+            if let Err(error) =
                 redirect_std_stream(&get_instance_name(args.instance, connector_instance))
             {
-                error!("{err:?}");
+                error!(?error);
             }
 
             // Duplicating the previous two logs to be included in
@@ -785,13 +790,13 @@ impl NetsimDaemon {
                 actual_hci_port = Some(listener.local_addr().map_err(init_error)?.port());
                 tokio::spawn(hci_server::run(listener, device_client.clone()));
             }
-            Err(e) => {
+            Err(error) => {
                 if is_explicit_hci {
                     return Err(init_error(format!(
-                        "Failed to bind requested HCI socket server port {resolved_hci_port}: {e}"
+                        "Failed to bind requested HCI socket server port {resolved_hci_port}: {error}"
                     )));
                 }
-                warn!("Failed to start HCI socket server: {e}");
+                warn!(%error, "Failed to start HCI socket server");
             }
         }
 
@@ -828,13 +833,13 @@ impl NetsimDaemon {
                     // runners (like pts-bot/mmi2grpc).
                     tokio::spawn(rootcanal_server::run(listener, device_client.clone()));
                 }
-                Err(e) => {
+                Err(error) => {
                     if is_explicit_test {
                         return Err(init_error(format!(
-                            "Failed to bind requested Rootcanal control server port {test_port}: {e}"
+                            "Failed to bind requested Rootcanal control server port {test_port}: {error}"
                         )));
                     }
-                    error!("Failed to bind Rootcanal control server: {e}");
+                    error!(%error, "Failed to bind Rootcanal control server");
                 }
             }
             addr
@@ -848,14 +853,14 @@ impl NetsimDaemon {
 
         if should_start_tcp {
             let tcp_port = resolved_tcp_port_opt.unwrap_or(0);
-            if let Err(e) = streams
+            if let Err(error) = streams
                 .start_listener(
                     "tcp",
                     packet_stream::transport::TransportType::tcp("127.0.0.1", tcp_port),
                 )
                 .await
             {
-                error!("Failed to start TCP forwarder listener: {e}");
+                error!(%error, "Failed to start TCP forwarder listener");
             } else if let Some(packet_stream::StreamAddress::Tcp(socket_addr)) =
                 streams.listener_address("tcp")
             {
@@ -981,8 +986,8 @@ impl NetsimDaemon {
             set_if_some!(ap_config.beacon_interval, args.wifi.wifi_beacon_interval);
             set_if_some!(ap_config.hw_mode, args.wifi.wifi_mode, Into::into);
 
-            if let Err(e) = ap_client.create_ap(Some(0), ap_config).await {
-                warn!("Failed to create default AP: {e}");
+            if let Err(error) = ap_client.create_ap(Some(0), ap_config).await {
+                warn!(%error, "Failed to create default AP");
             }
         }
 
@@ -1074,8 +1079,8 @@ impl NetsimDaemon {
 
         let link_fut = self.link_client.shutdown();
         let slirp_fut = async {
-            if let Err(e) = self.slirp_client.shutdown().await {
-                warn!("SlirpActor shutdown error: {}", e);
+            if let Err(error) = self.slirp_client.shutdown().await {
+                warn!(%error, "SlirpActor shutdown error");
             }
         };
         let chips_fut = futures::future::join_all(self.chip_clients.values().map(|c| c.shutdown()));
@@ -1083,20 +1088,20 @@ impl NetsimDaemon {
         // Execute all shutdown dispatches concurrently
         let (link_res, _, chips_res) = tokio::join!(link_fut, slirp_fut, chips_fut);
 
-        if let Err(e) = link_res {
-            warn!("LinkActor shutdown error: {}", e);
+        if let Err(error) = link_res {
+            warn!(%error, "LinkActor shutdown error");
         }
         for res in chips_res {
-            if let Err(e) = res {
-                warn!("ChipActor shutdown error: {}", e);
+            if let Err(error) = res {
+                warn!(%error, "ChipActor shutdown error");
             }
         }
         // Shut down CaptureActor after packet producers have stopped, and await
         // task completion so all buffered PCAP data is flushed and file handles
         // are closed before zipping.
         if !self.capture_task.is_finished() {
-            if let Err(e) = self.capture_client.shutdown().await {
-                warn!("CaptureActor shutdown error: {}", e);
+            if let Err(error) = self.capture_client.shutdown().await {
+                warn!(%error, "CaptureActor shutdown error");
             }
             let _ = (&mut self.capture_task).await;
         }
@@ -1107,8 +1112,8 @@ impl NetsimDaemon {
 
     fn handle_device_actor_completion(&self, result: Result<(), tokio::task::JoinError>) {
         info!("DeviceActor exited. Shutting down daemon.");
-        if let Err(e) = result {
-            error!("DeviceActor panicked: {}", e);
+        if let Err(error) = result {
+            error!(%error, "DeviceActor panicked");
         }
     }
 
@@ -1121,8 +1126,8 @@ impl NetsimDaemon {
                 info!("A secondary server task completed. Shutting down.");
                 true
             }
-            Some(Err(e)) => {
-                error!("A secondary server task panicked: {}", e);
+            Some(Err(error)) => {
+                error!(%error, "A secondary server task panicked");
                 true
             }
             None => {
@@ -1140,18 +1145,18 @@ impl NetsimDaemon {
         match serde_json::from_str::<DualFdConfig>(fd_startup_str) {
             Ok(config) => match DualFdListener::new(config).await {
                 Ok(listener) => {
-                    if let Err(e) = streams.add_listener("netsim_dualfd", Box::new(listener)) {
-                        error!("Failed to add DualFdListener: {}", e);
+                    if let Err(error) = streams.add_listener("netsim_dualfd", Box::new(listener)) {
+                        error!(%error, "Failed to add DualFdListener");
                     } else {
                         info!("Added DualFdListener");
                     }
                 }
-                Err(e) => {
-                    error!("Failed to create DualFdListener: {}", e);
+                Err(error) => {
+                    error!(%error, "Failed to create DualFdListener");
                 }
             },
-            Err(e) => {
-                error!("Failed to parse fd_startup_str JSON: {}", e);
+            Err(error) => {
+                error!(%error, "Failed to parse fd_startup_str JSON");
             }
         }
     }
@@ -1181,8 +1186,11 @@ impl NetsimDaemon {
                             // which could delay accepting other connections if awaited directly.
                             tokio::spawn(handle_new_connection(device_client, capture_client, next_chip_id, stream, sink, chip_info, guid));
                         }
-                        Err(e) => {
-                            error!("Error accepting connection: {}. Stopping new connections.", e);
+                        Err(error) => {
+                            error!(
+                                %error,
+                                "Error accepting connection. Stopping new connections."
+                            );
                         }
                     }
                 }
@@ -1290,8 +1298,8 @@ async fn shutdown_signal() {
         {
             match signal::unix::signal(signal::unix::SignalKind::terminate()) {
                 Ok(sig) => Some(sig),
-                Err(err) => {
-                    warn!("Failed to listen for terminate signal: {err}");
+                Err(error) => {
+                    warn!(%error, "Failed to listen for terminate signal");
                     None
                 }
             }
@@ -1300,8 +1308,8 @@ async fn shutdown_signal() {
         {
             match signal::windows::ctrl_close() {
                 Ok(sig) => Some(sig),
-                Err(err) => {
-                    warn!("Failed to listen for ctrl_close signal: {err}");
+                Err(error) => {
+                    warn!(%error, "Failed to listen for ctrl_close signal");
                     None
                 }
             }
@@ -1324,8 +1332,8 @@ async fn shutdown_signal() {
     loop {
         tokio::select! {
             res = &mut ctrl_c => {
-                if let Err(err) = res {
-                    warn!("Failed to listen for ctrl+c signal: {err}");
+                if let Err(error) = res {
+                    warn!(%error, "Failed to listen for ctrl+c signal");
                 } else {
                     info!("Ctrl+C received");
                     break;
@@ -1419,13 +1427,20 @@ impl NetsimDaemon {
                 Ok::<(), BridgeError>(())
             } => {
                 match res {
-                    Err(BridgeError::Guest(msg)) => {
-                        error!("Upstream bridge failed for chip {chip_id} (Guest): {msg}");
+                    Err(BridgeError::Guest(error)) => {
+                        error!(
+                            %error,
+                            %chip_id,
+                            "Upstream bridge failed for chip (Guest)"
+                        );
                         true
                     }
-                    Err(BridgeError::Remote(msg)) => {
+                    Err(BridgeError::Remote(error)) => {
                         error!(
-                            "Upstream bridge failed for chip {chip_id} ({transport_name}): {msg}"
+                            %error,
+                            %chip_id,
+                            %transport_name,
+                            "Upstream bridge failed for chip"
                         );
                         false
                     }
@@ -1444,13 +1459,20 @@ impl NetsimDaemon {
                 Ok::<(), BridgeError>(())
             } => {
                 match res {
-                    Err(BridgeError::Guest(msg)) => {
-                        error!("Downstream bridge failed for chip {chip_id} (Guest): {msg}");
+                    Err(BridgeError::Guest(error)) => {
+                        error!(
+                            %error,
+                            %chip_id,
+                            "Downstream bridge failed for chip (Guest)"
+                        );
                         true
                     }
-                    Err(BridgeError::Remote(msg)) => {
+                    Err(BridgeError::Remote(error)) => {
                         error!(
-                            "Downstream bridge failed for chip {chip_id} ({transport_name}): {msg}"
+                            %error,
+                            %chip_id,
+                            %transport_name,
+                            "Downstream bridge failed for chip"
                         );
                         false
                     }
@@ -1491,9 +1513,10 @@ impl NetsimDaemon {
                             )
                             .await
                         }
-                        Err(e) => {
+                        Err(error) => {
                             warn!(
-                                "Failed to connect to primary daemon WebSocket {server_addr}{path}: {e}"
+                                %error,
+                                "Failed to connect to primary daemon WebSocket {server_addr}{path}"
                             );
                             false
                         }
@@ -1511,14 +1534,14 @@ impl NetsimDaemon {
 
                         let init_json = match serde_json::to_vec(&init_info) {
                             Ok(json) => json,
-                            Err(e) => {
-                                error!("Failed to serialize InitInfo: {e}");
+                            Err(error) => {
+                                error!(%error, "Failed to serialize InitInfo");
                                 break;
                             }
                         };
 
-                        if let Err(e) = framed_tcp.send(bytes::Bytes::from(init_json)).await {
-                            error!("Failed to send InitInfo: {e}");
+                        if let Err(error) = framed_tcp.send(bytes::Bytes::from(init_json)).await {
+                            error!(%error, "Failed to send InitInfo");
                             false
                         } else {
                             info!("Sent initial ChipInfo to primary daemon for chip {chip_id}");
@@ -1536,8 +1559,8 @@ impl NetsimDaemon {
                             .await
                         }
                     }
-                    Err(e) => {
-                        warn!("Failed to connect to primary daemon TCP port: {e}");
+                    Err(error) => {
+                        warn!(%error, "Failed to connect to primary daemon TCP port");
                         false
                     }
                 },
@@ -1595,8 +1618,8 @@ impl NetsimDaemon {
                                 target.clone(),
                             ));
                         }
-                        Err(e) => {
-                            error!("Error accepting connection: {e}");
+                        Err(error) => {
+                            error!(%error, "Error accepting connection");
                             break;
                         }
                     }

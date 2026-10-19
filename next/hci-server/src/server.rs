@@ -48,8 +48,8 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
                     handle_hci_client(stream, addr, dc_clone).await;
                 });
             }
-            Err(e) => {
-                warn!("Error accepting HCI connection: {e}");
+            Err(error) => {
+                warn!(%error, "Error accepting HCI connection");
             }
         }
     }
@@ -103,8 +103,8 @@ async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: D
                         break;
                     }
                 }
-                Err(e) => {
-                    warn!("Error reading from HCI socket {read_addr}: {e:?}");
+                Err(error) => {
+                    warn!(%error, "Error reading from HCI socket {read_addr}");
                     break;
                 }
             }
@@ -136,8 +136,8 @@ async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: D
     let request = HciChipBuilder::build_device_add_chip_request(name, packet_stream, packet_sink);
 
     // 4. Send request to add chip
-    if let Err(e) = device_client.add_chip(request).await {
-        warn!("Failed to add virtual HCI chip for {addr}: {e}");
+    if let Err(error) = device_client.add_chip(request).await {
+        warn!(%error, "Failed to add virtual HCI chip for {addr}");
     }
 }
 

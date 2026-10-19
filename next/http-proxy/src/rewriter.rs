@@ -169,8 +169,8 @@ pub(crate) async fn connect_with_header_rewrite(
             Ok::<_, Error>(())
         };
 
-        if let Err(e) = task_logic.await {
-            warn!("Proxy bridge task failed: {}", e);
+        if let Err(error) = task_logic.await {
+            warn!(%error, "Proxy bridge task failed");
         }
     });
 

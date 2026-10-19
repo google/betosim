@@ -166,8 +166,8 @@ fn perform_command(
                 Ok(Some(response))
             }
         };
-        if let Err(e) = process_result(command, result, cells.as_deref(), Some(req), verbose) {
-            error!("{e}");
+        if let Err(error) = process_result(command, result, cells.as_deref(), Some(req), verbose) {
+            error!(%error);
             process_error = true;
         };
     }
@@ -248,8 +248,8 @@ fn main() -> ExitCode {
     netsim_logger::init("netsim", args.verbose);
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            error!("{e}");
+        Err(error) => {
+            error!(%error);
             ExitCode::FAILURE
         }
     }
