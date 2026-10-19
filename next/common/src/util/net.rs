@@ -70,7 +70,7 @@ pub fn bind_tcp_loopback(port: u16) -> std::io::Result<TcpListener> {
         Ok(l) => Ok(l),
         Err(e) => {
             if is_ipv4_unsupported(&e) {
-                warn!("IPv4 loopback unavailable on host, trying [::1]:{port}: {e}");
+                warn!(error = %e, "IPv4 loopback unavailable on host, trying [::1]:{port}");
                 create_listener(Domain::IPV6, SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
             } else {
                 Err(e)

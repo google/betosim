@@ -130,14 +130,14 @@ where
     let content = match std::fs::read_to_string(&filepath) {
         Ok(c) => c,
         Err(err) => {
-            error!("Error reading ini file: {err:?}");
+            error!(error = %err, "Error reading ini file");
             return None;
         }
     };
     let map = match parse_ini(&content, &IniParserOptions::default()) {
         Ok(m) => m,
         Err(err) => {
-            error!("Error parsing ini file: {err:?}");
+            error!(error = %err, "Error parsing ini file");
             return None;
         }
     };

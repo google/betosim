@@ -104,24 +104,57 @@ where
         write!(writer, "{} {} {} {}:{} - ", self.prefix, level, log_current_time(), file, line)?;
 
         {
-            struct Visitor<'a, 'b> {
-                writer: &'a mut tracing_subscriber::fmt::format::Writer<'b>,
-                result: std::fmt::Result,
+            use std::fmt::Write;
+
+            #[derive(Default)]
+            struct Visitor {
+                message: String,
+                fields: String,
             }
-            impl tracing::field::Visit for Visitor<'_, '_> {
+
+            impl Visitor {
+                fn record_field(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: std::fmt::Arguments<'_>,
+                ) {
+                    let name = field.name();
+                    if name == "message" {
+                        let _ = write!(self.message, "{value}");
+                        return;
+                    }
+                    if name.starts_with("log.") {
+                        return;
+                    }
+                    let key = name.strip_prefix("r#").unwrap_or(name);
+                    if !self.fields.is_empty() {
+                        self.fields.push(' ');
+                    }
+                    let _ = write!(self.fields, "{key}={value}");
+                }
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.record_field(field, format_args!("{value}"));
+                }
+
                 fn record_debug(
                     &mut self,
                     field: &tracing::field::Field,
                     value: &dyn std::fmt::Debug,
                 ) {
-                    if field.name() == "message" && self.result.is_ok() {
-                        self.result = write!(self.writer, "{:?}", value);
-                    }
+                    self.record_field(field, format_args!("{value:?}"));
                 }
             }
-            let mut visitor = Visitor { writer: &mut writer, result: Ok(()) };
+            let mut visitor = Visitor::default();
             event.record(&mut visitor);
-            visitor.result?;
+            match (visitor.message.is_empty(), visitor.fields.is_empty()) {
+                (false, false) => write!(writer, "{} {}", visitor.message, visitor.fields)?,
+                (false, true) => write!(writer, "{}", visitor.message)?,
+                (true, false) => write!(writer, "{}", visitor.fields)?,
+                (true, true) => {}
+            }
         }
         writeln!(writer)
     }
@@ -138,7 +171,7 @@ fn test_init_for_test() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -211,5 +244,94 @@ mod tests {
             let re = regex::Regex::new(r"netsim I \d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} netsim_logger\.rs:\d+ - Test log message").unwrap();
             assert!(re.is_match(&output), "Log output did not match legacy format: {}", output);
         }
+    }
+
+    #[derive(Clone)]
+    struct LocalWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LocalWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LocalWriter {
+        type Writer = LocalWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn test_format_structured_fields() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .event_format(CustomFormatter { prefix: "netsim" })
+            .with_writer(LocalWriter(buffer.clone()))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let get_line = || {
+                let mut buf = buffer.lock().unwrap();
+                let output = String::from_utf8(buf.clone()).unwrap();
+                buf.clear();
+                output
+            };
+
+            let err = std::io::Error::other("disk full");
+            tracing::error!(error = %err, "Failed to write stats");
+            let line_a1 = get_line();
+            assert!(
+                line_a1.ends_with(" - Failed to write stats error=disk full\n"),
+                "Expected line to end with ' - Failed to write stats error=disk full\\n', got: {line_a1:?}"
+            );
+
+            tracing::error!(error = "disk full", "Failed to write stats");
+            let line_a2 = get_line();
+            assert!(
+                line_a2.ends_with(" - Failed to write stats error=disk full\n"),
+                "Expected line to end with ' - Failed to write stats error=disk full\\n', got: {line_a2:?}"
+            );
+
+            tracing::warn!(error = ?std::io::Error::other("timeout"), "Operation timed out");
+            let line_b = get_line();
+            assert!(
+                line_b.contains(" - Operation timed out error=Custom {"),
+                "Expected line to contain ' - Operation timed out error=Custom {{', got: {line_b:?}"
+            );
+
+            tracing::error!(chip_id = 42, error = %"disconnected", "Bridge failed");
+            let line_c = get_line();
+            assert!(
+                line_c.ends_with(" - Bridge failed chip_id=42 error=disconnected\n"),
+                "Expected line to end with ' - Bridge failed chip_id=42 error=disconnected\\n', got: {line_c:?}"
+            );
+
+            tracing::error!(error = %"fatal error");
+            let line_d = get_line();
+            assert!(
+                line_d.ends_with(" - error=fatal error\n"),
+                "Expected line to end with ' - error=fatal error\\n', got: {line_d:?}"
+            );
+
+            tracing::warn!(
+                log.target = "slirp",
+                log.module_path = "slirp::tftp",
+                log.file = "tftp.rs",
+                log.line = 7u32,
+                error = %"bad packet",
+                "TFTP warning"
+            );
+            let line_e = get_line();
+            assert!(
+                line_e.ends_with(" - TFTP warning error=bad packet\n"),
+                "Expected line to end with ' - TFTP warning error=bad packet\\n', got: {line_e:?}"
+            );
+        });
     }
 }

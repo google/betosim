@@ -106,7 +106,7 @@ fn remove_zip_files_in_dir(root: &Path) -> Result<usize> {
     for file in zip_files {
         match std::fs::remove_file(&file) {
             Ok(()) => removed += 1,
-            Err(err) => warn!("Failed to remove file {}: {err}", file.display()),
+            Err(err) => warn!(error = %err, "Failed to remove file {}", file.display()),
         }
     }
     Ok(removed)
@@ -119,7 +119,7 @@ fn clear_pcap_files_in_dir(root: &Path) -> bool {
         Ok(()) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => {
-            warn!("Failed to remove directory {}: {err}", path.display());
+            warn!(error = %err, "Failed to remove directory {}", path.display());
             false
         }
     }
@@ -134,7 +134,7 @@ pub fn remove_old_artifacts_in_dir(root: &Path) {
         }
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => error!("Failed to remove zip files in {}: {err}", root.display()),
+        Err(err) => error!(error = %err, "Failed to remove zip files in {}", root.display()),
     }
 
     // Clear all pcap files
@@ -175,7 +175,7 @@ pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
                 Ok(f) => f,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
-                    warn!("Failed to open artifact file {}: {err}", file.display());
+                    warn!(error = %err, "Failed to open artifact file {}", file.display());
                     continue;
                 }
             };
@@ -194,7 +194,7 @@ pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
         match remove_file(&file) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => warn!("Failed to remove artifact file {}: {err}", file.display()),
+            Err(err) => warn!(error = %err, "Failed to remove artifact file {}", file.display()),
         }
     }
 
