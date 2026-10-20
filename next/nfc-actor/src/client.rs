@@ -23,9 +23,9 @@ use crate::NfcActor;
 
 #[derive(Clone, Debug)]
 pub struct NfcClient {
-    pub client: ResourceClient<NfcActor>,
+    client: ResourceClient<NfcActor>,
     pub stats: std::sync::Arc<crate::stats::NfcStats>,
-    pub service_stats: std::sync::Arc<crate::stats::NfcServiceStats>,
+    service_stats: std::sync::Arc<crate::stats::NfcServiceStats>,
 }
 
 impl NfcClient {

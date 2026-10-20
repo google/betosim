@@ -16,7 +16,7 @@ mod error;
 mod lifecycle;
 mod nfc_actor;
 mod scene;
-pub mod service;
+mod service;
 mod stats;
 
 mod client;
@@ -27,8 +27,7 @@ pub use actor_framework::ResourceActor;
 pub use client::NfcClient;
 pub use error::NfcError;
 pub use nfc_actor::{
-    ChipState, NFC_MODE_IDLE, NFC_MODE_LISTEN, NFC_MODE_POLL, NfcAction, NfcActionResult, NfcActor,
-    NfcMode,
+    NFC_MODE_IDLE, NFC_MODE_LISTEN, NFC_MODE_POLL, NfcAction, NfcActionResult, NfcActor, NfcMode,
 };
 pub use scene::SceneClient;
 pub use service::NciCodec;
@@ -37,7 +36,5 @@ pub use stats::{NfcApi, NfcServiceStats, NfcStats};
 /// Creates a new NFC actor framework instance and client.
 pub fn new() -> (ResourceActor<NfcActor>, NfcClient) {
     let (runner, client) = ResourceActor::new(32);
-    let stats = std::sync::Arc::new(stats::NfcStats::new());
-    let service_stats = std::sync::Arc::new(stats::NfcServiceStats::new());
-    (runner, NfcClient { client, stats, service_stats })
+    (runner, NfcClient::new(client))
 }

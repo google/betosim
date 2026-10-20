@@ -155,12 +155,12 @@ impl NfcActor {
     }
 
     /// Returns true if a chip with the given ID is active.
-    pub fn is_chip_active(&self, id: &ChipId) -> bool {
+    pub(crate) fn is_chip_active(&self, id: &ChipId) -> bool {
         self.active_chips.contains_key(id)
     }
 
     /// Returns a reference to the active [`ChipState`] for the given chip ID.
-    pub fn get_chip(&self, id: &ChipId) -> Option<&ChipState> {
+    pub(crate) fn get_chip(&self, id: &ChipId) -> Option<&ChipState> {
         self.active_chips.get(id)
     }
 

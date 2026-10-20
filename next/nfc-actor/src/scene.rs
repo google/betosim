@@ -19,7 +19,7 @@ use std::{
 };
 
 /// Commands that can be sent to the Netsim-wrapped Casimir Scene.
-pub enum SceneCommand {
+pub(crate) enum SceneCommand {
     AddDevice {
         builder: Box<
             dyn FnOnce(
@@ -44,7 +44,7 @@ pub struct SceneClient {
 }
 
 impl SceneClient {
-    pub fn new(cmd_tx: tokio::sync::mpsc::UnboundedSender<SceneCommand>) -> Self {
+    pub(crate) fn new(cmd_tx: tokio::sync::mpsc::UnboundedSender<SceneCommand>) -> Self {
         Self { cmd_tx }
     }
 

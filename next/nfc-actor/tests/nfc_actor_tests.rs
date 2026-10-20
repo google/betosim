@@ -765,7 +765,7 @@ async fn test_multiple_chip_stats_separation() {
 async fn test_nci_packet_framing_codec() {
     use bytes::Bytes;
     use futures::StreamExt;
-    use nfc_actor::service::NciCodec;
+    use nfc_actor::NciCodec;
     use tokio_util::codec::FramedRead;
 
     // Continuous NCI stream:

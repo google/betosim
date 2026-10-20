@@ -26,20 +26,20 @@ use netsim_proto::stats::{
 #[derive(Debug)]
 pub struct NfcStats {
     // Telemetry fields (Bailey)
-    pub nci_errors: AtomicU64,
-    pub casimir_errors: AtomicU64,
-    pub rf_errors: AtomicU64,
-    pub other_errors: AtomicU64,
+    nci_errors: AtomicU64,
+    casimir_errors: AtomicU64,
+    rf_errors: AtomicU64,
+    other_errors: AtomicU64,
 
-    pub nci_commands_rx: AtomicU64,
-    pub nci_responses_tx: AtomicU64,
-    pub nci_notifications_tx: AtomicU64,
-    pub nci_data_rx: AtomicU64,
-    pub nci_data_tx: AtomicU64,
-    pub rf_taps_tx: AtomicU64,
-    pub rf_taps_rx: AtomicU64,
-    pub card_emulation_count: AtomicU64,
-    pub tag_emulation_count: AtomicU64,
+    nci_commands_rx: AtomicU64,
+    nci_responses_tx: AtomicU64,
+    nci_notifications_tx: AtomicU64,
+    nci_data_rx: AtomicU64,
+    nci_data_tx: AtomicU64,
+    rf_taps_tx: AtomicU64,
+    rf_taps_rx: AtomicU64,
+    card_emulation_count: AtomicU64,
+    tag_emulation_count: AtomicU64,
 
     // API fields (Ours)
     nfc_apis: NfcApiArray,
@@ -94,12 +94,13 @@ pub enum NfcApi {
     TagTransceive = 7,
     CardEmulationProcessCommandApdu = 8,
     CardEmulationSendResponseApdu = 9,
-    Count = 10,
 }
+
+const NFC_API_COUNT: usize = 10;
 
 #[derive(Debug)]
 struct NfcApiArray {
-    data: [AtomicU32; NfcApi::Count as usize],
+    data: [AtomicU32; NFC_API_COUNT],
 }
 
 impl Default for NfcApiArray {
@@ -425,7 +426,8 @@ mod tests {
     #[test]
     fn test_nfc_api_get_out_of_bounds() {
         let stats = NfcStats::new();
-        assert_eq!(stats.get(NfcApi::Count), 0);
+        assert_eq!(stats.nfc_apis.data.len(), NFC_API_COUNT);
+        assert!(stats.nfc_apis.data.get(NFC_API_COUNT).is_none());
     }
 
     #[test]
