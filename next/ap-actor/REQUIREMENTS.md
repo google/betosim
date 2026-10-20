@@ -104,7 +104,7 @@ gRPC API. It maintains state for multiple virtual Access Points simultaneously.
   - [Man Pages](https://manpages.debian.org/testing/hostapd/hostapd.8.en.html)
   - [AOSP Source (legacy)](https://cs.android.com/android/platform/superproject/+/main:external/wpa_supplicant_8/) -
     Reference implementation for behavior parity.
-- [netsim CLI](https://android.googlesource.com/platform/tools/netsim/+/refs/heads/main/rust/cli/README.md)
+- [netsim CLI](https://android.googlesource.com/platform/tools/netsim/+/refs/heads/main/next/cli/README.md)
 - [mac80211_hwsim](https://docs.kernel.org/networking/mac80211_hwsim.html)
 
 ## 4. Functional Requirements

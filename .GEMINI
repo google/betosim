@@ -19,7 +19,7 @@ When checked out within the Android repo tree:
 Third-party Rust dependencies are imported via a custom module extension:
 - **Extension**: `cargo/local_rust_crates.bzl` (module extension `local_rust_crates`).
 - It scans vendored crates in `external/rust/android-crates-io` and registers them as Bazel repositories (`@crates//:<crate_name>`).
-- Custom build patches for crates reside in `cargo/netsim_build/`.
+- Custom build patches for crates reside in `cargo/build/`.
 
 ## Build Usage
 - Run builds from `tools/netsim` using Bazel or `python3 scripts/build_tools.py`:

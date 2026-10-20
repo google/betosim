@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Launch Netsim Daemon & Dual Headless Emulators with Host DNS, Nfc & netsimx Features
+# Launch Netsim Daemon & Dual Headless Emulators with Host DNS & Nfc Features
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ ADB_BIN="${SDK_DIR}/platform-tools/adb"
 
 echo "=========================================================="
 echo " Starting Netsim Daemon & Dual Pixel 10 Emulators (Headless)"
-echo " Features: Nfc, netsimx"
+echo " Features: Nfc"
 echo "=========================================================="
 
 # Helper function for resilient daemonization
@@ -47,7 +47,6 @@ echo "[1/4] Terminating existing emulator and netsimd instances..."
 pkill -9 -f "qemu-system-x86_64" 2>/dev/null || true
 pkill -9 -f "qemu-system-aarch64" 2>/dev/null || true
 pkill -9 -f "netsimd" 2>/dev/null || true
-pkill -9 -f "netsimdx" 2>/dev/null || true
 rm -f ~/.android/avd/Pixel_10*.avd/*.lock 2>/dev/null || true
 sleep 2
 
@@ -58,8 +57,8 @@ sleep 2
 
 # 3. Launch Dual Emulators
 echo "[3/4] Launching Pixel_10 (5554) and Pixel_10_2 (5556) with Features..."
-run_daemon /tmp/emu_5554.log "${EMULATOR_BIN}" -avd Pixel_10 -port 5554 -no-window -no-snapshot-load -dns-server 8.8.8.8,8.8.4.4 -feature Nfc -feature netsimx
-run_daemon /tmp/emu_5556.log "${EMULATOR_BIN}" -avd Pixel_10_2 -port 5556 -no-window -no-snapshot-load -dns-server 8.8.8.8,8.8.4.4 -feature Nfc -feature netsimx
+run_daemon /tmp/emu_5554.log "${EMULATOR_BIN}" -avd Pixel_10 -port 5554 -no-window -no-snapshot-load -dns-server 8.8.8.8,8.8.4.4 -feature Nfc
+run_daemon /tmp/emu_5556.log "${EMULATOR_BIN}" -avd Pixel_10_2 -port 5556 -no-window -no-snapshot-load -dns-server 8.8.8.8,8.8.4.4 -feature Nfc
 disown -a 2>/dev/null || true
 
 # 4. Wait for boot completion

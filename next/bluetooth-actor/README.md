@@ -34,7 +34,7 @@ All high-frequency packet I/O is handled through a generic `PacketStreamerApi` t
 You can build the Rust library using Bazel:
 
 ```bash
-bazel build //next/bluetooth
+bazel build //next/bluetooth-actor
 ```
 
 ## Running Tests
@@ -42,7 +42,7 @@ bazel build //next/bluetooth
 To run all unit tests and linter checks, use the following Bazel command:
 
 ```bash
-bazel test //next/bluetooth:tests
+bazel test //next/bluetooth-actor:test //next/bluetooth-actor:integration-test
 ```
 
 ### Test-Only Functions
@@ -54,7 +54,7 @@ This crate includes functions intended only for testing, which are exposed under
 To generate and view the crate's documentation, run the following command:
 
 ```bash
-bazel build //next/bluetooth:doc
+bazel build //next/bluetooth-actor:doc
 ```
 
-The generated documentation can be found in the `bazel-bin/rust/bluetooth/doc.rustdoc/bluetooth/index.html` file.
+The generated documentation can be found in the `bazel-bin/next/bluetooth-actor/doc.rustdoc/bluetooth_actor/index.html` file.

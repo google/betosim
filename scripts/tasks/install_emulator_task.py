@@ -152,7 +152,7 @@ class InstallEmulatorManager:
           )
       ):
         logging.info(
-            "Please run 'scripts/build_tools.py --task Compile' or"
+            "Please run 'scripts/build_tools.py --task Build' or"
             " 'scripts/build_tools.py --task CompileInstall' before running"
             " InstallEmulator"
         )
