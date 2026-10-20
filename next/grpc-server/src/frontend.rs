@@ -28,6 +28,7 @@ use netsim_proto::{
     frontend_grpc::FrontendService,
     protobuf,
 };
+use tokio::io::AsyncReadExt;
 
 use crate::frontend_converter::to_proto_device;
 
@@ -39,6 +40,7 @@ pub(crate) struct FrontendClient {
     capture_client: capture_actor::CaptureClient,
     version: String,
     frontend_stats: Arc<netsim_model::FrontendStats>,
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl FrontendClient {
@@ -50,7 +52,15 @@ impl FrontendClient {
         version: String,
         frontend_stats: Arc<netsim_model::FrontendStats>,
     ) -> Self {
-        Self { device_client, link_client, ap_client, capture_client, version, frontend_stats }
+        Self {
+            device_client,
+            link_client,
+            ap_client,
+            capture_client,
+            version,
+            frontend_stats,
+            tokio_handle: tokio::runtime::Handle::current(),
+        }
     }
 
     async fn handle_create_link(
@@ -424,7 +434,6 @@ impl FrontendClient {
         let mut buffer = vec![0u8; CHUNK_LEN];
 
         loop {
-            use tokio::io::AsyncReadExt;
             let length = match reader.read(&mut buffer).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -658,13 +667,13 @@ impl FrontendService for FrontendClient {
 
     fn get_capture(
         &mut self,
-        ctx: RpcContext,
+        _ctx: RpcContext,
         req: GetCaptureRequest,
         sink: ServerStreamingSink<GetCaptureResponse>,
     ) {
         self.frontend_stats.get_capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.capture_client.clone();
-        ctx.spawn(async move {
+        self.tokio_handle.spawn(async move {
             Self::handle_get_capture(client, req, sink).await;
         });
     }
@@ -950,5 +959,75 @@ mod tests {
             EnumOrUnknown::new(netsim_proto::common::ChipKind::UWB)
         );
         assert_eq!(resp.device.chips[0].name, "uwb-anchor");
+    }
+
+    #[tokio::test]
+    async fn test_get_capture_over_grpc_server() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let (capture_runner, capture_client) = capture_actor::new();
+        let capture_actor_state =
+            capture_actor::CaptureActor::new(false, Some(temp_dir.path().to_path_buf()));
+        tokio::spawn(capture_runner.run(capture_actor_state));
+
+        let enabled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let create = capture_actor::CaptureCreate {
+            chip_kind: ChipKind::BLUETOOTH,
+            device_name: "test-bt".to_string(),
+            enabled_flag,
+        };
+        let chip_id = ChipId(10);
+        capture_client.create_capture(chip_id, create).await.unwrap();
+
+        // Enable capture to flush PCAP header to disk, then disable
+        capture_client.update_capture(chip_id, true).await.unwrap();
+        capture_client.update_capture(chip_id, false).await.unwrap();
+
+        let info = capture_client.get_capture(chip_id).await.unwrap().unwrap();
+        let pcap_filepath = info.filepath.as_ref().unwrap();
+        let expected_bytes = std::fs::read(pcap_filepath).unwrap();
+
+        let (_, device_client) = device_actor::new();
+        let (_, ap_client) = ap_actor::new();
+        let frontend = FrontendClient::new(
+            device_client,
+            Arc::new(MockLinkClient::new()),
+            ap_client,
+            capture_client.clone(),
+            "1.0.0-test".to_string(),
+            Arc::new(netsim_model::FrontendStats::default()),
+        );
+
+        let server_env = Arc::new(grpcio::Environment::new(1));
+        let service = netsim_proto::frontend_grpc::create_frontend_service(frontend);
+        let mut server =
+            grpcio::ServerBuilder::new(server_env).register_service(service).build().unwrap();
+        let port = server
+            .add_listening_port("127.0.0.1:0", grpcio::ServerCredentials::insecure())
+            .unwrap();
+        server.start();
+        let client_env = Arc::new(grpcio::Environment::new(1));
+        let channel = grpcio::ChannelBuilder::new(client_env).connect(&format!("127.0.0.1:{port}"));
+        let client = netsim_proto::frontend_grpc::FrontendServiceClient::new(channel);
+
+        let mut req = GetCaptureRequest::new();
+        req.id = chip_id.0;
+        let mut rx = client.get_capture(&req).unwrap();
+
+        let mut streamed_bytes = Vec::new();
+        while let Some(chunk) = futures::StreamExt::next(&mut rx).await {
+            let res = chunk.unwrap();
+            streamed_bytes.extend_from_slice(&res.capture_stream);
+        }
+        assert_eq!(streamed_bytes, expected_bytes);
+
+        // Verify "grpc-poll-0" is alive and can process subsequent requests
+        let ver = client.get_version_async(&Empty::new()).unwrap().await.unwrap();
+        assert_eq!(ver.version, "1.0.0-test");
+
+        drop(client);
+        let shutdown_fut = server.shutdown();
+        server.cancel_all_calls();
+        let _ = shutdown_fut.await;
     }
 }

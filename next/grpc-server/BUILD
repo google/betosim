@@ -26,6 +26,7 @@ netsim_rust_library(
     ],
     test_deps = [
         "//next/actor-framework:testing",
+        "@tempfile",
     ],
     deps = [
         "//next/ap-actor",

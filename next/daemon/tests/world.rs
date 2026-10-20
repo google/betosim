@@ -63,7 +63,6 @@ pub struct World {
     pub grpc_port: u16,
     pub http_port: u16,
     _temp_dir: PathBuf,
-    _ini_guard: Option<daemon::IniFileInitialized>,
 }
 
 impl Drop for World {
@@ -101,8 +100,8 @@ impl World {
                 .await
                 .expect("Failed to create daemon");
 
-        let (daemon, ini_guard) = match startup_mode {
-            StartUpMode::Owner(daemon, ini_guard) => (daemon, ini_guard),
+        let daemon = match startup_mode {
+            StartUpMode::Owner(daemon) => daemon,
             _ => panic!("Expected to start as Owner"),
         };
 
@@ -134,7 +133,6 @@ impl World {
             grpc_port,
             http_port,
             _temp_dir: temp_dir,
-            _ini_guard: Some(ini_guard),
         }
     }
 
@@ -314,9 +312,8 @@ impl World {
             panic!("Daemon already spawned");
         }
         if let Some(daemon) = self.daemon.take() {
-            let ini_guard = self._ini_guard.take().expect("Discovery lock already handed over");
             let task = tokio::spawn(async move {
-                let _ = daemon.run_daemon(ini_guard).await;
+                let _ = daemon.run_daemon().await;
             });
             self.daemon_task = Some(task);
         } else {

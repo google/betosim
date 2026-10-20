@@ -14,7 +14,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use daemon::{Args, IniFileInitialized, NetsimDaemon, StartUpMode};
+use daemon::{Args, NetsimDaemon, StartUpMode};
 use device_actor::DeviceClient;
 use netsim_model::{Chip, ChipKind, ChipVariant, DeviceAddChip, DeviceConfig, DeviceId, Pose};
 use tokio::{
@@ -30,7 +30,6 @@ struct RootcanalWorld {
     daemon_task: Option<tokio::task::JoinHandle<()>>,
     temp_dir: PathBuf,
     test_port: u16,
-    _ini_guard: Option<IniFileInitialized>,
     device_client: DeviceClient,
 }
 
@@ -63,8 +62,8 @@ impl RootcanalWorld {
             .await
             .expect("Failed to create daemon");
 
-        let (daemon, ini_guard) = match startup_mode {
-            StartUpMode::Owner(daemon, ini_guard) => (daemon, ini_guard),
+        let daemon = match startup_mode {
+            StartUpMode::Owner(daemon) => daemon,
             _ => panic!("Expected daemon to start as Owner"),
         };
 
@@ -83,7 +82,6 @@ impl RootcanalWorld {
             daemon_task: None,
             temp_dir,
             test_port,
-            _ini_guard: Some(ini_guard),
             device_client,
         }
     }
@@ -94,9 +92,8 @@ impl RootcanalWorld {
             panic!("Daemon already spawned");
         }
         if let Some(daemon) = self.daemon.take() {
-            let ini_guard = self._ini_guard.take().expect("Discovery lock already handed over");
             let task = tokio::spawn(async move {
-                let _ = daemon.run_daemon(ini_guard).await;
+                let _ = daemon.run_daemon().await;
             });
             self.daemon_task = Some(task);
             // Allow time to yield and let the listener bind

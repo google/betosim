@@ -98,7 +98,7 @@ fn init_error<E: std::fmt::Display>(e: E) -> RunResult {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum StartUpMode {
-    Owner(NetsimDaemon, IniFileInitialized),
+    Owner(NetsimDaemon),
     Client(NetsimConfig),
 }
 
@@ -454,6 +454,11 @@ pub struct NetsimDaemon {
 
     slirp_client: SlirpClient,
     chip_clients: HashMap<ChipKind, Box<dyn ChipClient>>,
+    /// Guard holding the discovery INI file lock. Declared as the last field so
+    /// `netsim.ini.lock` is released only after `_grpc_server`, actor clients,
+    /// and task handles are dropped (Rust drops struct fields in declaration
+    /// order).
+    _ini_guard: IniFileInitialized,
 }
 
 impl Drop for NetsimDaemon {
@@ -1030,29 +1035,27 @@ impl NetsimDaemon {
             get_version(),
         ));
 
-        Ok(StartUpMode::Owner(
-            NetsimDaemon {
-                device_client,
-                capture_client,
-                next_chip_id,
-                join_set,
-                streams,
-                listener_addresses,
-                args,
-                _grpc_server: Some(grpc_server),
-                http_port: Some(actual_http_port),
-                http_task,
-                device_task,
-                capture_task,
-                artifact_dir,
-                ini_path,
-                ini_lock_inode,
-                link_client: Box::new(link_client),
-                slirp_client,
-                chip_clients: daemon_chip_clients,
-            },
-            initialized_guard,
-        ))
+        Ok(StartUpMode::Owner(NetsimDaemon {
+            device_client,
+            capture_client,
+            next_chip_id,
+            join_set,
+            streams,
+            listener_addresses,
+            args,
+            _grpc_server: Some(grpc_server),
+            http_port: Some(actual_http_port),
+            http_task,
+            device_task,
+            capture_task,
+            artifact_dir,
+            ini_path,
+            ini_lock_inode,
+            link_client: Box::new(link_client),
+            slirp_client,
+            chip_clients: daemon_chip_clients,
+            _ini_guard: initialized_guard,
+        }))
     }
     /// Gets the gRPC port, if the server is running.
     pub fn grpc_port(&self) -> Option<u16> {
@@ -1166,9 +1169,9 @@ impl NetsimDaemon {
     }
 
     /// Runs the main event loop for the daemon, then tears it down while
-    /// `ini_guard` keeps `netsim.ini.lock` held; the guard is released only
+    /// `self._ini_guard` keeps `netsim.ini.lock` held; the guard is released only
     /// after `self` (actors, gRPC server, C++ FFI state) has been dropped.
-    pub async fn run_daemon(mut self, ini_guard: IniFileInitialized) -> RunResult {
+    pub async fn run_daemon(mut self) -> RunResult {
         info!("Netsimd started {}", if self.args.no_shutdown { "--no-shutdown" } else { "" });
 
         let shutdown_signal = shutdown_signal();
@@ -1278,10 +1281,10 @@ impl NetsimDaemon {
         let _ =
             run_zip_with_timeout(ARTIFACT_ZIP_TIMEOUT, move || zip_artifacts_in_dir(&artifact_dir))
                 .await;
-        // Drop `self` (C++ FFI / gRPC destructors) and then the discovery lock
-        // while the teardown watchdog is still armed, then disarm it.
+        // Drop `self` (C++ FFI / gRPC destructors and lastly `_ini_guard` to
+        // release `netsim.ini.lock`) while the teardown watchdog is still
+        // armed, then disarm it.
         drop(self);
-        drop(ini_guard);
         drop(watchdog_tx);
         RunResult::ExitedNormally
     }
@@ -1361,14 +1364,14 @@ pub fn run() -> RunResult {
     let result = runtime.block_on(run_async());
     // Detach any wedged worker or timed-out `spawn_blocking` task immediately
     // once `run_async()` returns (`Runtime::drop` would block indefinitely, and
-    // waiting after `ini_guard` is dropped would keep `.lock`-less cleanup alive).
+    // waiting after `_ini_guard` is dropped would keep `.lock`-less cleanup alive).
     runtime.shutdown_background();
     result
 }
 
 async fn run_async() -> RunResult {
     match NetsimDaemon::new().await {
-        Ok(StartUpMode::Owner(daemon, ini_guard)) => daemon.run_daemon(ini_guard).await,
+        Ok(StartUpMode::Owner(daemon)) => daemon.run_daemon().await,
         Ok(StartUpMode::Client(config)) => {
             // If we are just a client, we shouldn't necessarily fail, but if
             // the user expected to start a NEW daemon, they might

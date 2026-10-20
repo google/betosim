@@ -39,6 +39,8 @@ netsim-model = { path = "../model" }
 packet-stream = { path = "../packet-stream" }
 protobuf = "3"
 tokio = { version = "1", features = [
+  "fs",
+  "io-util",
   "macros",
   "rt-multi-thread",
   "sync",
@@ -49,3 +51,4 @@ tracing = "0.1"
 
 [dev-dependencies]
 capture-api = { path = "../capture-api" }
+tempfile = "3"
