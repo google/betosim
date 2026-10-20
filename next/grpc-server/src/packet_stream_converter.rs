@@ -20,7 +20,7 @@ use netsim_proto::{
     startup as proto_startup,
 };
 use packet_stream::{
-    Chip, ChipInfo, ChipKind, DeviceInfo,
+    BtControllerProperties, Chip, ChipInfo, ChipKind, DeviceInfo,
     error::{PacketStreamError, Result},
 };
 use protobuf::Enum;
@@ -31,6 +31,7 @@ fn proto_to_chip_kind(proto: protobuf::EnumOrUnknown<proto_common::ChipKind>) ->
 }
 
 fn proto_to_chip(proto: proto_startup::Chip) -> Chip {
+    let bt_properties = proto.bt_properties.as_ref().and_then(BtControllerProperties::from_proto);
     Chip {
         kind: proto_to_chip_kind(proto.kind),
         id: proto.id,
@@ -41,6 +42,7 @@ fn proto_to_chip(proto: proto_startup::Chip) -> Chip {
         sim_type: if proto.sim_type != 0 { Some(proto.sim_type) } else { None },
         sim_profile: proto.sim_profile,
         loopback: proto.loopback,
+        bt_properties,
     }
 }
 
@@ -105,5 +107,72 @@ pub(crate) fn packet_request_to_bytes(value: PacketRequest) -> Result<Bytes> {
         _ => Err(PacketStreamError::InvalidConfig(
             "PacketRequest does not contain a supported packet type".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use netsim_proto::configuration::{
+        Controller, ControllerFeatures, ControllerPreset, ControllerQuirks, VendorFeatures,
+    };
+    use protobuf::MessageField;
+
+    use super::*;
+
+    #[test]
+    fn test_proto_to_chip_info_populates_bt_properties() {
+        let mut proto_chip = proto_startup::Chip::new();
+        proto_chip.kind = protobuf::EnumOrUnknown::new(proto_common::ChipKind::BLUETOOTH);
+        proto_chip.id = "chip-1".to_string();
+
+        let mut ctrl = Controller::new();
+        ctrl.set_preset(ControllerPreset::LAIRD_BL654);
+
+        let mut feats = ControllerFeatures::new();
+        feats.le_connected_isochronous_stream = Some(false);
+        ctrl.features = MessageField::some(feats);
+
+        let mut quirks = ControllerQuirks::new();
+        quirks.hardware_error_before_reset = Some(true);
+        ctrl.quirks = MessageField::some(quirks);
+
+        ctrl.set_strict(true);
+
+        let mut vendor = VendorFeatures::new();
+        vendor.android = Some(true);
+        ctrl.vendor = MessageField::some(vendor);
+
+        proto_chip.bt_properties = MessageField::some(ctrl);
+
+        let mut proto_info = proto_startup::ChipInfo::new();
+        proto_info.name = "test-device".to_string();
+        proto_info.chip = MessageField::some(proto_chip);
+
+        let chip_info = proto_to_chip_info(proto_info);
+        let chip = chip_info.chip.expect("chip present");
+        let props = chip.bt_properties.expect("bt_properties present");
+
+        assert_eq!(props.preset.as_deref(), Some("laird_bl654"));
+        assert_eq!(
+            props.features.as_ref().and_then(|f| f.le_connected_isochronous_stream),
+            Some(false)
+        );
+        assert_eq!(props.quirks.as_ref().and_then(|q| q.hardware_error_before_reset), Some(true));
+        assert_eq!(props.strict, Some(true));
+        assert_eq!(props.vendor.as_ref().and_then(|v| v.android), Some(true));
+    }
+
+    #[test]
+    fn test_proto_to_chip_info_empty_bt_properties_is_none() {
+        let mut proto_chip = proto_startup::Chip::new();
+        proto_chip.kind = protobuf::EnumOrUnknown::new(proto_common::ChipKind::BLUETOOTH);
+        proto_chip.bt_properties = MessageField::some(Controller::new());
+
+        let mut proto_info = proto_startup::ChipInfo::new();
+        proto_info.chip = MessageField::some(proto_chip);
+
+        let chip_info = proto_to_chip_info(proto_info);
+        let chip = chip_info.chip.expect("chip present");
+        assert!(chip.bt_properties.is_none());
     }
 }

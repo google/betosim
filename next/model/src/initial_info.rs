@@ -15,4 +15,7 @@
 // src/initial_info.rs - Data models for initial connection handshake
 //=============================================================================
 
-pub use netsim_types::{ChipInfo, ChipKind};
+pub use netsim_types::{
+    BtControllerFeatures, BtControllerProperties, BtControllerQuirks, BtControllerVendorFeatures,
+    ChipInfo, ChipKind,
+};

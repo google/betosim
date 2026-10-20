@@ -35,6 +35,7 @@ fn create_test_chip_info() -> ChipInfo {
             sim_type: None,
             sim_profile: None,
             loopback: false,
+            bt_properties: None,
         }),
         device_info: Some(DeviceInfo {
             name: "test-device".to_string(),

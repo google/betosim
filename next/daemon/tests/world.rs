@@ -804,6 +804,23 @@ impl World {
         self.send_initial_info(chip_info).await;
     }
 
+    pub async fn given_initial_info_sent_with_bt_properties(
+        &mut self,
+        chip_name: &str,
+        bt_properties: netsim_proto::configuration::Controller,
+    ) {
+        let mut chip_info = netsim_proto::startup::ChipInfo::new();
+        chip_info.name = chip_name.to_string();
+
+        let mut chip = netsim_proto::startup::Chip::new();
+        chip.kind = netsim_proto::protobuf::EnumOrUnknown::new(ChipKind::BLUETOOTH);
+        chip.address = "11:22:33:44:55:66".to_string();
+        chip.bt_properties = netsim_proto::protobuf::MessageField::some(bt_properties);
+        chip_info.chip = netsim_proto::protobuf::MessageField::some(chip);
+
+        self.send_initial_info(chip_info).await;
+    }
+
     pub async fn when_send_hci_packet(
         &mut self,
         packet_type: netsim_proto::hci_packet::hcipacket::PacketType,
@@ -866,5 +883,17 @@ impl World {
         let hci = response.hci_packet();
         assert_eq!(hci.packet_type.enum_value_or_default(), packet_type);
         assert_eq!(hci.packet, data);
+    }
+
+    pub async fn then_packet_stream_receives_hci_event(&mut self) -> Vec<u8> {
+        let receiver = self.packet_receiver.as_mut().expect("No packet receiver");
+        let response = timeout(Duration::from_secs(5), receiver.next())
+            .await
+            .expect("Timed out waiting for a packet")
+            .expect("Stream ended")
+            .expect("Stream error");
+        let hci = response.hci_packet();
+        assert_eq!(hci.packet_type.enum_value_or_default(), PacketType::EVENT);
+        hci.packet.clone()
     }
 }

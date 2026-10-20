@@ -19,8 +19,8 @@ use device_api::{
 use link_api::Link as ApiLink;
 use netsim_model::{
     AdvertiseData, AdvertiseMode, AdvertiseSettings, AdvertiseTxPower, BleBeacon, BluetoothCreate,
-    BluetoothMode, BluetoothUpdate, ChipId, ChipKind as ApiChipKind, ChipUpdate, ChipVariantUpdate,
-    Interval, RadioUpdate, TxPower, UwbCreate,
+    BluetoothMode, BluetoothUpdate, BtControllerProperties, ChipId, ChipKind as ApiChipKind,
+    ChipUpdate, ChipVariantUpdate, Interval, RadioUpdate, TxPower, UwbCreate,
 };
 use netsim_proto::{
     common::ChipKind as ProtoChipKind,
@@ -78,6 +78,8 @@ pub(crate) fn to_proto_chip(c: netsim_model::Chip) -> ProtoChip {
                 let mut bt = netsim_proto::model::chip::Bluetooth::new();
                 bt.low_energy = MessageField::some(to_proto_radio(&bt_model.low_energy));
                 bt.classic = MessageField::some(to_proto_radio(&bt_model.classic));
+                bt.bt_properties =
+                    MessageField::from_option(bt_model.bt_properties.config.to_proto());
                 chip.chip = Some(netsim_proto::model::chip::Chip::Bt(bt));
             }
             netsim_model::ChipVariant::Wifi(wifi) => {
@@ -151,7 +153,12 @@ pub(crate) fn from_proto_chip_create(c: ChipCreate) -> Option<DeviceChipCreate> 
     } else if c.kind.enum_value_or_default() == ProtoChipKind::BLUETOOTH {
         let bt_create = BluetoothCreate {
             address: c.address,
-            bt_properties: Default::default(),
+            bt_properties: c
+                .bt_properties
+                .as_ref()
+                .and_then(BtControllerProperties::from_proto)
+                .map(netsim_model::Controller::from)
+                .unwrap_or_default(),
             mode: BluetoothMode::Device(Default::default()),
         };
         Some(DeviceChipCreate {
@@ -279,10 +286,14 @@ pub(crate) fn from_proto_chip_update(c: ProtoChip) -> ChipUpdate {
     let variant = if let Some(chip_oneof) = c.chip {
         match chip_oneof {
             netsim_proto::model::chip::Chip::Bt(bt) => {
+                let bt_properties =
+                    bt.bt_properties.as_ref().and_then(BtControllerProperties::from_proto);
+                let preset = bt_properties.as_ref().and_then(|p| p.preset.clone());
                 Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
                     classic: from_proto_radio_update(bt.classic.into_option()),
                     low_energy: from_proto_radio_update(bt.low_energy.into_option()),
-                    preset: None,
+                    preset,
+                    bt_properties,
                 }))
             }
             netsim_proto::model::chip::Chip::BleBeacon(_) => None, // TODO
@@ -397,5 +408,90 @@ mod tests {
             device_chip.chip,
             ChipCreateVariant::Uwb(UwbCreate::Anchor { address: Some("00:01".to_string()) })
         );
+    }
+
+    #[test]
+    fn test_from_proto_chip_update_bluetooth_properties() {
+        use netsim_proto::configuration::{Controller, ControllerFeatures, ControllerPreset};
+
+        let mut chip = ProtoChip::new();
+        let mut bt = netsim_proto::model::chip::Bluetooth::new();
+        let mut ctrl = Controller::new();
+        ctrl.set_preset(ControllerPreset::LAIRD_BL654);
+        let mut features = ControllerFeatures::new();
+        features.le_extended_advertising = Some(true);
+        ctrl.features = MessageField::some(features);
+        bt.bt_properties = MessageField::some(ctrl);
+        chip.chip = Some(netsim_proto::model::chip::Chip::Bt(bt));
+
+        let update = from_proto_chip_update(chip);
+        match update.variant {
+            Some(ChipVariantUpdate::Bluetooth(bt_update)) => {
+                assert_eq!(bt_update.preset, Some("laird_bl654".to_string()));
+                let props = bt_update.bt_properties.expect("bt_properties should be present");
+                assert_eq!(props.preset, Some("laird_bl654".to_string()));
+                assert_eq!(props.features.unwrap().le_extended_advertising, Some(true));
+            }
+            _ => panic!("Expected Bluetooth variant update"),
+        }
+    }
+
+    #[test]
+    fn test_from_proto_chip_create_bluetooth_properties() {
+        use netsim_proto::configuration::{Controller, ControllerFeatures, ControllerPreset};
+
+        let mut chip = ChipCreate::new();
+        chip.name = "bt-chip".to_string();
+        chip.kind = EnumOrUnknown::new(ProtoChipKind::BLUETOOTH);
+
+        let mut ctrl = Controller::new();
+        ctrl.set_preset(ControllerPreset::LAIRD_BL654);
+        let mut features = ControllerFeatures::new();
+        features.le_extended_advertising = Some(true);
+        ctrl.features = MessageField::some(features);
+        chip.bt_properties = MessageField::some(ctrl);
+
+        let device_chip = from_proto_chip_create(chip).expect("device chip created");
+        assert_eq!(device_chip.name, "bt-chip");
+        match device_chip.chip {
+            ChipCreateVariant::Bluetooth(bt_create) => {
+                assert_eq!(bt_create.bt_properties.config.preset, Some("laird_bl654".to_string()));
+                assert_eq!(
+                    bt_create.bt_properties.config.features.unwrap().le_extended_advertising,
+                    Some(true)
+                );
+            }
+            _ => panic!("Expected Bluetooth variant create"),
+        }
+    }
+
+    #[test]
+    fn test_to_proto_chip_bluetooth_properties() {
+        use netsim_proto::configuration::ControllerPreset;
+
+        let mut chip = netsim_model::Chip::new_test_ble("bt-device");
+        chip.variant =
+            Some(netsim_model::ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
+                bt_properties: netsim_model::BtControllerProperties {
+                    preset: Some("laird_bl654".to_string()),
+                    features: Some(netsim_model::BtControllerFeatures {
+                        le_extended_advertising: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            })));
+
+        let proto_chip = to_proto_chip(chip);
+        match proto_chip.chip {
+            Some(netsim_proto::model::chip::Chip::Bt(bt)) => {
+                let ctrl = bt.bt_properties.into_option().expect("bt_properties present");
+                assert_eq!(ctrl.preset(), ControllerPreset::LAIRD_BL654);
+                assert_eq!(ctrl.features.le_extended_advertising, Some(true));
+            }
+            _ => panic!("Expected Bluetooth variant chip"),
+        }
     }
 }

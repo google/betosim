@@ -106,6 +106,14 @@ impl ActorService for BluetoothActor {
             beacon_params.ble_beacon.address = raw_address;
         }
 
+        // Construct the Protobuf configuration for Rootcanal
+        let is_device = matches!(&mode, BluetoothMode::Device(_));
+        let config_bytes = bluetooth
+            .bt_properties
+            .config
+            .serialize_config(is_device)
+            .map_err(BluetoothError::invalid_arg)?;
+
         let mut chip = params.chip;
         chip.id = chip_id.0;
         chip.name = name;
@@ -148,24 +156,6 @@ impl ActorService for BluetoothActor {
         };
 
         // 3. Create Rootcanal Controller
-        // Construct the Protobuf configuration for Rootcanal
-        let mut quirks = netsim_proto::configuration::ControllerQuirks::new();
-        // This quirk forces Rootcanal to reject post-init commands from uninitialized
-        // hosts, causing a HAL restart that properly unmasks the LE Meta
-        // events. We only apply this to actual Emulator Devices, not internal
-        // netsim beacons or scanners.
-        if let BluetoothMode::Device(_) = &mode {
-            quirks.hardware_error_before_reset = Some(true);
-        }
-
-        let mut config_controller = netsim_proto::configuration::Controller::new();
-        config_controller.quirks = netsim_proto::protobuf::MessageField::some(quirks);
-
-        let config_bytes = netsim_proto::protobuf::Message::write_to_bytes(&config_controller)
-            .map_err(|e| {
-                BluetoothError::invalid_arg(format!("Failed to serialize bt config: {e}"))
-            })?;
-
         self.rootcanal
             .new_controller(chip_id.0, address, Box::new(callback), Some(&config_bytes))
             .to_chip_error()?;
@@ -207,35 +197,23 @@ impl ActorService for BluetoothActor {
         update: Self::Update,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
-        let config_bytes = if let Some(netsim_model::ChipVariantUpdate::Bluetooth(
-            netsim_model::BluetoothUpdate { preset: Some(preset_name), .. },
-        )) = &update.variant
-        {
-            let preset = parse_controller_preset(preset_name)?;
-            let mut config = netsim_proto::configuration::Controller::new();
-            config.set_preset(preset);
-            Some(netsim_proto::protobuf::Message::write_to_bytes(&config).map_err(|e| {
-                BluetoothError::invalid_arg(format!("Failed to serialize config: {e}"))
-            })?)
-        } else {
-            None
-        };
+        let should_update_properties = matches!(
+            &update.variant,
+            Some(netsim_model::ChipVariantUpdate::Bluetooth(bt_update))
+                if bt_update.preset.is_some() || bt_update.bt_properties.is_some()
+        );
 
-        if let Some(bytes) = config_bytes {
-            self.rootcanal
-                .set_properties(id.0, &bytes)
-                .map_err(|e| BluetoothError::Rootcanal(Box::new(e)))?;
+        let mut chip = {
+            let chips = self.chips.read();
+            chips.get(&id).cloned().ok_or(BluetoothError::not_found(id))?
+        };
+        update.apply(&mut chip);
+
+        if should_update_properties {
+            self.apply_chip_properties(id, &chip)?;
         }
 
-        let chip = {
-            let mut chips = self.chips.write();
-            let mut chip = chips.get(&id).cloned().ok_or(BluetoothError::not_found(id))?;
-
-            update.apply(&mut chip);
-            chips.insert(id, chip.clone());
-            chip
-        };
-
+        self.chips.write().insert(id, chip.clone());
         Ok(chip)
     }
 
@@ -254,6 +232,7 @@ impl ActorService for BluetoothActor {
 
             info!("Deleting chip {chip_id}");
             self.rootcanal.remove_controller(chip_id.0).to_chip_error()?;
+            self.initial_chips.remove(&id);
 
             // Notify DeviceService
             let dc = self.device_client.clone();
@@ -279,10 +258,13 @@ impl ActorService for BluetoothActor {
                 info!("Resetting Bluetooth chip {id}");
                 let _ = self.rootcanal.clear_stats(id.0);
 
+                let initial_chip =
+                    self.initial_chips.get(&id).ok_or(BluetoothError::not_found(id))?;
+
+                self.apply_chip_properties(id, initial_chip)?;
+
                 let chip = {
                     let mut chips = self.chips.write();
-                    let initial_chip =
-                        self.initial_chips.get(&id).ok_or(BluetoothError::not_found(id))?;
                     let chip = chips.get_mut(&id).ok_or(BluetoothError::not_found(id))?;
                     *chip = initial_chip.clone();
                     chip.clone()
@@ -345,19 +327,20 @@ impl BluetoothActor {
             }
         });
     }
-}
 
-/// Maps a string slice representation of a preset to its Protobuf Enum value.
-fn parse_controller_preset(
-    preset_name: &str,
-) -> Result<netsim_proto::configuration::ControllerPreset, BluetoothError> {
-    match preset_name {
-        "default" => Ok(netsim_proto::configuration::ControllerPreset::DEFAULT),
-        "laird_bl654" => Ok(netsim_proto::configuration::ControllerPreset::LAIRD_BL654),
-        "csr_rck_pts_dongle" => {
-            Ok(netsim_proto::configuration::ControllerPreset::CSR_RCK_PTS_DONGLE)
+    /// Serializes the chip's Bluetooth controller properties and applies them to RootCanal.
+    fn apply_chip_properties(&self, id: ChipId, chip: &Chip) -> Result<(), BluetoothError> {
+        if let Some(ChipVariant::Bluetooth(bt)) = &chip.variant {
+            let is_device = matches!(&bt.mode, BluetoothMode::Device(_));
+            let bytes = bt
+                .bt_properties
+                .config
+                .serialize_config(is_device)
+                .map_err(BluetoothError::invalid_arg)?;
+            self.rootcanal
+                .set_properties(id.0, &bytes)
+                .map_err(|e| BluetoothError::Rootcanal(Box::new(e)))?;
         }
-        "intel_be200" => Ok(netsim_proto::configuration::ControllerPreset::INTEL_BE200),
-        _ => Err(BluetoothError::invalid_arg(format!("Invalid preset: {preset_name}"))),
+        Ok(())
     }
 }

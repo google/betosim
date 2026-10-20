@@ -16,6 +16,7 @@ rust_library_host {
     features: ["cuttlefish"],
     lints: "none",
     rustlibs: [
+        "libnetsim_proto",
         "libserde",
     ],
 }
@@ -35,6 +36,7 @@ rust_library_host {
     ],
     lints: "none",
     rustlibs: [
+        "libnetsim_proto",
         "libserde",
     ],
 }
@@ -56,6 +58,7 @@ rust_test_host {
     ],
     lints: "none",
     rustlibs: [
+        "libnetsim_proto",
         "libserde",
     ],
 }
@@ -78,6 +81,7 @@ rust_test_host {
     lints: "none",
     rustlibs: [
         "libnetsim_next_types_testing",
+        "libnetsim_proto",
         "libserde",
     ],
 }

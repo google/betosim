@@ -89,7 +89,10 @@ pub use crate::device::{
 // From device_error.rs
 pub use crate::device_error::DeviceError;
 // From initial_info.rs
-pub use crate::initial_info::{ChipInfo, ChipKind};
+pub use crate::initial_info::{
+    BtControllerFeatures, BtControllerProperties, BtControllerQuirks, BtControllerVendorFeatures,
+    ChipInfo, ChipKind,
+};
 // From link.rs
 pub use crate::link::{Link, LinkCreate, LinkId, LinkUpdate};
 // From stats.rs

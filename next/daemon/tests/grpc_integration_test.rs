@@ -14,6 +14,7 @@
 
 use netsim_proto::{
     common::ChipKind,
+    configuration::{Controller, ControllerFeatures, ControllerPreset},
     frontend::PatchDeviceRequest,
     hci_packet::hcipacket::PacketType,
     model::ChipCreate,
@@ -393,4 +394,94 @@ async fn test_frontend_stats_tracking() {
         frontend_stats.get("delete_device").and_then(|v| v.as_u64()).unwrap_or(0) > 0,
         "delete_device not tracked or is 0"
     );
+}
+
+// Scenario: gRPC PacketStreamer with Laird BL654 preset applies buffer size (b/573454032)
+#[tokio::test]
+async fn test_grpc_bt_properties_laird_bl654_preset_buffer_size() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    world.when_open_packet_stream().await;
+
+    let mut bt_props = Controller::new();
+    bt_props.set_preset(ControllerPreset::LAIRD_BL654);
+    world.given_initial_info_sent_with_bt_properties("laird-chip", bt_props).await;
+
+    // Send HCI_Reset ([0x03, 0x0c, 0x00])
+    world.when_send_hci_packet(PacketType::COMMAND, vec![0x03, 0x0c, 0x00]).await;
+    world
+        .then_packet_stream_receives_hci(PacketType::EVENT, &[0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00])
+        .await;
+
+    // Send HCI_LE_Read_Buffer_Size ([0x02, 0x20, 0x00])
+    world.when_send_hci_packet(PacketType::COMMAND, vec![0x02, 0x20, 0x00]).await;
+    // LAIRD_BL654: 512 bytes (0x0200) and 4 packets (0x04)
+    world
+        .then_packet_stream_receives_hci(
+            PacketType::EVENT,
+            &[0x0e, 0x07, 0x01, 0x02, 0x20, 0x00, 0x00, 0x02, 0x04],
+        )
+        .await;
+
+    world.when_close_packet_stream().await;
+}
+
+// Scenario: gRPC PacketStreamer with default config buffer size
+#[tokio::test]
+async fn test_grpc_bt_properties_default_buffer_size() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    world.when_open_packet_stream().await;
+
+    let bt_props = Controller::new();
+    world.given_initial_info_sent_with_bt_properties("default-chip", bt_props).await;
+
+    // Send HCI_Reset ([0x03, 0x0c, 0x00])
+    world.when_send_hci_packet(PacketType::COMMAND, vec![0x03, 0x0c, 0x00]).await;
+    world
+        .then_packet_stream_receives_hci(PacketType::EVENT, &[0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00])
+        .await;
+
+    // Send HCI_LE_Read_Buffer_Size ([0x02, 0x20, 0x00])
+    world.when_send_hci_packet(PacketType::COMMAND, vec![0x02, 0x20, 0x00]).await;
+    // DEFAULT: 27 bytes (0x001b) and 20 packets (0x14)
+    world
+        .then_packet_stream_receives_hci(
+            PacketType::EVENT,
+            &[0x0e, 0x07, 0x01, 0x02, 0x20, 0x00, 0x1b, 0x00, 0x14],
+        )
+        .await;
+
+    world.when_close_packet_stream().await;
+}
+
+// Scenario: gRPC PacketStreamer disabling CIS feature clears feature bits
+#[tokio::test]
+async fn test_grpc_bt_properties_disable_cis_feature() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    world.when_open_packet_stream().await;
+
+    let mut features = ControllerFeatures::new();
+    features.le_connected_isochronous_stream = Some(false);
+    let mut bt_props = Controller::new();
+    bt_props.features = MessageField::some(features);
+    world.given_initial_info_sent_with_bt_properties("no-cis-chip", bt_props).await;
+
+    // Send HCI_Reset ([0x03, 0x0c, 0x00])
+    world.when_send_hci_packet(PacketType::COMMAND, vec![0x03, 0x0c, 0x00]).await;
+    world
+        .then_packet_stream_receives_hci(PacketType::EVENT, &[0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00])
+        .await;
+
+    // Send HCI_LE_Read_Local_Supported_Features ([0x03, 0x20, 0x00])
+    world.when_send_hci_packet(PacketType::COMMAND, vec![0x03, 0x20, 0x00]).await;
+    let event = world.then_packet_stream_receives_hci_event().await;
+    // Command complete event for 0x2003: [0x0e, 0x0c, 0x01, 0x03, 0x20, 0x00, f0, f1, f2, f3, ...]
+    assert_eq!(event.len(), 14);
+    assert_eq!(&event[0..6], &[0x0e, 0x0c, 0x01, 0x03, 0x20, 0x00]);
+    // Feature byte 3 (packet index 9) has CIS bits (0x30) cleared:
+    assert_eq!(event[9] & 0x30, 0x00, "CIS feature bits should be cleared");
+
+    world.when_close_packet_stream().await;
 }

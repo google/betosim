@@ -89,4 +89,7 @@ pub use transport::{
 };
 pub use types::StreamAddress;
 
-pub use crate::types::{Chip, ChipInfo, ChipKind, DeviceInfo};
+pub use crate::types::{
+    BtControllerFeatures, BtControllerProperties, BtControllerQuirks, BtControllerVendorFeatures,
+    Chip, ChipInfo, ChipKind, DeviceInfo,
+};

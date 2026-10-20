@@ -166,3 +166,64 @@ async fn test_actor_reset_re_enables_chip() {
         panic!("Not a Bluetooth chip");
     }
 }
+
+// Scenario: Create chip with Laird BL654 preset applies buffer size
+#[tokio::test]
+async fn test_create_chip_with_laird_bl654_preset_applies_buffer_size() {
+    let mut world = World::new();
+
+    let props = netsim_model::BtControllerProperties {
+        preset: Some("laird_bl654".to_string()),
+        ..Default::default()
+    };
+    world.given_created_device_chip_with_properties("A", props).await;
+
+    world.when_packet_sent("A", Bytes::from(vec![0x01, 0x03, 0x0c, 0x00])).await;
+    world.then_packet_received("A", &[0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00]).await;
+
+    world.when_packet_sent("A", Bytes::from(vec![0x01, 0x02, 0x20, 0x00])).await;
+    world
+        .then_packet_received("A", &[0x04, 0x0e, 0x07, 0x01, 0x02, 0x20, 0x00, 0x00, 0x02, 0x04])
+        .await;
+}
+
+// Scenario: Create chip with default config buffer size
+#[tokio::test]
+async fn test_create_chip_with_default_config_buffer_size() {
+    let mut world = World::new();
+
+    world.given_device("A").await;
+
+    world.when_packet_sent("A", Bytes::from(vec![0x01, 0x03, 0x0c, 0x00])).await;
+    world.then_packet_received("A", &[0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00]).await;
+
+    world.when_packet_sent("A", Bytes::from(vec![0x01, 0x02, 0x20, 0x00])).await;
+    world
+        .then_packet_received("A", &[0x04, 0x0e, 0x07, 0x01, 0x02, 0x20, 0x00, 0x1b, 0x00, 0x14])
+        .await;
+}
+
+// Scenario: Create chip disabling CIS feature clears feature bits
+#[tokio::test]
+async fn test_create_chip_disabling_cis_feature_clears_feature_bits() {
+    let mut world = World::new();
+
+    let props = netsim_model::BtControllerProperties {
+        features: Some(netsim_model::BtControllerFeatures {
+            le_connected_isochronous_stream: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    world.given_created_device_chip_with_properties("A", props).await;
+
+    world.when_packet_sent("A", Bytes::from(vec![0x01, 0x03, 0x0c, 0x00])).await;
+    world.then_packet_received("A", &[0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00]).await;
+
+    world.when_packet_sent("A", Bytes::from(vec![0x01, 0x03, 0x20, 0x00])).await;
+    let packet = world.receive_packet("A").await;
+    assert_eq!(packet.len(), 15);
+    assert_eq!(&packet[0..7], &[0x04, 0x0e, 0x0c, 0x01, 0x03, 0x20, 0x00]);
+    // Feature byte 3 (index 10 with H4 prefix) has CIS bits 0x30 cleared:
+    assert_eq!(packet[10] & 0x30, 0x00, "CIS feature bits should be cleared");
+}

@@ -159,9 +159,13 @@ async fn handle_new_connection(
 
     let chip_variant = match chip.kind {
         ChipKind::BLUETOOTH => {
+            let bt_properties =
+                chip.bt_properties.take().map(netsim_model::Controller::from).unwrap_or_default();
+            let preset = bt_properties.config.preset.clone();
             Some(netsim_model::ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
                 address: chip.address.clone(),
-                bt_properties: Default::default(),
+                bt_properties,
+                preset,
                 mode: BluetoothMode::Device(DeviceParams {}),
                 ..Default::default()
             })))

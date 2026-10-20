@@ -15,6 +15,7 @@
 // Rust definitions for Bluetooth related structures
 use std::collections::HashMap;
 
+use netsim_types::BtControllerProperties;
 use serde::{Deserialize, Serialize};
 
 use crate::chip::{Radio, RadioUpdate};
@@ -47,15 +48,21 @@ pub struct BluetoothUpdate {
     pub classic: RadioUpdate,
     pub low_energy: RadioUpdate,
     pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bt_properties: Option<BtControllerProperties>,
 }
 
 impl BluetoothUpdate {
     pub fn apply(&self, bluetooth: &mut Bluetooth) {
         self.classic.apply(&mut bluetooth.classic);
         self.low_energy.apply(&mut bluetooth.low_energy);
-        if let Some(preset) = &self.preset {
-            bluetooth.preset = Some(preset.clone());
+        if let Some(bt_props) = &self.bt_properties {
+            bt_props.apply(&mut bluetooth.bt_properties.config);
         }
+        if let Some(preset) = &self.preset {
+            bluetooth.bt_properties.config.preset = Some(preset.clone());
+        }
+        bluetooth.preset = bluetooth.bt_properties.config.preset.clone();
     }
 }
 
@@ -72,13 +79,14 @@ pub struct BluetoothCreate {
 
 impl From<BluetoothCreate> for Bluetooth {
     fn from(create: BluetoothCreate) -> Self {
+        let preset = create.bt_properties.config.preset.clone();
         Bluetooth {
             low_energy: Radio::default(),
             classic: Radio::default(),
             address: create.address,
             bt_properties: create.bt_properties,
             mode: create.mode,
-            preset: None,
+            preset,
         }
     }
 }
@@ -126,6 +134,8 @@ pub struct Controller {
     pub version: String,
     pub address: String,
     pub properties: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "BtControllerProperties::is_empty")]
+    pub config: BtControllerProperties,
 }
 
 impl Default for Controller {
@@ -136,7 +146,14 @@ impl Default for Controller {
             version: "1.0".to_string(),
             address: "00:00:00:00:00:00".to_string(),
             properties: HashMap::new(),
+            config: BtControllerProperties::default(),
         }
+    }
+}
+
+impl From<BtControllerProperties> for Controller {
+    fn from(config: BtControllerProperties) -> Self {
+        Self { config, ..Default::default() }
     }
 }
 

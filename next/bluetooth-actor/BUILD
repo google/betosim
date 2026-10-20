@@ -22,7 +22,6 @@ BLUETOOTH_DEPS = [
     "//next/device-actor",
     "//next/model",
     "//next/rootcanal",
-    "//proto",
     "//next/packets",
     "@bytes",
     "@futures",

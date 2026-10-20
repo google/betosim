@@ -21,6 +21,7 @@ netsim_rust_library(
     edition = "2024",
     visibility = ["//visibility:public"],
     deps = [
+        "//proto",
         "@serde",
     ],
 )

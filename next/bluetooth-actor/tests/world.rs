@@ -85,10 +85,11 @@ impl World {
     }
 
     /// Internal helper to create and register a chip
-    async fn create_chip(
+    async fn create_chip_with_properties(
         &mut self,
         name: &str,
         mode: BluetoothMode,
+        bt_properties: netsim_model::BtControllerProperties,
         packet_stream: Option<PacketStream>,
         packet_sink: Option<PacketSink>,
         device_id: DeviceId,
@@ -101,13 +102,14 @@ impl World {
         chip.id = id.0;
         chip.device_id = device_id;
         chip.product_name = name.to_string();
+        let preset = bt_properties.preset.clone();
         chip.variant = Some(ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
             low_energy: Default::default(),
             classic: Default::default(),
             address,
-            bt_properties: Default::default(),
+            bt_properties: netsim_model::Controller::from(bt_properties),
+            preset,
             mode,
-            ..Default::default()
         })));
 
         let params = ChipCreate { packet_stream, packet_sink, chip };
@@ -120,11 +122,44 @@ impl World {
         id
     }
 
+    /// Internal helper to create and register a chip with default controller properties
+    async fn create_chip(
+        &mut self,
+        name: &str,
+        mode: BluetoothMode,
+        packet_stream: Option<PacketStream>,
+        packet_sink: Option<PacketSink>,
+        device_id: DeviceId,
+    ) -> ChipId {
+        self.create_chip_with_properties(
+            name,
+            mode,
+            netsim_model::BtControllerProperties::default(),
+            packet_stream,
+            packet_sink,
+            device_id,
+        )
+        .await
+    }
+
     // --- Given Steps ---
 
     /// Creates a Bluetooth chip in Device mode with a given name.
     /// The stream and sink are automatically created and managed by the World.
     pub async fn given_device(&mut self, name: &str) {
+        self.given_created_device_chip_with_properties(
+            name,
+            netsim_model::BtControllerProperties::default(),
+        )
+        .await;
+    }
+
+    /// Creates a Bluetooth chip in Device mode with custom controller properties.
+    pub async fn given_created_device_chip_with_properties(
+        &mut self,
+        name: &str,
+        bt_properties: netsim_model::BtControllerProperties,
+    ) {
         if self.chips.contains_key(name) {
             panic!("Chip with name '{}' already exists", name);
         }
@@ -132,9 +167,10 @@ impl World {
         let (stream, stream_tx) = crate::test_utils::mock_stream();
         let (sink, sink_rx) = crate::test_utils::mock_sink();
 
-        self.create_chip(
+        self.create_chip_with_properties(
             name,
             BluetoothMode::Device(DeviceParams {}),
+            bt_properties,
             Some(stream),
             Some(sink),
             self.device_id,

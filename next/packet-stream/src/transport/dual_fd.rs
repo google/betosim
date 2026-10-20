@@ -279,6 +279,7 @@ fn create_stream_and_sink(
             sim_type,
             sim_profile,
             loopback: false,
+            bt_properties: None,
         }),
         name: String::new(),
     };
