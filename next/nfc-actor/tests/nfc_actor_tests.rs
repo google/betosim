@@ -627,13 +627,7 @@ async fn test_nfc_stats_counters() {
 
     // 6. DataPacket (Casimir -> Guest while in Listen Mode via mock peer) ->
     //    CardEmulationProcessCommandApdu
-    world
-        .actor
-        .active_chips
-        .get(&chip_id)
-        .unwrap()
-        .mode
-        .store(nfc_actor::NFC_MODE_LISTEN, std::sync::atomic::Ordering::Relaxed);
+    world.actor.active_chips.get(&chip_id).unwrap().set_mode(nfc_actor::NfcMode::Listen);
     let nci_data_pkt = vec![0, 0, 3, 1, 2, 3]; // NCI Data Packet
     mock_peer_cmd_tx.send(nci_data_pkt).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

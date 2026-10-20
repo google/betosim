@@ -26,9 +26,7 @@ pub use ::casimir;
 pub use actor_framework::ResourceActor;
 pub use client::NfcClient;
 pub use error::NfcError;
-pub use nfc_actor::{
-    NFC_MODE_IDLE, NFC_MODE_LISTEN, NFC_MODE_POLL, NfcAction, NfcActionResult, NfcActor, NfcMode,
-};
+pub use nfc_actor::{NfcAction, NfcActionResult, NfcActor, NfcMode};
 pub use scene::SceneClient;
 pub use service::NciCodec;
 pub use stats::{NfcApi, NfcServiceStats, NfcStats};

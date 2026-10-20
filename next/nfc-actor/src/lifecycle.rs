@@ -22,7 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info};
 
 use crate::{
-    nfc_actor::{NfcActor, NfcMode},
+    nfc_actor::{NciMessageType, NfcActor, NfcMode},
     stats::NfcApi,
 };
 
@@ -43,8 +43,7 @@ impl ActorLifecycle for NfcActor {
         let Some(&b0) = message.first() else {
             return;
         };
-        let mt = b0 >> 5;
-        if mt == 0 {
+        if NciMessageType::from_header_byte(b0) == Some(NciMessageType::Data) {
             // Data Packet
             if message.len() < 3 {
                 tracing::warn!(
@@ -52,7 +51,7 @@ impl ActorLifecycle for NfcActor {
                     message
                 );
                 self.nfc_stats.incr_nci_error();
-            } else if let Some(state) = self.active_chips.get(&id) {
+            } else if let Some(state) = self.get_chip(&id) {
                 match state.mode() {
                     NfcMode::Poll => {
                         self.nfc_stats.incr(NfcApi::TagTransceive);
@@ -77,13 +76,13 @@ impl ActorLifecycle for NfcActor {
                     Ok(ControlPacketChild::RfPacket(rf_pkt)) => match rf_pkt.specialize() {
                         Ok(RfPacketChild::RfDiscoverCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::AdapterEnableReaderMode);
-                            if let Some(state) = self.active_chips.get(&id) {
+                            if let Some(state) = self.get_chip(&id) {
                                 state.set_mode(NfcMode::Poll);
                             }
                         }
                         Ok(RfPacketChild::RfDiscoverSelectCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::TagConnect);
-                            if let Some(state) = self.active_chips.get(&id) {
+                            if let Some(state) = self.get_chip(&id) {
                                 state.set_mode(NfcMode::Poll);
                             }
                         }
@@ -91,7 +90,7 @@ impl ActorLifecycle for NfcActor {
                             match cmd.deactivation_type {
                                 DeactivationType::IdleMode => {
                                     self.nfc_stats.incr(NfcApi::AdapterDisableReaderMode);
-                                    if let Some(state) = self.active_chips.get(&id) {
+                                    if let Some(state) = self.get_chip(&id) {
                                         state.set_mode(NfcMode::Idle);
                                     }
                                 }
@@ -99,7 +98,7 @@ impl ActorLifecycle for NfcActor {
                                 | DeactivationType::SleepAfMode
                                 | DeactivationType::Discovery => {
                                     self.nfc_stats.incr(NfcApi::TagClose);
-                                    if let Some(state) = self.active_chips.get(&id) {
+                                    if let Some(state) = self.get_chip(&id) {
                                         if cmd.deactivation_type == DeactivationType::Discovery {
                                             state.set_mode(NfcMode::Poll);
                                         } else {
@@ -111,7 +110,7 @@ impl ActorLifecycle for NfcActor {
                         }
                         Ok(RfPacketChild::RfSetListenModeRoutingCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::AdapterSetListenModeRouting);
-                            if let Some(state) = self.active_chips.get(&id) {
+                            if let Some(state) = self.get_chip(&id) {
                                 state.set_mode(NfcMode::Listen);
                             }
                         }
@@ -125,7 +124,7 @@ impl ActorLifecycle for NfcActor {
             }
         }
 
-        if let Some(state) = self.active_chips.get_mut(&id)
+        if let Some(state) = self.get_chip_mut(&id)
             && let Err(error) = state.nfc_writer.write_all(&message).await
         {
             error!(?error, "Failed to write guest packet to Casimir");
@@ -164,7 +163,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        nfc_actor::{ChipState, NFC_MODE_IDLE, NFC_MODE_LISTEN, NFC_MODE_POLL},
+        nfc_actor::{ChipState, NfcMode},
         stats::NfcStats,
     };
 
@@ -199,7 +198,7 @@ mod tests {
         // Setup active chip with duplex stream for writer testing
         let (nfc_io, _peer) = tokio::io::duplex(1024);
         let (_reader, nfc_writer) = tokio::io::split(nfc_io);
-        let chip_mode = Arc::new(AtomicU8::new(NFC_MODE_IDLE));
+        let chip_mode = Arc::new(AtomicU8::new(NfcMode::Idle.as_u8()));
         actor.active_chips.insert(
             chip_id,
             ChipState {
@@ -248,7 +247,7 @@ mod tests {
         };
         actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::AdapterEnableReaderMode), 1);
-        assert_eq!(chip_mode.load(Ordering::Relaxed), NFC_MODE_POLL);
+        assert_eq!(chip_mode.load(Ordering::Relaxed), NfcMode::Poll.as_u8());
 
         // 7. Data packet in Poll mode -> TagTransceive
         actor
@@ -265,31 +264,31 @@ mod tests {
         };
         actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::TagConnect), 1);
-        assert_eq!(chip_mode.load(Ordering::Relaxed), NFC_MODE_POLL);
+        assert_eq!(chip_mode.load(Ordering::Relaxed), NfcMode::Poll.as_u8());
 
         // 9. RfDeactivateCommand with SleepMode / Discovery -> TagClose
         let cmd = RfDeactivateCommand { deactivation_type: DeactivationType::SleepMode };
         actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::TagClose), 1);
-        assert_eq!(chip_mode.load(Ordering::Relaxed), NFC_MODE_IDLE);
+        assert_eq!(chip_mode.load(Ordering::Relaxed), NfcMode::Idle.as_u8());
 
         let cmd = RfDeactivateCommand { deactivation_type: DeactivationType::Discovery };
         actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::TagClose), 2);
-        assert_eq!(chip_mode.load(Ordering::Relaxed), NFC_MODE_POLL);
+        assert_eq!(chip_mode.load(Ordering::Relaxed), NfcMode::Poll.as_u8());
 
         // 10. RfDeactivateCommand with IdleMode -> AdapterDisableReaderMode
         let cmd = RfDeactivateCommand { deactivation_type: DeactivationType::IdleMode };
         actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::AdapterDisableReaderMode), 1);
-        assert_eq!(chip_mode.load(Ordering::Relaxed), NFC_MODE_IDLE);
+        assert_eq!(chip_mode.load(Ordering::Relaxed), NfcMode::Idle.as_u8());
 
         // 11. RfSetListenModeRoutingCommand -> AdapterSetListenModeRouting (sets mode
         //     to NFC_MODE_LISTEN)
         let cmd = RfSetListenModeRoutingCommand { more_to_follow: 0, routing_entries: vec![] };
         actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::AdapterSetListenModeRouting), 1);
-        assert_eq!(chip_mode.load(Ordering::Relaxed), NFC_MODE_LISTEN);
+        assert_eq!(chip_mode.load(Ordering::Relaxed), NfcMode::Listen.as_u8());
 
         // 12. Data packet in Listen mode -> CardEmulationSendResponseApdu
         actor
