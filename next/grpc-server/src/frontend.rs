@@ -317,24 +317,9 @@ impl FrontendClient {
                 format!("Failed to reset devices: {}", e),
             )
         })?;
-        let aps = ap_client.list_aps().await.map_err(|e| {
-            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to list APs: {}", e))
+        ap_client.reset().await.map_err(|e| {
+            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to reset APs: {}", e))
         })?;
-
-        let default_ap_bssid = ap_actor::expected_default_ap_bssid();
-        for (id, state) in aps {
-            // The default AP is considered built-in.
-            // TODO(b/499058772): reset default AP back to its original state.
-            if state.config.bssid == default_ap_bssid {
-                continue;
-            }
-            ap_client.destroy_ap(id).await.map_err(|e| {
-                RpcStatus::with_message(
-                    RpcStatusCode::INTERNAL,
-                    format!("Failed to destroy AP {}: {}", id, e),
-                )
-            })?;
-        }
         Ok(())
     }
 

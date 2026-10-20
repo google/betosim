@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use netsim_model::WifiMode;
+use netsim_packets::MacAddr;
 
 use crate::world::ApWorld;
 
@@ -169,4 +170,129 @@ async fn test_ap_lifecycle_crud() {
     assert!(list_after.iter().any(|(_, ap)| ap.config.ssid == "UpdatedAP")); // First
     // one still
     // there
+}
+
+// Scenario: Reset Restores Default AP and Clears Dynamic APs
+//   Given a running AP Actor with a custom initial Default AP (id: 0)
+//   And the Default AP is mutated with altered SSID, channel, and
+//   disabled state
+//   And a dynamic AP (id: 1) is created with station keys populated
+//   When the AP client reset action is called
+//   Then dynamic APs should be removed
+//   And the Default AP should be restored to its initial configuration
+//   And shared key store sessions and dynamic BSSIDs should be cleared
+//   And the next dynamic AP ID should reset to 1
+#[tokio::test]
+async fn test_reset_restores_default_ap_and_clears_dynamic_aps() {
+    let world = ApWorld::new().await;
+
+    // Given
+    let initial_config = ap_actor::ApConfig {
+        ssid: "InitialWifi".to_string(),
+        channel: 11,
+        ..ap_actor::ApConfig::default()
+    };
+    let id0 =
+        world.client.create_ap(Some(0), initial_config).await.expect("Failed to create default AP");
+    assert_eq!(id0, 0);
+
+    // Mutate default AP
+    world
+        .client
+        .update_ap_config(0, Some("MutatedWifi".to_string()), Some(1), None, Some(false))
+        .await
+        .expect("Failed to update default AP");
+
+    // Create dynamic AP
+    let dynamic_config = ap_actor::ApConfig {
+        ssid: "DynamicAP".to_string(),
+        channel: 6,
+        ..ap_actor::ApConfig::default()
+    };
+    let dyn_id =
+        world.client.create_ap(None, dynamic_config).await.expect("Failed to create dynamic AP");
+    assert_eq!(dyn_id, 1);
+    let dynamic_bssid =
+        world.client.get_ap(dyn_id).await.unwrap().expect("Dynamic AP missing").config.bssid;
+
+    // Populate station keys
+    let sta_mac = MacAddr::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+    world.shared_keys.set_station_bssid(sta_mac, ap_actor::expected_default_ap_bssid());
+    world.shared_keys.add_session(sta_mac, vec![0x42; 16]);
+
+    // When
+    world.client.reset().await.expect("Failed to reset AP client");
+
+    // Then
+    assert!(world.client.get_ap(1).await.unwrap().is_none());
+    let default_ap = world.client.get_ap(0).await.unwrap().expect("Default AP missing after reset");
+    assert_eq!(default_ap.config.ssid, "InitialWifi");
+    assert_eq!(default_ap.config.channel, 11);
+    assert!(default_ap.associations.is_empty());
+
+    assert!(world.shared_keys.has_bssid(&ap_actor::expected_default_ap_bssid()));
+    assert!(!world.shared_keys.has_bssid(&dynamic_bssid));
+    assert!(world.shared_keys.get_station_bssid(&sta_mac).is_none());
+
+    let next_dynamic_config = ap_actor::ApConfig {
+        ssid: "NewDynamicAP".to_string(),
+        channel: 36,
+        ..ap_actor::ApConfig::default()
+    };
+    let new_dyn_id = world
+        .client
+        .create_ap(None, next_dynamic_config)
+        .await
+        .expect("Failed to create new dynamic AP");
+    assert_eq!(new_dyn_id, 1);
+
+    // Verify deleting DEFAULT_AP_ID (0) and calling reset() recreates
+    // DEFAULT_AP_ID (0) with baseline config
+    world.client.destroy_ap(0).await.expect("Failed to destroy default AP");
+    assert!(world.client.get_ap(0).await.unwrap().is_none());
+    assert!(!world.shared_keys.has_bssid(&ap_actor::expected_default_ap_bssid()));
+
+    world.client.reset().await.expect("Failed to reset AP client");
+    let restored_default_ap = world
+        .client
+        .get_ap(0)
+        .await
+        .unwrap()
+        .expect("Default AP missing after reset following deletion");
+    assert_eq!(restored_default_ap.config.ssid, "InitialWifi");
+    assert!(world.shared_keys.has_bssid(&ap_actor::expected_default_ap_bssid()));
+
+    // Verify deleting DEFAULT_AP_ID (0) and recreating it with a new config
+    // updates default_ap_config
+    world.client.destroy_ap(0).await.expect("Failed to destroy default AP before recreation");
+    assert!(world.client.get_ap(0).await.unwrap().is_none());
+
+    let recreated_config = ap_actor::ApConfig {
+        ssid: "RecreatedDefault".to_string(),
+        channel: 6,
+        ..ap_actor::ApConfig::default()
+    };
+    let rec_id = world
+        .client
+        .create_ap(Some(0), recreated_config)
+        .await
+        .expect("Failed to recreate default AP");
+    assert_eq!(rec_id, 0);
+
+    // Mutate recreated default AP
+    world
+        .client
+        .update_ap_config(0, Some("MutatedRecreated".to_string()), Some(1), None, Some(false))
+        .await
+        .expect("Failed to update recreated default AP");
+    let mutated_recreated =
+        world.client.get_ap(0).await.unwrap().expect("Recreated AP missing after update");
+    assert_eq!(mutated_recreated.config.ssid, "MutatedRecreated");
+
+    // Calling reset() restores "RecreatedDefault"
+    world.client.reset().await.expect("Failed to reset AP client after recreation");
+    let reset_recreated =
+        world.client.get_ap(0).await.unwrap().expect("Default AP missing after second reset");
+    assert_eq!(reset_recreated.config.ssid, "RecreatedDefault");
+    assert_eq!(reset_recreated.config.channel, 6);
 }

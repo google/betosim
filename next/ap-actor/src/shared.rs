@@ -108,6 +108,19 @@ impl SharedKeyStore {
         self.station_bssids.write().remove(sta_addr);
     }
 
+    pub(crate) fn reset(&self, default_bssid: MacAddress) {
+        self.station_bssids.write().clear();
+        self.sessions.write().clear();
+        {
+            let mut gtks = self.gtks.write();
+            gtks.clear();
+            self.gtk_tx_pn.store(1, Ordering::SeqCst);
+        }
+        let mut bssids = self.bssids.write();
+        bssids.clear();
+        bssids.insert(default_bssid);
+    }
+
     pub fn try_encrypt(&self, ieee80211: &Ieee80211) -> Option<Vec<u8>> {
         let dest = ieee80211.get_destination();
         let is_group = dest.is_multicast() || dest.is_broadcast();
@@ -227,5 +240,36 @@ impl SharedKeyStore {
         let prot_byte = new_packet.get_mut(1)?;
         *prot_byte &= !0x40; // Clear protected bit
         Some(new_packet)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shared_key_store_reset() {
+        let store = SharedKeyStore::new();
+        let default_bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let other_bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+        let sta = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+
+        store.add_bssid(default_bssid);
+        store.add_bssid(other_bssid);
+        store.set_station_bssid(sta, other_bssid);
+        store.add_session(sta, vec![0x42; 16]);
+        store.set_gtk(default_bssid, [0x11; 16]);
+        store.set_gtk(other_bssid, [0x24; 16]);
+
+        store.gtk_tx_pn.store(42, Ordering::SeqCst);
+        store.reset(default_bssid);
+
+        assert!(store.has_bssid(&default_bssid));
+        assert!(!store.has_bssid(&other_bssid));
+        assert!(store.get_station_bssid(&sta).is_none());
+        assert!(store.get_gtk(&default_bssid).is_none());
+        assert!(store.get_gtk(&other_bssid).is_none());
+        assert!(store.sessions.read().is_empty());
+        assert_eq!(store.gtk_tx_pn.load(Ordering::SeqCst), 1);
     }
 }

@@ -91,8 +91,12 @@ const fn compute_ap_bssid(id: ApId) -> MacAddr {
     MacAddr::new(bytes)
 }
 
+/// Reserved ID for the built-in default AP created at daemon startup; dynamic
+/// AP IDs start at 1.
+pub(crate) const DEFAULT_AP_ID: ApId = ApId(0);
+
 /// Precomputed BSSID for the Built-in Default AP (ID 0).
-pub const EXPECTED_DEFAULT_AP_BSSID: MacAddr = compute_ap_bssid(ApId(0));
+pub const EXPECTED_DEFAULT_AP_BSSID: MacAddr = compute_ap_bssid(DEFAULT_AP_ID);
 
 /// Returns the expected BSSID for the Built-in Default AP (ID 0).
 pub const fn expected_default_ap_bssid() -> MacAddr {
@@ -221,6 +225,7 @@ pub enum ApReq {
     Disconnect {
         mac: MacAddr,
     },
+    Reset,
 }
 
 impl std::fmt::Debug for ApReq {
@@ -230,6 +235,7 @@ impl std::fmt::Debug for ApReq {
             ApReq::Disconnect { mac } => {
                 f.debug_struct("ApReq::Disconnect").field("mac", mac).finish()
             }
+            ApReq::Reset => write!(f, "ApReq::Reset"),
         }
     }
 }
@@ -250,6 +256,7 @@ pub struct ApActor {
     pub(crate) shared_keys: std::sync::Arc<shared::SharedKeyStore>,
     pub(crate) next_ap_id: u32,
     pub(crate) beacon_interval: Option<u16>, // In TUs (1024us)
+    pub(crate) default_ap_config: Option<ApConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -272,8 +279,25 @@ impl ApActor {
             aps: HashMap::new(),
             manager: Ieee80211Manager::new(),
             shared_keys,
-            next_ap_id: 1,
+            next_ap_id: DEFAULT_AP_ID.0 + 1,
             beacon_interval: None,
+            default_ap_config: None,
+        }
+    }
+}
+
+impl Default for ApState {
+    fn default() -> Self {
+        Self {
+            id: DEFAULT_AP_ID,
+            config: ApConfig { bssid: EXPECTED_DEFAULT_AP_BSSID, ..ApConfig::default() },
+            wpa: None,
+            sae_sessions: HashMap::new(),
+            eap_sessions: HashMap::new(),
+            associations: std::collections::HashSet::new(),
+            delayed_frames: std::collections::VecDeque::new(),
+            enabled: true,
+            tx_sequence: 0,
         }
     }
 }
@@ -287,18 +311,17 @@ impl ApState {
         Self {
             id,
             config,
-            wpa: None,
-            sae_sessions: HashMap::new(),
-            eap_sessions: HashMap::new(),
-            associations: std::collections::HashSet::new(),
-            delayed_frames: std::collections::VecDeque::new(),
-            enabled: true,
             tx_sequence: (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_micros()
                 % 4096) as u16,
+            ..Self::default()
         }
+    }
+
+    pub(crate) fn reset(&mut self, config: ApConfig) {
+        *self = Self { id: self.id, config, ..Self::default() };
     }
 
     pub(crate) fn clear_station_state(&mut self, sta_mac: &MacAddr) {
@@ -323,5 +346,52 @@ impl ApState {
         let sc = netsim_packets::SequenceControl::new(self.tx_sequence << 4);
         self.tx_sequence = (self.tx_sequence + 1) % 4096;
         sc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ap_state_reset() {
+        let initial_config = ApConfig {
+            ssid: "InitialSsid".to_string(),
+            bssid: expected_default_ap_bssid(),
+            channel: 6,
+            ..ApConfig::default()
+        };
+        let mut state = ApState::new(DEFAULT_AP_ID, initial_config.clone());
+
+        // Mutate fields
+        state.config.ssid = "MutatedSsid".to_string();
+        state.config.channel = 11;
+        state.enabled = false;
+        let sta_mac = MacAddr::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x10]);
+        state.associations.insert(sta_mac);
+        state
+            .delayed_frames
+            .push_back((std::time::Instant::now(), bytes::Bytes::from_static(b"frame")));
+        let _ = state.next_seq_control();
+
+        assert_eq!(state.config.ssid, "MutatedSsid");
+        assert_eq!(state.config.channel, 11);
+        assert!(!state.enabled);
+        assert!(!state.associations.is_empty());
+        assert!(!state.delayed_frames.is_empty());
+
+        // Reset to initial config
+        state.reset(initial_config);
+
+        assert_eq!(state.config.ssid, "InitialSsid");
+        assert_eq!(state.config.channel, 6);
+        assert!(state.enabled);
+        assert!(state.wpa.is_none());
+        assert!(state.sae_sessions.is_empty());
+        assert!(state.eap_sessions.is_empty());
+        assert!(state.associations.is_empty());
+        assert!(state.delayed_frames.is_empty());
+        let sc = state.next_seq_control();
+        assert_eq!(sc.get(), 0);
     }
 }

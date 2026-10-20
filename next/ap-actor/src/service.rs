@@ -16,7 +16,7 @@ use actor_framework::{ActorService, DynContext};
 use tracing::{error, info, warn};
 
 use crate::{
-    ap_actor::{ApActor, ApId, ApReq, ApResponse, ApState, WIFI_STREAM_ID},
+    ap_actor::{ApActor, ApId, ApReq, ApResponse, ApState, DEFAULT_AP_ID, WIFI_STREAM_ID},
     error::ApError,
 };
 
@@ -62,6 +62,9 @@ impl ActorService for ApActor {
         }
 
         let state = ApState::new(id_val, params);
+        if id_val == DEFAULT_AP_ID {
+            self.default_ap_config = Some(state.config.clone());
+        }
         self.shared_keys.add_bssid(state.config.bssid);
         self.aps.insert(id_val, state);
 
@@ -226,7 +229,27 @@ impl ActorService for ApActor {
                 }
                 Ok(ApResponse::Ok)
             }
+            ApReq::Reset => {
+                self.handle_reset();
+                Ok(ApResponse::Ok)
+            }
         }
+    }
+}
+
+impl ApActor {
+    fn handle_reset(&mut self) {
+        self.aps.retain(|id, _| *id == DEFAULT_AP_ID);
+        let base_config =
+            self.default_ap_config.clone().unwrap_or_else(|| ApState::default().config);
+        let default_bssid = base_config.bssid;
+        if let Some(default_ap) = self.aps.get_mut(&DEFAULT_AP_ID) {
+            default_ap.reset(base_config);
+        } else {
+            self.aps.insert(DEFAULT_AP_ID, ApState::new(DEFAULT_AP_ID, base_config));
+        }
+        self.shared_keys.reset(default_bssid);
+        self.next_ap_id = DEFAULT_AP_ID.0 + 1;
     }
 }
 

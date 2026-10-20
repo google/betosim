@@ -93,6 +93,11 @@ impl ApClient {
         self.client.delete(ApId(id)).err_into::<ClientError>().await
     }
 
+    /// Resets all APs and restores the default AP to its initial state.
+    pub async fn reset(&self) -> Result<(), ClientError> {
+        self.client.perform_action(None, ApReq::Reset).err_into::<ClientError>().await.map(|_| ())
+    }
+
     /// Retrieves the state of an Access Point by ID.
     pub async fn get_ap(&self, id: u32) -> Result<Option<crate::ApState>, ClientError> {
         self.client.get(ApId(id)).err_into::<ClientError>().await
