@@ -129,6 +129,29 @@ pub struct CallStatus {
     pub(crate) ring_token: Option<RingToken>,
 }
 
+impl CallStatus {
+    fn hangup_action(&self, initiator: ModemId) -> Option<CommandAction> {
+        self.peer_id.map(|target_peer| CommandAction::HangupCall {
+            initiator,
+            target_peer,
+            reason: self.state.release_reason(),
+        })
+    }
+
+    fn promote_to_active(&mut self, has_inbound: bool, id: ModemId) -> Option<CommandAction> {
+        if !self.state.should_promote_to_active(has_inbound) {
+            return None;
+        }
+        let was_inbound = self.state.is_inbound();
+        self.state = CallState::Active;
+        if was_inbound {
+            Some(CommandAction::AnswerCall(id))
+        } else {
+            self.peer_id.map(|target| CommandAction::ResumeCall { resumer: id, target })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallResponse {
     Ring,
@@ -307,17 +330,8 @@ impl CallService {
     }
 
     pub fn hangup_all(&mut self, id: ModemId) -> Vec<CommandAction> {
-        let actions: Vec<CommandAction> = self
-            .calls
-            .iter()
-            .filter_map(|call| {
-                call.peer_id.map(|peer_id| CommandAction::HangupCall {
-                    initiator: id,
-                    target_peer: peer_id,
-                    reason: call.state.release_reason(),
-                })
-            })
-            .collect();
+        let actions: Vec<CommandAction> =
+            self.calls.iter().filter_map(|call| call.hangup_action(id)).collect();
         self.calls.clear();
         actions
     }
@@ -580,12 +594,8 @@ impl CallService {
             };
 
             if should_drop {
-                if let Some(peer_id) = call.peer_id {
-                    actions.push(CommandAction::HangupCall {
-                        initiator: id,
-                        target_peer: peer_id,
-                        reason: call.state.release_reason(),
-                    });
+                if let Some(action) = call.hangup_action(id) {
+                    actions.push(action);
                 }
                 false
             } else {
@@ -627,12 +637,8 @@ impl CallService {
                         call.state == CallState::Held
                     };
                     if should_drop {
-                        if let Some(peer_id) = call.peer_id {
-                            actions.push(CommandAction::HangupCall {
-                                initiator: id,
-                                target_peer: peer_id,
-                                reason: call.state.release_reason(),
-                            });
+                        if let Some(action) = call.hangup_action(id) {
+                            actions.push(action);
                         }
                         false
                     } else {
@@ -645,25 +651,17 @@ impl CallService {
                 let mut actions = Vec::new();
                 if let Some(idx) = index {
                     if let Some(call) = self.calls.iter().find(|c| c.id == idx)
-                        && let Some(peer_id) = call.peer_id
+                        && let Some(action) = call.hangup_action(id)
                     {
-                        actions.push(CommandAction::HangupCall {
-                            initiator: id,
-                            target_peer: peer_id,
-                            reason: call.state.release_reason(),
-                        });
+                        actions.push(action);
                     }
                     self.remove_call(idx);
                 } else {
                     let has_inbound = self.has_inbound();
                     self.calls.retain(|c| {
                         if c.state.is_foreground() {
-                            if let Some(peer) = c.peer_id {
-                                actions.push(CommandAction::HangupCall {
-                                    initiator: id,
-                                    target_peer: peer,
-                                    reason: c.state.release_reason(),
-                                });
+                            if let Some(action) = c.hangup_action(id) {
+                                actions.push(action);
                             }
                             false
                         } else {
@@ -671,17 +669,8 @@ impl CallService {
                         }
                     });
                     for call in self.calls.iter_mut() {
-                        let was_inbound = call.state.is_inbound();
-                        if call.state.should_promote_to_active(has_inbound) {
-                            if was_inbound {
-                                actions.push(CommandAction::AnswerCall(id));
-                            } else if let Some(peer_id) = call.peer_id {
-                                actions.push(CommandAction::ResumeCall {
-                                    resumer: id,
-                                    target: peer_id,
-                                });
-                            }
-                            call.state = CallState::Active;
+                        if let Some(action) = call.promote_to_active(has_inbound, id) {
+                            actions.push(action);
                         }
                     }
                 }
@@ -721,19 +710,8 @@ impl CallService {
                                     .push(CommandAction::HoldCall { holder: id, target: peer_id });
                             }
                             call.state = CallState::Held;
-                        } else {
-                            let was_inbound = call.state.is_inbound();
-                            if call.state.should_promote_to_active(has_inbound) {
-                                if was_inbound {
-                                    actions.push(CommandAction::AnswerCall(id));
-                                } else if let Some(peer_id) = call.peer_id {
-                                    actions.push(CommandAction::ResumeCall {
-                                        resumer: id,
-                                        target: peer_id,
-                                    });
-                                }
-                                call.state = CallState::Active;
-                            }
+                        } else if let Some(action) = call.promote_to_active(has_inbound, id) {
+                            actions.push(action);
                         }
                     }
                 }

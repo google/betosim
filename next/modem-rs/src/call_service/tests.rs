@@ -488,3 +488,78 @@ fn test_handle_voice_dial_resolves_clir() {
         other => panic!("Expected Ok(Some(CallResponse::WithActions)), got {other:?}"),
     }
 }
+
+#[test]
+fn test_call_status_hangup_action() {
+    let mut service = CallService::default();
+    service.add_call(
+        CallState::Active,
+        CallDirection::Outgoing,
+        None,
+        NumberPresentation::Allowed,
+        Some(2),
+    );
+    let call = &mut service.calls[0];
+    assert_eq!(
+        call.hangup_action(1),
+        Some(CommandAction::HangupCall {
+            initiator: 1,
+            target_peer: 2,
+            reason: HangupReason::Normal,
+        })
+    );
+
+    call.state = CallState::Waiting;
+    assert_eq!(
+        call.hangup_action(1),
+        Some(CommandAction::HangupCall {
+            initiator: 1,
+            target_peer: 2,
+            reason: HangupReason::Busy,
+        })
+    );
+
+    call.peer_id = None;
+    assert_eq!(call.hangup_action(1), None);
+}
+
+#[test]
+fn test_call_status_promote_to_active() {
+    let mut service = CallService::default();
+    service.add_call(
+        CallState::Waiting,
+        CallDirection::Incoming,
+        None,
+        NumberPresentation::Allowed,
+        Some(2),
+    );
+    let call = &mut service.calls[0];
+
+    assert_eq!(call.promote_to_active(true, 1), Some(CommandAction::AnswerCall(1)));
+    assert_eq!(call.state, CallState::Active);
+
+    call.state = CallState::Held;
+    call.peer_id = Some(2);
+    assert_eq!(
+        call.promote_to_active(false, 1),
+        Some(CommandAction::ResumeCall { resumer: 1, target: 2 })
+    );
+    assert_eq!(call.state, CallState::Active);
+
+    call.state = CallState::Held;
+    call.peer_id = None;
+    assert_eq!(call.promote_to_active(false, 1), None);
+    assert_eq!(call.state, CallState::Active);
+
+    call.state = CallState::Held;
+    assert_eq!(call.promote_to_active(true, 1), None);
+    assert_eq!(call.state, CallState::Held);
+
+    call.state = CallState::Active;
+    assert_eq!(call.promote_to_active(false, 1), None);
+    assert_eq!(call.state, CallState::Active);
+
+    call.state = CallState::Dialing;
+    assert_eq!(call.promote_to_active(false, 1), None);
+    assert_eq!(call.state, CallState::Dialing);
+}
