@@ -46,6 +46,7 @@ EXACT_DEP_MAPPING = {
     "@base64": "libbase64_rust",
     "@log": "liblog_rust",
     "@rootcanal//:lib_rootcanal_ffi": "lib_rootcanal_ffi",
+    "@rootcanal//:rootcanal_rs": "librootcanal_rs",
     "@cxx.rs//:cxx": "libcxx",
     "@casimir//:casimir_lib": "libcasimir",
     "//next/testing": "libnetsim_next_netsim_testing_testing",

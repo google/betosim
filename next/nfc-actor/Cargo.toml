@@ -16,23 +16,40 @@
 name = "nfc-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 actor-framework = { path = "../actor-framework" }
 anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
-casimir = { path = "../../../../packages/modules/Nfc/libnfc-nci/tools/casimir" }
+casimir = { git = "https://github.com/google/casimir.git", rev = "50476e85f54349178c455844039b62ce9261e5f3" }
 device-actor = { path = "../device-actor" }
 device-api = { path = "../device-api" }
 futures = "0.3"
 netsim-model = { path = "../model" }
 netsim-proto = { path = "../../proto/proto-cf" }
+parking_lot = "0.12"
 pdl-runtime = "0.3"
 thiserror = "1"
-tokio = { version = "1.28.2", features = ["process", "rt-multi-thread"] }
+tokio = { version = "1.28.2", features = [
+  "process",
+  "rt-multi-thread",
+  "sync",
+  "macros",
+  "time",
+  "io-util",
+] }
 tokio-util = { version = "0.7", features = ["io", "codec"] }
 tracing = "0.1"
+
+[dev-dependencies]
+tokio-stream = "0.1"
+tracing-subscriber = "0.3"
 
 [features]
 cuttlefish = []

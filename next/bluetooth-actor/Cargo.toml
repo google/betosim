@@ -13,11 +13,17 @@
 # limitations under the License.
 
 [package]
-name = "bluetooth"
+name = "bluetooth-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [lib]
+name = "bluetooth_actor"
 path = "src/lib.rs"
 crate-type = ["staticlib", "lib"]
 
@@ -30,6 +36,8 @@ futures = "0.3.31"
 hex = "0.4.3"
 netsim-model = { path = "../model" }
 netsim-packets = { path = "../packets" }
+netsim-proto = { path = "../../proto/proto-cf" }
+parking_lot = "0.12"
 rootcanal = { path = "../rootcanal" }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
@@ -48,7 +56,8 @@ default = []
 test-utils = []
 
 [dev-dependencies]
-rootcanal = { path = "../rootcanal" }
+common = { package = "netsim-common", path = "../common" }
+netsim-model = { path = "../model", features = ["testing"] }
 netsim-testing = { path = "../testing", features = ["testing"] }
 rand = "0.8.5"
-tokio-stream = "0.1.17"
+tracing-subscriber = "0.3"

@@ -43,8 +43,11 @@ tokio-stream = "0.1"
 tracing = "0.1"
 
 [dev-dependencies]
+actor-framework = { path = "../actor-framework", features = ["testing"] }
+slirp-actor = { path = ".", features = ["testing"] }
 zerocopy = "0.8"
 
 [features]
-default = ["libslirp-rs", "http-proxy", "slirp", "slirp-host"]
+default = ["cuttlefish", "http-proxy"]
 cuttlefish = ["slirp", "slirp-host"]
+testing = ["actor-framework/testing", "netsim-model/testing"]

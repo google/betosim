@@ -32,6 +32,8 @@
 //!
 //! ## Example
 
+use rootcanal_rs as _;
+
 pub mod controller;
 pub mod error;
 mod ffi;

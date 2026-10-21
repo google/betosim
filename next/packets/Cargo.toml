@@ -16,6 +16,11 @@
 name = "netsim-packets"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [lib]
 path = "src/lib.rs"
@@ -28,6 +33,10 @@ hex = "0.4.3"
 num-derive = "0.4"
 num-traits = "0.2"
 pdl-runtime = "0.4.2"
+rootcanal-rs = { git = "https://github.com/sameer/rootcanal.git", rev = "a73b911f2a87364078f305bfba8a41db044d7ba0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.143"
 zerocopy = { version = "0.8", features = ["derive"] }
+
+[build-dependencies]
+pdl-compiler = "0.4.2"

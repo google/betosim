@@ -16,6 +16,11 @@
 name = "capture-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 actor-framework = { path = "../actor-framework" }
@@ -33,3 +38,6 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 zerocopy = { version = "0.8", features = ["derive"] }
+
+[features]
+testing = ["actor-framework/testing"]

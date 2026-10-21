@@ -13,17 +13,18 @@
 // limitations under the License.
 
 fn main() {
+    let boringssl = boringssl_src::Build::new().build();
+
     cxx_build::bridge("src/ffi.rs")
         .file("src/crypto_ffi.cc")
         .include("src")
+        .include(boringssl.include_dir())
         .flag_if_supported("-std=c++17")
         .compile("hostap_crypto");
+
+    boringssl.print_cargo_metadata();
 
     println!("cargo:rerun-if-changed=src/ffi.rs");
     println!("cargo:rerun-if-changed=src/crypto_ffi.cc");
     println!("cargo:rerun-if-changed=src/crypto_ffi.h");
-
-    // Link against libcrypto (BoringSSL/OpenSSL)
-    // In Android build this is handled by Soong/Bazel, but for Cargo:
-    println!("cargo:rustc-link-lib=crypto");
 }

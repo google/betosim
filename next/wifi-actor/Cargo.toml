@@ -16,6 +16,11 @@
 name = "wifi-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 actor-framework = { path = "../actor-framework" }
@@ -29,7 +34,7 @@ libc = "0.2"
 netsim-model = { path = "../model" }
 netsim-packets = { path = "../packets" }
 netsim-proto = { path = "../../proto/proto-cf" }
-nix = { version = "0.28", features = ["ioctl", "fs"] }
+nix = { version = "0.31", features = ["ioctl", "fs"] }
 slirp-actor = { path = "../slirp-actor" }
 socket2 = { version = "0.5", features = ["all"] }
 thiserror = "1"
@@ -38,6 +43,18 @@ tokio-stream = "0.1"
 tracing = "0.1"
 zerocopy = { version = "0.8", features = ["derive"] }
 
-
 [dev-dependencies]
+actor-framework = { path = "../actor-framework", features = ["testing"] }
+device-api = { path = "../device-api", features = ["testing"] }
 tempfile = "3"
+tracing-subscriber = "0.3"
+wifi-actor = { path = ".", features = ["testing"] }
+
+[features]
+testing = [
+  "actor-framework/testing",
+  "ap-actor/testing",
+  "device-actor/testing",
+  "netsim-model/testing",
+  "slirp-actor/testing",
+]

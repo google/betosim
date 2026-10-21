@@ -35,6 +35,7 @@ netsim_rust_library(
         "@bytes",
         "@parking_lot",
         "@rootcanal//:lib_rootcanal_ffi",
+        "@rootcanal//:rootcanal_rs",
         "@thiserror",
         "@tracing",
     ],

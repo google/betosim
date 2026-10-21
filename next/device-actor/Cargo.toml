@@ -16,6 +16,11 @@
 name = "device-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 actor-framework = { path = "../actor-framework" }
@@ -26,6 +31,7 @@ device-api = { path = "../device-api" }
 futures = "0.3"
 link-actor = { path = "../link-actor" }
 link-api = { path = "../link-api" }
+mockall = { version = "0.14.0", optional = true }
 netsim-model = { path = "../model" }
 netsim-proto = { path = "../../proto/proto-cf" }
 protobuf-json-mapping = "3.2.0"
@@ -35,4 +41,15 @@ thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 
+[features]
+testing = ["actor-framework/testing", "dep:mockall"]
+
 [dev-dependencies]
+actor-framework = { path = "../actor-framework", features = ["testing"] }
+capture-api = { path = "../capture-api", features = ["testing"] }
+device-actor = { path = ".", features = ["testing"] }
+device-api = { path = "../device-api", features = ["testing"] }
+link-api = { path = "../link-api", features = ["testing"] }
+mockall = "0.14.0"
+netsim-model = { path = "../model", features = ["testing"] }
+tokio-stream = "0.1"

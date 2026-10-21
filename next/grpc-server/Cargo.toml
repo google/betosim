@@ -18,25 +18,28 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
+actor-framework = { path = "../actor-framework" }
+ap-actor = { path = "../ap-actor" }
 async-trait = "0.1"
 bytes = "1.0"
+capture-actor = { path = "../capture-actor" }
 cell-actor = { path = "../cell-actor" }
 device-actor = { path = "../device-actor" }
 device-api = { path = "../device-api" }
 futures = "0.3"
 grpcio = { version = "0.13", default-features = false, features = [
   "protobufv3-codec",
-  "openssl",
+  "boringssl",
 ] }
+hex = "0.4"
 link-actor = { path = "../link-actor" }
 link-api = { path = "../link-api" }
-nfc-actor = { path = "../nfc-actor" }
-wifi-actor = { path = "../wifi-actor" }
-
-actor-framework = { path = "../actor-framework" }
-capture-actor = { path = "../capture-actor" }
 netsim-model = { path = "../model" }
+netsim-packets = { path = "../packets" }
+netsim-proto = { path = "../../proto/proto-cf" }
+nfc-actor = { path = "../nfc-actor" }
 packet-stream = { path = "../packet-stream" }
+pdl-runtime = "0.3"
 protobuf = "3"
 tokio = { version = "1", features = [
   "fs",
@@ -48,7 +51,10 @@ tokio = { version = "1", features = [
 ] }
 tokio-stream = "0.1"
 tracing = "0.1"
+wifi-actor = { path = "../wifi-actor" }
 
 [dev-dependencies]
+actor-framework = { path = "../actor-framework", features = ["testing"] }
 capture-api = { path = "../capture-api" }
+link-api = { path = "../link-api", features = ["testing"] }
 tempfile = "3"

@@ -20,9 +20,13 @@ edition = "2024"
 [dependencies]
 actor-framework = { path = "../actor-framework" }
 async-trait = "0.1"
-mockall = { version = "0.13", optional = true }
+mockall = { version = "0.14.0", optional = true }
 netsim-model = { path = "../model" }
 thiserror = "1.0"
 
+[dev-dependencies]
+link-api = { path = ".", features = ["testing"] }
+mockall = "0.14.0"
+
 [features]
-testing = ["mockall"]
+testing = ["actor-framework/testing", "dep:mockall", "netsim-model/testing"]

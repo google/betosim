@@ -18,6 +18,7 @@ version = "0.3.80"
 edition = "2024"
 
 [lib]
+name = "common"
 crate-type = ["staticlib", "lib"]
 doctest = false
 
@@ -37,3 +38,6 @@ zip = { version = "0.6.4", default-features = false }
 rand = "0.8.5"
 regex = "1"
 tempfile = "3"
+
+[features]
+cuttlefish = []

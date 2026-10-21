@@ -16,6 +16,11 @@
 name = "websocket-server"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 anyhow = "1"
@@ -37,5 +42,9 @@ tungstenite = { version = ">=0.19.0", default-features = false }
 
 [dev-dependencies]
 actor-framework = { path = "../actor-framework", features = ["testing"] }
-common = { path = "../common" }
-mockall = "0.13"
+common = { package = "netsim-common", path = "../common" }
+mockall = "0.14.0"
+websocket-server = { path = ".", features = ["testing"] }
+
+[features]
+testing = ["device-actor/testing", "device-api/testing", "netsim-model/testing"]

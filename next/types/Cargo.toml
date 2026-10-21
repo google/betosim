@@ -18,5 +18,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-netsim-proto = { path = "../../rust/proto-cf" }
+netsim-proto = { path = "../../proto/proto-cf" }
 serde = { version = "1.0", features = ["derive"] }

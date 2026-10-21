@@ -38,3 +38,7 @@ tokio = { version = "1.32.0", default-features = false, features = [
 ] }
 tokio-stream = "0.1.17"
 tracing = "0.1"
+
+[dev-dependencies]
+mockall = "0.14.0"
+serde_json = "1.0"

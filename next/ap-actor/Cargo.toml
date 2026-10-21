@@ -16,10 +16,16 @@
 name = "ap-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 cxx = "1.0"
 netsim-packets = { path = "../packets" }
+parking_lot = "0.12"
 thiserror = "1.0"
 tracing = "0.1"
 
@@ -36,7 +42,13 @@ tokio-stream = "0.1"
 zerocopy = { version = "0.8", features = ["derive"] }
 
 [build-dependencies]
+boringssl-src = "0.6"
 cxx-build = "1.0"
 
 [dev-dependencies]
+ap-actor = { path = ".", features = ["testing"] }
 netsim-testing = { path = "../testing", features = ["testing"] }
+rand = "0.9"
+
+[features]
+testing = ["actor-framework/testing"]

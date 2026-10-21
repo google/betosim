@@ -16,6 +16,11 @@
 name = "netsim-rest-api"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 ap-actor = { path = "../ap-actor" }
@@ -32,6 +37,8 @@ netsim-model = { path = "../model" }
 ring = "0.17.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "1.0"
 tokio = { version = "1.0", features = [
   "io-util",
   "macros",
@@ -42,7 +49,17 @@ tokio = { version = "1.0", features = [
 ] }
 tracing = "0.1"
 
+[build-dependencies]
+hyper = { version = "1", default-features = false }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
 [dev-dependencies]
-actor-framework = { path = "../actor-framework" }
+actor-framework = { path = "../actor-framework", features = ["testing"] }
+ap-actor = { path = "../ap-actor", features = ["testing"] }
 async-trait = "0.1"
-capture-api = { path = "../capture-api" }
+capture-actor = { path = "../capture-actor", features = ["testing"] }
+capture-api = { path = "../capture-api", features = ["testing"] }
+device-actor = { path = "../device-actor", features = ["testing"] }
+link-api = { path = "../link-api", features = ["testing"] }
+netsim-model = { path = "../model", features = ["testing"] }

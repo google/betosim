@@ -21,6 +21,11 @@ repository = "https://github.com/schilit/packetstream"
 license = "MIT"
 keywords = ["ipc", "networking", "packets", "cross-platform", "performance"]
 categories = ["network-programming", "api-bindings"]
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 async-trait = "0.1"

@@ -20,11 +20,17 @@ edition = "2024"
 [dependencies]
 bytes = "1.4"
 device-actor = { path = "../device-actor" }
-
 device-api = { path = "../device-api" }
 futures = "0.3"
 netsim-model = { path = "../model" }
+packet-stream = { path = "../packet-stream" }
 tokio = { version = "1.28.2", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
+
+[dev-dependencies]
+hci-server = { path = ".", features = ["testing"] }
+
+[features]
+testing = ["device-actor/testing", "device-api/testing", "netsim-model/testing"]

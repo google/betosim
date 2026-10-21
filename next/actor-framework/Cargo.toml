@@ -16,11 +16,17 @@
 name = "actor-framework"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 async-trait = "0.1.89"
 bytes = "1.9.0"
 futures = "0.3"
+mockall = { version = "0.14.0", optional = true }
 paste = "1.0.15"
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["full"] }
@@ -29,7 +35,7 @@ tokio-util = { version = "0.7", features = ["time"] }
 tracing = "0.1"
 
 [dev-dependencies]
-mockall = "0.13"
+mockall = "0.14.0"
 
 [features]
-testing = []
+testing = ["dep:mockall"]

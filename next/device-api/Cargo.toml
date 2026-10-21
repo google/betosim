@@ -20,3 +20,6 @@ edition = "2024"
 [dependencies]
 netsim-model = { path = "../model" }
 serde = { version = "1.0.188", features = ["derive"] }
+
+[features]
+testing = ["netsim-model/testing"]

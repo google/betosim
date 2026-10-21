@@ -16,6 +16,19 @@
 name = "uwb-actor"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
+
+[features]
+cuttlefish = []
+testing = [
+  "actor-framework/testing",
+  "device-actor/testing",
+  "netsim-model/testing",
+]
 
 [dependencies]
 actor-framework = { path = "../actor-framework" }
@@ -26,10 +39,15 @@ futures = "0.3"
 glam = "0.25"
 netsim-model = { path = "../model" }
 netsim-proto = { path = "../../proto/proto-cf" }
+parking_lot = "0.12"
+pdl-runtime = "0.5"
 pica = { version = "0.1", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 [dev-dependencies]
-device-api = { path = "../device-api" }
+device-api = { path = "../device-api", features = ["testing"] }
 netsim-testing = { path = "../testing", features = ["testing"] }
+uwb-actor = { path = ".", features = ["testing"] }
