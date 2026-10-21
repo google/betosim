@@ -352,22 +352,21 @@ fn synthesize_dns_reply(
     )
 }
 
-/// Parses resolv.conf format text into a list of valid non-loopback,
-/// non-unspecified IP addresses.
+/// Parses resolv.conf format text into a list of valid non-unspecified IP
+/// addresses (including container and stub resolver loopback addresses).
 pub fn parse_resolv_conf_content(content: &str) -> Vec<IpAddr> {
     let mut servers = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with('#') || line.starts_with(';') {
+        if line.starts_with(['#', ';']) {
             continue;
         }
         let mut words = line.split_whitespace();
         if let (Some("nameserver"), Some(ip_token)) = (words.next(), words.next()) {
             // Strip any IPv6 scope ID suffix (e.g. fe80::1%eth0 -> fe80::1)
-            let clean_ip = ip_token.split('%').next().unwrap();
+            let clean_ip = ip_token.split_once('%').map_or(ip_token, |(addr, _)| addr);
             if let Ok(ip) = clean_ip.parse::<IpAddr>()
                 && !ip.is_unspecified()
-                && !ip.is_loopback()
                 && !servers.contains(&ip)
             {
                 servers.push(ip);
@@ -398,7 +397,7 @@ pub async fn discover_host_dns_servers() -> Vec<IpAddr> {
     }
 
     if servers.is_empty() {
-        log::info!("No non-loopback DNS servers found in resolv.conf; falling back to localhost");
+        log::info!("No valid DNS servers found in resolv.conf; falling back to localhost");
         servers.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
     } else {
         log::info!("Discovered host DNS servers: {servers:?}");

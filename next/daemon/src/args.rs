@@ -120,7 +120,6 @@ pub struct Args {
     pub test_port: Option<u16>,
 
     /// DNS server for the host
-    /// TODO: Not implemented yet
     #[arg(long, alias = "host-dns")]
     pub host_dns: Option<String>,
 

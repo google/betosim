@@ -170,9 +170,9 @@ nameserver fe80::2%wlan0
 }
 
 #[test]
-fn test_parse_resolv_conf_skips_loopback_and_unspecified() {
+fn test_parse_resolv_conf_preserves_loopback_and_skips_unspecified() {
     let resolv_conf = r#"
-# Loopback and unspecified addresses should be filtered
+# Unspecified addresses should be filtered; loopback and external preserved in order
 nameserver 127.0.0.53
 nameserver 127.0.0.1
 nameserver ::1
@@ -181,7 +181,56 @@ nameserver ::
 nameserver 1.1.1.1
 "#;
     let servers = parse_resolv_conf_content(resolv_conf);
-    assert_eq!(servers, vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))]);
+    assert_eq!(
+        servers,
+        vec![
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 53)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        ]
+    );
+}
+
+#[test]
+fn test_parse_resolv_conf_container_and_stub_resolvers() {
+    let resolv_conf = r#"
+# Docker container embedded DNS and systemd-resolved stub alongside public resolvers
+nameserver 127.0.0.11
+nameserver 127.0.0.53
+nameserver 8.8.8.8
+nameserver 2001:4860:4860::8888
+"#;
+    let servers = parse_resolv_conf_content(resolv_conf);
+    assert_eq!(
+        servers,
+        vec![
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 11)),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 53)),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
+        ]
+    );
+}
+
+#[test]
+fn test_parse_resolv_conf_ipv6_loopback_zone_and_dedup() {
+    let resolv_conf = r#"
+nameserver ::1%lo
+nameserver 127.0.0.11
+nameserver 8.8.8.8
+nameserver 127.0.0.11
+nameserver 8.8.8.8
+"#;
+    let servers = parse_resolv_conf_content(resolv_conf);
+    assert_eq!(
+        servers,
+        vec![
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 11)),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        ]
+    );
 }
 
 #[test]
