@@ -12,271 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
-use actor_framework::{ActorLifecycle, ActorService, Context};
+use actor_framework::{ActorLifecycle, ActorService};
 use bytes::Bytes;
-use device_actor::DeviceActor;
-use futures::{StreamExt, future::BoxFuture};
-use netsim_model::{ChipCreate, ChipId, DeviceId};
+use netsim_model::{ChipId, DeviceId};
 use nfc_actor::NfcActor;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
-// --- Mock Helpers ---
-
-#[derive(Clone)]
-struct MockDeviceActorClient;
-
-#[async_trait::async_trait]
-impl actor_framework::ActorClient<DeviceActor> for MockDeviceActorClient {
-    async fn create(
-        &self,
-        _params: <DeviceActor as ActorService>::Create,
-    ) -> Result<
-        <DeviceActor as ActorService>::Id,
-        actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>,
-    > {
-        panic!("not implemented");
-    }
-    async fn create_with_id(
-        &self,
-        _id: <DeviceActor as ActorService>::Id,
-        _params: <DeviceActor as ActorService>::Create,
-    ) -> Result<
-        <DeviceActor as ActorService>::Id,
-        actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>,
-    > {
-        panic!("not implemented");
-    }
-    async fn get(
-        &self,
-        _id: <DeviceActor as ActorService>::Id,
-    ) -> Result<
-        Option<<DeviceActor as ActorService>::Entity>,
-        actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>,
-    > {
-        panic!("not implemented");
-    }
-    async fn update(
-        &self,
-        _id: <DeviceActor as ActorService>::Id,
-        _update: <DeviceActor as ActorService>::Update,
-    ) -> Result<
-        <DeviceActor as ActorService>::Entity,
-        actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>,
-    > {
-        panic!("not implemented");
-    }
-    async fn delete(
-        &self,
-        _id: <DeviceActor as ActorService>::Id,
-    ) -> Result<(), actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>> {
-        panic!("not implemented");
-    }
-    async fn perform_action(
-        &self,
-        _id: Option<<DeviceActor as ActorService>::Id>,
-        _action: <DeviceActor as ActorService>::Action,
-    ) -> Result<
-        <DeviceActor as ActorService>::ActionResult,
-        actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>,
-    > {
-        Ok(device_api::DeviceActionResult::Success)
-    }
-    async fn list(
-        &self,
-    ) -> Result<
-        Vec<<DeviceActor as ActorService>::Entity>,
-        actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>,
-    > {
-        panic!("not implemented");
-    }
-    async fn shutdown(
-        &self,
-    ) -> Result<(), actor_framework::FrameworkError<<DeviceActor as ActorService>::Error>> {
-        panic!("not implemented");
-    }
-    fn clone_box(&self) -> Box<dyn actor_framework::ActorClient<DeviceActor>> {
-        Box::new(self.clone())
-    }
-}
-
-struct TestContext {
-    tasks: Arc<Mutex<HashMap<ChipId, tokio::task::JoinHandle<ChipId>>>>,
-    stream_tasks: Arc<Mutex<HashMap<ChipId, tokio::task::JoinHandle<()>>>>,
-    aborted_tasks: Arc<Mutex<Vec<ChipId>>>,
-    removed_streams: Arc<Mutex<Vec<ChipId>>>,
-}
-
-impl Context<NfcActor> for TestContext {
-    fn set_interval(&mut self, _duration: std::time::Duration) {}
-    fn add_stream(&mut self, id: ChipId, mut stream: actor_framework::BoxStream) {
-        let handle = tokio::spawn(async move { while stream.next().await.is_some() {} });
-        self.stream_tasks.lock().unwrap().insert(id, handle);
-    }
-    fn remove_stream(&mut self, id: ChipId) {
-        self.removed_streams.lock().unwrap().push(id);
-        let value = self.stream_tasks.lock().unwrap().remove(&id);
-        if let Some(handle) = value {
-            handle.abort();
-        }
-    }
-    fn add_typed_stream(&mut self, _id: usize, _stream: actor_framework::BoxTypedStream<()>) {}
-    fn remove_typed_stream(&mut self, _id: usize) {}
-    fn spawn(&mut self, id: ChipId, task: BoxFuture<'static, ChipId>) {
-        let handle = tokio::spawn(task);
-        self.tasks.lock().unwrap().insert(id, handle);
-    }
-    fn abort(&mut self, id: ChipId) {
-        self.aborted_tasks.lock().unwrap().push(id);
-        let handle = self.tasks.lock().unwrap().remove(&id);
-        if let Some(handle) = handle {
-            handle.abort();
-        }
-    }
-    fn shutdown(&mut self) {}
-    fn run_later(
-        &mut self,
-        _duration: std::time::Duration,
-        _f: actor_framework::TimerCallback<NfcActor>,
-    ) -> actor_framework::TimerKey {
-        panic!("not implemented");
-    }
-    fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {}
-}
-
-struct MockSink(mpsc::Sender<Bytes>);
-impl futures::Sink<Bytes> for MockSink {
-    type Error = std::io::Error;
-    fn poll_ready(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-    fn start_send(self: std::pin::Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
-        let _ = self.0.try_send(item);
-        Ok(())
-    }
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-    fn poll_close(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-}
-
-// --- BDD World ---
-
-struct NfcWorld {
-    actor: NfcActor,
-    ctx: TestContext,
-    tasks: Arc<Mutex<HashMap<ChipId, tokio::task::JoinHandle<ChipId>>>>,
-    aborted_tasks: Arc<Mutex<Vec<ChipId>>>,
-    removed_streams: Arc<Mutex<Vec<ChipId>>>,
-    packet_receivers: HashMap<ChipId, mpsc::Receiver<Bytes>>,
-    packet_senders: HashMap<ChipId, mpsc::Sender<Bytes>>,
-}
-
-impl NfcWorld {
-    async fn new() -> Self {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-
-        let device_client = device_actor::DeviceClient::new(Box::new(MockDeviceActorClient));
-        let mut actor = NfcActor::new(device_client, Arc::new(nfc_actor::NfcStats::new()));
-        actor.start_casimir();
-
-        let tasks = Arc::new(Mutex::new(HashMap::new()));
-        let stream_tasks = Arc::new(Mutex::new(HashMap::new()));
-        let aborted_tasks = Arc::new(Mutex::new(Vec::new()));
-        let removed_streams = Arc::new(Mutex::new(Vec::new()));
-        let ctx = TestContext {
-            tasks: tasks.clone(),
-            stream_tasks: stream_tasks.clone(),
-            aborted_tasks: aborted_tasks.clone(),
-            removed_streams: removed_streams.clone(),
-        };
-        let packet_receivers = HashMap::new();
-        let packet_senders = HashMap::new();
-
-        Self { actor, ctx, tasks, aborted_tasks, removed_streams, packet_receivers, packet_senders }
-    }
-
-    async fn given_a_chip(&mut self, id_val: u32) {
-        let chip_id = ChipId(id_val);
-        let device_id = DeviceId(id_val);
-
-        let (tx_stream, rx_stream) = mpsc::channel(10);
-        let (tx_sink, rx_sink) = mpsc::channel(10);
-        let packet_stream = ReceiverStream::new(rx_stream);
-        let packet_sink = MockSink(tx_sink);
-
-        let params = ChipCreate {
-            packet_stream: Some(Box::new(packet_stream)),
-            packet_sink: Some(Box::pin(packet_sink)),
-            chip: netsim_model::Chip { device_id, ..Default::default() },
-        };
-
-        let create_res = self.actor.handle_create(Some(chip_id), params, &mut self.ctx).await;
-        assert!(create_res.is_ok());
-        assert_eq!(create_res.unwrap(), chip_id);
-        assert!(
-            self.actor
-                .active_chips
-                .get(&chip_id)
-                .unwrap()
-                .enabled
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "Chip must be enabled by default upon boot across all platforms during transition to Netsim"
-        );
-        self.packet_receivers.insert(chip_id, rx_sink);
-        self.packet_senders.insert(chip_id, tx_stream);
-    }
-
-    async fn when_casimir_disconnects(&mut self, id_val: u32) {
-        let chip_id = ChipId(id_val);
-        let casimir_device_id = self.actor.active_chips.get(&chip_id).unwrap().casimir_device_id;
-
-        let scene_client = self.actor.scene_client.as_ref().unwrap().clone();
-        let remove_res = scene_client.remove_device(casimir_device_id).await;
-        assert!(remove_res.is_ok());
-
-        let handle = {
-            let mut map = self.tasks.lock().unwrap();
-            map.remove(&chip_id)
-        };
-        if let Some(handle) = handle {
-            let res = handle.await;
-            assert!(res.is_ok());
-            assert_eq!(res.unwrap(), chip_id);
-
-            self.actor.on_task_closed(chip_id, &mut self.ctx).await;
-        } else {
-            panic!("Task handle NOT found for chip {}", id_val);
-        }
-    }
-
-    async fn then_chip_is_cleaned_up(&mut self, id_val: u32) {
-        let chip_id = ChipId(id_val);
-        assert!(!self.actor.active_chips.contains_key(&chip_id), "Chip still active in NfcActor");
-        assert!(self.aborted_tasks.lock().unwrap().contains(&chip_id), "Task was not aborted");
-        assert!(self.removed_streams.lock().unwrap().contains(&chip_id), "Stream was not removed");
-        assert!(
-            !self.actor.casimir_to_device.lock().values().any(|&dev_id| dev_id.0 == id_val),
-            "Casimir mapping was not cleaned up!"
-        );
-    }
-}
+use crate::world::*;
 
 // --- Tests ---
 
@@ -402,6 +144,130 @@ fn test_nfc_spatial_proximity_threshold() {
     let p3 = netsim_model::Position { x: 0.0, y: 0.0, z: 0.045 }; // 4.5cm
     assert!(p1.distance(&p2) <= 0.04, "3.5cm should be within 4cm NFC threshold!");
     assert!(p1.distance(&p3) > 0.04, "4.5cm should be outside 4cm NFC threshold!");
+}
+
+// Feature: NFC Spatial Proximity Gating
+// Scenario: NFC packets between devices are gated by the 4cm (0.04m) proximity threshold
+//
+//   Given two NFC chips on devices beyond 4cm (0.10m apart)
+//   When Device 1 enters discovery mode and emits RF poll packets
+//   Then Device 2 does not receive the packets (rf_taps_rx == 0)
+//   When Device 2 moves within 4cm (0.02m apart) and Device 1 rediscovers
+//   Then Device 2 receives the RF poll packets (rf_taps_rx >= 1)
+#[tokio::test]
+async fn test_nfc_spatial_proximity_gating() {
+    use casimir::packets::nci::{
+        CoreInitCommand, CoreResetCommand, DeactivationType, DiscoverConfiguration, FeatureEnable,
+        ResetType, RfDeactivateCommand, RfDiscoverCommand, RfTechnologyAndMode,
+    };
+    use pdl_runtime::Packet;
+
+    let mut world = NfcWorld::new().await;
+    let chip1 = 1;
+    let chip2 = 2;
+    world.given_a_chip(chip1).await;
+    world.given_a_chip(chip2).await;
+
+    // Set initial device positions: 10cm apart (> 4cm threshold)
+    world.set_device_position(DeviceId(chip1), 0.0, 0.0, 0.0);
+    world.set_device_position(DeviceId(chip2), 0.10, 0.0, 0.0);
+
+    async fn send_nci<P: Packet>(
+        actor: &mut NfcActor,
+        ctx: &mut TestContext,
+        chip_id: ChipId,
+        pkt: P,
+    ) {
+        let mut bytes = pkt.encode_to_vec().unwrap();
+        if bytes.len() > 3 {
+            bytes[2] = (bytes.len() - 3) as u8;
+        }
+        actor.on_stream(chip_id, Bytes::from(bytes), ctx).await;
+    }
+
+    // Initialize chip1 and start discovery
+    send_nci(
+        &mut world.actor,
+        &mut world.ctx,
+        ChipId(chip1),
+        CoreResetCommand { reset_type: ResetType::KeepConfig },
+    )
+    .await;
+    send_nci(
+        &mut world.actor,
+        &mut world.ctx,
+        ChipId(chip1),
+        CoreInitCommand { feature_enable: FeatureEnable {} },
+    )
+    .await;
+    send_nci(
+        &mut world.actor,
+        &mut world.ctx,
+        ChipId(chip1),
+        RfDiscoverCommand {
+            configurations: vec![DiscoverConfiguration {
+                technology_and_mode: RfTechnologyAndMode::NfcAPassivePollMode,
+                discovery_frequency: 1,
+            }],
+        },
+    )
+    .await;
+
+    // Wait for Casimir to process RfDiscoverCommand and emit rf::PollCommand from chip1
+    let first_poll = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while world.actor.nfc_stats.to_proto().rf_taps_tx() < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(first_poll.is_ok(), "Chip 1 must transmit RF poll packets within timeout");
+
+    // Verify chip1 transmitted RF taps but chip2 was out of range (10cm > 4cm)
+    assert!(
+        world.actor.nfc_stats.to_proto().rf_taps_tx() >= 1,
+        "Chip 1 must transmit RF poll packets"
+    );
+    assert_eq!(
+        world.actor.nfc_stats.to_proto().rf_taps_rx(),
+        0,
+        "Chip 2 must not receive RF packets when beyond 4cm threshold (0.10m > 0.04m)"
+    );
+
+    // Move Device 2 within 4cm (0.02m apart)
+    world.set_device_position(DeviceId(chip2), 0.02, 0.0, 0.0);
+
+    // Restart discovery on chip1 so it emits a new RF poll command
+    send_nci(
+        &mut world.actor,
+        &mut world.ctx,
+        ChipId(chip1),
+        RfDeactivateCommand { deactivation_type: DeactivationType::IdleMode },
+    )
+    .await;
+    send_nci(
+        &mut world.actor,
+        &mut world.ctx,
+        ChipId(chip1),
+        RfDiscoverCommand {
+            configurations: vec![DiscoverConfiguration {
+                technology_and_mode: RfTechnologyAndMode::NfcAPassivePollMode,
+                discovery_frequency: 1,
+            }],
+        },
+    )
+    .await;
+
+    // Wait for Casimir to emit the next RF poll command and deliver to chip2
+    let second_poll = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while world.actor.nfc_stats.to_proto().rf_taps_rx() < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        second_poll.is_ok(),
+        "Chip 2 must receive RF packets when within 4cm threshold (0.02m <= 0.04m)"
+    );
 }
 
 #[tokio::test]

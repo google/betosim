@@ -124,6 +124,7 @@ rust_test_host {
     srcs: [
         "tests/mod.rs",
         "tests/nfc_actor_tests.rs",
+        "tests/world.rs",
     ],
     features: [
         "cuttlefish",

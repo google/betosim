@@ -13,3 +13,4 @@
 // limitations under the License.
 
 mod nfc_actor_tests;
+mod world;
