@@ -131,16 +131,18 @@ pub struct UdpPacketBuilder<'a> {
 }
 
 impl<'a> UdpPacketBuilder<'a> {
-    /// Creates a new `UdpPacketBuilder`.
+    /// Creates a new `UdpPacketBuilder`, defaulting the UDP length field to
+    /// the provided buffer length (capped at `u16::MAX`).
     pub fn new(buffer: &'a mut [u8], src_port: u16, dst_port: u16) -> Option<Self> {
         if buffer.len() < std::mem::size_of::<UdpHeader>() {
             return None;
         }
+        let default_len = u16::try_from(buffer.len()).unwrap_or(u16::MAX);
         let (header_slice, payload) = buffer.split_at_mut(std::mem::size_of::<UdpHeader>());
         let header = UdpHeader::mut_from_bytes(header_slice).ok()?;
         header.source_port.set(src_port);
         header.dest_port.set(dst_port);
-        header.length.set(std::mem::size_of::<UdpHeader>() as u16);
+        header.length.set(default_len);
         header.checksum.set(0);
         Some(Self { header, payload })
     }

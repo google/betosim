@@ -453,4 +453,98 @@ mod tests {
         assert!(matches!(packet.ip, Some(IpPacket::V6(..))));
         assert!(packet.transport.is_none());
     }
+
+    #[test]
+    fn test_parse_ether_padded_ipv4_udp_tftp_ack() {
+        let mut bytes = Vec::new();
+        // Ethernet: 14 bytes
+        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        bytes.extend_from_slice(&ether_type::IPV4.to_be_bytes());
+        // IPv4: 20 bytes, total length = 32 (20 IP + 8 UDP + 4 payload)
+        bytes.extend_from_slice(&[0x45, 0x00]);
+        bytes.extend_from_slice(&32u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[64, IP_P_UDP]);
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[192, 168, 0, 1]);
+        bytes.extend_from_slice(&[192, 168, 0, 2]);
+        // UDP: 8 bytes, length = 12 (8 UDP + 4 payload)
+        bytes.extend_from_slice(&1234u16.to_be_bytes()); // Src Port
+        bytes.extend_from_slice(&69u16.to_be_bytes()); // Dst Port (TFTP)
+        bytes.extend_from_slice(&12u16.to_be_bytes()); // Length
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // Checksum
+        // TFTP ACK: 4 bytes (Opcode 4, Block 1)
+        bytes.extend_from_slice(&[0x00, 0x04, 0x00, 0x01]);
+        // Ethernet trailing padding to reach 60 bytes minimum frame size (60 - 46 = 14 bytes)
+        bytes.extend_from_slice(&[0x00; 14]);
+
+        assert_eq!(bytes.len(), 60);
+
+        let packet = parse(&bytes).expect("Failed to parse packet");
+        let ip_packet = packet.ip.expect("No IP packet found");
+        if let IpPacket::V4(header, payload) = ip_packet {
+            assert_eq!(header.total_length.get(), 32);
+            assert_eq!(payload.len(), 12);
+        } else {
+            panic!("Expected IPv4 packet");
+        }
+
+        let transport = packet.transport.expect("No transport packet found");
+        if let TransportPacket::Udp(header, payload) = transport {
+            assert_eq!(header.length.get(), 12);
+            assert_eq!(payload, &[0x00, 0x04, 0x00, 0x01]);
+        } else {
+            panic!("Expected UDP packet");
+        }
+    }
+
+    #[test]
+    fn test_parse_ipv4_with_options_udp() {
+        let mut bytes = Vec::new();
+        // Ethernet: 14 bytes
+        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        bytes.extend_from_slice(&ether_type::IPV4.to_be_bytes());
+        // IPv4 with IHL = 6: 24 bytes header (20 fixed + 4 options), total length = 36
+        bytes.extend_from_slice(&[0x46, 0x00]);
+        bytes.extend_from_slice(&36u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[64, IP_P_UDP]);
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&[192, 168, 0, 1]);
+        bytes.extend_from_slice(&[192, 168, 0, 2]);
+        // 4 bytes of options
+        bytes.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+        // UDP: 8 bytes, length = 12
+        bytes.extend_from_slice(&1234u16.to_be_bytes());
+        bytes.extend_from_slice(&53u16.to_be_bytes());
+        bytes.extend_from_slice(&12u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        // Payload: 4 bytes
+        bytes.extend_from_slice(&[10, 20, 30, 40]);
+        // 14 bytes trailing padding
+        bytes.extend_from_slice(&[0x00; 14]);
+
+        let packet = parse(&bytes).expect("Failed to parse packet");
+        let ip_packet = packet.ip.expect("No IP packet found");
+        if let IpPacket::V4(header, payload) = ip_packet {
+            assert_eq!(header.ihl(), 6);
+            assert_eq!(header.header_length(), 24);
+            assert_eq!(header.total_length.get(), 36);
+            assert_eq!(payload.len(), 12);
+        } else {
+            panic!("Expected IPv4 packet");
+        }
+
+        let transport = packet.transport.expect("No transport packet found");
+        if let TransportPacket::Udp(header, payload) = transport {
+            assert_eq!(header.length.get(), 12);
+            assert_eq!(payload, &[10, 20, 30, 40]);
+        } else {
+            panic!("Expected UDP packet");
+        }
+    }
 }

@@ -90,8 +90,10 @@ impl<'a> Ipv4Builder<'a> {
     }
 
     pub fn build(self) -> Option<usize> {
-        let total_len = std::mem::size_of::<Ipv4Header>() + self.payload_len;
-        if total_len > u16::MAX as usize || self.payload_len > self.payload.len() {
+        let total_len = std::mem::size_of::<Ipv4Header>().checked_add(self.payload_len)?;
+        if total_len > u16::MAX as usize
+            || (!self.payload.is_empty() && self.payload_len > self.payload.len())
+        {
             return None;
         }
         self.header.total_length.set(total_len as u16);
@@ -152,7 +154,9 @@ impl<'a> Ipv6Builder<'a> {
     }
 
     pub fn build(self) -> Option<usize> {
-        if self.payload_len > u16::MAX as usize || self.payload_len > self.payload.len() {
+        if self.payload_len > u16::MAX as usize
+            || (!self.payload.is_empty() && self.payload_len > self.payload.len())
+        {
             return None;
         }
         self.header.payload_length.set(self.payload_len as u16);

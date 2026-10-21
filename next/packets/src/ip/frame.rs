@@ -46,8 +46,20 @@ pub struct Ipv4Header {
 
 impl Ipv4Header {
     /// Parses an `Ipv4Header` from the beginning of the given byte slice.
+    ///
+    /// Advances past any IPv4 header options (`header_length() > 20`) and clips
+    /// the returned payload slice to `total_length` so trailing link-layer
+    /// padding (e.g. 60-byte minimum Ethernet frame padding) is excluded.
     pub fn parse(bytes: &[u8]) -> Option<ParseResult<'_, Ipv4Header>> {
-        Ref::from_prefix(bytes).ok()
+        let (header, _) = Ref::<_, Ipv4Header>::from_prefix(bytes).ok()?;
+        let hdr_len = header.header_length();
+        let total_len = usize::from(header.total_length.get());
+        if hdr_len < std::mem::size_of::<Ipv4Header>() || total_len < hdr_len {
+            return None;
+        }
+        let end = bytes.len().min(total_len);
+        let payload = bytes.get(hdr_len..end)?;
+        Some((header, payload))
     }
 
     /// Returns the version of the IP protocol (should be 4).
@@ -98,8 +110,15 @@ pub struct Ipv6Header {
 
 impl Ipv6Header {
     /// Parses an `Ipv6Header` from the beginning of the given byte slice.
+    ///
+    /// Clips the returned payload slice to `payload_length` so trailing
+    /// link-layer padding is excluded.
     pub fn parse(bytes: &[u8]) -> Option<ParseResult<'_, Ipv6Header>> {
-        Ref::from_prefix(bytes).ok()
+        let (header, rest) = Ref::<_, Ipv6Header>::from_prefix(bytes).ok()?;
+        let payload_len = usize::from(header.payload_length.get());
+        let end = rest.len().min(payload_len);
+        let payload = rest.get(..end)?;
+        Some((header, payload))
     }
 
     /// Returns the version of the IP protocol (should be 6).
@@ -196,5 +215,83 @@ mod tests {
         assert_eq!(header.hdr_ext_len, 0);
         assert_eq!(header.header_length(), 8);
         assert_eq!(rest.len(), 0);
+    }
+
+    #[test]
+    fn test_ipv4_header_with_options_and_padding() {
+        let mut bytes = Vec::new();
+        // 20-byte fixed header with IHL = 6 (24 bytes) and total_length = 28
+        bytes.extend_from_slice(&[
+            0x46, 0x00, 0x00, 0x1C, 0x12, 0x34, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00, 192, 168, 0, 1,
+            192, 168, 0, 2,
+        ]);
+        // 4 bytes of options
+        bytes.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+        // 4 bytes of payload
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        // 18 bytes of trailing Ethernet padding (total length = 46 bytes)
+        bytes.extend_from_slice(&[0x00; 18]);
+
+        let (header, payload) =
+            Ipv4Header::parse(&bytes).expect("Failed to parse IPv4 header with options");
+
+        assert_eq!(header.version(), 4);
+        assert_eq!(header.ihl(), 6);
+        assert_eq!(header.header_length(), 24);
+        assert_eq!(header.total_length.get(), 28);
+        assert_eq!(payload, &[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // Truncated IPv4 slice where total_length (28) > available bytes (26)
+        let (header, truncated_payload) =
+            Ipv4Header::parse(&bytes[..26]).expect("Failed to parse truncated IPv4 slice");
+        assert_eq!(header.total_length.get(), 28);
+        assert_eq!(truncated_payload, &[0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn test_ipv4_header_invalid_lengths() {
+        let valid_bytes: [u8; 20] = [
+            0x45, 0x00, 0x00, 0x14, 0x12, 0x34, 0x40, 0x00, 0x40, 0x06, 0x12, 0x34, 192, 168, 0, 1,
+            192, 168, 0, 2,
+        ];
+
+        // 1. IHL < 5 (version_ihl = 0x44 -> IHL = 4 -> 16 bytes < 20)
+        let mut ihl_too_small = valid_bytes;
+        ihl_too_small[0] = 0x44;
+        assert!(Ipv4Header::parse(&ihl_too_small).is_none());
+
+        // 2. bytes.len() < header_length() (IHL = 6 -> 24 bytes in 20-byte slice)
+        let mut truncated_header = valid_bytes;
+        truncated_header[0] = 0x46;
+        truncated_header[2] = 0x00;
+        truncated_header[3] = 0x1C; // total_length = 28
+        assert!(Ipv4Header::parse(&truncated_header).is_none());
+
+        // 3. total_length < header_length() (total_length = 16 < 20)
+        let mut total_len_too_small = valid_bytes;
+        total_len_too_small[2] = 0x00;
+        total_len_too_small[3] = 0x10;
+        assert!(Ipv4Header::parse(&total_len_too_small).is_none());
+    }
+
+    #[test]
+    fn test_ipv6_header_clips_trailing_padding() {
+        let mut bytes = Vec::new();
+        // 40-byte IPv6 header with payload_length = 4
+        bytes.extend_from_slice(&[
+            0x60, 0x00, 0x00, 0x00, 0x00, 0x04, 0x06, 0x40, 0x20, 0x01, 0x0D, 0xB8, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x20, 0x01, 0x0D, 0xB8,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ]);
+        // 4 bytes payload
+        bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        // 10 bytes trailing padding
+        bytes.extend_from_slice(&[0x00; 10]);
+
+        let (header, payload) =
+            Ipv6Header::parse(&bytes).expect("Failed to parse IPv6 header with padding");
+
+        assert_eq!(header.payload_length.get(), 4);
+        assert_eq!(payload, &[0x01, 0x02, 0x03, 0x04]);
     }
 }

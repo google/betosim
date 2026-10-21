@@ -17,7 +17,7 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use crate::{
-        ip::{Ipv4Builder, Ipv6Builder},
+        ip::{Ipv4Builder, Ipv4Header, Ipv6Builder, Ipv6Header},
         utils::test_utils::validate_pcap_json,
     };
 
@@ -128,6 +128,54 @@ mod tests {
         // payload length 6 overflows
         builder.payload_len(6);
         assert!(builder.build().is_none());
+    }
+
+    #[test]
+    fn test_ip_builders_header_only_slice_with_payload_len() {
+        let mut v4_packet = [0u8; 32];
+        let (v4_header_slice, v4_payload_slice) = v4_packet.split_at_mut(20);
+        v4_payload_slice.copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+        let mut v4_builder = Ipv4Builder::new(
+            v4_header_slice,
+            17, // UDP
+            Ipv4Addr::new(192, 168, 0, 1),
+            Ipv4Addr::new(192, 168, 0, 2),
+        )
+        .unwrap();
+        assert_eq!(v4_builder.payload_mut().len(), 0);
+        v4_builder.payload_len(12);
+        let v4_built_len =
+            v4_builder.build().expect("build should succeed on IPv4 header-only slice");
+        assert_eq!(v4_built_len, 32);
+
+        let (parsed_v4_header, parsed_v4_payload) =
+            Ipv4Header::parse(&v4_packet).expect("Failed to parse round-trip IPv4 packet");
+        assert_eq!(parsed_v4_header.total_length.get(), 32);
+        assert_ne!(parsed_v4_header.header_checksum.get(), 0);
+        assert_eq!(parsed_v4_payload, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+        let mut v6_packet = [0u8; 52];
+        let (v6_header_slice, v6_payload_slice) = v6_packet.split_at_mut(40);
+        v6_payload_slice.copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+        let mut v6_builder = Ipv6Builder::new(
+            v6_header_slice,
+            17, // UDP
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 2),
+        )
+        .unwrap();
+        assert_eq!(v6_builder.payload_mut().len(), 0);
+        v6_builder.payload_len(12);
+        let v6_built_len =
+            v6_builder.build().expect("build should succeed on IPv6 header-only slice");
+        assert_eq!(v6_built_len, 52);
+
+        let (parsed_v6_header, parsed_v6_payload) =
+            Ipv6Header::parse(&v6_packet).expect("Failed to parse round-trip IPv6 packet");
+        assert_eq!(parsed_v6_header.payload_length.get(), 12);
+        assert_eq!(parsed_v6_payload, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
 
     #[test]

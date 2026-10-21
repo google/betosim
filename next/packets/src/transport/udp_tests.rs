@@ -43,3 +43,38 @@ fn test_udp_header_too_short() {
     let bytes: [u8; 7] = [0x30, 0x39, 0x00, 0x50, 0x00, 0x1C, 0xAB];
     assert!(UdpHeader::parse(&bytes).is_none());
 }
+
+#[test]
+fn test_udp_header_clips_trailing_padding() {
+    let mut bytes = Vec::new();
+    // 8-byte UDP header: source port 12345, dest port 80, length 12, checksum 0
+    bytes.extend_from_slice(&[0x30, 0x39, 0x00, 0x50, 0x00, 0x0C, 0x00, 0x00]);
+    // 4 bytes payload
+    bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    // 14 bytes trailing padding
+    bytes.extend_from_slice(&[0x00; 14]);
+
+    let (header, payload) =
+        UdpHeader::parse(&bytes).expect("Failed to parse UDP header with padding");
+
+    assert_eq!(header.length.get(), 12);
+    assert_eq!(payload, &[0xDE, 0xAD, 0xBE, 0xEF]);
+}
+
+#[test]
+fn test_udp_header_invalid_length() {
+    // 8-byte UDP header + 4 bytes data, but length field is 6 (< 8)
+    let bytes: [u8; 12] = [0x30, 0x39, 0x00, 0x50, 0x00, 0x06, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
+    assert!(UdpHeader::parse(&bytes).is_none());
+}
+
+#[test]
+fn test_udp_header_zero_length_pass_through() {
+    // 8-byte UDP header with length == 0 followed by 4 bytes payload
+    let bytes: [u8; 12] = [0x30, 0x39, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+    let (header, payload) =
+        UdpHeader::parse(&bytes).expect("Failed to parse UDP header with zero length");
+
+    assert_eq!(header.length.get(), 0);
+    assert_eq!(payload, &[0xDE, 0xAD, 0xBE, 0xEF]);
+}

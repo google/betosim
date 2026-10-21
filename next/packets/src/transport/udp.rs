@@ -37,10 +37,19 @@ pub struct UdpHeader {
 impl UdpHeader {
     /// Parses a `UdpHeader` from the beginning of the given byte slice.
     ///
-    /// Returns a reference to the header and a slice for the remaining bytes
-    /// (the UDP payload).
+    /// Returns a reference to the header and a slice for the UDP payload,
+    /// clipped to `length - 8` when `length` is non-zero and smaller than the
+    /// remaining slice (when `length == 0`, defers to the enclosing slice).
     pub fn parse(bytes: &[u8]) -> Option<ParseResult<'_, UdpHeader>> {
-        Ref::from_prefix(bytes).ok()
+        let (header, rest) = Ref::<_, UdpHeader>::from_prefix(bytes).ok()?;
+        let len = usize::from(header.length.get());
+        if len == 0 {
+            return Some((header, rest));
+        }
+        let payload_len = len.checked_sub(std::mem::size_of::<UdpHeader>())?;
+        let end = rest.len().min(payload_len);
+        let payload = rest.get(..end)?;
+        Some((header, payload))
     }
 }
 
