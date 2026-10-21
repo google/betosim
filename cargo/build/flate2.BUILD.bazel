@@ -21,6 +21,7 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "flate2",
     srcs = glob(["**/*.rs"]),
+    compile_data = ["README.md"],
     crate_features = [
         "any_impl",
         "any_zlib",
