@@ -79,7 +79,7 @@ async fn handle_websocket_client(stream: TcpStream, addr: SocketAddr, device_cli
     } else {
         match setup_virtual_chip(&device_client, chip_kind, queries, addr, stream_rx, sink_tx).await
         {
-            Ok(id) => Some((id, device_client)),
+            Ok((device_id, chip_id)) => Some((device_id, chip_id, device_client)),
             Err(error) => {
                 warn!(%error, "Failed to setup virtual chip for {addr}");
                 return;

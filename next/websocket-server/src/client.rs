@@ -504,14 +504,15 @@ mod tests {
             inner.expect_perform_action().returning(move |_, action| match action {
                 DeviceAction::AddChipByGuid { params } => {
                     let device_id = DeviceId(next_id.fetch_add(1, Ordering::SeqCst));
-                    let _ = add_tx.try_send((params, device_id));
-                    Ok(DeviceActionResult::AddChipByGuidSuccess { device_id, chip_id: ChipId(0) })
+                    let chip_id = ChipId(7);
+                    let _ = add_tx.try_send((params, device_id, chip_id));
+                    Ok(DeviceActionResult::AddChipByGuidSuccess { device_id, chip_id })
+                }
+                DeviceAction::NotifyChipRemoved(device_id, chip_id) => {
+                    let _ = del_tx.try_send((device_id, chip_id));
+                    Ok(DeviceActionResult::Success)
                 }
                 _ => panic!("unexpected action"),
-            });
-            inner.expect_delete().returning(move |id| {
-                let _ = del_tx.try_send(id);
-                Ok(())
             });
             Box::new(inner)
         });
@@ -527,7 +528,7 @@ mod tests {
         let path = build_packet_stream_path(&chip_info, "dualfd-cvd-1");
         let (mut client_stream, mut client_sink) = connect(&addr, &path).await.unwrap();
 
-        let (mut add_req, device_id) = add_rx.recv().await.unwrap();
+        let (mut add_req, device_id, chip_id) = add_rx.recv().await.unwrap();
         assert_eq!(add_req.device_guid, "dualfd-cvd-1");
         assert_eq!(add_req.device_config.name, "cvd-1");
         assert_eq!(add_req.chip.kind, ChipKind::WIFI);
@@ -545,6 +546,6 @@ mod tests {
 
         drop(client_sink);
         drop(client_stream);
-        assert_eq!(del_rx.recv().await, Some(device_id));
+        assert_eq!(del_rx.recv().await, Some((device_id, chip_id)));
     }
 }

@@ -24,11 +24,11 @@ use device_actor::DeviceClient;
 use device_api::DeviceId;
 use futures::{StreamExt, sink::unfold};
 use netsim_model::{
-    Chip, ChipError, ChipKind, ChipVariant, DeviceInfo, PacketSink, PacketStream, Quirks,
+    Chip, ChipError, ChipId, ChipKind, ChipVariant, DeviceInfo, PacketSink, PacketStream, Quirks,
 };
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tungstenite::{Message, WebSocket};
 
 use crate::error::ServerError;
@@ -41,7 +41,7 @@ pub(crate) async fn setup_virtual_chip(
     addr: SocketAddr,
     stream_rx: mpsc::Receiver<Result<Bytes, io::Error>>,
     sink_tx: mpsc::Sender<Bytes>,
-) -> Result<DeviceId, ServerError> {
+) -> Result<(DeviceId, ChipId), ServerError> {
     let device_guid = query_params
         .remove("device_guid")
         .filter(|s| !s.is_empty())
@@ -95,7 +95,7 @@ pub(crate) async fn setup_virtual_chip(
         chip,
     };
 
-    device_client.add_chip(request).await.map_err(ServerError::DeviceActor)
+    device_client.add_chip_with_id(request).await.map_err(ServerError::DeviceActor)
 }
 
 fn extract_device_info(
@@ -187,14 +187,15 @@ fn packet_stream_and_sink(
 
 /// Spawns threads and tasks to manage WebSocket traffic and chip lifecycle.
 ///
-/// `device` is the registered device to delete on close; `None` for loopback.
+/// `device` is the registered `(DeviceId, ChipId)` to remove on close; `None`
+/// for loopback.
 pub(crate) async fn run_websocket_transport(
     mut websocket_reader: WebSocket<TcpStream>,
     mut websocket_writer: WebSocket<TcpStream>,
     addr: SocketAddr,
     stream_tx: mpsc::Sender<Result<Bytes, io::Error>>,
     mut sink_rx: mpsc::Receiver<Bytes>,
-    device: Option<(DeviceId, DeviceClient)>,
+    device: Option<(DeviceId, ChipId, DeviceClient)>,
 ) {
     let (outbound_msg_tx, mut outbound_msg_rx) = mpsc::unbounded_channel::<Message>();
 
@@ -239,6 +240,7 @@ pub(crate) async fn run_websocket_transport(
             }
         }
         let _ = websocket_writer.flush();
+        let _ = websocket_writer.get_ref().shutdown(std::net::Shutdown::Read);
     });
 
     // 3. Forward Task: Packet Sink -> WebSocket (Async to Sync bridge)
@@ -253,13 +255,13 @@ pub(crate) async fn run_websocket_transport(
 
     // 4. Cleanup Task: Triggered when WebSocket reader or writer closes
     JoinSet::from_iter([reader_task, writer_task]).join_next().await;
-    let Some((device_id, device_client)) = device else {
+    let Some((device_id, chip_id, device_client)) = device else {
         info!("WebSocket loopback stream for {addr} closed");
         return;
     };
-    info!("Cleaning up WebSocket device {device_id} for {addr}");
-    if let Err(error) = device_client.delete(device_id).await {
-        warn!(%error, "Failed to delete virtual WebSocket device {device_id}");
+    info!("Cleaning up WebSocket chip {chip_id} on device {device_id} for {addr}");
+    if let Err(error) = device_client.notify_chip_removed(device_id, chip_id).await {
+        debug!(%error, "WebSocket chip {chip_id} on device {device_id} already removed");
     }
 }
 

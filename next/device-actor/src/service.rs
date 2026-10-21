@@ -460,38 +460,38 @@ impl DeviceActor {
         chip_id: ChipId,
         ctx: &mut DynContext<Self>,
     ) -> Result<(), DeviceError> {
-        // Find and clone the chip + stats for archiving
-        let chip_to_archive = if let Some(entity) = self.devices.get(&device_id) {
-            entity.device.chips.iter().find(|c| c.id == chip_id.0).map(|c| {
-                let stream_stats = entity.chip_stats.get(&ChipId(c.id)).cloned();
-                let cached_stats = entity.last_known_stats.get(&ChipId(c.id)).cloned();
-                (c.clone(), stream_stats, cached_stats)
-            })
-        } else {
-            None
+        // Find and remove the chip + stats for archiving
+        let (chip_to_archive, should_delete) = {
+            let entity = self
+                .devices
+                .get_mut(&device_id)
+                .ok_or_else(|| DeviceError::DeviceNotFound(device_id.to_string()))?;
+            let archived =
+                if let Some(pos) = entity.device.chips.iter().position(|c| c.id == chip_id.0) {
+                    let chip = entity.device.chips.remove(pos);
+                    let stream_stats = entity.chip_stats.remove(&chip_id);
+                    let cached_stats = entity.last_known_stats.remove(&chip_id);
+                    Some((chip, stream_stats, cached_stats))
+                } else {
+                    None
+                };
+            (archived, entity.device.chips.is_empty())
         };
-        // Archive stats (if found)
+
         if let Some((chip, stream_stats, cached_stats)) = chip_to_archive {
             info!(
                 "DeviceActor: Removed chip {chip_id} (kind {}) from device {device_id}",
                 chip.kind
             );
             self.archive_chip_stats(device_id, &chip, stream_stats, cached_stats.as_ref()).await;
-        }
-
-        // Remove the chip and check for deletion
-        let should_delete = {
-            let entity = self
-                .devices
-                .get_mut(&device_id)
-                .ok_or_else(|| DeviceError::DeviceNotFound(device_id.to_string()))?;
-            entity.device.chips.retain(|c| c.id != chip_id.0);
-            entity.device.chips.is_empty()
-        };
-
-        // Notify Link Actor
-        if let Err(error) = self.link_client.notify_chip_removed(chip_id).await {
-            warn!(%error, "DeviceActor: Failed to notify LinkActor of chip remove");
+            if let Some(chip_client) = self.chip_clients.get(&chip.kind) {
+                let _ = chip_client.delete(chip_id).await;
+            }
+            if let Err(error) = self.link_client.notify_chip_removed(chip_id).await {
+                warn!(%error, "DeviceActor: Failed to notify LinkActor of chip remove");
+            }
+        } else if !should_delete {
+            return Ok(());
         }
 
         if should_delete {

@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::{
+    collections::HashMap,
     net::TcpStream as StdTcpStream,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
     time::Duration,
@@ -136,12 +137,13 @@ pub struct TestClientContext {
     pub packet_sink: Option<PacketSink>,
     pub add_request: Box<DeviceAddChip>,
     pub device_id: DeviceId,
+    pub chip_id: ChipId,
 }
 
 pub struct TestWorld {
     port: u16,
-    add_chip_rx: mpsc::Receiver<(Box<DeviceAddChip>, DeviceId)>,
-    delete_chip_rx: mpsc::Receiver<DeviceId>,
+    add_chip_rx: mpsc::Receiver<(Box<DeviceAddChip>, DeviceId, ChipId)>,
+    delete_chip_rx: mpsc::Receiver<(DeviceId, ChipId)>,
     clients: Vec<TestClientContext>,
     last_handshake_error: Option<u16>,
 }
@@ -152,36 +154,44 @@ impl TestWorld {
         let (del_tx, del_rx) = mpsc::channel(10);
 
         let device_id_counter = Arc::new(AtomicU32::new(1000));
+        let chip_id_counter = Arc::new(AtomicU32::new(1));
+        let guid_to_device_id = Arc::new(Mutex::new(HashMap::<String, DeviceId>::new()));
 
         let mut mock = MockActorClient::<DeviceActor>::new();
 
         let add_tx_clone = add_tx.clone();
         let del_tx_clone = del_tx.clone();
         let id_counter_clone = Arc::clone(&device_id_counter);
+        let chip_counter_clone = Arc::clone(&chip_id_counter);
+        let guid_map_clone = Arc::clone(&guid_to_device_id);
         mock.expect_clone_box().returning(move || {
             let mut inner_mock = MockActorClient::<DeviceActor>::new();
             let add_tx = add_tx_clone.clone();
             let del_tx = del_tx_clone.clone();
             let id_counter = Arc::clone(&id_counter_clone);
+            let chip_counter = Arc::clone(&chip_counter_clone);
+            let guid_map = Arc::clone(&guid_map_clone);
 
             inner_mock.expect_perform_action().returning(move |_, action| {
                 let add_tx = add_tx.clone();
+                let del_tx = del_tx.clone();
                 match action {
                     DeviceAction::AddChipByGuid { params } => {
-                        let device_id = DeviceId(id_counter.fetch_add(1, Ordering::SeqCst));
-                        let _ = add_tx.try_send((params, device_id));
-                        Ok(DeviceActionResult::AddChipByGuidSuccess {
-                            device_id,
-                            chip_id: ChipId(0),
-                        })
+                        let device_id = *guid_map
+                            .lock()
+                            .unwrap()
+                            .entry(params.device_guid.clone())
+                            .or_insert_with(|| DeviceId(id_counter.fetch_add(1, Ordering::SeqCst)));
+                        let chip_id = ChipId(chip_counter.fetch_add(1, Ordering::SeqCst));
+                        let _ = add_tx.try_send((params, device_id, chip_id));
+                        Ok(DeviceActionResult::AddChipByGuidSuccess { device_id, chip_id })
+                    }
+                    DeviceAction::NotifyChipRemoved(device_id, chip_id) => {
+                        let _ = del_tx.try_send((device_id, chip_id));
+                        Ok(DeviceActionResult::Success)
                     }
                     _ => panic!("Unexpected action in mock"),
                 }
-            });
-
-            inner_mock.expect_delete().returning(move |id| {
-                let _ = del_tx.try_send(id);
-                Ok(())
             });
 
             Box::new(inner_mock)
@@ -210,7 +220,7 @@ impl TestWorld {
     async fn connect_internal(&mut self, host: &str, path: &str) -> Result<usize, u16> {
         match ManualWebSocketClient::connect(host, self.port, path).await {
             Ok(client) => {
-                let (mut add_request, device_id) =
+                let (mut add_request, device_id, chip_id) =
                     self.add_chip_rx.recv().await.expect("Did not receive add_chip request");
 
                 let packet_stream = add_request.packet_stream.take().unwrap();
@@ -222,6 +232,7 @@ impl TestWorld {
                     packet_sink: Some(packet_sink),
                     add_request,
                     device_id,
+                    chip_id,
                 };
                 self.clients.push(context);
                 Ok(self.clients.len() - 1)
@@ -330,10 +341,21 @@ impl TestWorld {
         self.clients[client_idx].packet_sink.take();
     }
 
+    pub fn device_id(&self, client_idx: usize) -> DeviceId {
+        self.clients[client_idx].device_id
+    }
+
+    pub fn chip_id(&self, client_idx: usize) -> ChipId {
+        self.clients[client_idx].chip_id
+    }
+
     pub async fn then_backend_deletes_chip(&mut self, client_idx: usize) {
-        let expected_id = self.clients[client_idx].device_id;
-        let deleted_id = self.delete_chip_rx.recv().await.expect("Delete channel closed");
-        assert_eq!(deleted_id, expected_id);
+        let expected_device_id = self.clients[client_idx].device_id;
+        let expected_chip_id = self.clients[client_idx].chip_id;
+        let (deleted_device_id, deleted_chip_id) =
+            self.delete_chip_rx.recv().await.expect("Delete channel closed");
+        assert_eq!(deleted_device_id, expected_device_id);
+        assert_eq!(deleted_chip_id, expected_chip_id);
     }
 
     /// Connects a client with `?loopback=1`. No add_chip request is expected,

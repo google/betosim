@@ -92,6 +92,44 @@ async fn test_multiple_concurrent_clients() {
     world.then_client_receives_packet(client_b, &packet_b).await;
 }
 
+// Scenario: Disconnecting one WebSocket radio on a multi-chip device preserves other radios
+//   Given a Bluetooth and a Wi-Fi WebSocket client connected with the same device_guid
+//   When the Bluetooth WebSocket client closes its connection
+//   Then only the Bluetooth chip is removed from the device
+//   And the Wi-Fi WebSocket client continues to send and receive packets
+#[tokio::test]
+async fn test_multi_chip_same_device_guid_disconnect() {
+    let mut world = TestWorld::new().await;
+
+    let bt_client = world
+        .given_a_websocket_client_connected_at_path(
+            "/v1/websocket/bt?device_guid=shared-guid&name=cvd-1",
+        )
+        .await;
+    let wifi_client = world
+        .given_a_websocket_client_connected_at_path(
+            "/v1/websocket/wifi?device_guid=shared-guid&name=cvd-1",
+        )
+        .await;
+
+    assert_eq!(world.device_id(bt_client), world.device_id(wifi_client));
+    assert_ne!(world.chip_id(bt_client), world.chip_id(wifi_client));
+
+    // Closing the Bluetooth WebSocket only removes the Bluetooth chip, leaving Wi-Fi active
+    world.when_client_closes_connection(bt_client).await;
+    world.then_backend_deletes_chip(bt_client).await;
+    world.then_backend_deletes_nothing();
+
+    let wifi_packet = [0x80, 0x01];
+    world.when_client_sends_packet(wifi_client, &wifi_packet).await;
+    world.then_backend_receives_packet(wifi_client, &wifi_packet).await;
+    world.when_backend_sends_packet(wifi_client, &wifi_packet).await;
+    world.then_client_receives_packet(wifi_client, &wifi_packet).await;
+
+    world.when_client_closes_connection(wifi_client).await;
+    world.then_backend_deletes_chip(wifi_client).await;
+}
+
 #[tokio::test]
 async fn test_backend_initiated_termination() {
     let mut world = TestWorld::new().await;

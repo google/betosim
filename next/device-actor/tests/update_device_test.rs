@@ -93,6 +93,44 @@ async fn test_notify_chip_removed() {
     assert!(device.is_none());
 }
 
+// Scenario: Notify chip removed on a multi-chip device preserves remaining chips
+//   Given a running Device Actor with a device containing a Bluetooth chip and a Wi-Fi chip
+//   When I notify that the Bluetooth chip was removed
+//   Then the Bluetooth chip is deleted while the device and Wi-Fi chip remain active
+//   And a duplicate removal notification for the same chip is a no-op
+#[tokio::test]
+async fn test_notify_chip_removed_preserves_remaining_chips() {
+    let world = World::new().await;
+
+    let bt_params = World::create_device_add_chip_params(
+        "guid-1".to_string(),
+        "bt-chip".to_string(),
+        "00:00:00:00:00:01".to_string(),
+    );
+    let (device_id, bt_chip_id) = world.client.add_chip_with_id(bt_params).await.unwrap();
+
+    let mut wifi_params = World::create_device_add_chip_params(
+        "guid-1".to_string(),
+        "wifi-chip".to_string(),
+        String::new(),
+    );
+    wifi_params.chip.kind = ChipKind::WIFI;
+    wifi_params.chip.variant = None;
+    let (device_id_2, wifi_chip_id) = world.client.add_chip_with_id(wifi_params).await.unwrap();
+    assert_eq!(device_id, device_id_2);
+
+    // Removing the Bluetooth chip preserves the device and Wi-Fi chip, and deletes the BT chip from mock_chips
+    world.when_notify_chip_removed(device_id, bt_chip_id).await;
+    assert!(!world.mock_chips.lock().unwrap().contains_key(&bt_chip_id));
+    assert!(world.mock_chips.lock().unwrap().contains_key(&wifi_chip_id));
+
+    // Duplicate notification for the already-removed chip is a no-op
+    world.when_notify_chip_removed(device_id, bt_chip_id).await;
+    let device = world.client.get(device_id).await.unwrap().unwrap();
+    assert_eq!(device.chips.len(), 1);
+    assert_eq!(device.chips[0].id, wifi_chip_id.0);
+}
+
 // Scenario: Update device propagates by variant when no ID is provided
 //   Given a running Device Actor with expectation for Update call
 //   When I create a device and update it using a variant (e.g. Bluetooth)

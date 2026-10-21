@@ -167,13 +167,14 @@ impl DeviceClient {
         self.inner.delete(id).err_into::<ClientError>().await
     }
 
-    /// Creates or updates a device based on PacketStream parameters.
+    /// Creates or updates a device based on PacketStream parameters and returns
+    /// both the device ID and the newly assigned chip ID.
     ///
     /// Uses `AddChipByGuid` to atomically find/create a device by GUID.
-    pub async fn add_chip(
+    pub async fn add_chip_with_id(
         &self,
         params: netsim_model::DeviceAddChip,
-    ) -> Result<DeviceId, ClientError> {
+    ) -> Result<(DeviceId, netsim_model::ChipId), ClientError> {
         let result = self
             .inner
             .perform_action(
@@ -184,9 +185,21 @@ impl DeviceClient {
             .await?;
 
         match result {
-            DeviceActionResult::AddChipByGuidSuccess { device_id, chip_id: _ } => Ok(device_id),
+            DeviceActionResult::AddChipByGuidSuccess { device_id, chip_id } => {
+                Ok((device_id, chip_id))
+            }
             _ => Err(ClientError::Recv("Unexpected action result for AddChipByGuid".to_string())),
         }
+    }
+
+    /// Creates or updates a device based on PacketStream parameters.
+    ///
+    /// Uses `AddChipByGuid` to atomically find/create a device by GUID.
+    pub async fn add_chip(
+        &self,
+        params: netsim_model::DeviceAddChip,
+    ) -> Result<DeviceId, ClientError> {
+        self.add_chip_with_id(params).await.map(|(device_id, _)| device_id)
     }
 
     /// Shuts down the device actor.
