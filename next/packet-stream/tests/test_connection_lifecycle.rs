@@ -16,244 +16,165 @@
 // lifecycle
 //=============================================================================
 
+use std::time::Duration;
+
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
-use packet_stream::{Chip, ChipInfo, ChipKind, DeviceInfo, Streams, TransportType};
-use tokio::{
-    net::TcpStream,
-    time::{Duration, timeout},
-};
 
-/// Helper to create test chip info
-fn create_test_chip_info() -> ChipInfo {
-    ChipInfo {
-        name: "test-chip".to_string(),
-        chip: Some(Chip {
-            kind: ChipKind::WIFI,
-            id: "test-lifecycle-chip".to_string(),
-            name: "Test Lifecycle Chip v1.0".to_string(),
-            manufacturer: "Test Lifecycle Corp".to_string(),
-            product_name: "Test Lifecycle Chip v1.0".to_string(),
-            address: "".to_string(),
-            sim_type: None,
-            sim_profile: None,
-            loopback: false,
-            bt_properties: None,
-        }),
-        device_info: Some(DeviceInfo {
-            name: "test-lifecycle-device".to_string(),
-            id: "test-lifecycle-device".to_string(),
-            avd_path: "".to_string(),
-            ..Default::default()
-        }),
-    }
-}
+use crate::world::{World, create_chip_info};
 
+// Scenario: Client gracefully closes sink and server detects EOF
+// Given a running TCP listener
+// And a connected client
+// When the connection is accepted
+// And the client sends an initial packet
+// Then the server receives the packet
+// When the client gracefully closes its sink
+// Then the server stream closes
 #[tokio::test]
 async fn test_graceful_client_disconnect() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let chip_info = create_test_chip_info();
-    let (_client_stream, mut client_sink) = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let (_name, (mut server_stream, _, _, _guid)) =
-        timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    let chip_info = create_chip_info("test-chip");
+    world.when_connect_client("client", "tcp", chip_info).await;
+    world.when_accept_connection().await;
 
     let test_data = b"Connection established";
-    client_sink.send(Bytes::from_static(test_data)).await.unwrap();
+    world.when_send_packet_from_client("client", Bytes::from_static(test_data)).await;
+    world.then_server_receives_packet("test-chip", test_data).await;
 
-    let received =
-        timeout(Duration::from_secs(5), server_stream.next()).await.unwrap().unwrap().unwrap();
-    assert_eq!(received, &test_data[..]);
-
-    client_sink.close().await.unwrap();
-
-    let server_recv_result = timeout(Duration::from_secs(3), server_stream.next()).await;
-    assert!(server_recv_result.is_err() || server_recv_result.unwrap().is_none());
+    world.when_close_client_sink("client").await;
+    world.then_server_stream_closes("test-chip").await;
 }
 
+// Scenario: Client drops abruptly and server detects EOF
+// Given a running TCP listener
+// And a connected client
+// When the connection is accepted
+// And the client sends an initial packet
+// Then the server receives the packet
+// When the client is dropped abruptly
+// Then the server stream closes
 #[tokio::test]
 async fn test_abrupt_client_disconnect() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let chip_info = create_test_chip_info();
-    let (client_stream, mut client_sink) = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let (_name, (mut server_stream, _, _, _guid)) =
-        timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    let chip_info = create_chip_info("test-chip");
+    world.when_connect_client("client", "tcp", chip_info).await;
+    world.when_accept_connection().await;
 
     let test_data = b"Before disconnect";
-    client_sink.send(Bytes::from_static(test_data)).await.unwrap();
+    world.when_send_packet_from_client("client", Bytes::from_static(test_data)).await;
+    world.then_server_receives_packet("test-chip", test_data).await;
 
-    let received =
-        timeout(Duration::from_secs(5), server_stream.next()).await.unwrap().unwrap().unwrap();
-    assert_eq!(received, &test_data[..]);
-
-    drop(client_sink);
-    drop(client_stream);
-
+    world.when_drop_client("client");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let server_recv_result = timeout(Duration::from_secs(3), server_stream.next()).await;
-    assert!(server_recv_result.is_err() || server_recv_result.unwrap().is_none());
+    world.then_server_stream_closes("test-chip").await;
 }
 
+// Scenario: Raw socket disconnects before handshake and server ignores it
+// Given a running TCP listener
+// When a raw TCP connection connects and drops immediately
+// Then no connection is accepted
 #[tokio::test]
 async fn test_raw_socket_disconnect() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let raw_stream =
-        timeout(Duration::from_secs(5), TcpStream::connect(format!("localhost:{}", port)))
-            .await
-            .unwrap()
-            .unwrap();
-    drop(raw_stream);
+    world.when_connect_raw_tcp("raw", "tcp").await;
+    world.when_drop_raw_tcp("raw");
 
-    let accept_result = timeout(Duration::from_secs(3), streams.accept_any()).await;
-    assert!(accept_result.is_err() || accept_result.unwrap().is_err());
+    world.then_no_connection_accepted().await;
 }
 
+// Scenario: One client disconnects while another remains connected and active
+// Given a running TCP listener
+// And two connected clients
+// When both connections are accepted
+// And both clients send messages
+// Then the server receives both messages
+// When the first client drops
+// Then the second client can still send messages
+// And the first server stream closes
 #[tokio::test]
 async fn test_multiple_client_disconnect() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let chip_info1 = create_test_chip_info();
-    let chip_info2 = create_test_chip_info();
+    let chip_info1 = create_chip_info("client1");
+    let chip_info2 = create_chip_info("client2");
 
-    let (client1_stream, mut client1_sink) = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info1),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    world.when_connect_client("client1", "tcp", chip_info1).await;
+    world.when_connect_client("client2", "tcp", chip_info2).await;
 
-    let (_client2_stream, mut client2_sink) = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info2),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    world.when_accept_connection().await;
+    world.when_accept_connection().await;
 
-    let (_name1, (mut server1_stream, _, _, _guid1)) =
-        timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
-    let (_name2, (mut server2_stream, _, _, _guid2)) =
-        timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    world.when_send_packet_from_client("client1", Bytes::from_static(b"Client 1 message")).await;
+    world.when_send_packet_from_client("client2", Bytes::from_static(b"Client 2 message")).await;
 
-    client1_sink.send(Bytes::from_static(b"Client 1 message")).await.unwrap();
-    client2_sink.send(Bytes::from_static(b"Client 2 message")).await.unwrap();
+    world.then_server_receives_packet("client1", b"Client 1 message").await;
+    world.then_server_receives_packet("client2", b"Client 2 message").await;
 
-    let msg1 =
-        timeout(Duration::from_secs(5), server1_stream.next()).await.unwrap().unwrap().unwrap();
-    let msg2 =
-        timeout(Duration::from_secs(5), server2_stream.next()).await.unwrap().unwrap().unwrap();
+    world.when_drop_client("client1");
 
-    assert_eq!(msg1, &b"Client 1 message"[..]);
-    assert_eq!(msg2, &b"Client 2 message"[..]);
+    world
+        .when_send_packet_from_client("client2", Bytes::from_static(b"Client 2 still works"))
+        .await;
+    world.then_server_receives_packet("client2", b"Client 2 still works").await;
 
-    drop(client1_sink);
-    drop(client1_stream);
-
-    client2_sink.send(Bytes::from_static(b"Client 2 still works")).await.unwrap();
-
-    let msg2_after =
-        timeout(Duration::from_secs(5), server2_stream.next()).await.unwrap().unwrap().unwrap();
-    assert_eq!(msg2_after, &b"Client 2 still works"[..]);
-
-    let server1_result = timeout(Duration::from_secs(3), server1_stream.next()).await;
-    assert!(server1_result.is_err() || server1_result.unwrap().is_none());
+    world.then_server_stream_closes("client1").await;
 }
 
+// Scenario: Shutting down all listeners stops accepting new connections
+// Given a running TCP listener
+// And a connected client
+// When the connection is accepted
+// And all listeners are shut down
+// Then the listener is reported as stopped
+// And subsequent connection attempts fail
 #[tokio::test]
 async fn test_listener_shutdown() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let chip_info = create_test_chip_info();
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let chip_info = create_chip_info("test-chip");
+    world.when_connect_client("client", "tcp", chip_info).await;
+    world.when_accept_connection().await;
+    world.then_connection_accepted("test-chip");
 
-    let (_name, _) = timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    world.when_shutdown_all().await;
+    world.then_listener_is_running("tcp", false);
 
-    streams.shutdown_all().await.unwrap();
-
-    let chip_info2 = create_test_chip_info();
-    let connect_result = timeout(
-        Duration::from_secs(3),
-        streams.connect(TransportType::tcp("localhost", port), chip_info2),
-    )
-    .await;
-    assert!(connect_result.is_err() || connect_result.unwrap().is_err());
+    world.when_try_connect_client("tcp", create_chip_info("test-chip")).await;
+    world.then_connect_failed();
 }
 
+// Scenario: Repeated connect, accept, and drop cycles clean up resources properly
+// Given a running TCP listener
+// When multiple clients repeatedly connect, accept, and drop
+// Then subsequent connections can still be established and accepted
 #[tokio::test]
 async fn test_connection_resource_cleanup() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
     for _ in 0..5 {
-        let chip_info = create_test_chip_info();
-        let (client_stream, client_sink) = timeout(
-            Duration::from_secs(5),
-            streams.connect(TransportType::tcp("localhost", port), chip_info),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let chip_info = create_chip_info("test-chip");
+        world.when_connect_client("client", "tcp", chip_info).await;
+        world.when_accept_connection().await;
+        world.then_connection_accepted("test-chip");
 
-        let (_name, (server_stream, server_sink, _, _guid)) =
-            timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
-
-        drop(client_stream);
-        drop(client_sink);
-        drop(server_stream);
-        drop(server_sink);
+        world.when_drop_client("client");
+        world.when_drop_server("test-chip");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let chip_info = create_test_chip_info();
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let (_name, _) = timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    let chip_info = create_chip_info("test-chip");
+    world.when_connect_client("client", "tcp", chip_info).await;
+    world.when_accept_connection().await;
+    world.then_connection_accepted("test-chip");
 }

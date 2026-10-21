@@ -56,7 +56,6 @@ netsim_rust_library(
     }),
     crate_name = "packet_stream",
     edition = "2024",
-    enable_integration_test = False,
     proc_macro_deps = [
         "@async-trait",
     ],

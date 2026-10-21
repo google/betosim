@@ -17,186 +17,134 @@
 //=============================================================================
 
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
-use packet_stream::{Chip, ChipInfo, ChipKind, DeviceInfo, Streams, TransportType};
-use tokio::time::{Duration, timeout};
+use packet_stream::TransportType;
 
-/// Helper to create test chip info for integration tests
-fn create_test_chip_info() -> ChipInfo {
-    ChipInfo {
-        name: "test-chip".to_string(),
-        chip: Some(Chip {
-            kind: ChipKind::WIFI,
-            id: "test-chip".to_string(),
-            name: "Test WiFi Chip".to_string(),
-            manufacturer: "Test Corp".to_string(),
-            product_name: "Test WiFi Chip".to_string(),
-            address: "".to_string(),
-            sim_type: None,
-            sim_profile: None,
-            loopback: false,
-            bt_properties: None,
-        }),
-        device_info: Some(DeviceInfo {
-            name: "test-device".to_string(),
-            id: "test-device".to_string(),
-            avd_path: "".to_string(),
-            ..Default::default()
-        }),
-    }
-}
+use crate::world::{World, create_chip_info};
 
+// Scenario: TCP transport echoes packets bidirectionally
+// Given a running TCP listener
+// And a connected client
+// When the connection is accepted
+// And the client sends a packet
+// Then the server receives the packet
+// When the server echoes the packet back
+// Then the client receives the echoed packet
 #[tokio::test]
 async fn test_tcp_transport_echo() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let chip_info = create_test_chip_info();
-    let (mut client_stream, mut client_sink) = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let (_name, (mut server_stream, mut server_sink, _chip_info, _guid)) =
-        streams.accept_any().await.unwrap();
+    let chip_info = create_chip_info("test-chip");
+    world.when_connect_client("client", "tcp", chip_info).await;
+    world.when_accept_connection().await;
 
     let test_data = b"Hello PacketStream!";
-    client_sink.send(Bytes::from_static(test_data)).await.unwrap();
+    world.when_send_packet_from_client("client", Bytes::from_static(test_data)).await;
+    world.then_server_receives_packet("test-chip", test_data).await;
 
-    let received =
-        timeout(Duration::from_secs(5), server_stream.next()).await.unwrap().unwrap().unwrap();
-    assert_eq!(received, &test_data[..]);
-
-    server_sink.send(received.clone()).await.unwrap();
-
-    let echoed =
-        timeout(Duration::from_secs(5), client_stream.next()).await.unwrap().unwrap().unwrap();
-    assert_eq!(echoed, &test_data[..]);
+    world.when_send_packet_from_server("test-chip", Bytes::from_static(test_data)).await;
+    world.then_client_receives_packet("client", test_data).await;
 }
 
+// Scenario: UDS transport sends packets from client to server
+// Given a running Unix Domain Socket listener
+// And a connected client
+// When the connection is accepted
+// And the client sends a packet
+// Then the server receives the packet
+#[cfg(unix)]
 #[tokio::test]
 async fn test_uds_transport_echo() {
-    let mut streams = Streams::new();
-    let socket_path = std::env::temp_dir().join("test_packet_stream.sock");
-    streams.start_listener("uds", TransportType::uds(socket_path.to_string_lossy())).await.unwrap();
+    let mut world = World::new();
+    world.given_uds_listener("uds").await;
 
-    let chip_info = create_test_chip_info();
-    let (_client_stream, mut client_sink) = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::uds(socket_path.to_string_lossy()), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let chip_info = create_chip_info("test-chip");
+    world.when_connect_client("client", "uds", chip_info).await;
+    world.when_accept_connection().await;
 
-    let (_name, (mut server_stream, _server_sink, _chip_info, _guid)) =
-        streams.accept_any().await.unwrap();
-
-    let test_data = Bytes::from(&b"Zero-copy test!"[..]);
-    client_sink.send(test_data.clone()).await.unwrap();
-
-    let received =
-        timeout(Duration::from_secs(5), server_stream.next()).await.unwrap().unwrap().unwrap();
-    assert_eq!(received, &test_data[..]);
+    let test_data = b"Zero-copy test!";
+    world.when_send_packet_from_client("client", Bytes::from_static(test_data)).await;
+    world.then_server_receives_packet("test-chip", test_data).await;
 }
 
+// Scenario: Connection handshake transmits device and chip metadata
+// Given a running TCP listener
+// When a client connects with custom device and chip info
+// And the connection is accepted
+// Then the server received matching device info and manufacturer
 #[tokio::test]
 async fn test_chip_info_protocol() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let mut client_chip_info = create_test_chip_info();
-    client_chip_info.device_info.as_mut().unwrap().name = "specific-test-device".to_string();
-    client_chip_info.chip.as_mut().unwrap().manufacturer = "Specific Corp".to_string();
+    let mut chip_info = create_chip_info("test-chip");
+    chip_info.device_info.as_mut().expect("device_info").name = "specific-test-device".to_string();
+    chip_info.chip.as_mut().expect("chip").manufacturer = "Specific Corp".to_string();
 
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), client_chip_info.clone()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    world.when_connect_client("client", "tcp", chip_info).await;
+    world.when_accept_connection().await;
 
-    let (_name, (_, _, received_chip_info, _guid)) =
-        timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
-
-    assert_eq!(received_chip_info.device_info.as_ref().unwrap().name, "specific-test-device");
-    assert_eq!(received_chip_info.chip.as_ref().unwrap().manufacturer, "Specific Corp");
+    world.then_init_info_matches("test-chip", "specific-test-device", "Specific Corp");
 }
 
+// Scenario: Streams manages multiple concurrent transport listeners
+// Given running TCP and UDS listeners
+// When clients connect to both listeners
+// Then both connections are successfully accepted
+#[cfg(unix)]
 #[tokio::test]
 async fn test_multiple_transports() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let socket_path = std::env::temp_dir().join("test_multi_transport.sock");
-    streams.start_listener("uds", TransportType::uds(socket_path.to_string_lossy())).await.unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
+    world.given_uds_listener("uds").await;
 
-    let chip_info = create_test_chip_info();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let tcp_chip = create_chip_info("tcp-chip");
+    let uds_chip = create_chip_info("uds-chip");
 
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info.clone()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    world.when_connect_client("tcp-client", "tcp", tcp_chip).await;
+    world.when_connect_client("uds-client", "uds", uds_chip).await;
 
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::uds(socket_path.to_string_lossy()), chip_info.clone()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    world.when_accept_connection().await;
+    world.when_accept_connection().await;
 
-    let (_name1, _) = timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
-    let (_name2, _) = timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    world.then_connection_accepted("tcp-chip");
+    world.then_connection_accepted("uds-chip");
 }
 
+// Scenario: Connecting to an unreachable port yields an error or timeout
+// Given an unreachable TCP transport target
+// When a client attempts to connect
+// Then the connection fails or times out
 #[tokio::test]
 async fn test_error_handling() {
-    let streams = Streams::new();
-    let chip_info = create_test_chip_info();
-    let result = timeout(
-        Duration::from_secs(2),
-        streams.connect(TransportType::tcp("localhost", 65534), chip_info),
-    )
-    .await;
-    assert!(result.is_err() || result.unwrap().is_err());
+    let mut world = World::new();
+    world
+        .when_try_connect_to_transport(
+            TransportType::tcp("localhost", 65534),
+            create_chip_info("test-chip"),
+        )
+        .await;
+    world.then_connect_failed();
 }
 
+// Scenario: Multiple clients connect concurrently to the same listener
+// Given a running TCP listener
+// When two clients connect concurrently
+// Then both connections are accepted by the server
 #[tokio::test]
 async fn test_concurrent_connections() {
-    let mut streams = Streams::new();
-    streams.start_listener("tcp", TransportType::tcp("localhost", 0)).await.unwrap();
-    let listener_addr = streams.listener_address("tcp").cloned().unwrap();
-    let port = listener_addr.to_string().split(':').last().unwrap().parse::<u16>().unwrap();
+    let mut world = World::new();
+    world.given_tcp_listener("tcp").await;
 
-    let chip_info = create_test_chip_info();
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info.clone()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let _ = timeout(
-        Duration::from_secs(5),
-        streams.connect(TransportType::tcp("localhost", port), chip_info),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let chip_info1 = create_chip_info("client1");
+    let chip_info2 = create_chip_info("client2");
 
-    let (_name1, _) = timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
-    let (_name2, _) = timeout(Duration::from_secs(5), streams.accept_any()).await.unwrap().unwrap();
+    world.when_connect_client("client1", "tcp", chip_info1).await;
+    world.when_connect_client("client2", "tcp", chip_info2).await;
+
+    world.when_accept_connection().await;
+    world.when_accept_connection().await;
+
+    world.then_connection_accepted("client1");
+    world.then_connection_accepted("client2");
 }

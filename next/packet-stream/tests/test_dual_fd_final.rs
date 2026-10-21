@@ -20,74 +20,72 @@ mod tests {
 
     use packet_stream::{TransportType, transport::dual_fd::DualFdConfig};
 
-    /// Tests for DualFd transport focusing on what's accessible through public
-    /// API
-    ///
-    /// Note: DualFd is designed for pre-existing file descriptors passed from
-    /// parent processes (like Cuttlefish). Most functionality requires internal
-    /// APIs.
+    // Note: DualFd is designed for pre-existing file descriptors passed from
+    // parent processes (like Cuttlefish). Most functionality requires internal
+    // APIs.
 
+    // Scenario: Create DualFd TransportType with separate or single file descriptors
+    // Given file descriptor integers for input and optional output
+    // When creating DualFd TransportType instances
+    // Then the transport description and stream/listener capabilities match expectations
     #[test]
     fn test_dual_fd_transport_creation() {
-        // Test that we can create DualFd TransportType instances
-
-        // Test dual FD (separate input and output)
+        // Dual FD (separate input and output)
         let dual_fd_transport = TransportType::fd(10, Some(11));
         assert_eq!(dual_fd_transport.description(), "FD 10:11");
         assert!(dual_fd_transport.supports_stream());
-        assert!(!dual_fd_transport.supports_listener()); // FDs cannot create listeners
+        assert!(!dual_fd_transport.supports_listener());
 
-        // Test single FD (bidirectional)
+        // Single FD (bidirectional)
         let single_fd_transport = TransportType::fd(12, None);
         assert_eq!(single_fd_transport.description(), "FD 12");
         assert!(single_fd_transport.supports_stream());
         assert!(!single_fd_transport.supports_listener());
     }
 
+    // Scenario: Parse DualFd JSON configuration containing a device with multiple chips
+    // Given a JSON configuration with Bluetooth and WiFi chips
+    // When deserializing the JSON into DualFdConfig
+    // Then the parsed devices and chips match the configuration values
     #[test]
     fn test_dual_fd_config_parsing() {
-        // Test JSON configuration parsing for Cuttlefish integration
         let json_config = r#"
-    {
-        "devices": [
-            {
-                "name": "emulator-5554",
-                "chips": [
-                    {
-                        "kind": "BLUETOOTH",
-                        "fdIn": 10,
-                        "fdOut": 11,
-                        "model": "Bluetooth Controller"
-                    },
-                    {
-                        "kind": "WIFI",
-                        "fdIn": 12,
-                        "fdOut": 13,
-                        "model": "WiFi Controller"
-                    }
-                ]
-            }
-        ]
-    }
-    "#;
+        {
+            "devices": [
+                {
+                    "name": "emulator-5554",
+                    "chips": [
+                        {
+                            "kind": "BLUETOOTH",
+                            "fdIn": 10,
+                            "fdOut": 11,
+                            "model": "Bluetooth Controller"
+                        },
+                        {
+                            "kind": "WIFI",
+                            "fdIn": 12,
+                            "fdOut": 13,
+                            "model": "WiFi Controller"
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
 
-        // Parse the configuration (this would normally be done by Cuttlefish)
         let dual_fd_config: DualFdConfig = serde_json::from_str(json_config).unwrap();
 
-        // Verify configuration parsing
         assert_eq!(dual_fd_config.devices.len(), 1);
         let device = &dual_fd_config.devices[0];
-        assert_eq!(device.name, "emulator-5554");
+        assert_eq!(device.name.as_deref(), Some("emulator-5554"));
         assert_eq!(device.chips.len(), 2);
 
-        // Verify Bluetooth chip config
         let bt_chip = &device.chips[0];
         assert_eq!(bt_chip.kind, "BLUETOOTH");
         assert_eq!(bt_chip.fd_in, 10);
         assert_eq!(bt_chip.fd_out, Some(11));
         assert_eq!(bt_chip.model, Some("Bluetooth Controller".to_string()));
 
-        // Verify WiFi chip config
         let wifi_chip = &device.chips[1];
         assert_eq!(wifi_chip.kind, "WIFI");
         assert_eq!(wifi_chip.fd_in, 12);
@@ -95,46 +93,47 @@ mod tests {
         assert_eq!(wifi_chip.model, Some("WiFi Controller".to_string()));
     }
 
+    // Scenario: Parse single device with multiple radio chips
+    // Given a JSON configuration with Bluetooth, WiFi, and UWB chips
+    // When deserializing into DualFdConfig
+    // Then all three chip configurations are accurately extracted
     #[test]
     fn test_dual_fd_config_single_device_multiple_chips() {
-        // Test configuration with multiple chips per device (realistic Cuttlefish
-        // scenario)
         let json_config = r#"
-    {
-        "devices": [
-            {
-                "name": "test-device-001",
-                "chips": [
-                    {
-                        "kind": "BLUETOOTH",
-                        "fdIn": 100,
-                        "fdOut": 101
-                    },
-                    {
-                        "kind": "WIFI",
-                        "fdIn": 102,
-                        "fdOut": 103
-                    },
-                    {
-                        "kind": "UWB",
-                        "fdIn": 104,
-                        "fdOut": 105,
-                        "model": "UWB Chip v2.0"
-                    }
-                ]
-            }
-        ]
-    }
-    "#;
+        {
+            "devices": [
+                {
+                    "name": "test-device-001",
+                    "chips": [
+                        {
+                            "kind": "BLUETOOTH",
+                            "fdIn": 100,
+                            "fdOut": 101
+                        },
+                        {
+                            "kind": "WIFI",
+                            "fdIn": 102,
+                            "fdOut": 103
+                        },
+                        {
+                            "kind": "UWB",
+                            "fdIn": 104,
+                            "fdOut": 105,
+                            "model": "UWB Chip v2.0"
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
 
         let config: DualFdConfig = serde_json::from_str(json_config).unwrap();
 
         assert_eq!(config.devices.len(), 1);
         let device = &config.devices[0];
-        assert_eq!(device.name, "test-device-001");
+        assert_eq!(device.name.as_deref(), Some("test-device-001"));
         assert_eq!(device.chips.len(), 3);
 
-        // Verify all chips parsed correctly
         let chips = &device.chips;
         assert_eq!(chips[0].kind, "BLUETOOTH");
         assert_eq!(chips[0].fd_in, 100);
@@ -150,141 +149,147 @@ mod tests {
         assert_eq!(chips[2].model, Some("UWB Chip v2.0".to_string()));
     }
 
+    // Scenario: Parse configuration with multiple virtual devices
+    // Given a JSON configuration defining two separate emulators
+    // When deserializing into DualFdConfig
+    // Then both device configurations are parsed with their respective chips
     #[test]
     fn test_dual_fd_config_multiple_devices() {
-        // Test configuration with multiple devices (multi-instance Cuttlefish)
         let json_config = r#"
-    {
-        "devices": [
-            {
-                "name": "emulator-5554",
-                "chips": [
-                    {
-                        "kind": "BLUETOOTH",
-                        "fdIn": 10,
-                        "fdOut": 11
-                    }
-                ]
-            },
-            {
-                "name": "emulator-5556",
-                "chips": [
-                    {
-                        "kind": "WIFI",
-                        "fdIn": 20,
-                        "fdOut": 21
-                    }
-                ]
-            }
-        ]
-    }
-    "#;
+        {
+            "devices": [
+                {
+                    "name": "emulator-5554",
+                    "chips": [
+                        {
+                            "kind": "BLUETOOTH",
+                            "fdIn": 10,
+                            "fdOut": 11
+                        }
+                    ]
+                },
+                {
+                    "name": "emulator-5556",
+                    "chips": [
+                        {
+                            "kind": "WIFI",
+                            "fdIn": 20,
+                            "fdOut": 21
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
 
         let config: DualFdConfig = serde_json::from_str(json_config).unwrap();
 
         assert_eq!(config.devices.len(), 2);
 
-        // First device
         let device1 = &config.devices[0];
-        assert_eq!(device1.name, "emulator-5554");
+        assert_eq!(device1.name.as_deref(), Some("emulator-5554"));
         assert_eq!(device1.chips.len(), 1);
         assert_eq!(device1.chips[0].kind, "BLUETOOTH");
         assert_eq!(device1.chips[0].fd_in, 10);
         assert_eq!(device1.chips[0].fd_out, Some(11));
 
-        // Second device
         let device2 = &config.devices[1];
-        assert_eq!(device2.name, "emulator-5556");
+        assert_eq!(device2.name.as_deref(), Some("emulator-5556"));
         assert_eq!(device2.chips.len(), 1);
         assert_eq!(device2.chips[0].kind, "WIFI");
         assert_eq!(device2.chips[0].fd_in, 20);
         assert_eq!(device2.chips[0].fd_out, Some(21));
     }
 
+    // Scenario: Parse configuration where optional fields are omitted
+    // Given a JSON configuration without model strings
+    // When deserializing into DualFdConfig
+    // Then missing optional fields default to None
     #[test]
     fn test_dual_fd_config_optional_fields() {
-        // Test configuration with optional fields missing
         let json_config = r#"
-    {
-        "devices": [
-            {
-                "name": "minimal-device",
-                "chips": [
-                    {
-                        "kind": "BLUETOOTH",
-                        "fdIn": 50,
-                        "fdOut": 51
-                    }
-                ]
-            }
-        ]
-    }
-    "#;
+        {
+            "devices": [
+                {
+                    "name": "minimal-device",
+                    "chips": [
+                        {
+                            "kind": "BLUETOOTH",
+                            "fdIn": 50,
+                            "fdOut": 51
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
 
         let config: DualFdConfig = serde_json::from_str(json_config).unwrap();
 
         let chip = &config.devices[0].chips[0];
-        assert_eq!(chip.model, None); // Optional field should be None
-        assert_eq!(chip.fd_out, Some(51)); // fdOut is present
+        assert_eq!(chip.model, None);
+        assert_eq!(chip.fd_out, Some(51));
     }
 
+    // Scenario: Parse configuration with single input FD (bidirectional mode)
+    // Given a JSON configuration specifying only fdIn without fdOut
+    // When deserializing into DualFdConfig
+    // Then fdOut is parsed as None
     #[test]
     fn test_dual_fd_config_single_fd() {
-        // Test configuration with only input FD (bidirectional mode)
         let json_config = r#"
-    {
-        "devices": [
-            {
-                "name": "single-fd-device",
-                "chips": [
-                    {
-                        "kind": "BLUETOOTH",
-                        "fdIn": 60
-                    }
-                ]
-            }
-        ]
-    }
-    "#;
+        {
+            "devices": [
+                {
+                    "name": "single-fd-device",
+                    "chips": [
+                        {
+                            "kind": "BLUETOOTH",
+                            "fdIn": 60
+                        }
+                    ]
+                }
+            ]
+        }
+        "#;
 
         let config: DualFdConfig = serde_json::from_str(json_config).unwrap();
 
         let chip = &config.devices[0].chips[0];
         assert_eq!(chip.fd_in, 60);
-        assert_eq!(chip.fd_out, None); // Should be None when not specified
+        assert_eq!(chip.fd_out, None);
     }
 
+    // Scenario: Verify TransportType descriptions distinguish file descriptor pairings
+    // Given different input and output file descriptor combinations
+    // When generating transport descriptions
+    // Then identical configurations match and different configurations differ
     #[test]
     fn test_dual_fd_transport_type_equality() {
-        // Test TransportType equality for DualFd
         let transport1 = TransportType::fd(10, Some(11));
         let transport2 = TransportType::fd(10, Some(11));
-        let transport3 = TransportType::fd(10, Some(12)); // Different output FD
-        let transport4 = TransportType::fd(11, Some(11)); // Different input FD
+        let transport3 = TransportType::fd(10, Some(12));
+        let transport4 = TransportType::fd(11, Some(11));
 
-        // Note: TransportType may not implement PartialEq, so we test descriptions
+        // Note: TransportType may not implement PartialEq, so we test descriptions.
         assert_eq!(transport1.description(), transport2.description());
         assert_ne!(transport1.description(), transport3.description());
         assert_ne!(transport1.description(), transport4.description());
     }
 
+    // Scenario: Round-trip JSON serialization preserves all DualFd configuration fields
+    // Given a valid DualFdConfig instance
+    // When serializing to JSON and deserializing back
+    // Then all device and chip fields are preserved identically
     #[test]
     fn test_dual_fd_config_serialization_round_trip() {
-        // Test that we can serialize and deserialize DualFd configuration
-
         let original_config =
             r#"{"devices":[{"name":"test","chips":[{"kind":"BLUETOOTH","fdIn":10,"fdOut":11}]}]}"#;
 
-        // Parse JSON -> Config
         let config: DualFdConfig = serde_json::from_str(original_config).unwrap();
-
-        // Config -> JSON
         let serialized = serde_json::to_string(&config).unwrap();
-
-        // Parse again to verify round-trip
         let config2: DualFdConfig = serde_json::from_str(&serialized).unwrap();
 
-        // Verify round-trip preserved data
         assert_eq!(config.devices.len(), config2.devices.len());
         assert_eq!(config.devices[0].name, config2.devices[0].name);
         assert_eq!(config.devices[0].chips[0].kind, config2.devices[0].chips[0].kind);
@@ -292,9 +297,20 @@ mod tests {
         assert_eq!(config.devices[0].chips[0].fd_out, config2.devices[0].chips[0].fd_out);
     }
 
+    // Scenario: Deserialization honors vsockFd and virtioFd aliases
+    // Given JSON configurations using legacy vsockFd and virtioFd field names
+    // When deserializing into DualFdConfig
+    // Then fdIn is properly populated from the alias fields
     #[test]
     fn test_dual_fd_config_aliases() {
-        let vsock_json = r#"{"devices":[{"name":"cvd-1","chips":[{"kind":"CELLULAR","vsockFd":42,"simType":1}]}]}"#;
+        let vsock_json = r#"{
+            "devices": [
+                {
+                    "name": "cvd-1",
+                    "chips": [{"kind": "CELLULAR", "vsockFd": 42, "simType": 1}]
+                }
+            ]
+        }"#;
         let config: DualFdConfig = serde_json::from_str(vsock_json).unwrap();
         assert_eq!(config.devices[0].chips[0].fd_in, 42);
         assert_eq!(config.devices[0].chips[0].sim_type, Some(1));

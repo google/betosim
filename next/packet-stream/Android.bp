@@ -98,3 +98,43 @@ rust_test_host {
         "libasync_trait",
     ],
 }
+
+rust_test_host {
+    name: "libnetsim_next_packet_stream_integration_tests",
+    crate_name: "packet_stream_tests",
+    edition: "2024",
+    crate_root: "tests/mod.rs",
+    test_suites: [
+        "general_tests",
+    ],
+    srcs: [
+        "tests/integration_tests.rs",
+        "tests/mod.rs",
+        "tests/test_connection_lifecycle.rs",
+        "tests/test_dual_fd_final.rs",
+        "tests/test_init_info.rs",
+        "tests/world.rs",
+    ],
+    features: [
+        "cuttlefish",
+        "testing",
+    ],
+    lints: "none",
+    rustlibs: [
+        "libbytes",
+        "libcommand_fds",
+        "libfutures",
+        "libnetsim_next_packet_stream_testing",
+        "libnetsim_next_types_testing",
+        "libnix",
+        "libserde",
+        "libserde_json",
+        "libthiserror",
+        "libtokio",
+        "libtokio_util",
+        "libtracing",
+    ],
+    proc_macros: [
+        "libasync_trait",
+    ],
+}
