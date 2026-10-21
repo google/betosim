@@ -110,12 +110,14 @@ rust_test_host {
     name: "libnetsim_next_cell_actor_integration_tests",
     crate_name: "cell_actor_tests",
     edition: "2024",
-    crate_root: "tests/integration_test.rs",
+    crate_root: "tests/mod.rs",
     test_suites: [
         "general_tests",
     ],
     srcs: [
         "tests/integration_test.rs",
+        "tests/mod.rs",
+        "tests/world.rs",
     ],
     features: [
         "cuttlefish",
