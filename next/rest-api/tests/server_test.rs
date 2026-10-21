@@ -20,7 +20,7 @@ use device_actor::DeviceClient;
 use http_body_util::BodyExt;
 use hyper::{Method, StatusCode};
 use link_api::{Link, LinkAction, LinkCreate, LinkError, LinkId, LinkUpdate};
-use netsim_model::{ChipError, ChipId, ChipKind, ClientError, DeviceId};
+use netsim_model::{Ap, ChipError, ChipId, ChipKind, ClientError, DeviceId};
 use netsim_rest_api::{
     ApUpdate, CreateLinkRequest, Created, ErrorResponse, JsonResponse, NoContent, Op, RestServer,
     VersionResponse, client_error_status, created_response, no_content_response,
@@ -445,4 +445,117 @@ async fn test_write_status_responses_201_and_204() {
     let (status, err) = collect_error_response(delete_missing).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(err.error.contains("99"));
+}
+
+#[tokio::test]
+async fn test_ap_rest_endpoints_lifecycle_and_error_cases() {
+    let (device_tx, _) = tokio::sync::mpsc::channel(1);
+    let device_client =
+        DeviceClient::new(Box::new(actor_framework::ResourceClient::new(device_tx)));
+    let shared_keys = std::sync::Arc::new(ap_actor::SharedKeyStore::new());
+    let ap_actor = ap_actor::ApActor::new(shared_keys);
+    let (runner, client_base) = actor_framework::ResourceActor::new(32);
+    let ap_client = ApClient::new(client_base);
+    tokio::spawn(runner.run(ap_actor));
+    let link_client = Arc::new(MockLinkClient);
+    let server = RestServer::new(
+        device_client,
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
+
+    // 1. POST /v1/aps (Create AP) - 201 Created
+    let create_body = br#"{"ssid":"TestSSID","channel":6}"#;
+    let resp = server.handle_request(&Method::POST, "/v1/aps", create_body).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let created_ap: Ap = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(created_ap.id, 1);
+    assert_eq!(created_ap.config.ssid, "TestSSID");
+    assert_eq!(created_ap.config.channel, 6);
+    assert!(!created_ap.config.bssid.is_empty());
+
+    // POST /v1/aps - 400 Bad Request on invalid JSON
+    let bad_json_resp = server.handle_request(&Method::POST, "/v1/aps", b"{bad json").await;
+    assert_eq!(bad_json_resp.status(), StatusCode::BAD_REQUEST);
+
+    // POST /v1/aps - 400 Bad Request on invalid BSSID
+    let bad_bssid_resp =
+        server.handle_request(&Method::POST, "/v1/aps", br#"{"bssid":"not-a-mac"}"#).await;
+    assert_eq!(bad_bssid_resp.status(), StatusCode::BAD_REQUEST);
+
+    // POST /v1/aps - 400 Bad Request on all-zeros BSSID
+    let zero_bssid_resp =
+        server.handle_request(&Method::POST, "/v1/aps", br#"{"bssid":"00:00:00:00:00:00"}"#).await;
+    assert_eq!(zero_bssid_resp.status(), StatusCode::BAD_REQUEST);
+
+    // POST /v1/aps - 201 Created with defaulted empty/zero fields
+    let empty_fields_resp = server
+        .handle_request(
+            &Method::POST,
+            "/v1/aps",
+            br#"{"ssid":"","bssid":"","channel":0,"beacon_interval":0,"dtim_period":0}"#,
+        )
+        .await;
+    assert_eq!(empty_fields_resp.status(), StatusCode::CREATED);
+    let body_bytes = empty_fields_resp.into_body().collect().await.unwrap().to_bytes();
+    let ap_defaulted: Ap = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(ap_defaulted.config.ssid, "AndroidWifi");
+    assert_eq!(ap_defaulted.config.channel, 6);
+    assert_eq!(ap_defaulted.config.beacon_interval, 200);
+    assert_eq!(ap_defaulted.config.dtim_period, 2);
+    assert!(!ap_defaulted.config.bssid.is_empty());
+    assert_ne!(ap_defaulted.config.bssid, "00:00:00:00:00:00");
+
+    // 2. PATCH /v1/aps/1 - 200 OK
+    let patch_body = br#"{"ssid":"PatchedSSID","channel":11}"#;
+    let resp = server.handle_request(&Method::PATCH, "/v1/aps/1", patch_body).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let patched_ap: Ap = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(patched_ap.id, 1);
+    assert_eq!(patched_ap.config.ssid, "PatchedSSID");
+    assert_eq!(patched_ap.config.channel, 11);
+
+    // PATCH /v1/aps/99 - 404 Not Found
+    let not_found_patch = server.handle_request(&Method::PATCH, "/v1/aps/99", patch_body).await;
+    assert_eq!(not_found_patch.status(), StatusCode::NOT_FOUND);
+
+    // PATCH /v1/aps/invalid - 400 Bad Request
+    let bad_id_patch = server.handle_request(&Method::PATCH, "/v1/aps/not-an-id", patch_body).await;
+    assert_eq!(bad_id_patch.status(), StatusCode::BAD_REQUEST);
+
+    // 3. POST /v1/aps/1:disconnect - 204 No Content
+    let disconnect_body = br#"{"mac_address":"02:15:b2:00:01:00"}"#;
+    let resp = server.handle_request(&Method::POST, "/v1/aps/1:disconnect", disconnect_body).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // POST /v1/aps/99:disconnect - 404 Not Found
+    let not_found_disconnect =
+        server.handle_request(&Method::POST, "/v1/aps/99:disconnect", disconnect_body).await;
+    assert_eq!(not_found_disconnect.status(), StatusCode::NOT_FOUND);
+
+    // POST /v1/aps/1:disconnect - 400 Bad Request on invalid MAC
+    let bad_mac_disconnect = server
+        .handle_request(&Method::POST, "/v1/aps/1:disconnect", br#"{"mac_address":"invalid-mac"}"#)
+        .await;
+    assert_eq!(bad_mac_disconnect.status(), StatusCode::BAD_REQUEST);
+
+    // 4. DELETE /v1/aps/1 - 204 No Content
+    let resp = server.handle_request(&Method::DELETE, "/v1/aps/1", &[]).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // DELETE /v1/aps/1 again - 204 No Content (idempotent)
+    let delete_again = server.handle_request(&Method::DELETE, "/v1/aps/1", &[]).await;
+    assert_eq!(delete_again.status(), StatusCode::NO_CONTENT);
+
+    // DELETE /v1/aps/99 - 204 No Content (idempotent)
+    let delete_missing = server.handle_request(&Method::DELETE, "/v1/aps/99", &[]).await;
+    assert_eq!(delete_missing.status(), StatusCode::NO_CONTENT);
+
+    // DELETE /v1/aps/invalid - 400 Bad Request
+    let bad_id_delete = server.handle_request(&Method::DELETE, "/v1/aps/invalid-id", &[]).await;
+    assert_eq!(bad_id_delete.status(), StatusCode::BAD_REQUEST);
 }

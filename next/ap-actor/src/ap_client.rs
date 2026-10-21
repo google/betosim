@@ -158,14 +158,14 @@ impl ApClient {
     /// Disconnects a device from an Access Point.
     pub async fn disconnect(&self, id: u32, mac_str: String) -> Result<(), ClientError> {
         let mac = mac_str.parse::<netsim_packets::MacAddr>().map_err(|e| {
-            ClientError::Chip(netsim_model::ChipError::Internal(
-                format!("Invalid MAC: {}", e).into(),
+            ClientError::Chip(netsim_model::ChipError::InvalidAddress(
+                format!("Invalid MAC {mac_str}: {e}").into(),
             ))
         })?;
         self.client
             .perform_action(Some(ApId(id)), ApReq::Disconnect { mac })
+            .err_into::<ClientError>()
             .await
             .map(|_| ())
-            .map_err(|e| ClientError::Chip(netsim_model::ChipError::Internal(e.to_string().into())))
     }
 }

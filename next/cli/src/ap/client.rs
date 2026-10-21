@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use grpcio::CallOption;
-use netsim_proto::{access_point, access_point_grpc::AccessPointServiceClient};
 use netsim_rest_api::NetsimRestClient;
-use protobuf::MessageField;
 
 use super::{
     args::ApCommand,
@@ -23,10 +20,14 @@ use super::{
 };
 use crate::error::Result;
 
+fn parse_channel(ch: u32) -> Result<u8> {
+    u8::try_from(ch)
+        .map_err(|_err| crate::error::Error::from(format!("Invalid channel {ch}: must be 0..=255")))
+}
+
 pub(crate) fn execute(
     cmd: &ApCommand,
     rest_client: &NetsimRestClient,
-    client: &AccessPointServiceClient,
     verbose: bool,
 ) -> Result<()> {
     match cmd {
@@ -37,64 +38,61 @@ pub(crate) fn execute(
             })?;
         }
         ApCommand::Create(args) => {
-            let mut ap = access_point::AccessPoint::new();
+            let mut req = netsim_model::ApCreate::default();
             if let Some(ssid) = &args.ssid {
-                ap.ssid = ssid.clone();
+                req.ssid = ssid.clone();
             }
             if let Some(channel) = args.channel {
-                ap.channel = channel;
+                req.channel = parse_channel(channel)?;
             }
             if let Some(bssid) = &args.bssid {
-                ap.bssid = bssid.clone();
+                req.bssid = bssid.clone();
             }
 
             if let Some(password) = &args.password {
-                ap.wpa_passphrase = password.clone();
+                req.wpa_passphrase = Some(password.clone());
             }
             if let Some(protocol) = &args.protocol {
-                ap.hw_mode = protocol.clone();
+                req.hw_mode = protocol
+                    .parse::<netsim_model::WifiMode>()
+                    .map_err(crate::error::Error::from)?;
             }
-            let mut req = access_point::CreateAccessPointRequest::new();
-            req.access_point = MessageField::some(ap);
 
-            let res = client.create_opt(&req, CallOption::default())?;
+            let res = rest_client.create_ap(&req).send_blocking()?;
             if verbose {
-                println!("Successfully created Access Point '{}' with ID {}", res.ssid, res.id);
+                println!(
+                    "Successfully created Access Point '{}' with ID {}",
+                    res.config.ssid, res.id
+                );
                 print_ap(&res);
             }
         }
         ApCommand::Patch(args) => {
-            let mut req = access_point::UpdateAccessPointRequest::new();
-            req.id = args.id;
-            if let Some(ssid) = &args.ssid {
-                req.ssid = Some(ssid.clone());
-            }
-            if let Some(channel) = args.channel {
-                req.channel = Some(channel);
-            }
+            let req = netsim_model::ApUpdate {
+                ssid: args.ssid.clone(),
+                channel: args.channel.map(parse_channel).transpose()?,
+                ..Default::default()
+            };
 
-            let res = client.update_opt(&req, CallOption::default())?;
+            let res = rest_client.patch_ap(args.id, &req).send_blocking()?;
             if verbose {
-                println!("Successfully updated Access Point '{}' with ID {}", res.ssid, res.id);
+                println!(
+                    "Successfully updated Access Point '{}' with ID {}",
+                    res.config.ssid, res.id
+                );
                 print_ap(&res);
             }
         }
         ApCommand::Remove(args) => {
-            let mut req = access_point::DeleteAccessPointRequest::new();
-            req.id = args.id;
-            client.delete_opt(&req, CallOption::default())?;
+            rest_client.delete_ap(args.id).send_blocking()?;
             if verbose {
                 println!("Successfully removed Access Point");
             }
         }
         ApCommand::Disconnect(args) => {
-            let mut req = access_point::ExecuteAccessPointRequest::new();
-            req.id = args.id;
-            let mut disconnect = access_point::DisconnectRequest::new();
-            disconnect.mac_address = args.mac_address.clone();
-            req.action =
-                Some(access_point::execute_access_point_request::Action::Disconnect(disconnect));
-            client.execute_opt(&req, CallOption::default())?;
+            let req =
+                netsim_rest_api::DisconnectApRequest { mac_address: args.mac_address.clone() };
+            rest_client.disconnect_ap(args.id, &req).send_blocking()?;
             if verbose {
                 println!("Successfully disconnected client from Access Point");
             }

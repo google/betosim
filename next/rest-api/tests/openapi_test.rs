@@ -301,19 +301,36 @@ pub const ROUTES: &[Route<Op>] = &[
 fn test_netsim_openapi_spec() {
     let doc: Value = serde_json::from_str(netsim_rest_api::OPENAPI_JSON).unwrap();
     assert_eq!(validate(&doc), Vec::<String>::new());
+    assert!(doc["components"]["schemas"]["ApCreate"].get("required").is_none());
 
     let ops: Vec<String> = netsim_rest_api::ROUTES.iter().map(Route::operation_id).collect();
-    assert_eq!(ops, ["ListAps", "ListDevices", "ListLinks", "GetVersion"]);
+    assert_eq!(
+        ops,
+        [
+            "ListAps",
+            "CreateAp",
+            "PatchAp",
+            "DeleteAp",
+            "DisconnectAp",
+            "ListDevices",
+            "ListLinks",
+            "GetVersion"
+        ]
+    );
 
     let cpp = generate_cpp(&doc);
     assert!(cpp.contains("struct VersionResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListDeviceResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListLinkResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListApResponse {"), "{cpp}");
+    assert!(cpp.contains("struct ApCreate {"), "{cpp}");
+    assert!(cpp.contains("std::optional<std::string> ssid;"), "{cpp}");
 
     let py = generate_python(&doc);
     assert!(py.contains("class WifiMode(StrEnum):\n    A = \"a\""), "{py}");
     assert!(py.contains("class ListDeviceResponse:\n    devices: list[Device]"), "{py}");
+    assert!(py.contains("class ApCreate:\n"), "{py}");
+    assert!(py.contains("ssid: str | None = None"), "{py}");
 }
 
 #[test]

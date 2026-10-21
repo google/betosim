@@ -22,7 +22,8 @@ use std::{
 };
 
 use hyper::StatusCode;
-use netsim_rest_api::{NetsimRestClient, RestError, VersionResponse};
+use netsim_model::{ApCreate, ApUpdate};
+use netsim_rest_api::{DisconnectApRequest, NetsimRestClient, RestError, VersionResponse};
 
 /// Accepts one connection, replies with `response`, and closes. The handle
 /// yields the raw request the client sent.
@@ -172,4 +173,50 @@ fn test_connect_error() {
         .send_blocking()
         .expect_err("nothing is listening");
     assert!(matches!(err, RestError::Connect(..)), "{err:?}");
+}
+
+const CANNED_AP: &str = "HTTP/1.1 200 OK\r\n\r\n{\"id\":1,\"config\":{\"ssid\":\"AndroidWifi\",\"bssid\":\"02:15:b2:00:00:00\",\"channel\":6,\"hw_mode\":\"g\",\"beacon_interval\":200,\"country_code\":\"US\",\"dtim_period\":2,\"hidden_ssid\":false,\"sae\":false,\"wmm_enabled\":true,\"enterprise_enabled\":false,\"mac_acl_mode\":0,\"mac_acl_list\":[],\"ftm_responder_enabled\":true},\"associations\":[]}";
+
+const CANNED_CREATED_AP: &str = "HTTP/1.1 201 Created\r\n\r\n{\"id\":1,\"config\":{\"ssid\":\"AndroidWifi\",\"bssid\":\"02:15:b2:00:00:00\",\"channel\":6,\"hw_mode\":\"g\",\"beacon_interval\":200,\"country_code\":\"US\",\"dtim_period\":2,\"hidden_ssid\":false,\"sae\":false,\"wmm_enabled\":true,\"enterprise_enabled\":false,\"mac_acl_mode\":0,\"mac_acl_list\":[],\"ftm_responder_enabled\":true},\"associations\":[]}";
+
+#[test]
+fn test_create_ap_wire_format_and_response() {
+    let (client, server) = serve_once(CANNED_CREATED_AP);
+    let create_req = ApCreate::default();
+    let ap = client.create_ap(&create_req).send_blocking().expect("create_ap");
+    assert_eq!(ap.id, 1);
+    assert_eq!(ap.config.ssid, "AndroidWifi");
+    let request = server.join().expect("server");
+    assert!(request.starts_with("POST /v1/aps HTTP/1.1\r\n"), "{request}");
+    assert!(request.contains(r#""ssid":"AndroidWifi""#), "{request}");
+}
+
+#[test]
+fn test_patch_ap_wire_format_and_response() {
+    let (client, server) = serve_once(CANNED_AP);
+    let patch_req =
+        ApUpdate { ssid: Some("PatchedWifi".to_string()), channel: Some(11), ..Default::default() };
+    let ap = client.patch_ap(1, &patch_req).send_blocking().expect("patch_ap");
+    assert_eq!(ap.id, 1);
+    let request = server.join().expect("server");
+    assert!(request.starts_with("PATCH /v1/aps/1 HTTP/1.1\r\n"), "{request}");
+    assert!(request.contains(r#""ssid":"PatchedWifi""#), "{request}");
+}
+
+#[test]
+fn test_delete_ap_wire_format() {
+    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    client.delete_ap(42).send_blocking().expect("delete_ap");
+    let request = server.join().expect("server");
+    assert!(request.starts_with("DELETE /v1/aps/42 HTTP/1.1\r\n"), "{request}");
+}
+
+#[test]
+fn test_disconnect_ap_wire_format() {
+    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    let disconnect_req = DisconnectApRequest { mac_address: "02:15:b2:00:01:00".to_string() };
+    client.disconnect_ap(7, &disconnect_req).send_blocking().expect("disconnect_ap");
+    let request = server.join().expect("server");
+    assert!(request.starts_with("POST /v1/aps/7:disconnect HTTP/1.1\r\n"), "{request}");
+    assert!(request.contains(r#""mac_address":"02:15:b2:00:01:00""#), "{request}");
 }

@@ -17,7 +17,16 @@ info:
   title: Netsim REST API
   version: 1.0.0
 components:
+  parameters:
+    Id: &Id
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
+    Empty: &Empty
+      type: object
     ErrorResponse: &ErrorResponse
       properties:
         error: &str
@@ -92,6 +101,7 @@ components:
       properties:
         links: [*Link]
     ApCreate: &ApCreate
+      required: []
       properties:
         ssid: *str
         bssid: *str
@@ -118,6 +128,18 @@ components:
     ListApResponse: &ListApResponse
       properties:
         aps: [*Ap]
+    ApUpdate: &ApUpdate
+      x-rust-type: netsim_model::ApUpdate
+      properties:
+        ssid: *opt_str
+        channel: &opt_int
+          type: [integer, 'null']
+        force_disconnect: &opt_str_arr
+          type: [array, 'null']
+          items: *str
+    DisconnectApRequest: &DisconnectApRequest
+      properties:
+        mac_address: *str
 paths:
   /v1/version:
     get:
@@ -151,3 +173,69 @@ paths:
       responses:
         <<: *err_resp
         '200': *ListApResponse
+    post:
+      operationId: CreateAp
+      tags: [ApService]
+      summary: Creates a Wi-Fi access point.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApCreate'
+            example:
+              ssid: AndroidWifi
+              bssid: '02:15:b2:00:00:00'
+              channel: 6
+              hw_mode: g
+              beacon_interval: 200
+              dtim_period: 2
+              hidden_ssid: false
+              sae: false
+              wmm_enabled: true
+              enterprise_enabled: false
+              mac_acl_mode: 0
+              mac_acl_list: []
+              ftm_responder_enabled: true
+      responses:
+        <<: *err_resp
+        '200': *Ap
+  /v1/aps/{id}:
+    parameters: [*Id]
+    patch:
+      operationId: PatchAp
+      tags: [ApService]
+      summary: Updates a Wi-Fi access point.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApUpdate'
+            example:
+              ssid: GuestWifi
+              channel: 11
+      responses:
+        <<: *err_resp
+        '200': *Ap
+    delete:
+      operationId: DeleteAp
+      tags: [ApService]
+      summary: Deletes a Wi-Fi access point.
+      responses:
+        <<: *err_resp
+        '200': *Empty
+  /v1/aps/{id}:disconnect:
+    parameters: [*Id]
+    post:
+      operationId: DisconnectAp
+      tags: [ApService]
+      summary: Disconnects a station from a Wi-Fi access point.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisconnectApRequest'
+            example:
+              mac_address: '02:15:b2:00:01:00'
+      responses:
+        <<: *err_resp
+        '200': *Empty

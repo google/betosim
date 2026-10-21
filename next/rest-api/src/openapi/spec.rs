@@ -155,6 +155,10 @@ pub fn expand(doc: &mut Value) {
                 if !req.is_empty() {
                     schema["required"] = Value::Array(req);
                 }
+            } else if schema["required"].as_array().is_some_and(Vec::is_empty)
+                && let Some(map) = schema.as_object_mut()
+            {
+                map.remove("required");
             }
         }
     }
@@ -191,7 +195,7 @@ fn parse_schema<'a>(name: &'a str, s: &'a Value) -> SchemaDef<'a> {
         let mut fields: Vec<FieldDef<'a>> = obj(&s["properties"])
             .filter_map(|(name, prop)| {
                 let (ty, nullable) = parse_type(prop)?;
-                let required = (req.is_empty() || req.contains(name)) && !nullable;
+                let required = req.contains(name) && !nullable;
                 Some(FieldDef { name, description: prop["description"].as_str(), ty, required })
             })
             .collect();

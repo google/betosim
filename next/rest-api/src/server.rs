@@ -467,6 +467,50 @@ impl RestServer {
         crate::VersionResponse { version: self.version.clone() }
     }
 
+    async fn create_ap(&self, body: &[u8]) -> Result<Created<netsim_model::Ap>, HttpError> {
+        let req: netsim_model::ApCreate = parse_json_body(body)?;
+        let config = ap_actor::ApConfig::try_from(req).map_err(HttpError::bad_request)?;
+        let id = self.ap_client.create_ap(None, config).await?;
+        let state = self.ap_client.get_ap(id).await?.ok_or_else(|| {
+            HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Access point {id} missing after creation"),
+            )
+        })?;
+        Ok(Created(state.into()))
+    }
+
+    async fn patch_ap(
+        &self,
+        params: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<netsim_model::Ap, HttpError> {
+        let id: u32 = path_id(params)?;
+        let req: netsim_model::ApUpdate = parse_json_body(body)?;
+        let state = self
+            .ap_client
+            .update_ap_config(id, req.ssid, req.channel, Some(req.force_disconnect), None)
+            .await?;
+        Ok(state.into())
+    }
+
+    async fn delete_ap(&self, params: &[(&str, &str)]) -> Result<NoContent, HttpError> {
+        let id: u32 = path_id(params)?;
+        self.ap_client.destroy_ap(id).await?;
+        Ok(NoContent)
+    }
+
+    async fn disconnect_ap(
+        &self,
+        params: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<NoContent, HttpError> {
+        let id: u32 = path_id(params)?;
+        let req: crate::DisconnectApRequest = parse_json_body(body)?;
+        self.ap_client.disconnect(id, req.mac_address).await?;
+        Ok(NoContent)
+    }
+
     /// Serves one HTTP request. Reads and bounds the body, then dispatches.
     ///
     /// The error type is [`Infallible`] because every failure is reported as an
@@ -515,17 +559,21 @@ impl RestServer {
         &self,
         method: &Method,
         path: &str,
-        _body: &[u8],
+        body: &[u8],
     ) -> Response<Full<Bytes>> {
         if *method == Method::GET && path == crate::path::OPENAPI {
             return build_response(StatusCode::OK, crate::OPENAPI_JSON);
         }
         let resp: JsonResponse = match crate::openapi::find_route(crate::ROUTES, method, path) {
-            Some((route, _params)) => match route.op {
+            Some((route, params)) => match route.op {
                 crate::Op::GetVersion => self.get_version().into(),
                 crate::Op::ListDevices => self.device_client.list().await.into(),
                 crate::Op::ListLinks => self.link_client.list().await.into(),
                 crate::Op::ListAps => self.ap_client.list_aps().await.into(),
+                crate::Op::CreateAp => self.create_ap(body).await.into(),
+                crate::Op::PatchAp => self.patch_ap(&params, body).await.into(),
+                crate::Op::DeleteAp => self.delete_ap(&params).await.into(),
+                crate::Op::DisconnectAp => self.disconnect_ap(&params, body).await.into(),
             },
             None => {
                 error_response(StatusCode::NOT_FOUND, &format!("Not Found: {} {}", method, path))

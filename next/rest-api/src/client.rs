@@ -130,6 +130,30 @@ impl NetsimRestClient {
     pub fn get_aps(&self) -> RestRequest<'_, ListApResponse> {
         self.get(crate::path::APS)
     }
+
+    /// `POST /v1/aps`
+    pub fn create_ap(&self, req: &netsim_model::ApCreate) -> RestRequest<'_, netsim_model::Ap> {
+        self.post(crate::path::APS).json(req)
+    }
+
+    /// `PATCH /v1/aps/{id}`
+    pub fn patch_ap(
+        &self,
+        id: u32,
+        req: &netsim_model::ApUpdate,
+    ) -> RestRequest<'_, netsim_model::Ap> {
+        self.patch(format!("{}/{id}", crate::path::APS)).json(req)
+    }
+
+    /// `DELETE /v1/aps/{id}`
+    pub fn delete_ap(&self, id: u32) -> RestRequest<'_, ()> {
+        self.delete(format!("{}/{id}", crate::path::APS))
+    }
+
+    /// `POST /v1/aps/{id}:disconnect`
+    pub fn disconnect_ap(&self, id: u32, req: &crate::DisconnectApRequest) -> RestRequest<'_, ()> {
+        self.post(format!("{}/{id}:disconnect", crate::path::APS)).json(req)
+    }
 }
 
 /// A pending REST request. Run it with `.send().await`, or

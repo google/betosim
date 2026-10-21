@@ -66,8 +66,25 @@ impl fmt::Display for WifiMode {
     }
 }
 
+impl std::str::FromStr for WifiMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "a" | "802.11a" => Ok(Self::A),
+            "b" | "802.11b" => Ok(Self::B),
+            "g" | "802.11g" => Ok(Self::G),
+            "n" | "802.11n" => Ok(Self::N),
+            "ac" | "802.11ac" => Ok(Self::Ac),
+            "ax" | "802.11ax" => Ok(Self::Ax),
+            _ => Err(format!("Unsupported Wi-Fi mode: {s}")),
+        }
+    }
+}
+
 /// Parameters for creating an Access Point chip.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ApCreate {
     pub ssid: String,
     pub bssid: String,
@@ -86,12 +103,42 @@ pub struct ApCreate {
     pub ftm_responder_enabled: bool,
 }
 
+impl Default for ApCreate {
+    fn default() -> Self {
+        Self {
+            ssid: DEFAULT_WIFI_SSID.to_string(),
+            bssid: String::new(),
+            channel: 6,
+            hw_mode: WifiMode::G,
+            wpa_passphrase: None,
+            beacon_interval: 200,
+            country_code: Some("US".to_string()),
+            dtim_period: 2,
+            hidden_ssid: false,
+            sae: false,
+            wmm_enabled: true,
+            enterprise_enabled: false,
+            mac_acl_mode: 0,
+            mac_acl_list: Vec::new(),
+            ftm_responder_enabled: true,
+        }
+    }
+}
+
+fn null_to_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 /// Parameters for updating an Access Point chip.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApUpdate {
     pub ssid: Option<String>,
     pub channel: Option<u8>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub force_disconnect: Vec<String>,
 }
 
@@ -142,5 +189,66 @@ mod tests {
         .expect("associations must be optional on input");
 
         assert!(ap.associations.is_empty());
+    }
+
+    #[test]
+    fn ap_create_defaults_fill_omitted_json_fields() {
+        let ap_create: ApCreate =
+            serde_json::from_str("{}").expect("empty JSON must deserialize with default fields");
+        assert_eq!(ap_create.ssid, DEFAULT_WIFI_SSID);
+        assert_eq!(ap_create.bssid, "");
+        assert_eq!(ap_create.channel, 6);
+        assert_eq!(ap_create.hw_mode, WifiMode::G);
+        assert!(ap_create.wpa_passphrase.is_none());
+        assert_eq!(ap_create.beacon_interval, 200);
+        assert_eq!(ap_create.country_code.as_deref(), Some("US"));
+        assert_eq!(ap_create.dtim_period, 2);
+        assert!(!ap_create.hidden_ssid);
+        assert!(!ap_create.sae);
+        assert!(ap_create.wmm_enabled);
+        assert!(!ap_create.enterprise_enabled);
+        assert_eq!(ap_create.mac_acl_mode, 0);
+        assert!(ap_create.mac_acl_list.is_empty());
+        assert!(ap_create.ftm_responder_enabled);
+
+        let partial: ApCreate = serde_json::from_str(r#"{"ssid":"CustomSSID","channel":11}"#)
+            .expect("partial JSON must deserialize with defaults");
+        assert_eq!(partial.ssid, "CustomSSID");
+        assert_eq!(partial.channel, 11);
+        assert_eq!(partial.bssid, "");
+        assert_eq!(partial.hw_mode, WifiMode::G);
+    }
+
+    #[test]
+    fn ap_update_null_or_omitted_force_disconnect() {
+        let update_null: ApUpdate = serde_json::from_str(r#"{"force_disconnect": null}"#)
+            .expect("null force_disconnect must deserialize to empty vec");
+        assert!(update_null.force_disconnect.is_empty());
+
+        let update_omitted: ApUpdate =
+            serde_json::from_str("{}").expect("omitted force_disconnect must deserialize to empty");
+        assert!(update_omitted.force_disconnect.is_empty());
+
+        let update_list: ApUpdate =
+            serde_json::from_str(r#"{"force_disconnect": ["02:15:b2:00:01:00"]}"#)
+                .expect("explicit force_disconnect array must deserialize");
+        assert_eq!(update_list.force_disconnect, vec!["02:15:b2:00:01:00"]);
+    }
+
+    #[test]
+    fn wifi_mode_from_str() {
+        assert_eq!("a".parse::<WifiMode>().unwrap(), WifiMode::A);
+        assert_eq!("802.11a".parse::<WifiMode>().unwrap(), WifiMode::A);
+        assert_eq!("B".parse::<WifiMode>().unwrap(), WifiMode::B);
+        assert_eq!("802.11b".parse::<WifiMode>().unwrap(), WifiMode::B);
+        assert_eq!("g".parse::<WifiMode>().unwrap(), WifiMode::G);
+        assert_eq!("802.11G".parse::<WifiMode>().unwrap(), WifiMode::G);
+        assert_eq!("n".parse::<WifiMode>().unwrap(), WifiMode::N);
+        assert_eq!("802.11n".parse::<WifiMode>().unwrap(), WifiMode::N);
+        assert_eq!("ac".parse::<WifiMode>().unwrap(), WifiMode::Ac);
+        assert_eq!("802.11AC".parse::<WifiMode>().unwrap(), WifiMode::Ac);
+        assert_eq!("ax".parse::<WifiMode>().unwrap(), WifiMode::Ax);
+        assert_eq!("802.11ax".parse::<WifiMode>().unwrap(), WifiMode::Ax);
+        assert!("unsupported".parse::<WifiMode>().is_err());
     }
 }
