@@ -38,7 +38,7 @@ rust_library(
     ],
     crate_name = "hyper_util",
     crate_root = "src/lib.rs",
-    edition = "2021",
+    edition = "2024",
     rustc_flags = [
         # Suppress new lints introduced by Rust 1.91.1.
         "--cap-lints=allow",
@@ -50,6 +50,7 @@ rust_library(
         "@futures-util",
         "@http",
         "@http-body",
+        "@httparse",
         "@hyper",
         "@ipnet",
         "@libc",
