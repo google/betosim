@@ -21,7 +21,7 @@ mod service;
 mod client;
 // Re-export core types
 pub use actions::{CellAction, CellActionResult};
-pub use actor_framework::ResourceActor;
+use actor_framework::ResourceActor;
 pub use cell_actor::CellActor;
 /// A type alias for the client used to interact with the Cell actor.
 pub use client::CellClient;
