@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use netsim_model::{ChipClient, ChipId, ChipKind, MockChipClient};
 
@@ -280,4 +283,113 @@ async fn test_reset_propagates_link_removal_to_chips() {
 
     // Then
     // Verification happens on drop
+}
+
+type ChipUpdateRecord = (ChipId, Option<Vec<(ChipId, i8)>>);
+
+async fn recording_world() -> (World, Arc<Mutex<Vec<ChipUpdateRecord>>>) {
+    let mut shared_mock = MockChipClient::new();
+    configure_base_mock(&mut shared_mock);
+    let recorded_updates = Arc::new(Mutex::new(Vec::new()));
+    let updates_clone = Arc::clone(&recorded_updates);
+    shared_mock.expect_update().returning(move |id, patch| {
+        updates_clone.lock().unwrap().push((id, patch.links));
+        Ok(netsim_model::Chip::default())
+    });
+    let mut clients: HashMap<ChipKind, Box<dyn ChipClient>> = HashMap::new();
+    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock));
+    let world = World::with_clients(clients).await;
+    (world, recorded_updates)
+}
+
+// Scenario: Asymmetric bidirectional links propagate updates only to modified sender
+//
+//   Given two chips with bidirectional links having different RSSIs
+//   When one link's RSSI is updated
+//   Then only the sender of the updated link receives a new patch
+#[tokio::test]
+async fn test_asymmetric_bidirectional_links() {
+    // Given
+    let (world, recorded_updates) = recording_world().await;
+    let chip_a = ChipId(1);
+    let chip_b = ChipId(2);
+
+    world.when_notify_chip_added(chip_a, ChipKind::BLUETOOTH).await;
+    world.when_notify_chip_added(chip_b, ChipKind::BLUETOOTH).await;
+
+    let link_a_b = world.when_create_link(chip_a, chip_b, -50).await.unwrap();
+    world.when_create_link(chip_b, chip_a, -85).await.unwrap();
+
+    // When
+    world.when_update_link(link_a_b, -35).await.unwrap();
+
+    // Then
+    let recorded = recorded_updates.lock().unwrap();
+    assert_eq!(
+        *recorded,
+        vec![
+            (chip_a, Some(vec![(chip_b, -50)])),
+            (chip_b, Some(vec![(chip_a, -85)])),
+            (chip_a, Some(vec![(chip_b, -35)])),
+        ]
+    );
+}
+
+// Scenario: Removing central chip in star topology cascades link pruning to peripherals
+//
+//   Given a central chip connected bidirectionally to three peripheral chips
+//   When the central chip is removed
+//   Then each peripheral receives an empty links patch, dead chip receives 0 updates,
+//   and all 6 links are pruned from the world
+#[tokio::test]
+async fn test_star_topology_chip_removal_cascade() {
+    // Given
+    let (world, recorded_updates) = recording_world().await;
+    let center = ChipId(1);
+    let peripheral_links = [(ChipId(2), -50), (ChipId(3), -55), (ChipId(4), -60)];
+    let peripherals = peripheral_links.map(|(chip, _)| chip);
+
+    world.when_notify_chip_added(center, ChipKind::BLUETOOTH).await;
+    for peripheral in peripherals {
+        world.when_notify_chip_added(peripheral, ChipKind::BLUETOOTH).await;
+    }
+
+    for (peripheral, rssi) in peripheral_links {
+        world.when_create_link(center, peripheral, rssi).await.unwrap();
+        world.when_create_link(peripheral, center, rssi).await.unwrap();
+    }
+
+    assert_eq!(world.client.list().await.unwrap().len(), 6);
+    {
+        let setup_updates = recorded_updates.lock().unwrap();
+        for (peripheral, rssi) in peripheral_links {
+            let (_, patch) = setup_updates
+                .iter()
+                .find(|(id, _)| *id == peripheral)
+                .expect("peripheral update must exist");
+            assert_eq!(patch, &Some(vec![(center, rssi)]));
+        }
+    }
+
+    // When
+    let update_count_before_removal = recorded_updates.lock().unwrap().len();
+    world.when_notify_chip_removed(center).await;
+
+    // Then
+    let remaining_links = world.client.list().await.unwrap();
+    assert!(remaining_links.is_empty(), "All 6 links must be pruned from the world");
+
+    let recorded = recorded_updates.lock().unwrap();
+    let removal_updates = &recorded[update_count_before_removal..];
+    assert_eq!(removal_updates.len(), 3);
+    assert!(
+        !removal_updates.iter().any(|(id, _)| *id == center),
+        "Dead center chip must receive zero updates on removal"
+    );
+    for peripheral in peripherals {
+        assert!(
+            removal_updates.contains(&(peripheral, Some(vec![]))),
+            "Peripheral {peripheral:?} must receive an update with empty links"
+        );
+    }
 }

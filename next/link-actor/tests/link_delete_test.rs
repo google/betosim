@@ -60,3 +60,31 @@ async fn test_delete_missing_link_fails() {
     // Then
     assert!(result.is_err());
 }
+
+// Scenario: Successfully re-create a link after deletion
+//
+//   Given a link exists between two chips
+//   When the link is deleted and then re-created with a new RSSI
+//   Then re-creation succeeds with a new LinkId and updated RSSI
+#[tokio::test]
+async fn test_recreate_link_after_deletion_succeeds() {
+    // Given
+    let world = World::new().await;
+    world.given_default_chips().await;
+    let first_id = world.when_create_link(ChipId(1), ChipId(2), -50).await.unwrap();
+    assert_eq!(first_id, link_api::LinkId(1));
+
+    // When
+    world.client.delete(first_id).await.unwrap();
+    assert!(world.client.list().await.unwrap().is_empty());
+    let second_id = world.when_create_link(ChipId(1), ChipId(2), -60).await.unwrap();
+
+    // Then
+    assert_eq!(second_id, link_api::LinkId(2));
+    let links = world.client.list().await.unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].id, second_id);
+    assert_eq!(links[0].sender, ChipId(1));
+    assert_eq!(links[0].receiver, ChipId(2));
+    assert_eq!(links[0].rssi, -60);
+}

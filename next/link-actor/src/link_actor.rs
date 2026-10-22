@@ -158,3 +158,79 @@ impl LinkActor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(id: u32, sender: u32, receiver: u32, rssi: i8) -> Link {
+        Link {
+            id: link_api::LinkId(id),
+            sender: ChipId(sender),
+            receiver: ChipId(receiver),
+            rssi,
+            kind: ChipKind::BLUETOOTH,
+        }
+    }
+
+    #[test]
+    fn test_allocate_link_id_wraparound_to_initial_id() {
+        let mut actor = LinkActor::new(HashMap::new());
+        actor.next_id = u32::MAX;
+
+        let first = actor.allocate_link_id().expect("first allocation succeeds");
+        assert_eq!(first, link_api::LinkId(u32::MAX));
+
+        let second = actor.allocate_link_id().expect("second allocation wraps to initial id");
+        assert_eq!(second, link_api::LinkId(LinkActor::INITIAL_LINK_ID));
+    }
+
+    #[test]
+    fn test_allocate_link_id_skips_occupied_ids() {
+        let mut actor = LinkActor::new(HashMap::new());
+        actor.insert_link(link(1, 10, 20, -50));
+        actor.insert_link(link(2, 10, 21, -50));
+        actor.insert_link(link(4, 10, 22, -50));
+        actor.next_id = 1;
+
+        let first = actor.allocate_link_id().expect("allocation skips 1 and 2");
+        assert_eq!(first, link_api::LinkId(3));
+        assert_eq!(actor.next_id, 4);
+
+        let second = actor.allocate_link_id().expect("allocation skips 4");
+        assert_eq!(second, link_api::LinkId(5));
+        assert_eq!(actor.next_id, 6);
+    }
+
+    #[test]
+    fn test_remove_chip_links_bidirectional_and_deleted_senders() {
+        let mut actor = LinkActor::new(HashMap::new());
+        actor.insert_link(link(1, 1, 2, -50));
+        actor.insert_link(link(2, 2, 1, -60));
+        actor.insert_link(link(3, 3, 1, -70));
+        actor.insert_link(link(4, 3, 4, -80));
+
+        let (removed_count, deleted_senders) = actor.remove_chip_links(ChipId(1));
+        assert_eq!(removed_count, 3);
+        assert_eq!(deleted_senders, HashSet::from([ChipId(2), ChipId(3)]));
+
+        assert!(actor.has_link_pair(ChipId(3), ChipId(4)));
+        assert_eq!(actor.links.len(), 1);
+        assert!(actor.links.contains_key(&link_api::LinkId(4)));
+        assert!(!actor.has_link_pair(ChipId(1), ChipId(2)));
+        assert!(!actor.has_link_pair(ChipId(2), ChipId(1)));
+        assert!(!actor.has_link_pair(ChipId(3), ChipId(1)));
+    }
+
+    #[test]
+    fn test_remove_link_purges_chip_pairs() {
+        let mut actor = LinkActor::new(HashMap::new());
+        let link_id = link_api::LinkId(42);
+        actor.insert_link(link(42, 10, 20, -50));
+        assert!(actor.has_link_pair(ChipId(10), ChipId(20)));
+        let removed = actor.remove_link(&link_id);
+        assert_eq!(removed.map(|l| l.id), Some(link_id));
+        assert!(!actor.has_link_pair(ChipId(10), ChipId(20)));
+        assert_eq!(actor.get_link(&link_id), None);
+    }
+}
