@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io;
+use std::{io, time::Duration};
 
 use device_actor::DeviceClient;
 use netsim_model::{
-    BluetoothUpdate, ChipKind, ChipUpdate, ChipVariantUpdate, DeviceConfig, DeviceId, DeviceUpdate,
-    Pose, RadioUpdate,
+    BluetoothUpdate, Chip, ChipKind, ChipUpdate, ChipVariantUpdate, DeviceConfig, DeviceId,
+    DeviceUpdate, Pose, RadioUpdate,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 use tracing::{error, info, warn};
+
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+const PHY_LOW_ENERGY_ID: &str = "0";
+const PHY_CLASSIC_ID: &str = "1";
 
 /// Starts the asynchronous TCP server loop.
 ///
@@ -48,7 +52,7 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
             Err(error) => {
                 error!(%error, "Error accepting Rootcanal control connection");
                 // Mitigate tight CPU spin in case of persistent accept errors (e.g. EMFILE)
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
             }
         }
     }
@@ -59,16 +63,16 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
 /// Used to map the legacy integer-based PHY index (0 for LE, 1 for Classic)
 /// to the strongly-typed radio categories.
 enum PhyTarget {
-    LowEnergy, // "0"
-    Classic,   // "1"
-    All,       // Fallback for other values
+    LowEnergy,
+    Classic,
+    All, // Fallback for other values
 }
 
 impl From<&str> for PhyTarget {
     fn from(s: &str) -> Self {
         match s {
-            "0" => PhyTarget::LowEnergy,
-            "1" => PhyTarget::Classic,
+            PHY_LOW_ENERGY_ID => PhyTarget::LowEnergy,
+            PHY_CLASSIC_ID => PhyTarget::Classic,
             _ => PhyTarget::All,
         }
     }
@@ -102,69 +106,80 @@ enum Command {
     },
 }
 
-/// Parses and validates a raw TCP packet's command name and arguments.
-///
-/// Performs arity checks and parses string arguments into their strongly-typed
-/// representations, returning a `Command` or a descriptive error message
-/// suitable for sending back to the client.
-fn parse_command(name: &str, args: &[String]) -> Result<Command, String> {
-    // We match on the command name and the "shape" of the slice simultaneously
-    match (name, args) {
-        ("CLOSE_TEST_CHANNEL", []) => Ok(Command::CloseTestChannel),
-        ("CLOSE_TEST_CHANNEL", _) => {
-            Err("TestCommandHandler 'CLOSE_TEST_CHANNEL' takes no arguments".to_string())
-        }
+impl Command {
+    /// Parses and validates a raw TCP packet's command name and arguments.
+    ///
+    /// Performs arity checks and parses string arguments into their strongly-typed
+    /// representations, returning a `Command` or a descriptive error message
+    /// suitable for sending back to the client.
+    fn parse(name: &str, args: &[String]) -> Result<Self, String> {
+        // We match on the command name and the "shape" of the slice simultaneously
+        match (name, args) {
+            ("CLOSE_TEST_CHANNEL", []) => Ok(Command::CloseTestChannel),
+            ("CLOSE_TEST_CHANNEL", _) => {
+                Err("TestCommandHandler 'CLOSE_TEST_CHANNEL' takes no arguments".to_string())
+            }
 
-        ("list", []) => Ok(Command::List),
-        ("list", _) => Err("TestCommandHandler 'list' takes no arguments".to_string()),
+            ("list", []) => Ok(Command::List),
+            ("list", _) => Err("TestCommandHandler 'list' takes no arguments".to_string()),
 
-        ("reset", []) => Ok(Command::Reset),
-        ("reset", _) => Err("TestCommandHandler 'reset' takes no arguments".to_string()),
+            ("reset", []) => Ok(Command::Reset),
+            ("reset", _) => Err("TestCommandHandler 'reset' takes no arguments".to_string()),
 
-        // Matches exactly two elements and binds them to `id_str` and `phy_str`
-        ("add_device_to_phy" | "del_device_from_phy", [id_str, phy_str]) => {
-            let device_id =
-                id_str.parse::<u32>().map_err(|_err| "Invalid device_id".to_string())?;
-            Ok(Command::PhyStateUpdate {
-                device_id,
-                target: PhyTarget::from(phy_str.as_str()),
-                raw_phy_str: phy_str.clone(),
-                enabled: name == "add_device_to_phy",
-                command_name: name.to_string(),
-            })
-        }
-        ("add_device_to_phy" | "del_device_from_phy", _) => {
-            Err(format!("TestCommandHandler '{name}' takes two arguments"))
-        }
+            // Matches exactly two elements and binds them to `id_str` and `phy_str`
+            ("add_device_to_phy" | "del_device_from_phy", [id_str, phy_str]) => {
+                let device_id =
+                    id_str.parse::<u32>().map_err(|_err| "Invalid device_id".to_string())?;
+                Ok(Command::PhyStateUpdate {
+                    device_id,
+                    target: PhyTarget::from(phy_str.as_str()),
+                    raw_phy_str: phy_str.clone(),
+                    enabled: name == "add_device_to_phy",
+                    command_name: name.to_string(),
+                })
+            }
+            ("add_device_to_phy" | "del_device_from_phy", _) => {
+                Err(format!("TestCommandHandler '{name}' takes two arguments"))
+            }
 
-        // Matches exactly one element
-        ("del", [id_str]) => {
-            let device_id =
-                id_str.parse::<u32>().map_err(|_err| "Invalid device_id".to_string())?;
-            Ok(Command::DelDevice { device_id })
-        }
-        ("del", _) => Err("TestCommandHandler 'del' takes an argument".to_string()),
+            // Matches exactly one element
+            ("del", [id_str]) => {
+                let device_id =
+                    id_str.parse::<u32>().map_err(|_err| "Invalid device_id".to_string())?;
+                Ok(Command::DelDevice { device_id })
+            }
+            ("del", _) => Err("TestCommandHandler 'del' takes an argument".to_string()),
 
-        // Handles 1 argument OR 2 arguments cleanly using standard slice matching
-        ("add", [device_type]) => {
-            Ok(Command::AddDevice { device_type: device_type.clone(), address: String::new() })
-        }
-        ("add", [device_type, address]) => {
-            Ok(Command::AddDevice { device_type: device_type.clone(), address: address.clone() })
-        }
-        ("add", _) => Err("TestCommandHandler 'add' takes an argument".to_string()),
+            // Handles 1 argument OR 2 arguments cleanly using standard slice matching
+            ("add", [device_type]) => {
+                Ok(Command::AddDevice { device_type: device_type.clone(), address: String::new() })
+            }
+            ("add", [device_type, address]) => Ok(Command::AddDevice {
+                device_type: device_type.clone(),
+                address: address.clone(),
+            }),
+            ("add", _) => Err("TestCommandHandler 'add' takes an argument".to_string()),
 
-        ("set_device_configuration", [id_str, preset_str]) => {
-            let device_id =
-                id_str.parse::<u32>().map_err(|_err| "Invalid device_id".to_string())?;
-            Ok(Command::SetDeviceConfiguration { device_id, preset: preset_str.clone() })
-        }
-        ("set_device_configuration", _) => {
-            Err("TestCommandHandler 'set_device_configuration' takes two arguments".to_string())
-        }
+            ("set_device_configuration", [id_str, preset_str]) => {
+                let device_id =
+                    id_str.parse::<u32>().map_err(|_err| "Invalid device_id".to_string())?;
+                Ok(Command::SetDeviceConfiguration { device_id, preset: preset_str.clone() })
+            }
+            ("set_device_configuration", _) => {
+                Err("TestCommandHandler 'set_device_configuration' takes two arguments".to_string())
+            }
 
-        (other, _) => Ok(Command::Unknown { name: other.to_string() }),
+            (other, _) => Ok(Command::Unknown { name: other.to_string() }),
+        }
     }
+}
+
+/// Writes a RootCanal test-channel response framed with a 4-byte little-endian length prefix.
+async fn write_response(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
+    let size = payload.len() as u32;
+    stream.write_all(&size.to_le_bytes()).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await
 }
 
 /// Manages the lifecycle of a single test channel session.
@@ -172,11 +187,7 @@ fn parse_command(name: &str, args: &[String]) -> Result<Command, String> {
 /// Performs the initial handshake, and then enters a read-parse-dispatch loop
 /// until the client disconnects or sends a `CLOSE_TEST_CHANNEL` command.
 async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io::Result<()> {
-    let welcome = b"RootCanal\n";
-    let size = welcome.len() as u32;
-    stream.write_all(&size.to_le_bytes()).await?;
-    stream.write_all(welcome).await?;
-    stream.flush().await?;
+    write_response(&mut stream, b"RootCanal\n").await?;
 
     loop {
         let name_len = match stream.read_u8().await {
@@ -209,16 +220,12 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
 
         info!("Received Rootcanal control command: {name_str} with {args_len} args");
 
-        let command = match parse_command(&name_str, &args) {
+        let command = match Command::parse(&name_str, &args) {
             Ok(cmd) => cmd,
             Err(error) => {
                 error!(%error, "Command '{name_str}' parse failed");
                 // Write the parser error back to the client and continue
-                let response_bytes = error.as_bytes();
-                let resp_size = response_bytes.len() as u32;
-                stream.write_all(&resp_size.to_le_bytes()).await?;
-                stream.write_all(response_bytes).await?;
-                stream.flush().await?;
+                write_response(&mut stream, error.as_bytes()).await?;
                 continue;
             }
         };
@@ -263,12 +270,7 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
             }
         };
 
-        // Send response packet ([4-byte size][payload])
-        let response_bytes = response_str.as_bytes();
-        let resp_size = response_bytes.len() as u32;
-        stream.write_all(&resp_size.to_le_bytes()).await?;
-        stream.write_all(response_bytes).await?;
-        stream.flush().await?;
+        write_response(&mut stream, response_str.as_bytes()).await?;
     }
 
     Ok(())
@@ -279,34 +281,30 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
 async fn handle_list(device_client: &DeviceClient) -> Result<String, String> {
     let devices = device_client.list().await.map_err(|e| format!("Failed to list devices: {e}"))?;
 
-    let mut le_ids: Vec<u32> = Vec::new();
-    let mut classic_ids: Vec<u32> = Vec::new();
-
-    for device in &devices {
-        if device
-            .chips
+    let phy_section = |radio_enabled: fn(&Chip) -> bool| {
+        devices
             .iter()
-            .any(|chip| chip.kind == ChipKind::BLUETOOTH && chip.enabled && chip.is_le_enabled())
-        {
-            le_ids.push(device.id);
-        }
-
-        if device.chips.iter().any(|chip| {
-            chip.kind == ChipKind::BLUETOOTH && chip.enabled && chip.is_classic_enabled()
-        }) {
-            classic_ids.push(device.id);
-        }
-    }
+            .filter(|device| {
+                device.chips.iter().any(|chip| {
+                    chip.kind == ChipKind::BLUETOOTH && chip.enabled && radio_enabled(chip)
+                })
+            })
+            .map(|device| device.id.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let low_energy_section = phy_section(Chip::is_le_enabled);
+    let br_edr_section = phy_section(Chip::is_classic_enabled);
 
     let devices_section: String = devices
         .iter()
         .map(|device| format!("  {}:hci_device_{}\n", device.id, device.id))
         .collect();
-    let low_energy_section = le_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-    let br_edr_section = classic_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
 
     Ok(format!(
-        "Devices:\n{devices_section}Phys:\n  0:LOW_ENERGY:{low_energy_section}\n  1:BR_EDR:{br_edr_section}\n"
+        "Devices:\n{devices_section}Phys:\n{}\n{}\n",
+        format_args!("  {PHY_LOW_ENERGY_ID}:LOW_ENERGY:{low_energy_section}"),
+        format_args!("  {PHY_CLASSIC_ID}:BR_EDR:{br_edr_section}"),
     ))
 }
 
@@ -413,7 +411,7 @@ async fn handle_add(
         packet_stream: None,
         packet_sink: None,
         device_config,
-        chip: netsim_model::Chip {
+        chip: Chip {
             name: format!("chip_{device_guid}"),
             manufacturer: "Netsim".to_string(),
             product_name: "RootcanalTestChannel".to_string(),
@@ -449,15 +447,10 @@ async fn handle_set_device_configuration(
         .map_err(|e| format!("Failed to get device: {e}"))?
         .ok_or_else(|| format!("Device {device_id} not found"))?;
 
-    let bluetooth_chips: Vec<_> =
-        device.chips.iter().filter(|chip| chip.kind == ChipKind::BLUETOOTH).collect();
-
-    if bluetooth_chips.is_empty() {
-        return Err(format!("Device {device_id} has no Bluetooth chip"));
-    }
-
-    let chip_updates: Vec<ChipUpdate> = bluetooth_chips
+    let chip_updates: Vec<ChipUpdate> = device
+        .chips
         .iter()
+        .filter(|chip| chip.kind == ChipKind::BLUETOOTH)
         .map(|chip| ChipUpdate {
             id: Some(chip.id.into()),
             variant: Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
@@ -467,6 +460,10 @@ async fn handle_set_device_configuration(
             ..Default::default()
         })
         .collect();
+
+    if chip_updates.is_empty() {
+        return Err(format!("Device {device_id} has no Bluetooth chip"));
+    }
 
     let device_update =
         DeviceUpdate { id: device_id, chips: Some(chip_updates), ..Default::default() };
@@ -494,8 +491,8 @@ mod tests {
 
     #[test]
     fn test_parse_command_close_test_channel() {
-        assert!(matches!(parse_command("CLOSE_TEST_CHANNEL", &[]), Ok(Command::CloseTestChannel)));
-        let err = parse_command("CLOSE_TEST_CHANNEL", &["extra".to_string()]);
+        assert!(matches!(Command::parse("CLOSE_TEST_CHANNEL", &[]), Ok(Command::CloseTestChannel)));
+        let err = Command::parse("CLOSE_TEST_CHANNEL", &["extra".to_string()]);
         assert_eq!(
             err.err().as_deref(),
             Some("TestCommandHandler 'CLOSE_TEST_CHANNEL' takes no arguments")
@@ -504,21 +501,22 @@ mod tests {
 
     #[test]
     fn test_parse_command_list() {
-        assert!(matches!(parse_command("list", &[]), Ok(Command::List)));
-        let err = parse_command("list", &["arg".to_string()]);
+        assert!(matches!(Command::parse("list", &[]), Ok(Command::List)));
+        let err = Command::parse("list", &["arg".to_string()]);
         assert_eq!(err.err().as_deref(), Some("TestCommandHandler 'list' takes no arguments"));
     }
 
     #[test]
     fn test_parse_command_reset() {
-        assert!(matches!(parse_command("reset", &[]), Ok(Command::Reset)));
-        let err = parse_command("reset", &["arg1".to_string(), "arg2".to_string()]);
+        assert!(matches!(Command::parse("reset", &[]), Ok(Command::Reset)));
+        let err = Command::parse("reset", &["arg1".to_string(), "arg2".to_string()]);
         assert_eq!(err.err().as_deref(), Some("TestCommandHandler 'reset' takes no arguments"));
     }
 
     #[test]
     fn test_parse_command_phy_state_update_valid() {
-        let cmd = parse_command("add_device_to_phy", &["42".to_string(), "0".to_string()]).unwrap();
+        let cmd =
+            Command::parse("add_device_to_phy", &["42".to_string(), "0".to_string()]).unwrap();
         match cmd {
             Command::PhyStateUpdate { device_id, target, raw_phy_str, enabled, command_name } => {
                 assert_eq!(device_id, 42);
@@ -531,7 +529,7 @@ mod tests {
         }
 
         let cmd =
-            parse_command("del_device_from_phy", &["7".to_string(), "1".to_string()]).unwrap();
+            Command::parse("del_device_from_phy", &["7".to_string(), "1".to_string()]).unwrap();
         match cmd {
             Command::PhyStateUpdate { device_id, target, raw_phy_str, enabled, command_name } => {
                 assert_eq!(device_id, 7);
@@ -547,10 +545,10 @@ mod tests {
     #[test]
     fn test_parse_command_phy_state_update_errors() {
         let err_invalid_id =
-            parse_command("add_device_to_phy", &["not_a_number".to_string(), "0".to_string()]);
+            Command::parse("add_device_to_phy", &["not_a_number".to_string(), "0".to_string()]);
         assert_eq!(err_invalid_id.err().as_deref(), Some("Invalid device_id"));
 
-        let err_bad_arity = parse_command("del_device_from_phy", &["42".to_string()]);
+        let err_bad_arity = Command::parse("del_device_from_phy", &["42".to_string()]);
         assert_eq!(
             err_bad_arity.err().as_deref(),
             Some("TestCommandHandler 'del_device_from_phy' takes two arguments")
@@ -559,22 +557,22 @@ mod tests {
 
     #[test]
     fn test_parse_command_del() {
-        let cmd = parse_command("del", &["123".to_string()]).unwrap();
+        let cmd = Command::parse("del", &["123".to_string()]).unwrap();
         match cmd {
             Command::DelDevice { device_id } => assert_eq!(device_id, 123),
             _ => panic!("Expected DelDevice"),
         }
 
-        let err_invalid_id = parse_command("del", &["bad".to_string()]);
+        let err_invalid_id = Command::parse("del", &["bad".to_string()]);
         assert_eq!(err_invalid_id.err().as_deref(), Some("Invalid device_id"));
 
-        let err_no_args = parse_command("del", &[]);
+        let err_no_args = Command::parse("del", &[]);
         assert_eq!(
             err_no_args.err().as_deref(),
             Some("TestCommandHandler 'del' takes an argument")
         );
 
-        let err_too_many = parse_command("del", &["1".to_string(), "2".to_string()]);
+        let err_too_many = Command::parse("del", &["1".to_string(), "2".to_string()]);
         assert_eq!(
             err_too_many.err().as_deref(),
             Some("TestCommandHandler 'del' takes an argument")
@@ -583,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_parse_command_add() {
-        let cmd = parse_command("add", &["beacon".to_string()]).unwrap();
+        let cmd = Command::parse("add", &["beacon".to_string()]).unwrap();
         match cmd {
             Command::AddDevice { device_type, address } => {
                 assert_eq!(device_type, "beacon");
@@ -592,8 +590,8 @@ mod tests {
             _ => panic!("Expected AddDevice"),
         }
 
-        let cmd =
-            parse_command("add", &["beacon".to_string(), "00:11:22:33:44:55".to_string()]).unwrap();
+        let cmd = Command::parse("add", &["beacon".to_string(), "00:11:22:33:44:55".to_string()])
+            .unwrap();
         match cmd {
             Command::AddDevice { device_type, address } => {
                 assert_eq!(device_type, "beacon");
@@ -602,14 +600,14 @@ mod tests {
             _ => panic!("Expected AddDevice"),
         }
 
-        let err_no_args = parse_command("add", &[]);
+        let err_no_args = Command::parse("add", &[]);
         assert_eq!(
             err_no_args.err().as_deref(),
             Some("TestCommandHandler 'add' takes an argument")
         );
 
         let err_too_many =
-            parse_command("add", &["a".to_string(), "b".to_string(), "c".to_string()]);
+            Command::parse("add", &["a".to_string(), "b".to_string(), "c".to_string()]);
         assert_eq!(
             err_too_many.err().as_deref(),
             Some("TestCommandHandler 'add' takes an argument")
@@ -618,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_parse_command_set_device_configuration() {
-        let cmd = parse_command(
+        let cmd = Command::parse(
             "set_device_configuration",
             &["10".to_string(), "strict_mode".to_string()],
         )
@@ -631,13 +629,13 @@ mod tests {
             _ => panic!("Expected SetDeviceConfiguration"),
         }
 
-        let err_bad_id = parse_command(
+        let err_bad_id = Command::parse(
             "set_device_configuration",
             &["xyz".to_string(), "strict_mode".to_string()],
         );
         assert_eq!(err_bad_id.err().as_deref(), Some("Invalid device_id"));
 
-        let err_bad_arity = parse_command("set_device_configuration", &["10".to_string()]);
+        let err_bad_arity = Command::parse("set_device_configuration", &["10".to_string()]);
         assert_eq!(
             err_bad_arity.err().as_deref(),
             Some("TestCommandHandler 'set_device_configuration' takes two arguments")
@@ -646,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_parse_command_unknown() {
-        let cmd = parse_command("custom_unknown_op", &["foo".to_string()]).unwrap();
+        let cmd = Command::parse("custom_unknown_op", &["foo".to_string()]).unwrap();
         match cmd {
             Command::Unknown { name } => assert_eq!(name, "custom_unknown_op"),
             _ => panic!("Expected Unknown"),
