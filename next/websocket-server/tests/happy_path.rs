@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_model::{ChipKind, ChipVariant};
+use netsim_model::{ChipKind, ChipVariant, ChipVariantUpdate};
 
 use crate::world::TestWorld;
 
@@ -161,4 +161,73 @@ async fn test_device_and_chip_metadata_query_parameters() {
 
     world.when_client_closes_connection(idx).await;
     world.then_backend_deletes_chip(idx).await;
+}
+
+#[tokio::test]
+async fn test_websocket_initial_text_config_updates_bt_properties_before_binary() {
+    let mut world = TestWorld::new().await;
+
+    let client_idx = world
+        .given_a_websocket_client_connected_at_path("/v1/websocket/bt?name=bt-config-test")
+        .await;
+
+    // 1. Send initial Text configuration frame
+    world
+        .when_client_sends_text(
+            client_idx,
+            r#"{"preset":"laird_bl654","features":{"le_connected_isochronous_stream":false}}"#,
+        )
+        .await;
+
+    // 2. Verify backend receives DeviceUpdate with parsed bt_properties
+    let (device_id, update) = world.then_backend_receives_device_update().await;
+    assert!(device_id.0 >= 1000);
+    let chips = update.chips.expect("Expected chips in DeviceUpdate");
+    assert_eq!(chips.len(), 1);
+    assert!(chips[0].id.is_none());
+    match &chips[0].variant {
+        Some(ChipVariantUpdate::Bluetooth(bt_update)) => {
+            let bt_props = bt_update.bt_properties.as_ref().expect("Expected bt_properties");
+            assert_eq!(bt_props.preset.as_deref(), Some("laird_bl654"));
+            let features = bt_props.features.as_ref().expect("Expected features");
+            assert_eq!(features.le_connected_isochronous_stream, Some(false));
+        }
+        other => panic!("Expected Bluetooth variant update, got {other:?}"),
+    }
+
+    // 3. Send binary HCI packet and verify packet_stream receives it
+    let test_packet = vec![0x01, 0x03, 0x0c, 0x00];
+    world.when_client_sends_packet(client_idx, &test_packet).await;
+    world.then_backend_receives_packet(client_idx, &test_packet).await;
+
+    world.when_client_closes_connection(client_idx).await;
+    world.then_backend_deletes_chip(client_idx).await;
+}
+
+#[tokio::test]
+async fn test_websocket_text_ignored_after_binary() {
+    let mut world = TestWorld::new().await;
+
+    let client_idx = world
+        .given_a_websocket_client_connected_at_path("/v1/websocket/bt?name=bt-ignore-test")
+        .await;
+
+    // 1. Send binary packet first
+    let test_packet = vec![0x01, 0x03, 0x0c, 0x00];
+    world.when_client_sends_packet(client_idx, &test_packet).await;
+    world.then_backend_receives_packet(client_idx, &test_packet).await;
+
+    // 2. Send Text message after binary streaming started
+    world.when_client_sends_text(client_idx, r#"{"preset":"laird_bl654"}"#).await;
+
+    // 3. Send a second binary packet to deterministically synchronize the reader loop
+    let second_packet = vec![0x01, 0x02, 0x20, 0x00];
+    world.when_client_sends_packet(client_idx, &second_packet).await;
+    world.then_backend_receives_packet(client_idx, &second_packet).await;
+
+    // 4. Verify no device update was sent for the Text frame
+    world.then_no_device_update();
+
+    world.when_client_closes_connection(client_idx).await;
+    world.then_backend_deletes_chip(client_idx).await;
 }

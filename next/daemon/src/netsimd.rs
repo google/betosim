@@ -444,6 +444,11 @@ pub struct NetsimDaemon {
     /// The HTTP listener task, aborted when the daemon is dropped so the HTTP
     /// port does not outlive it.
     http_task: tokio::task::JoinHandle<()>,
+    /// The port the WebSocket server is listening on.
+    ws_port: Option<u16>,
+    /// The WebSocket listener task, aborted when the daemon is dropped so the
+    /// WebSocket port does not outlive it.
+    ws_task: Option<tokio::task::JoinHandle<()>>,
     /// The DeviceActor task handle.
     device_task: tokio::task::JoinHandle<()>,
     /// The CaptureActor task handle.
@@ -467,6 +472,9 @@ impl Drop for NetsimDaemon {
         // releases the port, so restarting the daemon in the same process does
         // not fail with "Address already in use".
         self.http_task.abort();
+        if let Some(task) = &self.ws_task {
+            task.abort();
+        }
         self.device_task.abort();
         self.capture_task.abort();
     }
@@ -811,6 +819,7 @@ impl NetsimDaemon {
 
         // WebSocket server
         let mut actual_ws_port = None;
+        let mut ws_task = None;
         let resolved_ws_port_opt =
             resolve_port_with_env(args.ws_port, "NETSIM_WS_PORT", |name| std::env::var(name));
         let websocket_port = resolved_ws_port_opt.map(|p| p + instance_num - 1);
@@ -818,7 +827,10 @@ impl NetsimDaemon {
             match bind_tcp_loopback(ws_port) {
                 Ok(listener) => {
                     actual_ws_port = Some(listener.local_addr().map_err(init_error)?.port());
-                    tokio::spawn(websocket_server::server::run(listener, device_client.clone()));
+                    ws_task = Some(tokio::spawn(websocket_server::server::run(
+                        listener,
+                        device_client.clone(),
+                    )));
                 }
                 Err(e) => {
                     return Err(init_error(format!(
@@ -1046,6 +1058,8 @@ impl NetsimDaemon {
             _grpc_server: Some(grpc_server),
             http_port: Some(actual_http_port),
             http_task,
+            ws_port: actual_ws_port,
+            ws_task,
             device_task,
             capture_task,
             artifact_dir,
@@ -1070,6 +1084,11 @@ impl NetsimDaemon {
     /// Gets the HTTP /v1 API port, if the server is running.
     pub fn http_port(&self) -> Option<u16> {
         self.http_port
+    }
+
+    /// Gets the WebSocket server port, if the server is running.
+    pub fn ws_port(&self) -> Option<u16> {
+        self.ws_port
     }
 
     /// Gets the Rootcanal test port, if the server is running.

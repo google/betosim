@@ -17,6 +17,7 @@ use std::{
     future::ready,
     io,
     net::{SocketAddr, TcpStream},
+    sync::Arc,
 };
 
 use bytes::Bytes;
@@ -24,7 +25,8 @@ use device_actor::DeviceClient;
 use device_api::DeviceId;
 use futures::{StreamExt, sink::unfold};
 use netsim_model::{
-    Chip, ChipError, ChipId, ChipKind, ChipVariant, DeviceInfo, PacketSink, PacketStream, Quirks,
+    BluetoothUpdate, BtControllerProperties, Chip, ChipError, ChipId, ChipKind, ChipUpdate,
+    ChipVariant, ChipVariantUpdate, DeviceInfo, DeviceUpdate, PacketSink, PacketStream, Quirks,
 };
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
@@ -185,29 +187,93 @@ fn packet_stream_and_sink(
     (packet_stream, packet_sink)
 }
 
+/// Context for a device registered with the device actor.
+pub(crate) struct RegisteredDevice {
+    pub(crate) device_id: DeviceId,
+    pub(crate) chip_id: ChipId,
+    pub(crate) client: DeviceClient,
+}
+
 /// Spawns threads and tasks to manage WebSocket traffic and chip lifecycle.
 ///
-/// `device` is the registered `(DeviceId, ChipId)` to remove on close; `None`
-/// for loopback.
+/// `device` is the registered chip to remove on close; `None` for loopback.
 pub(crate) async fn run_websocket_transport(
     mut websocket_reader: WebSocket<TcpStream>,
     mut websocket_writer: WebSocket<TcpStream>,
     addr: SocketAddr,
+    chip_kind: ChipKind,
     stream_tx: mpsc::Sender<Result<Bytes, io::Error>>,
     mut sink_rx: mpsc::Receiver<Bytes>,
-    device: Option<(DeviceId, ChipId, DeviceClient)>,
+    device: Option<Arc<RegisteredDevice>>,
 ) {
     let (outbound_msg_tx, mut outbound_msg_rx) = mpsc::unbounded_channel::<Message>();
 
     // 1. Read Loop: WebSocket -> Packet Stream (HCI traffic from client)
     let outbound_msg_tx_clone = outbound_msg_tx.clone();
+    let rt_handle = tokio::runtime::Handle::current();
+    // Arc avoids invoking DeviceClient::clone() (which calls inner.clone_box(),
+    // panicking on connection-scoped MockActorClient test mocks that only expect
+    // a single clone_box() in server::run).
+    let reader_device = device.clone();
     let reader_task = tokio::task::spawn_blocking(move || {
+        let mut binary_seen = false;
         loop {
             // Ref: RFC 6455, Section 5.2 - Base Framing Protocol
             match websocket_reader.read() {
                 Ok(Message::Binary(data)) => {
+                    binary_seen = true;
                     if stream_tx.blocking_send(Ok(data)).is_err() {
                         break;
+                    }
+                }
+                Ok(Message::Text(text)) => {
+                    if binary_seen {
+                        warn!(
+                            "Ignoring WebSocket Text message after binary streaming started for {addr}"
+                        );
+                        continue;
+                    }
+                    if chip_kind != ChipKind::BLUETOOTH {
+                        warn!(
+                            "Ignoring WebSocket Text config frame for non-Bluetooth chip {chip_kind:?} from {addr}"
+                        );
+                        continue;
+                    }
+                    let bt_props = match parse_ws_bt_properties(text.as_str()) {
+                        Ok(props) if !props.is_empty() => props,
+                        Ok(_) => {
+                            warn!(
+                                "Ignoring WebSocket Text config frame with empty or unrecognized bt_properties for {addr}"
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            warn!(%error, "Failed to parse WebSocket Text config frame for {addr}");
+                            continue;
+                        }
+                    };
+                    if let Some(device) = &reader_device {
+                        let update = DeviceUpdate {
+                            chips: Some(vec![ChipUpdate {
+                                id: None,
+                                variant: Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+                                    bt_properties: Some(bt_props),
+                                    ..Default::default()
+                                })),
+                                ..Default::default()
+                            }]),
+                            ..Default::default()
+                        };
+                        // Blocking the spawn_blocking thread here is intentional and deadlock-free:
+                        // DeviceActor::handle_update and BluetoothActor::handle_update only mutate
+                        // actor state and call rootcanal.set_properties without awaiting this WebSocket
+                        // reader task, and completing the update before reading the next frame ensures
+                        // RootCanal controller properties are applied prior to the first binary HCI packet.
+                        if let Err(error) =
+                            rt_handle.block_on(device.client.update(device.device_id, update))
+                        {
+                            warn!(%error, "Failed to apply WebSocket chip config for {addr}");
+                        }
                     }
                 }
                 Ok(Message::Ping(data)) => {
@@ -217,7 +283,7 @@ pub(crate) async fn run_websocket_transport(
                     let _ = outbound_msg_tx_clone.send(Message::Close(close_frame));
                     break;
                 }
-                Ok(_) => {} // Ignore Text, Pong, Frame
+                Ok(_) => {} // Ignore Pong, Frame
                 Err(error) => {
                     warn!(%error, "WebSocket read error for {addr}");
                     break;
@@ -255,14 +321,29 @@ pub(crate) async fn run_websocket_transport(
 
     // 4. Cleanup Task: Triggered when WebSocket reader or writer closes
     JoinSet::from_iter([reader_task, writer_task]).join_next().await;
-    let Some((device_id, chip_id, device_client)) = device else {
+    let Some(device) = device else {
         info!("WebSocket loopback stream for {addr} closed");
         return;
     };
+    let RegisteredDevice { device_id, chip_id, client } = &*device;
     info!("Cleaning up WebSocket chip {chip_id} on device {device_id} for {addr}");
-    if let Err(error) = device_client.notify_chip_removed(device_id, chip_id).await {
+    if let Err(error) = client.notify_chip_removed(*device_id, *chip_id).await {
         debug!(%error, "WebSocket chip {chip_id} on device {device_id} already removed");
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum BtPropsOrEnvelope {
+    Envelope { bt_properties: BtControllerProperties },
+    Direct(BtControllerProperties),
+}
+
+fn parse_ws_bt_properties(text: &str) -> Result<BtControllerProperties, serde_json::Error> {
+    serde_json::from_str::<BtPropsOrEnvelope>(text).map(|res| match res {
+        BtPropsOrEnvelope::Envelope { bt_properties } => bt_properties,
+        BtPropsOrEnvelope::Direct(bt_properties) => bt_properties,
+    })
 }
 
 #[cfg(test)]
@@ -366,5 +447,67 @@ mod tests {
         let ethernet = build_chip_variant(ChipKind::ETHERNET, String::new(), None)
             .expect("ethernet variant should build");
         assert!(matches!(ethernet, ChipVariant::Ethernet(_)));
+    }
+
+    #[test]
+    fn test_parse_ws_bt_properties_preset_direct() {
+        let json = r#"{"preset": "laird_bl654"}"#;
+        let props = parse_ws_bt_properties(json).expect("should parse direct preset");
+        assert_eq!(props.preset.as_deref(), Some("laird_bl654"));
+        assert!(!props.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ws_bt_properties_preset_envelope() {
+        let json = r#"{"bt_properties": {"preset": "laird_bl654", "strict": true}}"#;
+        let props = parse_ws_bt_properties(json).expect("should parse enveloped preset");
+        assert_eq!(props.preset.as_deref(), Some("laird_bl654"));
+        assert_eq!(props.strict, Some(true));
+        assert!(!props.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ws_bt_properties_features() {
+        let json = r#"{"features": {"le_connected_isochronous_stream": false}}"#;
+        let props = parse_ws_bt_properties(json).expect("should parse features");
+        assert_eq!(
+            props.features.as_ref().and_then(|f| f.le_connected_isochronous_stream),
+            Some(false)
+        );
+        assert!(!props.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ws_bt_properties_empty() {
+        let json = "{}";
+        let props = parse_ws_bt_properties(json).expect("should parse empty object");
+        assert!(props.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ws_bt_properties_nested_empty_substructs_are_empty() {
+        let empty_json = r#"{"features":{},"quirks":{},"vendor":{}}"#;
+        let props = parse_ws_bt_properties(empty_json).expect("should parse empty substructs");
+        assert!(props.is_empty());
+
+        let with_feature = r#"{"features":{"le_2m_phy":true}}"#;
+        assert!(!parse_ws_bt_properties(with_feature).unwrap().is_empty());
+
+        let with_quirk = r#"{"quirks":{"has_default_random_address":true}}"#;
+        assert!(!parse_ws_bt_properties(with_quirk).unwrap().is_empty());
+
+        let with_vendor = r#"{"vendor":{"csr":true}}"#;
+        assert!(!parse_ws_bt_properties(with_vendor).unwrap().is_empty());
+
+        let with_strict = r#"{"strict":true}"#;
+        assert!(!parse_ws_bt_properties(with_strict).unwrap().is_empty());
+
+        let with_preset = r#"{"preset":"default"}"#;
+        assert!(!parse_ws_bt_properties(with_preset).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_ws_bt_properties_invalid() {
+        assert!(parse_ws_bt_properties("not json").is_err());
     }
 }

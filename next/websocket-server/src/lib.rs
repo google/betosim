@@ -13,7 +13,12 @@
 // limitations under the License.
 
 pub mod client;
+pub use client::ClientError;
 pub(crate) mod error;
 pub(crate) mod handshake;
 pub mod server;
+#[cfg(feature = "testing")]
+mod testing;
+#[cfg(feature = "testing")]
+pub use testing::ManualWebSocketClient;
 pub(crate) mod transport;

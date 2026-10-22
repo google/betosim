@@ -79,6 +79,7 @@ netsim-proto = { path = "../../proto/proto-cf" }
 rand = "0.8"
 regex = "1"
 tempfile = "3"
+websocket-server = { path = "../websocket-server", features = ["testing"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1"

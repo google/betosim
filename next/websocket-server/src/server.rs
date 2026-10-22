@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, net::SocketAddr, str::FromStr};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::BytesMut;
 use device_actor::DeviceClient;
@@ -27,7 +27,7 @@ use tracing::{error, info, warn};
 use crate::{
     error::ServerError,
     handshake::{handle_websocket_handshake, write_http_response},
-    transport::{run_loopback, run_websocket_transport, setup_virtual_chip},
+    transport::{RegisteredDevice, run_loopback, run_websocket_transport, setup_virtual_chip},
 };
 
 const WEBSOCKET_PREFIX: &str = "/v1/websocket/";
@@ -79,7 +79,9 @@ async fn handle_websocket_client(stream: TcpStream, addr: SocketAddr, device_cli
     } else {
         match setup_virtual_chip(&device_client, chip_kind, queries, addr, stream_rx, sink_tx).await
         {
-            Ok((device_id, chip_id)) => Some((device_id, chip_id, device_client)),
+            Ok((device_id, chip_id)) => {
+                Some(Arc::new(RegisteredDevice { device_id, chip_id, client: device_client }))
+            }
             Err(error) => {
                 warn!(%error, "Failed to setup virtual chip for {addr}");
                 return;
@@ -88,8 +90,16 @@ async fn handle_websocket_client(stream: TcpStream, addr: SocketAddr, device_cli
     };
 
     // 3. Start the WebSocket transport loops (Read/Write/Forward)
-    run_websocket_transport(websocket_reader, websocket_writer, addr, stream_tx, sink_rx, device)
-        .await;
+    run_websocket_transport(
+        websocket_reader,
+        websocket_writer,
+        addr,
+        chip_kind,
+        stream_tx,
+        sink_rx,
+        device,
+    )
+    .await;
     if let Some(task) = loopback_task {
         task.abort();
     }
@@ -125,7 +135,7 @@ async fn perform_handshake(
 > {
     let mut buffer = BytesMut::with_capacity(MAX_HTTP_BUFFER_SIZE);
     // Wait until we have a full HTTP request or hit MAX_HTTP_BUFFER_SIZE
-    loop {
+    let header_len = loop {
         let n = stream.read_buf(&mut buffer).await?;
         if n == 0 {
             if buffer.len() == buffer.capacity() {
@@ -145,8 +155,8 @@ async fn perform_handshake(
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         match req.parse(&buffer) {
-            Ok(httparse::Status::Complete(_)) => {
-                break;
+            Ok(httparse::Status::Complete(header_len)) => {
+                break header_len;
             }
             Err(err) => {
                 let response = Response::builder()
@@ -158,7 +168,7 @@ async fn perform_handshake(
             }
             Ok(httparse::Status::Partial) => {}
         }
-    }
+    };
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
@@ -192,6 +202,8 @@ async fn perform_handshake(
     // Write the upgrade response
     write_http_response(&mut stream, response).await?;
 
+    let leftover = buffer.split_off(header_len).to_vec();
+
     // Transition to standard blocking stream for tungstenite
     let std_stream = stream.into_std()?;
     if let Err(error) = std_stream.set_nonblocking(false) {
@@ -205,8 +217,9 @@ async fn perform_handshake(
         tungstenite::protocol::Role::Server,
         None,
     );
-    let websocket_reader = tungstenite::WebSocket::from_raw_socket(
+    let websocket_reader = tungstenite::WebSocket::from_partially_read(
         std_stream,
+        leftover,
         tungstenite::protocol::Role::Server,
         None,
     );

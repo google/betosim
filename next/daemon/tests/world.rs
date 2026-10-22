@@ -19,6 +19,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use daemon::{NetsimDaemon, StartUpMode};
 use futures::{SinkExt, StreamExt};
 use grpcio::ChannelBuilder;
@@ -40,6 +41,7 @@ use netsim_proto::{
     startup::{Chip as StartupChip, ChipInfo, DeviceInfo},
 };
 use tokio::time::timeout;
+use websocket_server::ManualWebSocketClient;
 
 // Share a single gRPC Environment across all server instances within the same
 // process (namely during parallel test execution) to prevent Abseil lock
@@ -62,6 +64,8 @@ pub struct World {
 
     pub grpc_port: u16,
     pub http_port: u16,
+    ws_port: Option<u16>,
+    ws_client: Option<ManualWebSocketClient>,
     _temp_dir: PathBuf,
 }
 
@@ -80,6 +84,15 @@ impl World {
         let mut args = daemon::Args::default();
         args.logtostderr = true; // Disable log redirection
         args.no_shutdown = true; // Prevent tests from dying when deleting devices
+        Self::new_with_args(args).await
+    }
+
+    /// Starts a Netsim Daemon configured with an active WebSocket listener on port 0.
+    pub async fn new_with_websocket() -> Self {
+        let mut args = daemon::Args::default();
+        args.logtostderr = true;
+        args.no_shutdown = true;
+        args.ws_port = Some(0);
         Self::new_with_args(args).await
     }
 
@@ -107,6 +120,7 @@ impl World {
 
         let grpc_port = daemon.grpc_port().expect("NetsimDaemon has no gRPC port");
         let http_port = daemon.http_port().expect("NetsimDaemon has no HTTP port");
+        let ws_port = daemon.ws_port();
 
         // Allow some time for bindings
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -132,6 +146,8 @@ impl World {
             packet_receiver: None,
             grpc_port,
             http_port,
+            ws_port,
+            ws_client: None,
             _temp_dir: temp_dir,
         }
     }
@@ -892,5 +908,46 @@ impl World {
         let hci = response.hci_packet();
         assert_eq!(hci.packet_type.enum_value_or_default(), PacketType::EVENT);
         hci.packet.clone()
+    }
+
+    pub async fn when_connect_websocket(&mut self, path: &str) {
+        let ws_port = self.ws_port.expect("NetsimDaemon has no WebSocket port");
+        let client = ManualWebSocketClient::connect("127.0.0.1", ws_port, path)
+            .await
+            .expect("Failed to connect WebSocket");
+        self.ws_client = Some(client);
+    }
+
+    fn ws_client(&mut self) -> &mut ManualWebSocketClient {
+        self.ws_client.as_mut().expect("No WebSocket client")
+    }
+
+    pub async fn when_send_websocket_text(&mut self, text: &str) {
+        self.ws_client().send_text(text).await;
+    }
+
+    pub async fn when_send_websocket_binary(&mut self, data: &[u8]) {
+        self.ws_client().send_binary(Bytes::copy_from_slice(data)).await;
+    }
+
+    async fn read_websocket_binary(&mut self) -> Bytes {
+        let client = self.ws_client();
+        timeout(Duration::from_secs(5), client.read_binary())
+            .await
+            .expect("Timed out waiting for WebSocket binary response")
+    }
+
+    pub async fn then_websocket_receives_binary(&mut self, expected: &[u8]) {
+        let resp = self.read_websocket_binary().await;
+        assert_eq!(resp.as_ref(), expected);
+    }
+
+    pub async fn then_websocket_receives_le_features_with_cis_cleared(&mut self) {
+        let feat_resp = self.read_websocket_binary().await;
+        // Command complete event length is 15 (0x04, 0x0e, 0x0c, 0x01, 0x03, 0x20, status, features[8])
+        assert_eq!(feat_resp.len(), 15);
+        assert_eq!(feat_resp[6], 0x00, "status should be SUCCESS");
+        // Byte 3 of features (packet index 10) bits 4-5 correspond to CIS.
+        assert_eq!(feat_resp[10] & 0x30, 0x00, "CIS feature bits should be cleared");
     }
 }

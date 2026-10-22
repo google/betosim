@@ -38,6 +38,8 @@ netsim_rust_library(
         "@http",
         "@httparse",
         "@ring",
+        "@serde",
+        "@serde_json",
         "@thiserror",
         "@tokio",
         "@tokio-stream",

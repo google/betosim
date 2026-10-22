@@ -195,7 +195,7 @@ pub async fn connect(
 
 /// Ref: RFC 6455, Section 4.1 - a randomly selected 16-byte nonce, base64
 /// encoded.
-fn generate_websocket_key() -> Result<String, ClientError> {
+pub(crate) fn generate_websocket_key() -> Result<String, ClientError> {
     let mut nonce = [0u8; 16];
     SystemRandom::new().fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(nonce))
@@ -205,7 +205,7 @@ fn generate_websocket_key() -> Result<String, ClientError> {
 ///
 /// Returns any bytes read past the response; they already belong to the
 /// WebSocket stream.
-async fn read_handshake_response(
+pub(crate) async fn read_handshake_response(
     stream: &mut TcpStream,
     key: &str,
 ) -> Result<Vec<u8>, ClientError> {
