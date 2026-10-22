@@ -17,7 +17,9 @@
 use std::net::Ipv6Addr;
 
 use netsim_packets::{
-    EthernetFrame, IP_P_ICMPV6, Icmpv6Header, Icmpv6Type, Ipv6Header, MacAddr, icmpv6_checksum,
+    DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, Dhcpv6Header, EthernetFrame, IP_P_ICMPV6, IP_P_UDP,
+    Icmpv6Header, Icmpv6Type, Ipv6Header, MSG_INFORMATION_REQUEST, MSG_REPLY, MacAddr,
+    OPTION_CLIENTID, PacketBuilder, UdpHeader, ether_type, icmpv6_checksum, udp_checksum_v6,
 };
 use slirp_actor::SlirpBackend;
 use zerocopy::FromBytes;
@@ -173,4 +175,80 @@ async fn test_ipv6_neighbor_solicitation() {
     for backend in [SlirpBackend::CFfi, SlirpBackend::Native] {
         run_ipv6_neighbor_solicitation_test(backend).await;
     }
+}
+
+// -----------------------------------------------------------------------------
+// 3. DHCPv6 Information-Request & Reply UDP Checksum Test (b/565540890)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dhcpv6_information_request_reply_udp_checksum() {
+    let mut driver = SlirpTestDriver::new(SlirpBackend::Native, None).await;
+
+    // Build DHCPv6 Information-Request carrying Option Client ID
+    let client_duid = [&[0x00, 0x03, 0x00, 0x01][..], &GUEST_MAC].concat();
+    let transaction_id = [0x12, 0x34, 0x56];
+    let dhcpv6_payload = [
+        &[MSG_INFORMATION_REQUEST][..],
+        &transaction_id,
+        &OPTION_CLIENTID.to_be_bytes(),
+        &(client_duid.len() as u16).to_be_bytes(),
+        &client_duid,
+    ]
+    .concat();
+
+    let dst_ipv6 = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 2); // All_DHCP_Relay_Agents_and_Servers
+
+    let req_packet = bytes::Bytes::from(
+        PacketBuilder::new([0x33, 0x33, 0x00, 0x01, 0x00, 0x02], GUEST_MAC, ether_type::IPV6)
+            .ipv6(GUEST_LINK_LOCAL.octets(), dst_ipv6.octets(), IP_P_UDP)
+            .hop_limit(64)
+            .udp(DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT)
+            .payload(&dhcpv6_payload),
+    );
+
+    driver.send_packet(req_packet).await.expect("Failed to send DHCPv6 Information-Request");
+
+    // Wait for DHCPv6 Reply (UDP 547 -> 546)
+    let is_dhcpv6_reply = |frame: &bytes::Bytes| {
+        EthernetFrame::parse(frame)
+            .filter(|(eth, _)| eth.ethertype.get() == ether_type::IPV6)
+            .and_then(|(_, payload)| Ipv6Header::parse(payload))
+            .filter(|(ip, _)| ip.next_header == IP_P_UDP)
+            .and_then(|(_, payload)| UdpHeader::parse(payload))
+            .is_some_and(|(udp, _)| {
+                udp.source_port.get() == DHCPV6_SERVER_PORT
+                    && udp.dest_port.get() == DHCPV6_CLIENT_PORT
+            })
+    };
+    let reply_opt = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        driver.recv_matching(is_dhcpv6_reply),
+    )
+    .await;
+
+    let reply_frame = reply_opt
+        .expect("Timed out waiting for DHCPv6 Reply")
+        .expect("Failed to receive DHCPv6 Reply frame");
+
+    let (_, eth_payload) = EthernetFrame::parse(&reply_frame).unwrap();
+    let (reply_ipv6, ip_payload) = Ipv6Header::parse(eth_payload).unwrap();
+    let (reply_udp, udp_payload) = UdpHeader::parse(ip_payload).unwrap();
+
+    assert_eq!(reply_udp.source_port.get(), DHCPV6_SERVER_PORT);
+    assert_eq!(reply_udp.dest_port.get(), DHCPV6_CLIENT_PORT);
+    assert_ne!(reply_udp.checksum.get(), 0, "DHCPv6 Reply UDP checksum must not be 0");
+
+    let src_ip = Ipv6Addr::from(reply_ipv6.source_addr);
+    let dst_ip = Ipv6Addr::from(reply_ipv6.dest_addr);
+
+    assert_eq!(
+        udp_checksum_v6(ip_payload, src_ip, dst_ip),
+        u16::MAX,
+        "UDP checksum over packet including checksum must be 0xFFFF"
+    );
+
+    let (dhcpv6_hdr, _) = Dhcpv6Header::parse(udp_payload).unwrap();
+    assert_eq!(dhcpv6_hdr.msg_type, MSG_REPLY);
+    assert_eq!(dhcpv6_hdr.transaction_id, transaction_id);
 }

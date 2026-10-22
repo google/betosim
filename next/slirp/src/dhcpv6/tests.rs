@@ -134,6 +134,11 @@ fn test_dhcpv6_information_request_reply() {
     let reply_udp = UdpHeader::parse(reply_ip_payload).unwrap().0;
     assert_eq!(reply_udp.source_port.get(), DHCPV6_SERVER_PORT);
     assert_eq!(reply_udp.dest_port.get(), DHCPV6_CLIENT_PORT);
+    assert_ne!(reply_udp.checksum.get(), 0);
+    assert_eq!(
+        netsim_packets::udp_checksum_v6(reply_ip_payload, config.host_ipv6, config.guest_ipv6),
+        u16::MAX
+    );
 
     let (reply_dhcpv6, reply_options) = Dhcpv6Header::parse(reply_udp_payload).unwrap();
     assert_eq!(reply_dhcpv6.msg_type, MSG_REPLY);

@@ -20,7 +20,7 @@ use bytes::Bytes;
 use netsim_packets::{
     DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, Dhcpv6Header, Dhcpv6OptionIterator, EthernetFrame,
     EthernetPacket, Ipv6Builder, MSG_INFORMATION_REQUEST, MSG_REPLY, MacAddr, OPTION_CLIENTID,
-    OPTION_DNS_SERVERS, OPTION_DOMAIN_LIST, OPTION_SERVERID, UdpHeader, UdpPacketBuilder,
+    OPTION_DNS_SERVERS, OPTION_DOMAIN_LIST, OPTION_SERVERID, UdpBuilder, UdpHeader,
 };
 use zerocopy::FromBytes;
 
@@ -140,9 +140,16 @@ impl Dhcpv6Manager {
         ipv6_builder.hop_limit(64);
 
         // 3. Build UDP Header
-        let (udp_slice, udp_payload) = ipv6_payload.split_at_mut(udp_header_len);
-        let mut udp_builder =
-            UdpPacketBuilder::new(udp_slice, DHCPV6_SERVER_PORT, DHCPV6_CLIENT_PORT).unwrap();
+        let Some(mut udp_builder) = UdpBuilder::new_v6(
+            ipv6_payload,
+            src_ip,
+            dest_ip,
+            DHCPV6_SERVER_PORT,
+            DHCPV6_CLIENT_PORT,
+        ) else {
+            return;
+        };
+        let udp_payload = udp_builder.payload_mut();
 
         // 4. Build DHCPv6 Header
         let (dhcpv6_slice, options_slice) = udp_payload.split_at_mut(dhcpv6_header_len);
@@ -180,9 +187,11 @@ impl Dhcpv6Manager {
 
         // 6. Finalize UDP and IPv6
         udp_builder.payload_len(total_dhcpv6_len);
-        udp_builder.build();
+        let Some(udp_len) = udp_builder.build() else {
+            return;
+        };
 
-        ipv6_builder.payload_len(total_udp_len);
+        ipv6_builder.payload_len(udp_len);
         ipv6_builder.build();
 
         responses.push(SlirpResponse::Packet(Bytes::copy_from_slice(&buffer)));
