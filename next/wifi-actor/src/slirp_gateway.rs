@@ -127,10 +127,9 @@ impl GatewayTrait for SlirpGateway {
                     FrameDirection::FromAp,
                     true,
                     seq,
-                ) {
-                    if let Ok(bytes) = ieee80211.encode_to_vec() {
-                        let _ = medium.transmit_from_infra(&bytes::Bytes::from(bytes), out_queue);
-                    }
+                ) && let Ok(bytes) = ieee80211.encode_to_vec()
+                {
+                    let _ = medium.transmit_from_infra(&bytes::Bytes::from(bytes), out_queue);
                 }
             }
             return;
@@ -174,28 +173,27 @@ impl GatewayTrait for SlirpGateway {
     }
 
     async fn on_start(&mut self, ctx: &mut DynContext<WifiActor>) {
-        if let Some(client) = self.client.as_ref() {
-            if let Some((uplink_rx, downlink_tx, downlink_rx)) = self.pending_channels.take() {
-                debug!("Registering Slirp channels in on_start");
-                // Register with SlirpActor
-                let stream =
-                    Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(uplink_rx));
-                let sink: netsim_model::PacketSink =
-                    Box::pin(futures::sink::unfold(downlink_tx, |tx, bytes| async move {
-                        let _ = tx.send(bytes);
-                        Ok(tx)
-                    }));
+        if let Some(client) = self.client.as_ref()
+            && let Some((uplink_rx, downlink_tx, downlink_rx)) = self.pending_channels.take()
+        {
+            debug!("Registering Slirp channels in on_start");
+            // Register with SlirpActor
+            let stream = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(uplink_rx));
+            let sink: netsim_model::PacketSink =
+                Box::pin(futures::sink::unfold(downlink_tx, |tx, bytes| async move {
+                    let _ = tx.send(bytes);
+                    Ok(tx)
+                }));
 
-                if let Err(error) = client.register(SLIRP_ID.0, stream, sink, None, false).await {
-                    warn!(%error, "Failed to register with SlirpActor");
-                }
-
-                // Add downlink stream to context
-                ctx.add_stream(
-                    SLIRP_ID,
-                    Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(downlink_rx)),
-                );
+            if let Err(error) = client.register(SLIRP_ID.0, stream, sink, None, false).await {
+                warn!(%error, "Failed to register with SlirpActor");
             }
+
+            // Add downlink stream to context
+            ctx.add_stream(
+                SLIRP_ID,
+                Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(downlink_rx)),
+            );
         }
     }
 

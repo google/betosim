@@ -20,7 +20,7 @@ autotests = false
 
 [[test]]
 name = "integration_test"
-path = "tests/integration_test.rs"
+path = "tests/mod.rs"
 
 [dependencies]
 actor-framework = { path = "../actor-framework" }

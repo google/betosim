@@ -49,7 +49,7 @@ pub(crate) async fn run_mdns_forwarder(tx: UnboundedSender<Bytes>) -> Result<(),
         .map_err(|e| format!("set_multicast_loop_v4 failed: {:?}", e))?;
 
     let addr: SocketAddr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT).into();
-    socket.bind(&addr.into()).map_err(|e| format!("socket bind to {} failed: {:?}", &addr, e))?;
+    socket.bind(&addr.into()).map_err(|e| format!("socket bind to {} failed: {:?}", addr, e))?;
 
     // Convert to tokio socket
     let socket = std::net::UdpSocket::from(socket);

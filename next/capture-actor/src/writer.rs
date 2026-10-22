@@ -143,7 +143,7 @@ impl CaptureWriter for PcapWriter {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let ts_sec = duration.as_secs() as u32;
-        let ts_usec = duration.subsec_micros() as u32;
+        let ts_usec = duration.subsec_micros();
 
         let header = PcapRecordHeader {
             ts_sec: U32::new(ts_sec),

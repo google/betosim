@@ -59,7 +59,7 @@ pub(crate) fn execute(cmd: GsmCommand, client: &impl CellClient, verbose: bool) 
         GsmCommand::Call(args) => {
             let id = resolve_cell_id(args.id, client)?;
             if verbose {
-                println!("Incoming call from {} triggered for cell {}.", &args.number, id);
+                println!("Incoming call from {} triggered for cell {}.", args.number, id);
             }
             let mut req = ExecuteCellRequest::new();
             req.id = id;

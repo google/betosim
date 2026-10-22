@@ -284,10 +284,11 @@ impl<W: ?Sized> Features<W> {
 
     fn is_match(&self, text: &str) -> bool {
         for (regex, _) in &self.steps {
-            if let Some(m) = regex.find(text) {
-                if m.start() == 0 && m.end() == text.len() {
-                    return true;
-                }
+            if let Some(m) = regex.find(text)
+                && m.start() == 0
+                && m.end() == text.len()
+            {
+                return true;
             }
         }
         false

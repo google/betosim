@@ -120,6 +120,7 @@ impl TapInterface {
         let file = std::fs::File::from(fd);
 
         // Wrap in AsyncFd
+        #[allow(deprecated)]
         let poll_fd =
             AsyncFd::new(file).map_err(|e| WifiError::Internal(Box::from(e.to_string())))?;
 
@@ -240,7 +241,7 @@ impl GatewayTrait for TapGateway {
         };
 
         let res = medium.transmit_from_infra(&bytes, out_queue);
-        medium.wifi_stats.log_outcome(res, |s, _| {
+        medium.wifi_stats.log_outcome(res, |_, _| {
             // Nothing to do for success of transmit_from_infra
         });
     }

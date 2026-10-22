@@ -14,7 +14,7 @@
 
 use std::{env, fs, path::PathBuf};
 
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 #[path = "src/openapi.rs"]
 mod openapi;
 

@@ -26,7 +26,7 @@ pub(crate) fn execute(cmd: SmsCommand, client: &impl CellClient, verbose: bool) 
         SmsCommand::Send(args) => {
             let id = resolve_cell_id(args.id, client)?;
             if verbose {
-                println!("SMS from {} received on cell {}.", &args.sender, id);
+                println!("SMS from {} received on cell {}.", args.sender, id);
             }
             let mut req = ExecuteCellRequest::new();
             req.id = id;

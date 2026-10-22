@@ -42,9 +42,9 @@ impl ActorService for LinkActor {
         // Validate chips exist and have matching kinds
         let sender_kind = self
             .chip_kind(&params.sender)
-            .ok_or(LinkError::InvalidParam(format!("Sender chip {} not found", &params.sender)))?;
+            .ok_or(LinkError::InvalidParam(format!("Sender chip {} not found", params.sender)))?;
         let receiver_kind = self.chip_kind(&params.receiver).ok_or(LinkError::InvalidParam(
-            format!("Receiver chip {} not found", &params.receiver),
+            format!("Receiver chip {} not found", params.receiver),
         ))?;
 
         if sender_kind != receiver_kind {

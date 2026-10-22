@@ -242,33 +242,15 @@ impl Ieee80211Manager {
         // ACL Check
         // Mode 0: Disable, 1: Deny, 2: Allow
         match ap.config.mac_acl_mode {
-            1 => {
+            1 if ap.config.mac_acl_list.contains(&src) => {
                 // Deny List
-                if ap.config.mac_acl_list.contains(&src) {
-                    info!("ApActor: ACL Deny {}", src);
-                    return Ok(vec![bytes::Bytes::from(self.build_auth_frame(
-                        ap,
-                        src,
-                        0,
-                        2,
-                        1,
-                        &[],
-                    ))]);
-                }
+                info!("ApActor: ACL Deny {}", src);
+                return Ok(vec![bytes::Bytes::from(self.build_auth_frame(ap, src, 0, 2, 1, &[]))]);
             }
-            2 => {
+            2 if !ap.config.mac_acl_list.contains(&src) => {
                 // Allow List
-                if !ap.config.mac_acl_list.contains(&src) {
-                    info!("ApActor: ACL Reject (Not Allowed) {}", src);
-                    return Ok(vec![bytes::Bytes::from(self.build_auth_frame(
-                        ap,
-                        src,
-                        0,
-                        2,
-                        1,
-                        &[],
-                    ))]);
-                }
+                info!("ApActor: ACL Reject (Not Allowed) {}", src);
+                return Ok(vec![bytes::Bytes::from(self.build_auth_frame(ap, src, 0, 2, 1, &[]))]);
             }
             _ => {}
         }
@@ -496,19 +478,15 @@ impl Ieee80211Manager {
 
         // ACL Check
         match ap.config.mac_acl_mode {
-            1 => {
-                if ap.config.mac_acl_list.contains(&src) {
-                    info!("ApActor: ACL Deny Assoc {}", src);
-                    let resp = self.build_assoc_resp(ap, src, 1);
-                    return Ok(vec![bytes::Bytes::from(resp)]);
-                }
+            1 if ap.config.mac_acl_list.contains(&src) => {
+                info!("ApActor: ACL Deny Assoc {}", src);
+                let resp = self.build_assoc_resp(ap, src, 1);
+                return Ok(vec![bytes::Bytes::from(resp)]);
             }
-            2 => {
-                if !ap.config.mac_acl_list.contains(&src) {
-                    info!("ApActor: ACL Reject Assoc (Not Allowed) {}", src);
-                    let resp = self.build_assoc_resp(ap, src, 1);
-                    return Ok(vec![bytes::Bytes::from(resp)]);
-                }
+            2 if !ap.config.mac_acl_list.contains(&src) => {
+                info!("ApActor: ACL Reject Assoc (Not Allowed) {}", src);
+                let resp = self.build_assoc_resp(ap, src, 1);
+                return Ok(vec![bytes::Bytes::from(resp)]);
             }
             _ => {}
         }

@@ -70,27 +70,20 @@ impl CellAction {
     /// Validates the action parameters, returning an error if validation fails.
     pub(crate) fn validate(&self) -> Result<(), ChipError> {
         match self {
-            Self::IncomingCall { number } => {
-                if !Self::is_valid_phone_number(number) {
-                    return Err(ChipError::InvalidArguments(
-                        format!("Invalid phone number: {number}").into(),
-                    ));
-                }
+            Self::IncomingCall { number } if !Self::is_valid_phone_number(number) => {
+                return Err(ChipError::InvalidArguments(
+                    format!("Invalid phone number: {number}").into(),
+                ));
             }
-            Self::ReceiveSms { sender, .. } => {
-                if !Self::is_valid_sms_sender(sender) {
-                    return Err(ChipError::InvalidArguments(
-                        format!("Invalid SMS sender: {sender}").into(),
-                    ));
-                }
+            Self::ReceiveSms { sender, .. } if !Self::is_valid_sms_sender(sender) => {
+                return Err(ChipError::InvalidArguments(
+                    format!("Invalid SMS sender: {sender}").into(),
+                ));
             }
-            Self::ReceivePdu { pdu } => {
-                if !Self::is_valid_hex_pdu(pdu) {
-                    return Err(ChipError::InvalidArguments(
-                        format!("Invalid PDU format (must be even-length hex string): {pdu}")
-                            .into(),
-                    ));
-                }
+            Self::ReceivePdu { pdu } if !Self::is_valid_hex_pdu(pdu) => {
+                return Err(ChipError::InvalidArguments(
+                    format!("Invalid PDU format (must be even-length hex string): {pdu}").into(),
+                ));
             }
             _ => {}
         }

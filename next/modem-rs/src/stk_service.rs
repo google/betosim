@@ -186,12 +186,9 @@ impl StkService {
         let mut current_items = &self.stk_config.setup_menu.items;
         let mut last_item = None;
         for &id in path {
-            if let Some(matched) = current_items.iter().find(|item| item.menu_id == id) {
-                last_item = Some(matched);
-                current_items = &matched.items;
-            } else {
-                return None;
-            }
+            let matched = current_items.iter().find(|item| item.menu_id == id)?;
+            last_item = Some(matched);
+            current_items = &matched.items;
         }
         last_item
     }
