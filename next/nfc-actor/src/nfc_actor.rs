@@ -90,6 +90,7 @@ impl NciMessageType {
 pub struct ChipState {
     pub id: ChipId,
     pub device_id: device_api::DeviceId,
+    pub(crate) chip: netsim_model::Chip,
     pub enabled: Arc<AtomicBool>,
     pub casimir_device_id: u16,
     pub nfc_writer: WriteHalf<DuplexStream>,
@@ -263,6 +264,7 @@ mod tests {
         let state = ChipState {
             id: ChipId(42),
             device_id: device_api::DeviceId(1),
+            chip: Default::default(),
             enabled: Arc::new(AtomicBool::new(true)),
             casimir_device_id: 1,
             nfc_writer,

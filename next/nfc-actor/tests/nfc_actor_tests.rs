@@ -98,8 +98,11 @@ async fn test_nfc_update_via_variant() {
     let chip_id = 1;
     world.given_a_chip(chip_id).await;
 
-    // When (Update via variant field to disable)
+    // When (Update via variant field to disable along with metadata)
     let update_disable = netsim_model::ChipUpdate {
+        name: Some("custom-nfc-1".to_string()),
+        manufacturer: Some("TestMfg".to_string()),
+        product_name: Some("TestProd".to_string()),
         variant: Some(netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
             radio: netsim_model::RadioUpdate { state: Some(false) },
         })),
@@ -109,10 +112,13 @@ async fn test_nfc_update_via_variant() {
         world.actor.handle_update(ChipId(chip_id), update_disable, &mut world.ctx).await;
     assert!(update_res1.is_ok());
 
-    // Then (Verify chip is now disabled)
+    // Then (Verify chip is now disabled and metadata is applied)
     let state_disabled =
         world.actor.handle_get(ChipId(chip_id), &mut world.ctx).await.unwrap().unwrap();
     assert!(!state_disabled.enabled, "Chip should be disabled after variant update!");
+    assert_eq!(state_disabled.name, "custom-nfc-1");
+    assert_eq!(state_disabled.manufacturer, "TestMfg");
+    assert_eq!(state_disabled.product_name, "TestProd");
 
     // When (Update via variant field to enable)
     let update_enable = netsim_model::ChipUpdate {
@@ -125,10 +131,47 @@ async fn test_nfc_update_via_variant() {
         world.actor.handle_update(ChipId(chip_id), update_enable, &mut world.ctx).await;
     assert!(update_res2.is_ok());
 
-    // Then (Verify chip is enabled again)
+    // Then (Verify chip is enabled again and metadata is preserved)
     let state_enabled_again =
         world.actor.handle_get(ChipId(chip_id), &mut world.ctx).await.unwrap().unwrap();
     assert!(state_enabled_again.enabled, "Chip should be enabled after second variant update!");
+    assert_eq!(state_enabled_again.name, "custom-nfc-1");
+    assert_eq!(state_enabled_again.manufacturer, "TestMfg");
+    assert_eq!(state_enabled_again.product_name, "TestProd");
+
+    // And handle_list reflects the updated chip metadata and NFC radio state
+    let chips = world.actor.handle_list(&mut world.ctx).await.unwrap();
+    assert_eq!(chips.len(), 1);
+    assert_eq!(chips[0].name, "custom-nfc-1");
+    assert_eq!(chips[0].manufacturer, "TestMfg");
+    assert_eq!(chips[0].product_name, "TestProd");
+    assert_eq!(
+        chips[0].variant,
+        Some(netsim_model::ChipVariant::Nfc(netsim_model::Nfc {
+            radio: netsim_model::Radio { state: Some(true), ..Default::default() },
+        }))
+    );
+
+    // When both enabled and variant are provided, variant takes precedence
+    let update_precedence = netsim_model::ChipUpdate {
+        enabled: Some(true),
+        variant: Some(netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
+            radio: netsim_model::RadioUpdate { state: Some(false) },
+        })),
+        ..Default::default()
+    };
+    let state_precedence = world
+        .actor
+        .handle_update(ChipId(chip_id), update_precedence, &mut world.ctx)
+        .await
+        .unwrap();
+    assert!(!state_precedence.enabled);
+    assert_eq!(
+        state_precedence.variant,
+        Some(netsim_model::ChipVariant::Nfc(netsim_model::Nfc {
+            radio: netsim_model::Radio { state: Some(false), ..Default::default() },
+        }))
+    );
 }
 
 // Feature: NFC Proximity Threshold and Mapping

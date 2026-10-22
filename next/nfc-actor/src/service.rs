@@ -60,23 +60,6 @@ impl Decoder for NciCodec {
 /// Maximum physical proximity threshold (in meters) for peer-to-peer NFC interactions.
 const PROXIMITY_THRESHOLD_METERS: f32 = 0.04;
 
-impl From<&ChipState> for netsim_model::Chip {
-    fn from(state: &ChipState) -> Self {
-        let is_enabled = state.enabled.load(Ordering::Acquire);
-        netsim_model::Chip {
-            kind: netsim_model::ChipKind::NFC,
-            id: state.id.0,
-            name: format!("nfc-{}", state.id.0),
-            device_id: state.device_id,
-            enabled: is_enabled,
-            variant: Some(netsim_model::ChipVariant::Nfc(netsim_model::Nfc {
-                radio: netsim_model::Radio { state: Some(is_enabled), ..Default::default() },
-            })),
-            ..Default::default()
-        }
-    }
-}
-
 /// Helper to check if two Casimir NFC devices are within physical NFC proximity
 /// (<= 0.04m). Returns true if within threshold or if either device is
 /// unmapped/missing (fallback for non-spatial tests).
@@ -277,11 +260,24 @@ impl ActorService for NfcActor {
         });
         ctx.add_stream(chip_id, Box::pin(packet_stream));
 
+        let mut chip = params.chip;
+        chip.kind = netsim_model::ChipKind::NFC;
+        chip.id = chip_id.0;
+        if chip.name.is_empty() {
+            chip.name = format!("nfc-{}", chip_id.0);
+        }
+        chip.device_id = device_id;
+        chip.enabled = true;
+        chip.variant = Some(netsim_model::ChipVariant::Nfc(netsim_model::Nfc {
+            radio: netsim_model::Radio { state: Some(true), ..Default::default() },
+        }));
+
         self.active_chips.insert(
             chip_id,
             ChipState {
                 id: chip_id,
                 device_id,
+                chip,
                 enabled,
                 casimir_device_id,
                 nfc_writer,
@@ -336,23 +332,21 @@ impl ActorService for NfcActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
-        Ok(self.get_chip(&id).map(Into::into))
+        Ok(self.get_chip(&id).map(|s| s.chip.clone()))
     }
 
     async fn handle_update(
         &mut self,
         id: Self::Id,
         update: Self::Update,
-        ctx: &mut DynContext<Self>,
+        _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
-        let (should_disable_adapter_base, should_disable_adapter_variant) = {
+        let (should_disable_adapter, updated_chip) = {
             let state = self
                 .get_chip_mut(&id)
                 .ok_or_else(|| NfcError::Chip(ChipError::ChipNotFound(id)))?;
 
-            let disable_base = update
-                .enabled
-                .is_some_and(|enabled| state.enabled.swap(enabled, Ordering::AcqRel) && !enabled);
+            update.apply(&mut state.chip);
 
             let variant_enabled = match &update.variant {
                 Some(netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
@@ -360,17 +354,24 @@ impl ActorService for NfcActor {
                 })) => *state,
                 _ => None,
             };
-            let disable_variant = variant_enabled
+            let target_enabled = variant_enabled.or(update.enabled);
+            let should_disable = target_enabled
                 .is_some_and(|enabled| state.enabled.swap(enabled, Ordering::AcqRel) && !enabled);
 
-            (disable_base, disable_variant)
+            let is_enabled = state.enabled.load(Ordering::Acquire);
+            if let Some(netsim_model::ChipVariant::Nfc(ref mut nfc)) = state.chip.variant {
+                nfc.radio.state = Some(is_enabled);
+            }
+            state.chip.enabled = is_enabled;
+
+            (should_disable, state.chip.clone())
         };
 
-        if should_disable_adapter_base || should_disable_adapter_variant {
+        if should_disable_adapter {
             self.nfc_stats.incr(NfcApi::AdapterDisable);
         }
 
-        self.handle_get(id, ctx).await?.ok_or_else(|| NfcError::Chip(ChipError::ChipNotFound(id)))
+        Ok(updated_chip)
     }
 
     async fn handle_action(
@@ -441,7 +442,7 @@ impl ActorService for NfcActor {
         &mut self,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Vec<Self::Entity>, Self::Error> {
-        Ok(self.active_chips.values().map(Into::into).collect())
+        Ok(self.active_chips.values().map(|s| s.chip.clone()).collect())
     }
 }
 

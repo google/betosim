@@ -329,6 +329,11 @@ pub(crate) fn from_proto_chip_update(c: ProtoChip) -> ChipUpdate {
                     radio: from_proto_radio_update(Some(eth)),
                 }))
             }
+            netsim_proto::model::chip::Chip::Nfc(nfc) => {
+                Some(ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
+                    radio: from_proto_radio_update(Some(nfc)),
+                }))
+            }
             _ => None,
         }
     } else {
@@ -493,5 +498,20 @@ mod tests {
             }
             _ => panic!("Expected Bluetooth variant chip"),
         }
+    }
+
+    #[test]
+    fn test_from_proto_chip_update_nfc() {
+        let mut chip = ProtoChip::new();
+        let mut nfc = netsim_proto::model::chip::Radio::new();
+        nfc.state = Some(false);
+        chip.chip = Some(netsim_proto::model::chip::Chip::Nfc(nfc));
+        let update = from_proto_chip_update(chip);
+        assert_eq!(
+            update.variant,
+            Some(ChipVariantUpdate::Nfc(netsim_model::NfcUpdate {
+                radio: RadioUpdate { state: Some(false) },
+            }))
+        );
     }
 }

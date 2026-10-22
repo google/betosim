@@ -73,6 +73,11 @@ impl Command {
                     uwb_chip.state = chip_state.into();
                     chip.set_uwb(uwb_chip);
                     chip.kind = ChipKind::UWB.into();
+                } else if cmd.radio_type == RadioType::Nfc {
+                    let mut nfc_chip = Chip_Radio::new();
+                    nfc_chip.state = chip_state.into();
+                    chip.set_nfc(nfc_chip);
+                    chip.kind = ChipKind::NFC.into();
                 } else if cmd.radio_type == RadioType::Ethernet {
                     let mut eth_chip = Chip_Radio::new();
                     eth_chip.state = chip_state.into();
@@ -618,6 +623,11 @@ mod tests {
             uwb_chip.state = chip_state.into();
             chip.set_uwb(uwb_chip);
             chip.kind = ChipKind::UWB.into();
+        } else if radio_type == "nfc" {
+            let mut nfc_chip = Chip_Radio::new();
+            nfc_chip.state = chip_state.into();
+            chip.set_nfc(nfc_chip);
+            chip.kind = ChipKind::NFC.into();
         } else if radio_type == "ethernet" {
             let mut eth_chip = Chip_Radio::new();
             eth_chip.state = chip_state.into();
@@ -779,6 +789,17 @@ mod tests {
             }),
             GrpcRequest::PatchDevice(get_expected_radio("b", "uwb", "up")),
         );
+    }
+
+    #[test]
+    fn test_radio_nfc() {
+        for (status_str, status) in [("down", UpDownStatus::Down), ("up", UpDownStatus::Up)] {
+            test_command(
+                &format!("netsim-cli radio nfc {status_str} a"),
+                Command::Radio(Radio { radio_type: RadioType::Nfc, status, name: "a".to_string() }),
+                GrpcRequest::PatchDevice(get_expected_radio("a", "nfc", status_str)),
+            );
+        }
     }
 
     #[test]

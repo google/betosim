@@ -204,6 +204,7 @@ mod tests {
             ChipState {
                 id: chip_id,
                 device_id: DeviceId(1),
+                chip: Default::default(),
                 enabled: Arc::new(AtomicBool::new(true)),
                 casimir_device_id: 1,
                 nfc_writer,
