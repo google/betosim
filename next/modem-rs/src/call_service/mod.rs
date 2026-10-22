@@ -138,6 +138,18 @@ impl CallStatus {
         })
     }
 
+    /// Moves an active call to `CallState::Held` and returns a
+    /// `CommandAction::HoldCall` targeting its `peer_id`. Non-active calls are
+    /// left unchanged and return `None`. An active call without a `peer_id`
+    /// is still held but returns `None`.
+    fn hold_if_active(&mut self, holder: ModemId) -> Option<CommandAction> {
+        if self.state != CallState::Active {
+            return None;
+        }
+        self.state = CallState::Held;
+        self.peer_id.map(|target| CommandAction::HoldCall { holder, target })
+    }
+
     fn promote_to_active(&mut self, has_inbound: bool, id: ModemId) -> Option<CommandAction> {
         if !self.state.should_promote_to_active(has_inbound) {
             return None;
@@ -291,10 +303,21 @@ impl CallService {
         Some(id)
     }
 
-    fn remove_call(&mut self, id: u8) {
-        if let Some(pos) = self.calls.iter().position(|c| c.id == id) {
-            self.calls.remove(pos);
-        }
+    /// Removes calls matching the predicate and returns their hangup actions.
+    fn hangup_matching(
+        &mut self,
+        id: ModemId,
+        mut should_drop: impl FnMut(&CallStatus) -> bool,
+    ) -> Vec<CommandAction> {
+        let mut actions = Vec::new();
+        self.calls.retain(|call| {
+            if !should_drop(call) {
+                return true;
+            }
+            actions.extend(call.hangup_action(id));
+            false
+        });
+        actions
     }
 
     /// Returns true if this call is currently part of an active or held
@@ -330,10 +353,7 @@ impl CallService {
     }
 
     pub fn hangup_all(&mut self, id: ModemId) -> Vec<CommandAction> {
-        let actions: Vec<CommandAction> =
-            self.calls.iter().filter_map(|call| call.hangup_action(id)).collect();
-        self.calls.clear();
-        actions
+        self.hangup_matching(id, |_| true)
     }
 
     pub fn handle_ring_timeout(&mut self, id: ModemId, ring_token: RingToken) -> CallResult {
@@ -506,15 +526,8 @@ impl CallService {
             return Err(ExecutionResult::cme_error(CmeError::OperationNotAllowed));
         }
 
-        let mut actions = Vec::new();
-        for call in self.calls.iter_mut() {
-            if call.state == CallState::Active {
-                call.state = CallState::Held;
-                if let Some(peer_id) = call.peer_id {
-                    actions.push(CommandAction::HoldCall { holder: id, target: peer_id });
-                }
-            }
-        }
+        let mut actions: Vec<_> =
+            self.calls.iter_mut().filter_map(|call| call.hold_if_active(id)).collect();
 
         let call_clir =
             if args.clir == ClirMode::SubscriptionDefault { clir_default } else { args.clir };
@@ -559,11 +572,8 @@ impl CallService {
             for call in self.calls.iter_mut() {
                 if call.id == answerable_id {
                     call.state = CallState::Active;
-                } else if call.state == CallState::Active {
-                    call.state = CallState::Held;
-                    if let Some(peer_id) = call.peer_id {
-                        actions.push(CommandAction::HoldCall { holder: id, target: peer_id });
-                    }
+                } else if let Some(action) = call.hold_if_active(id) {
+                    actions.push(action);
                 }
             }
 
@@ -583,23 +593,13 @@ impl CallService {
         let has_inbound = self.has_inbound();
         let has_foreground = self.has_foreground();
 
-        let mut actions = Vec::new();
-        self.calls.retain(|call| {
-            let should_drop = if has_inbound {
+        let actions = self.hangup_matching(id, |call| {
+            if has_inbound {
                 call.state.is_inbound()
             } else if has_foreground {
                 call.state.is_foreground()
             } else {
                 call.state == CallState::Held
-            };
-
-            if should_drop {
-                if let Some(action) = call.hangup_action(id) {
-                    actions.push(action);
-                }
-                false
-            } else {
-                true
             }
         });
 
@@ -628,53 +628,28 @@ impl CallService {
 
         let actions = match op {
             CallHoldAction::ReleaseHeld => {
-                let mut actions = Vec::new();
                 let has_inbound = self.has_inbound();
-                self.calls.retain(|call| {
-                    let should_drop = if has_inbound {
+                self.hangup_matching(id, |call| {
+                    if has_inbound {
                         call.state.is_inbound()
                     } else {
                         call.state == CallState::Held
-                    };
-                    if should_drop {
-                        if let Some(action) = call.hangup_action(id) {
-                            actions.push(action);
-                        }
-                        false
-                    } else {
-                        true
                     }
-                });
-                actions
+                })
             }
             CallHoldAction::ReleaseAndAccept => {
-                let mut actions = Vec::new();
                 if let Some(idx) = index {
-                    if let Some(call) = self.calls.iter().find(|c| c.id == idx)
-                        && let Some(action) = call.hangup_action(id)
-                    {
-                        actions.push(action);
-                    }
-                    self.remove_call(idx);
+                    self.hangup_matching(id, |c| c.id == idx)
                 } else {
                     let has_inbound = self.has_inbound();
-                    self.calls.retain(|c| {
-                        if c.state.is_foreground() {
-                            if let Some(action) = c.hangup_action(id) {
-                                actions.push(action);
-                            }
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    for call in self.calls.iter_mut() {
-                        if let Some(action) = call.promote_to_active(has_inbound, id) {
-                            actions.push(action);
-                        }
-                    }
+                    let mut actions = self.hangup_matching(id, |call| call.state.is_foreground());
+                    actions.extend(
+                        self.calls
+                            .iter_mut()
+                            .filter_map(|call| call.promote_to_active(has_inbound, id)),
+                    );
+                    actions
                 }
-                actions
             }
             CallHoldAction::HoldAndAccept => {
                 let mut actions = Vec::new();
@@ -693,27 +668,19 @@ impl CallService {
                             }
                             call.state = CallState::Active;
                             call.is_multi_party = false;
-                        } else if call.state == CallState::Active {
-                            if let Some(peer_id) = call.peer_id {
-                                actions
-                                    .push(CommandAction::HoldCall { holder: id, target: peer_id });
-                            }
-                            call.state = CallState::Held;
+                        } else if let Some(action) = call.hold_if_active(id) {
+                            actions.push(action);
                         }
                     }
                 } else {
                     let has_inbound = self.has_inbound();
-                    for call in self.calls.iter_mut() {
+                    actions.extend(self.calls.iter_mut().filter_map(|call| {
                         if call.state == CallState::Active {
-                            if let Some(peer_id) = call.peer_id {
-                                actions
-                                    .push(CommandAction::HoldCall { holder: id, target: peer_id });
-                            }
-                            call.state = CallState::Held;
-                        } else if let Some(action) = call.promote_to_active(has_inbound, id) {
-                            actions.push(action);
+                            call.hold_if_active(id)
+                        } else {
+                            call.promote_to_active(has_inbound, id)
                         }
-                    }
+                    }));
                 }
                 actions
             }

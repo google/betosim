@@ -563,3 +563,109 @@ fn test_call_status_promote_to_active() {
     assert_eq!(call.promote_to_active(false, 1), None);
     assert_eq!(call.state, CallState::Dialing);
 }
+
+#[test]
+fn test_call_status_hold_if_active() {
+    let mut service = CallService::default();
+    service.add_call(
+        CallState::Active,
+        CallDirection::Outgoing,
+        None,
+        NumberPresentation::Allowed,
+        Some(2),
+    );
+    let call = &mut service.calls[0];
+    assert_eq!(call.hold_if_active(1), Some(CommandAction::HoldCall { holder: 1, target: 2 }));
+    assert_eq!(call.state, CallState::Held);
+
+    call.state = CallState::Active;
+    call.peer_id = None;
+    assert_eq!(call.hold_if_active(1), None);
+    assert_eq!(call.state, CallState::Held);
+
+    call.state = CallState::Held;
+    assert_eq!(call.hold_if_active(1), None);
+    assert_eq!(call.state, CallState::Held);
+
+    call.state = CallState::Waiting;
+    assert_eq!(call.hold_if_active(1), None);
+    assert_eq!(call.state, CallState::Waiting);
+
+    call.state = CallState::Dialing;
+    assert_eq!(call.hold_if_active(1), None);
+    assert_eq!(call.state, CallState::Dialing);
+}
+
+#[test]
+fn test_call_service_hangup_matching() {
+    let mut service = CallService::default();
+    service.add_call(
+        CallState::Active,
+        CallDirection::Outgoing,
+        None,
+        NumberPresentation::Allowed,
+        Some(2),
+    );
+    service.add_call(
+        CallState::Waiting,
+        CallDirection::Incoming,
+        None,
+        NumberPresentation::Allowed,
+        None,
+    );
+    service.add_call(
+        CallState::Held,
+        CallDirection::Outgoing,
+        None,
+        NumberPresentation::Allowed,
+        Some(3),
+    );
+
+    let actions = service.hangup_matching(1, |c| c.state != CallState::Held);
+    assert_eq!(
+        actions,
+        vec![CommandAction::HangupCall {
+            initiator: 1,
+            target_peer: 2,
+            reason: HangupReason::Normal,
+        }]
+    );
+    assert_eq!(service.calls.len(), 1);
+    assert_eq!(service.calls[0].state, CallState::Held);
+    assert_eq!(service.calls[0].peer_id, Some(3));
+}
+
+#[test]
+fn test_handle_call_hold_swap_peerless_active_and_held() {
+    let mut service = CallService::default();
+    service.add_call(
+        CallState::Active,
+        CallDirection::Outgoing,
+        None,
+        NumberPresentation::Allowed,
+        None,
+    );
+    service.add_call(
+        CallState::Held,
+        CallDirection::Incoming,
+        None,
+        NumberPresentation::Allowed,
+        None,
+    );
+
+    let res = service
+        .handle_call_hold(
+            crate::types::CallHoldParam {
+                op: crate::types::CallHoldAction::HoldAndAccept,
+                call_id: None,
+            },
+            1,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(res, CallResponse::WithActions(Vec::new()));
+    assert_eq!(service.calls.len(), 2);
+    assert_eq!(service.calls[0].state, CallState::Held);
+    assert_eq!(service.calls[1].state, CallState::Active);
+}
