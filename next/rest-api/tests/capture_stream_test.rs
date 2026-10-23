@@ -36,7 +36,7 @@ const CLIENT_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const EXPECTED_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 const PCAP_HEADER_LEN: usize = 24;
 const PCAP_RECORD_HEADER_LEN: usize = 16;
-const DLT_BLUETOOTH_H4: u32 = 187;
+const DLT_BLUETOOTH_H4: u32 = 201;
 
 struct World {
     addr: SocketAddr,

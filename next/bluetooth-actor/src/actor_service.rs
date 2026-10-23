@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::{collections::VecDeque, sync::Arc};
+
 use actor_framework::{ActorService, DynContext};
 use netsim_model::{BluetoothMode, Chip, ChipCreate, ChipId, ChipUpdate, ChipVariant};
+use parking_lot::Mutex;
 use tracing::{info, warn};
 
 use crate::{
@@ -136,6 +139,8 @@ impl ActorService for BluetoothActor {
         }
 
         // 2. Setup Sink and Callbacks
+        let invalid_packets = Arc::new(Mutex::new(VecDeque::new()));
+
         let callback = if let Some(sink) = params.packet_sink {
             // Bounded to SINK_CHANNEL_CAPACITY packets (~100ms of lag absorption at 2Mbps) to:
             // - Tolerate transient guest lag.
@@ -153,7 +158,8 @@ impl ActorService for BluetoothActor {
             }
         } else {
             HciCallbacks::new(chip_id)
-        };
+        }
+        .with_invalid_packets(invalid_packets.clone());
 
         // 3. Create Rootcanal Controller
         self.rootcanal
@@ -177,6 +183,7 @@ impl ActorService for BluetoothActor {
         }
         self.chips.write().insert(chip_id, chip.clone());
         self.initial_chips.insert(chip_id, chip);
+        self.invalid_packets.insert(chip_id, invalid_packets);
         Ok(chip_id)
     }
 
@@ -233,6 +240,7 @@ impl ActorService for BluetoothActor {
             info!("Deleting chip {chip_id}");
             self.rootcanal.remove_controller(chip_id.0).to_chip_error()?;
             self.initial_chips.remove(&id);
+            self.invalid_packets.remove(&id);
 
             // Notify DeviceService
             let dc = self.device_client.clone();
@@ -257,6 +265,9 @@ impl ActorService for BluetoothActor {
             BluetoothAction::Reset { id } => {
                 info!("Resetting Bluetooth chip {id}");
                 let _ = self.rootcanal.clear_stats(id.0);
+                if let Some(invalid_packets) = self.invalid_packets.get(&id) {
+                    invalid_packets.lock().clear();
+                }
 
                 let initial_chip =
                     self.initial_chips.get(&id).ok_or(BluetoothError::not_found(id))?;
@@ -279,6 +290,12 @@ impl ActorService for BluetoothActor {
                 };
                 for (id, name) in chips_info {
                     if let Ok(stats) = self.rootcanal.get_stats(id.0) {
+                        let chip_invalid_packets: Vec<netsim_model::InvalidPacket> = self
+                            .invalid_packets
+                            .get(&id)
+                            .map(|lock| lock.lock().iter().cloned().collect())
+                            .unwrap_or_default();
+
                         // BLE Stats
                         let mut radio_stats = netsim_model::NetsimRadioStats::default();
                         radio_stats.id = id.0;
@@ -288,6 +305,9 @@ impl ActorService for BluetoothActor {
                         radio_stats.rx_count = stats.ll_packets_in_ble;
                         radio_stats.p2p_tx_count = stats.ble_p2p_tx_count;
                         radio_stats.p2p_rx_count = stats.ble_p2p_rx_count;
+                        for pkt in &chip_invalid_packets {
+                            radio_stats.push_invalid_packet(pkt.clone());
+                        }
                         stats_list.push(radio_stats);
 
                         // Classic Stats
@@ -299,6 +319,9 @@ impl ActorService for BluetoothActor {
                         radio_stats.rx_count = stats.ll_packets_in_classic;
                         radio_stats.p2p_tx_count = stats.classic_p2p_tx_count;
                         radio_stats.p2p_rx_count = stats.classic_p2p_rx_count;
+                        for pkt in &chip_invalid_packets {
+                            radio_stats.push_invalid_packet(pkt.clone());
+                        }
                         stats_list.push(radio_stats);
                     }
                 }

@@ -46,7 +46,7 @@ async fn test_capture_entity_lifecycle() {
     world.when_dummy_packet_is_sent(chip_id).await;
 
     // Then: stats should be updated
-    world.then_capture_stats_are(chip_id, 1, 4).await;
+    world.then_capture_stats_are(chip_id, 1, 8).await;
 
     // When: capture is disabled
     world.when_update_capture(chip_id, false).await.unwrap();

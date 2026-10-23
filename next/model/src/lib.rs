@@ -97,7 +97,8 @@ pub use crate::initial_info::{
 pub use crate::link::{Link, LinkCreate, LinkId, LinkUpdate};
 // From stats.rs
 pub use crate::stats::{
-    FrontendStats, NetsimDeviceStats, NetsimFrontendStats, NetsimRadioStats, RadioKind, WifiStats,
+    FrontendStats, InvalidPacket, InvalidPacketReason, NetsimDeviceStats, NetsimFrontendStats,
+    NetsimRadioStats, RadioKind, WifiStats,
 };
 pub use crate::{
     ap::{Ap, ApCreate, ApUpdate, DEFAULT_WIFI_BSSID, DEFAULT_WIFI_SSID, WifiMode},

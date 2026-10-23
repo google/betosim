@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use device_actor::DeviceClient;
 use netsim_model::{Chip, ChipId};
@@ -114,6 +117,8 @@ pub struct BluetoothActor {
     pub(crate) device_client: DeviceClient,
     /// Unbounded receiver for internal events, registered in on_start.
     pub(crate) event_rx: Mutex<Option<mpsc::UnboundedReceiver<BluetoothEvent>>>,
+    /// Shared with HciCallbacks so synchronous Rootcanal callbacks can record invalid packets for GetStatistics.
+    pub(crate) invalid_packets: HashMap<ChipId, Arc<Mutex<VecDeque<netsim_model::InvalidPacket>>>>,
 }
 
 impl BluetoothActor {
@@ -140,6 +145,7 @@ impl BluetoothActor {
             initial_chips,
             device_client,
             event_rx: Mutex::new(Some(event_rx)),
+            invalid_packets: HashMap::new(),
         }
     }
 }

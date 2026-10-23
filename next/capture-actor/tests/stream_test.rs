@@ -67,7 +67,7 @@ async fn test_stream_capture_while_disabled() {
     let header = timeout(RECV_TIMEOUT, rx.recv()).await.unwrap().unwrap();
     let header = PcapHeader::read_from_bytes(&header).unwrap();
     assert_eq!(header.magic_number.get(), 0xa1b2c3d4);
-    assert_eq!(header.network.get(), 187);
+    assert_eq!(header.network.get(), 201);
 
     // When: a packet is sent
     world.when_dummy_packet_is_sent(chip_id).await;
@@ -76,7 +76,7 @@ async fn test_stream_capture_while_disabled() {
     let record = timeout(RECV_TIMEOUT, rx.recv()).await.unwrap().unwrap();
     let (record_header, payload) = PcapRecordHeader::read_from_prefix(&record).unwrap();
     assert_eq!(record_header.incl_len.get() as usize, payload.len());
-    assert!(payload.ends_with(&[0, 1, 2, 3]));
+    assert_eq!(payload, &[0, 0, 0, 1, 0, 1, 2, 3]);
 
     // And: no file capture was written
     world.then_capture_stats_are(chip_id, 0, 0).await;
@@ -100,7 +100,7 @@ async fn test_stream_and_file_capture_coexist() {
 
     // Then: both the stream and the file capture receive the packet
     let _record = timeout(RECV_TIMEOUT, rx.recv()).await.unwrap().unwrap();
-    world.then_capture_stats_are(chip_id, 1, 4).await;
+    world.then_capture_stats_are(chip_id, 1, 8).await;
 
     // When: file capture is disabled while the stream subscriber remains connected
     world.when_update_capture(chip_id, false).await.unwrap();

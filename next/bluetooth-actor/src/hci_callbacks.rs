@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ffi::c_int;
+use std::{collections::VecDeque, ffi::c_int, sync::Arc};
 
 use bytes::Bytes;
 use futures::SinkExt;
 use netsim_model::ChipId;
+use parking_lot::Mutex;
 use rootcanal::{
     controller::{Callbacks as ControllerCallbacks, Id},
     types::Phy,
@@ -33,19 +34,28 @@ pub(crate) struct HciCallbacks {
     /// Channel to send LL packets (not currently used in this path, usually for
     /// sniffer/link bridging).
     ll_tx: Option<mpsc::Sender<Bytes>>,
+    invalid_packets: Option<Arc<Mutex<VecDeque<netsim_model::InvalidPacket>>>>,
 }
 
 impl HciCallbacks {
     pub(crate) fn new(id: ChipId) -> Self {
-        Self { id, hci_tx: None, ll_tx: None }
+        Self { id, hci_tx: None, ll_tx: None, invalid_packets: None }
     }
 
     pub(crate) fn with_hci(id: ChipId, hci_tx: mpsc::Sender<Bytes>) -> Self {
-        Self { id, hci_tx: Some(hci_tx), ll_tx: None }
+        Self { id, hci_tx: Some(hci_tx), ll_tx: None, invalid_packets: None }
     }
 
     pub(crate) fn with_ll(id: ChipId, ll_tx: mpsc::Sender<Bytes>) -> Self {
-        Self { id, hci_tx: None, ll_tx: Some(ll_tx) }
+        Self { id, hci_tx: None, ll_tx: Some(ll_tx), invalid_packets: None }
+    }
+
+    pub(crate) fn with_invalid_packets(
+        mut self,
+        invalid_packets: Arc<Mutex<VecDeque<netsim_model::InvalidPacket>>>,
+    ) -> Self {
+        self.invalid_packets = Some(invalid_packets);
+        self
     }
 }
 
@@ -75,6 +85,16 @@ impl ControllerCallbacks for HciCallbacks {
             "[chip-{}] Invalid packet received by device: reason={reason}, message={message}, packet={packet_hex}",
             self.id
         );
+        if let Some(invalid_packets) = &self.invalid_packets {
+            let mut packets = invalid_packets.lock();
+            netsim_model::NetsimRadioStats::push_bounded_invalid_packet(
+                &mut packets,
+                netsim_model::InvalidPacket {
+                    reason: netsim_model::InvalidPacketReason::from(reason),
+                    description: message.to_string(),
+                },
+            );
+        }
     }
 }
 
@@ -145,5 +165,24 @@ mod tests {
     fn test_invalid_packet_received() {
         let callbacks = HciCallbacks::new(ChipId::from(1));
         callbacks.invalid_packet_received(0, 1, "test error message", &[0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn test_invalid_packet_received_records_and_caps() {
+        let buffer = Arc::new(Mutex::new(VecDeque::new()));
+        let callbacks = HciCallbacks::new(ChipId::from(1)).with_invalid_packets(buffer.clone());
+
+        for i in 0..(netsim_model::NetsimRadioStats::MAX_INVALID_PACKETS + 5) {
+            callbacks.invalid_packet_received(0, 1, &format!("error {i}"), &[0xde, 0xad]);
+        }
+
+        let packets = buffer.lock();
+        assert_eq!(packets.len(), netsim_model::NetsimRadioStats::MAX_INVALID_PACKETS);
+        assert_eq!(packets[0].reason, netsim_model::InvalidPacketReason::ParseError);
+        assert_eq!(packets[0].description, "error 5");
+        assert_eq!(
+            packets[netsim_model::NetsimRadioStats::MAX_INVALID_PACKETS - 1].description,
+            format!("error {}", netsim_model::NetsimRadioStats::MAX_INVALID_PACKETS + 4)
+        );
     }
 }

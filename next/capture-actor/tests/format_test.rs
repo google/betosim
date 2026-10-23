@@ -153,9 +153,9 @@ async fn test_bluetooth_h4_capture() {
     world.when_dummy_packet_is_sent(chip_id).await;
 
     // Then: the capture info reflects the written packet
-    world.then_capture_stats_are(chip_id, 1, 4).await;
+    world.then_capture_stats_are(chip_id, 1, 8).await;
 
-    // And: the PCAP file header has correct Bluetooth H4 DLT (187)
+    // And: the PCAP file header has correct Bluetooth H4 DLT (201)
     world.then_capture_file_has_dlt(DataLinkType::BluetoothH4).await;
 }
 

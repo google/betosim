@@ -77,12 +77,26 @@ mod tests {
 
         let (records, bytes) = writer.get_stats();
         assert_eq!(records, 1);
-        assert_eq!(bytes, 4);
+        assert_eq!(bytes, 8);
 
-        // explicitly drop writer to ensure file handle closed (though not strictly
-        // required for remove_file on linux)
         writer.flush().await.unwrap();
         drop(writer);
+
+        let file_bytes = fs::read(&filename).unwrap();
+        assert_eq!(&file_bytes[40..44], &[0, 0, 0, 1]);
+        assert_eq!(&file_bytes[44..48], &data[..]);
+
+        fs::remove_file(&filename).unwrap();
+
+        let mut writer = BluetoothH4Writer::new(&filename).await.unwrap();
+        writer.write_packet(SystemTime::now(), Direction::Received, &data).await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
+
+        let file_bytes = fs::read(&filename).unwrap();
+        assert_eq!(&file_bytes[40..44], &[0, 0, 0, 0]);
+        assert_eq!(&file_bytes[44..48], &data[..]);
+
         fs::remove_file(filename).unwrap();
         fs::remove_dir(dir).unwrap();
     }

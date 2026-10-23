@@ -235,7 +235,29 @@ pub(crate) fn to_proto_stats(
     p.set_rx_bytes(saturate_cast(m.rx_bytes));
     p.set_p2p_tx_count(saturate_cast(m.p2p_tx_count));
     p.set_p2p_rx_count(saturate_cast(m.p2p_rx_count));
-    // invalid_packets are not yet persisted/converted
+    for pkt in m.invalid_packets() {
+        let mut proto_pkt = netsim_proto::stats::InvalidPacket::new();
+        let reason = match pkt.reason {
+            netsim_model::InvalidPacketReason::ParseError => {
+                netsim_proto::stats::invalid_packet::Reason::PARSE_ERROR
+            }
+            netsim_model::InvalidPacketReason::Unsupported => {
+                netsim_proto::stats::invalid_packet::Reason::UNSUPPORTED
+            }
+            netsim_model::InvalidPacketReason::Others => {
+                netsim_proto::stats::invalid_packet::Reason::OTHERS
+            }
+            netsim_model::InvalidPacketReason::Delayed => {
+                netsim_proto::stats::invalid_packet::Reason::DELAYED
+            }
+            netsim_model::InvalidPacketReason::Unknown => {
+                netsim_proto::stats::invalid_packet::Reason::UNKNOWN
+            }
+        };
+        proto_pkt.set_reason(reason);
+        proto_pkt.set_description(pkt.description.clone());
+        p.invalid_packets.push(proto_pkt);
+    }
     p
 }
 
@@ -284,4 +306,67 @@ pub(crate) fn to_proto_device_stats(
     stats.set_variant(info.variant.clone());
     stats.set_arch(info.arch.clone());
     stats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_proto_stats_converts_invalid_packets() {
+        let mut model_stats = netsim_model::NetsimRadioStats::default();
+        model_stats.push_invalid_packet(netsim_model::InvalidPacket {
+            reason: netsim_model::InvalidPacketReason::ParseError,
+            description: "Failed to parse header".to_string(),
+        });
+        model_stats.push_invalid_packet(netsim_model::InvalidPacket {
+            reason: netsim_model::InvalidPacketReason::Unsupported,
+            description: "Opcode 0x1234 not supported".to_string(),
+        });
+        model_stats.push_invalid_packet(netsim_model::InvalidPacket {
+            reason: netsim_model::InvalidPacketReason::Others,
+            description: "Internal buffer overflow".to_string(),
+        });
+        model_stats.push_invalid_packet(netsim_model::InvalidPacket {
+            reason: netsim_model::InvalidPacketReason::Delayed,
+            description: "Packet expired".to_string(),
+        });
+        model_stats.push_invalid_packet(netsim_model::InvalidPacket {
+            reason: netsim_model::InvalidPacketReason::Unknown,
+            description: "Unknown error".to_string(),
+        });
+
+        let proto_stats = to_proto_stats(model_stats);
+        assert_eq!(proto_stats.invalid_packets.len(), 5);
+
+        assert_eq!(
+            proto_stats.invalid_packets[0].reason(),
+            netsim_proto::stats::invalid_packet::Reason::PARSE_ERROR
+        );
+        assert_eq!(proto_stats.invalid_packets[0].description(), "Failed to parse header");
+
+        assert_eq!(
+            proto_stats.invalid_packets[1].reason(),
+            netsim_proto::stats::invalid_packet::Reason::UNSUPPORTED
+        );
+        assert_eq!(proto_stats.invalid_packets[1].description(), "Opcode 0x1234 not supported");
+
+        assert_eq!(
+            proto_stats.invalid_packets[2].reason(),
+            netsim_proto::stats::invalid_packet::Reason::OTHERS
+        );
+        assert_eq!(proto_stats.invalid_packets[2].description(), "Internal buffer overflow");
+
+        assert_eq!(
+            proto_stats.invalid_packets[3].reason(),
+            netsim_proto::stats::invalid_packet::Reason::DELAYED
+        );
+        assert_eq!(proto_stats.invalid_packets[3].description(), "Packet expired");
+
+        assert_eq!(
+            proto_stats.invalid_packets[4].reason(),
+            netsim_proto::stats::invalid_packet::Reason::UNKNOWN
+        );
+        assert_eq!(proto_stats.invalid_packets[4].description(), "Unknown error");
+    }
 }

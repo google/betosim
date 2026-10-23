@@ -204,7 +204,7 @@ pub enum DataLinkType {
     /// User defined 0 (DLT_USER0, often used for custom protocols like AT commands and NCI).
     User0 = 147,
     /// Bluetooth HCI H4 with direction flag.
-    BluetoothH4 = 187,
+    BluetoothH4 = 201,
     /// FiRa Ultra-Wideband Command Interface (UCI).
     FiraUci = 299,
 }
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(DataLinkType::Ethernet.as_u32(), 1);
         assert_eq!(DataLinkType::Ieee80211Radio.as_u32(), 127);
         assert_eq!(DataLinkType::User0.as_u32(), 147);
-        assert_eq!(DataLinkType::BluetoothH4.as_u32(), 187);
+        assert_eq!(DataLinkType::BluetoothH4.as_u32(), 201);
         assert_eq!(DataLinkType::FiraUci.as_u32(), 299);
     }
 

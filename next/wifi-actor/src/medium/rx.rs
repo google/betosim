@@ -185,9 +185,7 @@ impl Medium {
                         infra_target = InfraTarget::Slirp;
                     } else {
                         // If client disabled, only multicast or own-BSSID traffic?
-                        if dest_addr.is_multicast()
-                            || ieee80211.get_bssid().is_some_and(|b| self.key_store.has_bssid(&b))
-                        {
+                        if dest_addr.is_multicast() || self.key_store.has_bssid(&dest_addr) {
                             infra_target = InfraTarget::Slirp;
                         }
                     };

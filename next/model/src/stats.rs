@@ -17,10 +17,35 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+/// Rootcanal invalid packet reason codes mirrored from stats.proto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InvalidPacketReason {
+    ParseError,
+    Unsupported,
+    Others,
+    Delayed,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<i32> for InvalidPacketReason {
+    fn from(v: i32) -> Self {
+        match v {
+            1 => Self::ParseError,
+            2 => Self::Unsupported,
+            3 => Self::Others,
+            4 => Self::Delayed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Represents an invalid packet with a reason and description.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InvalidPacket {
-    pub reason: String,
+    pub reason: InvalidPacketReason,
     pub description: String,
     // Packet content is intentionally omitted from the model to avoid large payloads in stats
 }
@@ -99,12 +124,21 @@ impl NetsimRadioStats {
     /// The maximum number of invalid packets to store.
     pub const MAX_INVALID_PACKETS: usize = 50;
 
+    /// Adds an invalid packet to a queue, maintaining a maximum of [`Self::MAX_INVALID_PACKETS`] items.
+    pub fn push_bounded_invalid_packet(queue: &mut VecDeque<InvalidPacket>, packet: InvalidPacket) {
+        if queue.len() >= Self::MAX_INVALID_PACKETS {
+            queue.pop_front();
+        }
+        queue.push_back(packet);
+    }
+
     /// Adds an invalid packet to the stats, maintaining a maximum of 50 items.
     pub fn push_invalid_packet(&mut self, packet: InvalidPacket) {
-        if self.invalid_packets.len() >= Self::MAX_INVALID_PACKETS {
-            self.invalid_packets.pop_front();
-        }
-        self.invalid_packets.push_back(packet);
+        Self::push_bounded_invalid_packet(&mut self.invalid_packets, packet);
+    }
+
+    pub fn invalid_packets(&self) -> &VecDeque<InvalidPacket> {
+        &self.invalid_packets
     }
 }
 
@@ -240,15 +274,16 @@ mod tests {
         let overflow = 10;
         for i in 0..(NetsimRadioStats::MAX_INVALID_PACKETS + overflow) {
             stats.push_invalid_packet(InvalidPacket {
-                reason: format!("reason {}", i),
+                reason: InvalidPacketReason::ParseError,
                 description: format!("description {}", i),
             });
         }
         assert_eq!(stats.invalid_packets.len(), NetsimRadioStats::MAX_INVALID_PACKETS);
-        assert_eq!(stats.invalid_packets[0].reason, format!("reason {}", overflow));
+        assert_eq!(stats.invalid_packets[0].reason, InvalidPacketReason::ParseError);
+        assert_eq!(stats.invalid_packets[0].description, format!("description {}", overflow));
         assert_eq!(
-            stats.invalid_packets[NetsimRadioStats::MAX_INVALID_PACKETS - 1].reason,
-            format!("reason {}", NetsimRadioStats::MAX_INVALID_PACKETS + overflow - 1)
+            stats.invalid_packets[NetsimRadioStats::MAX_INVALID_PACKETS - 1].description,
+            format!("description {}", NetsimRadioStats::MAX_INVALID_PACKETS + overflow - 1)
         );
     }
 
