@@ -77,7 +77,7 @@ pub struct WifiStats {
 
 #[repr(usize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WifiApi {
+pub(crate) enum WifiApi {
     // Wi-Fi Aware (NAN)
     WifiAwareSessionPublishUnsolicited = 0,
     WifiAwareSessionPublishSolicited = 1,
@@ -178,15 +178,15 @@ impl WifiStats {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self { counts: Default::default(), values: WifiValues::new(clock) }
     }
-    pub fn record_download_bytes(&mut self, bytes: usize) {
+    pub(crate) fn record_download_bytes(&mut self, bytes: usize) {
         self.values.download_throughput.record(bytes, "Download");
     }
 
-    pub fn record_upload_bytes(&mut self, bytes: usize) {
+    pub(crate) fn record_upload_bytes(&mut self, bytes: usize) {
         self.values.upload_throughput.record(bytes, "Upload");
     }
 
-    pub fn log_and_incr_err_count(&mut self, error: &WifiError) {
+    pub(crate) fn log_and_incr_err_count(&mut self, error: &WifiError) {
         warn!(%error);
         match error {
             WifiError::Hostapd(_) => self.counts.hostapd_error += 1,
@@ -201,7 +201,7 @@ impl WifiStats {
     }
 
     /// Handles the "log on error, increment on success" pattern.
-    pub fn log_outcome<T, E, F>(&mut self, result: Result<T, E>, success_op: F)
+    pub(crate) fn log_outcome<T, E, F>(&mut self, result: Result<T, E>, success_op: F)
     where
         E: Into<WifiError>,
         F: FnOnce(&mut Self, T),
@@ -212,57 +212,57 @@ impl WifiStats {
         }
     }
 
-    pub fn incr_hwsim_frames_rx(&mut self) {
+    pub(crate) fn incr_hwsim_frames_rx(&mut self) {
         self.counts.hwsim_frames_rx += 1;
     }
 
-    pub fn incr_hwsim_frames_tx(&mut self) {
+    pub(crate) fn incr_hwsim_frames_tx(&mut self) {
         self.counts.hwsim_frames_tx += 1;
     }
 
-    pub fn incr_network_packets_tx(&mut self) {
+    pub(crate) fn incr_network_packets_tx(&mut self) {
         self.counts.network_packets_tx += 1;
     }
 
-    pub fn incr_network_packets_rx(&mut self) {
+    pub(crate) fn incr_network_packets_rx(&mut self) {
         self.counts.network_packets_rx += 1;
     }
 
-    pub fn incr_hostapd_frames_tx(&mut self) {
+    pub(crate) fn incr_hostapd_frames_tx(&mut self) {
         self.counts.hostapd_frames_tx += 1;
     }
 
-    pub fn incr_hostapd_frames_rx(&mut self) {
+    pub(crate) fn incr_hostapd_frames_rx(&mut self) {
         self.counts.hostapd_frames_rx += 1;
     }
 
-    pub fn incr_wmedium_frames_tx(&mut self) {
+    pub(crate) fn incr_wmedium_frames_tx(&mut self) {
         self.counts.wmedium_frames_tx += 1;
     }
 
-    pub fn incr_wmedium_unicast_frames_tx(&mut self) {
+    pub(crate) fn incr_wmedium_unicast_frames_tx(&mut self) {
         self.counts.wmedium_unicast_frames_tx += 1;
     }
 
-    pub fn incr_mgmt_frames_rx(&mut self) {
+    pub(crate) fn incr_mgmt_frames_rx(&mut self) {
         self.counts.mgmt_frames_rx += 1;
     }
 
-    pub fn incr_mdns_count(&mut self) {
+    pub(crate) fn incr_mdns_count(&mut self) {
         self.counts.mdns_count += 1;
     }
 
-    pub fn incr_wifi_api(&mut self, api: WifiApi) {
+    pub(crate) fn incr_wifi_api(&mut self, api: WifiApi) {
         if let Some(count) = self.counts.wifi_apis.get_mut(api) {
             *count += 1;
         }
     }
 
-    pub fn bytes_ps_to_mbps(bytes_per_second: u64) -> f32 {
+    fn bytes_ps_to_mbps(bytes_per_second: u64) -> f32 {
         ((bytes_per_second as f64 * 8.0) / (1_000_000.0)) as f32
     }
 
-    pub fn to_proto(&self) -> netsim_proto::stats::WifiIpcStats {
+    pub(crate) fn to_proto(&self) -> netsim_proto::stats::WifiIpcStats {
         let mut wifi_stats = netsim_proto::stats::WifiStats::new();
 
         let saturate = |val: u64| -> i32 { std::cmp::min(val, i32::MAX as u64) as i32 };

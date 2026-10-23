@@ -23,7 +23,7 @@ use crate::wifi_actor::WifiActor;
 
 #[derive(Clone)]
 pub struct WifiClient {
-    pub(crate) inner: Box<dyn actor_framework::ActorClient<WifiActor>>,
+    inner: Box<dyn actor_framework::ActorClient<WifiActor>>,
 }
 impl std::fmt::Debug for WifiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
