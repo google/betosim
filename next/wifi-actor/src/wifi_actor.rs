@@ -198,10 +198,19 @@ impl WifiActor {
 
         match self.medium.resolve_tx_packet(chip_id, &packet) {
             Ok(tx_state) => {
-                // 1. Ack
-                let res = self.medium.ack_frame(chip_id, &tx_state.frame, &mut self.out_queue);
-                self.medium.wifi_stats.log_outcome(res, |_, _| {});
-                // 2. Infra (AP/Slirp) routing
+                let ack_pos = self.out_queue.len();
+                let is_hosted_ap_nullfunc = tx_state.get_ieee80211().is_data()
+                    && tx_state.get_ieee80211().is_to_ap()
+                    && tx_state.get_ieee80211().stype()
+                        == u8::from(netsim_packets::DataSubType::Nodata)
+                    && tx_state
+                        .get_ieee80211()
+                        .get_bssid()
+                        .is_some_and(|b| self.medium.key_store.has_bssid(&b));
+                let mut acked = self.medium.enabled(chip_id).unwrap_or(false)
+                    && (!matches!(tx_state.infra_target, InfraTarget::None)
+                        || is_hosted_ap_nullfunc);
+                // 1. Infra (AP/Slirp) routing
                 match tx_state.infra_target {
                     InfraTarget::Ap => {
                         debug!("ROUTING: Guest -> AP");
@@ -244,9 +253,17 @@ impl WifiActor {
                                                 "Simulated FTM Response from {} to {}",
                                                 peer_id, chip_id
                                             );
+                                            let res = self.medium.ack_frame(
+                                                chip_id,
+                                                &tx_state.frame,
+                                                true,
+                                                &mut self.out_queue,
+                                            );
+                                            self.medium.wifi_stats.log_outcome(res, |_, _| {});
                                             for resp in responses {
                                                 self.out_queue.push((chip_id, resp));
                                             }
+                                            self.flush_out_queue();
                                             // Suppress generic transmission.
                                             // Act as a Hardware Offload/Medium Interception to
                                             // ensure ONLY the simulated FTM response is sent.
@@ -259,15 +276,28 @@ impl WifiActor {
                     }
                 }
 
-                // 3. Stations (Loopback/Peers)
+                // 2. Stations (Loopback/Peers)
                 if tx_state.stations {
                     let res = self.medium.transmit(
                         &tx_state.frame,
                         tx_state.get_ieee80211(),
                         &mut self.out_queue,
                     );
+                    if let Ok(tx_acked) = &res {
+                        acked = acked || *tx_acked;
+                    }
                     self.medium.wifi_stats.log_outcome(res, |_, _| {});
                 }
+
+                // 3. Ack
+                let res =
+                    self.medium.ack_frame(chip_id, &tx_state.frame, acked, &mut self.out_queue);
+                if res.is_ok()
+                    && let Some(slice) = self.out_queue.get_mut(ack_pos..)
+                {
+                    slice.rotate_right(1);
+                }
+                self.medium.wifi_stats.log_outcome(res, |_, _| {});
             }
             Err(e) => {
                 self.medium.wifi_stats.log_and_incr_err_count(&e);

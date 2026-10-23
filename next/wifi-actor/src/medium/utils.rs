@@ -165,7 +165,7 @@ fn construct_hwsim_msg(
     Ok(HwsimMsg { nl_hdr, hwsim_hdr, attributes })
 }
 
-pub(crate) fn build_tx_info(hwsim_msg: &HwsimMsg) -> WifiResult<HwsimMsg> {
+pub(crate) fn build_tx_info(hwsim_msg: &HwsimMsg, acked: bool) -> WifiResult<HwsimMsg> {
     let attrs = HwsimAttrSet::parse(&hwsim_msg.attributes)
         .map_err(|e| WifiError::Internal(Box::from(e.to_string())))?;
 
@@ -174,6 +174,11 @@ pub(crate) fn build_tx_info(hwsim_msg: &HwsimMsg) -> WifiResult<HwsimMsg> {
     let mut new_attr_builder = HwsimAttrSet::builder();
     const HWSIM_TX_STAT_ACK: u32 = 1 << 2;
 
+    let raw_flags =
+        attrs.flags.ok_or(WifiError::Internal(Box::from("Missing flags in HwsimAttrSet")))?;
+    let tx_flags =
+        if acked { raw_flags | HWSIM_TX_STAT_ACK } else { raw_flags & !HWSIM_TX_STAT_ACK };
+
     new_attr_builder
         .transmitter(
             &attrs
@@ -181,10 +186,7 @@ pub(crate) fn build_tx_info(hwsim_msg: &HwsimMsg) -> WifiResult<HwsimMsg> {
                 .ok_or(WifiError::Internal(Box::from("Missing transmitter in HwsimAttrSet")))?
                 .into(),
         )
-        .flags(
-            attrs.flags.ok_or(WifiError::Internal(Box::from("Missing flags in HwsimAttrSet")))?
-                | HWSIM_TX_STAT_ACK,
-        )
+        .flags(tx_flags)
         .cookie(
             attrs.cookie.ok_or(WifiError::Internal(Box::from("Missing cookie in HwsimAttrSet")))?,
         )

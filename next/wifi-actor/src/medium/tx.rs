@@ -88,9 +88,17 @@ impl Medium {
         &mut self,
         client_id: u32,
         frame: &HwsimFrame,
+        acked: bool,
         out_queue: &mut Vec<(u32, Bytes)>,
     ) -> WifiResult<()> {
-        let tx_info = build_tx_info(&frame.hwsim_msg)?;
+        if !acked
+            && let Some(client) = self.clients.get_mut(&client_id)
+            && client.in_p2p_action
+        {
+            client.in_p2p_listen = true;
+            client.in_p2p_action = false;
+        }
+        let tx_info = build_tx_info(&frame.hwsim_msg, acked)?;
         self.push_packet(client_id, &tx_info, out_queue)?;
         self.incr_tx(client_id)
     }
@@ -257,18 +265,32 @@ impl Medium {
         frame: &HwsimFrame,
         ieee80211: &Ieee80211,
         out_queue: &mut Vec<(u32, Bytes)>,
-    ) -> WifiResult<()> {
+    ) -> WifiResult<bool> {
         self.parse_action_frame(ieee80211);
         let source_addr = ieee80211.get_source();
         let source = self.get_station(&source_addr)?.clone();
         let dest_addr = ieee80211.get_destination();
+        let via_infra_ap = ieee80211.get_bssid().is_some_and(|b| self.key_store.has_bssid(&b));
 
-        let targets = self.resolve_targets(&dest_addr);
+        let mut targets = self.resolve_targets(&dest_addr);
+        let mut flooded = false;
         if targets.is_empty() && !dest_addr.is_multicast() {
-            return Err(WifiError::Internal(Box::from(format!(
-                "Dropped packet from {} to {}",
-                source.addr, dest_addr
-            ))));
+            // Flood unknown non-infra unicast (e.g. unlearned virtual P2P interface MAC) to peer radios.
+            if !via_infra_ap && dest_addr.bytes != [0; 6] {
+                let mut visited = HashSet::new();
+                for station in self.stations.values() {
+                    if station.client_id != source.client_id && visited.insert(station.hwsim_addr) {
+                        targets.push(station.clone());
+                    }
+                }
+                flooded = !targets.is_empty();
+            }
+            if targets.is_empty() {
+                return Err(WifiError::Internal(Box::from(format!(
+                    "Dropped packet from {} to {}",
+                    source.addr, dest_addr
+                ))));
+            }
         }
 
         if dest_addr.is_multicast() {
@@ -281,16 +303,19 @@ impl Medium {
             self.wifi_stats.incr_wmedium_unicast_frames_tx();
         }
 
-        let via_infra_ap = ieee80211.get_bssid().is_some_and(|b| self.key_store.has_bssid(&b));
         // Consider a frame as infra if it is coming from an AP (FromDS=1)
         // OR if it aligns with a hosted AP in key_store.
         let is_infra = ieee80211.is_from_ds() || via_infra_ap;
 
         // RESTRICT: Only run M2U optimizations for infrastructure networks
         let is_m2u_conversion = is_infra
-            && (is_m2u_candidate(&dest_addr) || (!dest_addr.is_multicast() && targets.len() > 1));
+            && (is_m2u_candidate(&dest_addr)
+                || (!dest_addr.is_multicast() && !flooded && targets.len() > 1));
 
         let is_p2p_payload_data = !via_infra_ap && ieee80211.is_payload_bearing_data();
+        let src_enabled = self.enabled(source.client_id)?;
+        let mut acked = dest_addr.is_multicast() && src_enabled;
+        let targets_len = targets.len();
 
         for dest in targets {
             // Drop unicast packets destined to the sender itself (invalid for hwsim)
@@ -300,7 +325,6 @@ impl Medium {
             {
                 continue;
             }
-            let src_enabled = self.enabled(source.client_id)?;
             let dst_enabled = self.enabled(dest.client_id)?;
             if src_enabled && dst_enabled {
                 // 1. Apply AP Reflection first on the original broadcast frame
@@ -342,8 +366,17 @@ impl Medium {
                         self.wifi_stats.incr_hwsim_frames_tx();
                         self.push_packet(dest.client_id, &msg, out_queue)?;
                         self.incr_rx(dest.client_id)?;
+                        if (!flooded || targets_len == 1)
+                            && self
+                                .clients
+                                .get(&dest.client_id)
+                                .is_some_and(|c| c.is_reachable_on_freq(frame.attrs.freq))
+                        {
+                            acked = true;
+                        }
 
                         if is_p2p_payload_data
+                            && !flooded
                             && source.client_id != dest.client_id
                             && !dest_addr.is_multicast()
                         {
@@ -355,7 +388,7 @@ impl Medium {
                 }
             }
         }
-        Ok(())
+        Ok(acked)
     }
 
     pub(crate) fn parse_action_frame(&mut self, ieee80211: &Ieee80211) {
@@ -415,6 +448,12 @@ impl Medium {
                     if stype == management_subtype::PROBE_REQUEST {
                         let source_addr = ieee80211.get_source();
                         self.active_p2p_groups.remove(&source_addr);
+                        if let Some(listen_freq) = self.p2p_listen_freq(ieee80211)
+                            && let Some(client_id) = self.get_station_chip_id(&source_addr)
+                            && let Some(client) = self.clients.get_mut(&client_id)
+                        {
+                            client.listen_freq = Some(listen_freq);
+                        }
                     }
                     self.wifi_stats.incr_wifi_api(WifiApi::WifiP2pManagerDiscoverPeers);
                 }
@@ -423,6 +462,13 @@ impl Medium {
                     && self.is_p2p_go(ieee80211)
                 {
                     let source_addr = ieee80211.get_source();
+                    if let Some(client_id) = self.get_station_chip_id(&source_addr)
+                        && let Some(client) = self.clients.get_mut(&client_id)
+                    {
+                        client.listen_freq = None;
+                        client.in_p2p_listen = false;
+                        client.in_p2p_action = false;
+                    }
                     if self.active_p2p_groups.insert(source_addr) {
                         self.wifi_stats.incr_wifi_api(WifiApi::WifiP2pManagerCreateGroup);
                     }
@@ -431,7 +477,35 @@ impl Medium {
         }
     }
 
-    fn has_p2p_ie(&self, ieee80211: &Ieee80211) -> bool {
+    fn p2p_listen_freq(&self, ieee80211: &Ieee80211) -> Option<u32> {
+        use netsim_packets::{IeIterator, p2p, tags};
+
+        for ie in IeIterator::new(&ieee80211.get_payload()) {
+            if ie.id == tags::VENDOR_SPECIFIC
+                && let Some((&p2p::OUI, &[p2p::OUI_TYPE, ref rest @ ..])) =
+                    ie.body.split_first_chunk::<3>()
+            {
+                let mut attr_bytes = rest;
+                while let &[attr_id, len_l, len_h, ref remaining @ ..] = attr_bytes {
+                    let attr_len = u16::from_le_bytes([len_l, len_h]) as usize;
+                    let Some((attr_val, next)) = remaining.split_at_checked(attr_len) else {
+                        break;
+                    };
+                    // P2P_ATTR_LISTEN_CHANNEL (ID 6): Country(3) + RegClass(1) + Channel(1)
+                    const P2P_ATTR_LISTEN_CHANNEL: u8 = 6;
+                    if attr_id == P2P_ATTR_LISTEN_CHANNEL
+                        && let &[_, _, _, _, ch @ 1..=13, ..] = attr_val
+                    {
+                        return Some(2407 + 5 * u32::from(ch));
+                    }
+                    attr_bytes = next;
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn has_p2p_ie(&self, ieee80211: &Ieee80211) -> bool {
         use netsim_packets::{IeIterator, management_subtype, p2p, tags};
 
         let payload = ieee80211.get_payload();

@@ -43,6 +43,10 @@ pub struct Client {
     pub rx_count: u32,
     pub p2p_tx_count: u64,
     pub p2p_rx_count: u64,
+    pub(crate) radio_freq: u32,
+    pub(crate) listen_freq: Option<u32>,
+    pub(crate) in_p2p_listen: bool,
+    pub(crate) in_p2p_action: bool,
 }
 
 impl Default for Client {
@@ -53,6 +57,55 @@ impl Default for Client {
 
 impl Client {
     pub fn new() -> Self {
-        Self { enabled: true, tx_count: 0, rx_count: 0, p2p_tx_count: 0, p2p_rx_count: 0 }
+        Self {
+            enabled: true,
+            tx_count: 0,
+            rx_count: 0,
+            p2p_tx_count: 0,
+            p2p_rx_count: 0,
+            radio_freq: 0,
+            listen_freq: None,
+            in_p2p_listen: false,
+            in_p2p_action: false,
+        }
+    }
+
+    pub(crate) fn is_reachable_on_freq(&self, tx_freq: Option<u32>) -> bool {
+        let Some(tx_freq) = tx_freq else {
+            return true;
+        };
+        if self.in_p2p_action && self.listen_freq == Some(tx_freq) {
+            return true;
+        }
+        let active_freq =
+            self.listen_freq.filter(|_| self.in_p2p_listen).unwrap_or(self.radio_freq);
+        active_freq == 0 || active_freq == tx_freq
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_is_reachable_on_freq() {
+        let mut client = Client::new();
+        assert!(client.is_reachable_on_freq(Some(2412)));
+        assert!(client.is_reachable_on_freq(None));
+
+        client.radio_freq = 2462;
+        assert!(client.is_reachable_on_freq(Some(2462)));
+        assert!(!client.is_reachable_on_freq(Some(2412)));
+
+        client.listen_freq = Some(2437);
+        client.in_p2p_listen = true;
+        assert!(client.is_reachable_on_freq(Some(2437)));
+        assert!(!client.is_reachable_on_freq(Some(2462)));
+
+        client.in_p2p_listen = false;
+        client.in_p2p_action = true;
+        assert!(client.is_reachable_on_freq(Some(2462)));
+        assert!(client.is_reachable_on_freq(Some(2437)));
+        assert!(!client.is_reachable_on_freq(Some(2412)));
     }
 }

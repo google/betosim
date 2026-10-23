@@ -787,3 +787,442 @@ async fn test_secure_network_dhcp_broadcast() {
         }
     }
 }
+
+async fn recv_next_tx_info_ack(chip: &mut crate::world::ChipChannels) -> bool {
+    const HWSIM_TX_STAT_ACK: u32 = 1 << 2;
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            Some(bytes) = chip.stream_rx.recv() => {
+                if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
+                    && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::TxInfoFrame
+                    && let Ok(attrs) = netsim_packets::HwsimAttrSet::parse(&hwsim_msg.attributes)
+                    && let Some(flags) = attrs.flags
+                {
+                    return (flags & HWSIM_TX_STAT_ACK) != 0;
+                }
+            }
+            _ = &mut timeout => {
+                panic!("Timeout waiting for TxInfoFrame on chip {}", chip.id);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_hwsim_tx_stat_ack_conditional() {
+    let mut world = World::new().await;
+    let _sender = world.given_a_chip(1).await;
+    let _receiver = world.given_a_chip(2).await;
+
+    // Drain initial registration TxInfoFrames from both chips
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+    while world.chips[1].stream_rx.try_recv().is_ok() {}
+
+    // 1. Same-channel unicast (both on 2412 MHz) -> ACK bit must be set
+    world.when_chip_transmits_unicast(0, 1, "SameChannel").await;
+    assert!(recv_next_tx_info_ack(&mut world.chips[0]).await, "Expected ACK on same channel");
+    world.then_chip_receives_payload(1, "SameChannel").await;
+
+    // 2. Move receiver to 2462 MHz (non-scan frame)
+    let src_mac = world.chips[1].mac;
+    let dst_mac = world.chips[0].mac;
+    let ap_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let eth = World::create_ethernet_frame(&src_mac, &dst_mac, b"MoveTo2462");
+    let msg_2462 =
+        crate::hwsim_helper::wrap_ethernet_in_hwsim(&eth, &ap_mac, &dst_mac, &src_mac, 2462)
+            .unwrap();
+    world.chips[1].sink_tx.send(Bytes::from(msg_2462)).await.unwrap();
+    let _ = recv_next_tx_info_ack(&mut world.chips[1]).await;
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Sender transmits on 2412 MHz while receiver is on 2462 MHz -> ACK bit must be cleared
+    world.when_chip_transmits_unicast(0, 1, "OffChannel").await;
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK when peer is off-channel"
+    );
+
+    // 3. Disable receiver -> ACK bit must be cleared even on matching channel
+    world.given_chip_is_disabled(1).await;
+    let sender_mac = world.chips[0].mac;
+    let receiver_mac = world.chips[1].mac;
+    let eth_disabled = World::create_ethernet_frame(&sender_mac, &receiver_mac, b"DisabledPeer");
+    let msg_disabled = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth_disabled,
+        &ap_mac,
+        &receiver_mac,
+        &sender_mac,
+        2462,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_disabled)).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK when peer is disabled"
+    );
+}
+
+#[tokio::test]
+async fn test_p2p_listen_channel_ack_and_unknown_unicast_routing() {
+    use netsim_packets::{
+        FrameControl, Ieee80211, MacAddr, MacAddress, MacHeader3Addr, SequenceControl,
+    };
+    use zerocopy::IntoBytes;
+
+    let mut world = World::new().await;
+    let _sender = world.given_a_chip(1).await;
+    let _receiver = world.given_a_chip(2).await;
+
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+    while world.chips[1].stream_rx.try_recv().is_ok() {}
+
+    let sender_mac = world.chips[0].mac;
+    let receiver_mac = world.chips[1].mac;
+    let unknown_p2p_mac = [0x02, 0x00, 0x00, 0x00, 0x02, 0x99];
+    let bssid_p2p = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+    // Receiver sends a broadcast P2P Probe Request advertising Listen Channel 6 (2437 MHz).
+    let probe_hdr = MacHeader3Addr {
+        frame_control: FrameControl::new(0x0040), // Management: Probe Request (stype=4)
+        duration_id: zerocopy::U16::new(0),
+        addr1: MacAddr::new([0xFF; 6]),
+        addr2: MacAddr::new(receiver_mac),
+        addr3: MacAddr::new([0xFF; 6]),
+        sequence_control: SequenceControl::new(0),
+    };
+    let p2p_ie = [0xDD, 12, 0x50, 0x6F, 0x9A, 0x09, 6, 5, 0, b'X', b'X', 0x04, 81, 6];
+    let mut probe_bytes = Vec::new();
+    probe_bytes.extend_from_slice(probe_hdr.as_bytes());
+    probe_bytes.extend_from_slice(&p2p_ie);
+    let probe_ieee = Ieee80211::decode(&probe_bytes).unwrap();
+
+    // 1. Mid-scan on Channel 1 (2412 MHz): Receiver is actively on 2412 MHz, NOT yet on 2437 MHz.
+    let probe_2412 = wifi_actor::create_hwsim_msg_from_frame(
+        &probe_ieee,
+        &MacAddress::new([0xFF; 6]),
+        2412,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1].sink_tx.send(Bytes::from(probe_2412.encode_to_vec().unwrap())).await.unwrap();
+    assert!(recv_next_tx_info_ack(&mut world.chips[1]).await);
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    let eth = World::create_ethernet_frame(&sender_mac, &unknown_p2p_mac, b"P2PFrame");
+    let msg_2437 = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth,
+        &bssid_p2p,
+        &unknown_p2p_mac,
+        &sender_mac,
+        2437,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_2437.clone())).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK on Listen Channel 2437 MHz while peer is mid-scan on 2412 MHz"
+    );
+    while world.chips[1].stream_rx.try_recv().is_ok() {}
+
+    // 2. End of social scan on Channel 11 (2462 MHz): Receiver enters passive Listen on 2437 MHz.
+    let probe_2462 = wifi_actor::create_hwsim_msg_from_frame(
+        &probe_ieee,
+        &MacAddress::new([0xFF; 6]),
+        2462,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1].sink_tx.send(Bytes::from(probe_2462.encode_to_vec().unwrap())).await.unwrap();
+    assert!(recv_next_tx_info_ack(&mut world.chips[1]).await);
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Unicast to unlearned P2P interface MAC on Listen Channel 2437 MHz is routed and ACKed,
+    // while stale scan channel 2462 MHz is NOT ACKed.
+    world.chips[0].sink_tx.send(Bytes::from(msg_2437)).await.unwrap();
+    assert!(
+        recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected ACK on peer's P2P Listen channel 2437 MHz"
+    );
+    world.then_chip_receives_payload_and_dst(1, "P2PFrame", unknown_p2p_mac).await;
+
+    let msg_2462 = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth,
+        &bssid_p2p,
+        &unknown_p2p_mac,
+        &sender_mac,
+        2462,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_2462)).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK on scan channel 2462 MHz after peer entered Listen on 2437 MHz"
+    );
+}
+
+#[tokio::test]
+async fn test_p2p_action_nack_recovery_non_p2p_scan_and_hosted_ap_nullfunc() {
+    use netsim_packets::{
+        FrameControl, Ieee80211, MacAddr, MacAddress, MacHeader3Addr, SequenceControl,
+    };
+    use zerocopy::IntoBytes;
+
+    let mut world = World::new().await;
+    world.given_an_ap().await;
+    let _sender = world.given_a_chip(1).await;
+    let _receiver = world.given_a_chip(2).await;
+
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+    while world.chips[1].stream_rx.try_recv().is_ok() {}
+
+    let sender_mac = world.chips[0].mac;
+    let receiver_mac = world.chips[1].mac;
+    let unknown_p2p_mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x88];
+    let hosted_ap_bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let p2p_bssid = [0x02, 0x00, 0x00, 0x00, 0x99, 0x99];
+
+    // 1. Hosted AP BSSID NullFunc/data frame (ftype=2 Data, stype=4 Nodata, ToDS=1 -> 0x0148)
+    // is ACKed via initial acked path in wifi_actor.rs.
+    let nullfunc_hdr = MacHeader3Addr {
+        frame_control: FrameControl::new(0x0148),
+        duration_id: zerocopy::U16::new(0),
+        addr1: MacAddr::new(hosted_ap_bssid),
+        addr2: MacAddr::new(sender_mac),
+        addr3: MacAddr::new(hosted_ap_bssid),
+        sequence_control: SequenceControl::new(1),
+    };
+    let nullfunc_ieee = Ieee80211::decode(nullfunc_hdr.as_bytes()).unwrap();
+    let nullfunc_msg = wifi_actor::create_hwsim_msg_from_frame(
+        &nullfunc_ieee,
+        &MacAddress::new(hosted_ap_bssid),
+        2412,
+        Some(&MacAddress::new(sender_mac)),
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(nullfunc_msg.encode_to_vec().unwrap())).await.unwrap();
+    assert!(
+        recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected ACK for NullFunc frame sent to hosted AP BSSID"
+    );
+
+    // 2. Non-P2P multicast Probe Request on Channel 11 (2462 MHz) does NOT enter P2P Listen.
+    let probe_hdr = MacHeader3Addr {
+        frame_control: FrameControl::new(0x0040), // Management: Probe Request (stype=4)
+        duration_id: zerocopy::U16::new(0),
+        addr1: MacAddr::new([0xFF; 6]),
+        addr2: MacAddr::new(receiver_mac),
+        addr3: MacAddr::new([0xFF; 6]),
+        sequence_control: SequenceControl::new(2),
+    };
+    let p2p_ie = [0xDD, 12, 0x50, 0x6F, 0x9A, 0x09, 6, 5, 0, b'X', b'X', 0x04, 81, 6];
+    let mut p2p_probe_bytes = Vec::new();
+    p2p_probe_bytes.extend_from_slice(probe_hdr.as_bytes());
+    p2p_probe_bytes.extend_from_slice(&p2p_ie);
+    let p2p_probe_ieee = Ieee80211::decode(&p2p_probe_bytes).unwrap();
+
+    // First advertise listen_freq = 2437 MHz via P2P Probe Request on 2412 MHz.
+    let p2p_probe_2412 = wifi_actor::create_hwsim_msg_from_frame(
+        &p2p_probe_ieee,
+        &MacAddress::new([0xFF; 6]),
+        2412,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1]
+        .sink_tx
+        .send(Bytes::from(p2p_probe_2412.encode_to_vec().unwrap()))
+        .await
+        .unwrap();
+    assert!(recv_next_tx_info_ack(&mut world.chips[1]).await);
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Now send a regular (non-P2P) broadcast Probe Request on 2462 MHz.
+    let mut regular_probe_bytes = Vec::new();
+    regular_probe_bytes.extend_from_slice(probe_hdr.as_bytes());
+    regular_probe_bytes.extend_from_slice(&[0, 4, b't', b'e', b's', b't']); // SSID IE only
+    let regular_probe_ieee = Ieee80211::decode(&regular_probe_bytes).unwrap();
+    let regular_probe_2462 = wifi_actor::create_hwsim_msg_from_frame(
+        &regular_probe_ieee,
+        &MacAddress::new([0xFF; 6]),
+        2462,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1]
+        .sink_tx
+        .send(Bytes::from(regular_probe_2462.encode_to_vec().unwrap()))
+        .await
+        .unwrap();
+    assert!(recv_next_tx_info_ack(&mut world.chips[1]).await);
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Receiver should still be strictly on 2462 MHz, NOT in P2P Listen on 2437 MHz.
+    let eth = World::create_ethernet_frame(&sender_mac, &receiver_mac, b"CheckFreq");
+    let msg_2437_unicast = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth,
+        &p2p_bssid,
+        &receiver_mac,
+        &sender_mac,
+        2437,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_2437_unicast.clone())).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK on 2437 MHz after regular non-P2P Probe Request on 2462 MHz"
+    );
+
+    // 3. Category 3 (Block Ack) vs Category 4 (Public Action) on `in_p2p_action` and NACK recovery:
+    // First put receiver into P2P Listen on 2437 MHz (end of scan on 2462 MHz).
+    let p2p_probe_2462 = wifi_actor::create_hwsim_msg_from_frame(
+        &p2p_probe_ieee,
+        &MacAddress::new([0xFF; 6]),
+        2462,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1]
+        .sink_tx
+        .send(Bytes::from(p2p_probe_2462.encode_to_vec().unwrap()))
+        .await
+        .unwrap();
+    assert!(recv_next_tx_info_ack(&mut world.chips[1]).await);
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Receiver sends an off-channel Category 3 (Block Ack) Action frame on 2412 MHz to unknown_p2p_mac (NACKed).
+    // Because Category 3 does NOT set `in_p2p_action`, receiver stays on 2412 MHz and does NOT return to 2437 MHz.
+    let action_to_unknown_hdr = MacHeader3Addr {
+        frame_control: FrameControl::new(0x00D0), // Management: Action (stype=13)
+        duration_id: zerocopy::U16::new(0),
+        addr1: MacAddr::new(unknown_p2p_mac),
+        addr2: MacAddr::new(receiver_mac),
+        addr3: MacAddr::new(unknown_p2p_mac),
+        sequence_control: SequenceControl::new(3),
+    };
+    let mut block_ack_bytes = Vec::new();
+    block_ack_bytes.extend_from_slice(action_to_unknown_hdr.as_bytes());
+    block_ack_bytes.extend_from_slice(&[3, 0]); // Category 3 (Block Ack)
+    let block_ack_ieee = Ieee80211::decode(&block_ack_bytes).unwrap();
+    let block_ack_2412 = wifi_actor::create_hwsim_msg_from_frame(
+        &block_ack_ieee,
+        &MacAddress::new(unknown_p2p_mac),
+        2412,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1]
+        .sink_tx
+        .send(Bytes::from(block_ack_2412.encode_to_vec().unwrap()))
+        .await
+        .unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[1]).await,
+        "Expected NACK for Category 3 Block Ack frame to offline MAC on 2412 MHz"
+    );
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Because Category 3 did NOT set `in_p2p_action`, receiver is ONLY on 2412 MHz, NOT on 2437 MHz.
+    world.chips[0].sink_tx.send(Bytes::from(msg_2437_unicast.clone())).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK on 2437 MHz after Category 3 Block Ack frame on 2412 MHz"
+    );
+
+    // 4. Now re-enter P2P Listen on 2437 MHz and send an off-channel Category 4 (Public Action) frame
+    // on 2412 MHz to `unknown_p2p_mac` (NACKed). Because Category 4 sets `in_p2p_action = true`,
+    // `ack_frame` with `!acked` restores `in_p2p_listen = true` on `listen_freq` (2437 MHz).
+    world.chips[1]
+        .sink_tx
+        .send(Bytes::from(p2p_probe_2462.encode_to_vec().unwrap()))
+        .await
+        .unwrap();
+    assert!(recv_next_tx_info_ack(&mut world.chips[1]).await);
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    let mut public_action_unknown_bytes = Vec::new();
+    public_action_unknown_bytes.extend_from_slice(action_to_unknown_hdr.as_bytes());
+    public_action_unknown_bytes.extend_from_slice(&[4, 9, 0x50, 0x6F, 0x9A, 0x09]);
+    let public_action_unknown_ieee = Ieee80211::decode(&public_action_unknown_bytes).unwrap();
+    let public_action_unknown_2412 = wifi_actor::create_hwsim_msg_from_frame(
+        &public_action_unknown_ieee,
+        &MacAddress::new(unknown_p2p_mac),
+        2412,
+        Some(&MacAddress::new(receiver_mac)),
+    )
+    .unwrap();
+    world.chips[1]
+        .sink_tx
+        .send(Bytes::from(public_action_unknown_2412.encode_to_vec().unwrap()))
+        .await
+        .unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[1]).await,
+        "Expected NACK for off-channel Public Action frame on 2412 MHz when peer is on 2437 MHz"
+    );
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+
+    // Because `ack_frame` with `!acked` transitioned receiver from `in_p2p_action` to `in_p2p_listen`,
+    // receiver is reachable on `listen_freq` (2437 MHz) and NOT reachable on failed TX channel 2412 MHz.
+    world.chips[0].sink_tx.send(Bytes::from(msg_2437_unicast)).await.unwrap();
+    assert!(
+        recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected ACK on Listen Channel 2437 MHz after NACKed Public Action restored listen state"
+    );
+    world.then_chip_receives_payload_and_dst(1, "CheckFreq", receiver_mac).await;
+
+    let msg_2412_unicast = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth,
+        &p2p_bssid,
+        &receiver_mac,
+        &sender_mac,
+        2412,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_2412_unicast)).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK on failed TX channel 2412 MHz after NACK recovery to Listen Channel"
+    );
+
+    // 5. Unrouted/dropped frame (destination 00:00:00:00:00:00 on non-hosted BSSID) is NACKed.
+    let zero_dst = [0x00; 6];
+    let eth_zero = World::create_ethernet_frame(&sender_mac, &zero_dst, b"Dropped");
+    let msg_zero = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth_zero,
+        &p2p_bssid,
+        &zero_dst,
+        &sender_mac,
+        2412,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_zero)).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no ACK for unrouted frame addressed to 00:00:00:00:00:00"
+    );
+
+    // 6. In a 3-device topology (2 peer stations), flooding an unknown non-infra unicast frame
+    // does NOT return a false ACK when an unrelated peer is on-channel (targets_len > 1).
+    let _third_chip = world.given_a_chip(3).await;
+    while world.chips[2].stream_rx.try_recv().is_ok() {}
+    while world.chips[0].stream_rx.try_recv().is_ok() {}
+    while world.chips[1].stream_rx.try_recv().is_ok() {}
+
+    let eth_unknown = World::create_ethernet_frame(&sender_mac, &unknown_p2p_mac, b"Flooded3Peers");
+    let msg_unknown_2412 = crate::hwsim_helper::wrap_ethernet_in_hwsim(
+        &eth_unknown,
+        &p2p_bssid,
+        &unknown_p2p_mac,
+        &sender_mac,
+        2412,
+    )
+    .unwrap();
+    world.chips[0].sink_tx.send(Bytes::from(msg_unknown_2412)).await.unwrap();
+    assert!(
+        !recv_next_tx_info_ack(&mut world.chips[0]).await,
+        "Expected no false ACK when flooding unknown unicast across multiple peers (targets_len > 1)"
+    );
+}

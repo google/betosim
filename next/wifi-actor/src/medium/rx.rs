@@ -73,6 +73,27 @@ impl Medium {
                 .map_err(|e| self.wifi_stats.log_and_incr_err_count(&e))
                 .ok();
         }
+        let has_p2p_ie = frame.ieee80211.is_mgmt()
+            && frame.ieee80211.stype() == netsim_packets::management_subtype::PROBE_REQUEST
+            && frame.ieee80211.get_destination().is_multicast()
+            && frame.attrs.freq == Some(2462)
+            && self.has_p2p_ie(&frame.ieee80211);
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            if let Some(freq) = frame.attrs.freq {
+                client.radio_freq = freq;
+            }
+            let is_mgmt = frame.ieee80211.is_mgmt();
+            let stype = frame.ieee80211.stype();
+            let is_multicast = frame.ieee80211.get_destination().is_multicast();
+            client.in_p2p_listen = has_p2p_ie;
+            client.in_p2p_action = is_mgmt
+                && ((stype == netsim_packets::management_subtype::ACTION
+                    && frame.ieee80211.get_payload().first()
+                        == Some(&netsim_packets::category::PUBLIC))
+                    || ((stype == netsim_packets::management_subtype::PROBE_REQUEST
+                        || stype == netsim_packets::management_subtype::PROBE_RESPONSE)
+                        && !is_multicast));
+        }
 
         // 3. Decryption
         let (plaintext_bytes, plaintext_ieee80211) = self.try_decrypt_frame(&frame.ieee80211);
@@ -161,6 +182,12 @@ impl Medium {
             && !bssid.is_multicast()
             && !self.key_store.has_bssid(&bssid)
         {
+            if !dest_addr.is_multicast()
+                && dest_addr.bytes != [0; 6]
+                && !self.debug.debug_no_wmedium
+            {
+                stations = true;
+            }
             return (infra_target, stations);
         }
 
@@ -197,6 +224,15 @@ impl Medium {
             if addr1.is_multicast() || addr1.is_broadcast() || self.key_store.has_bssid(&addr1) {
                 infra_target = InfraTarget::Ap;
             }
+        }
+
+        if infra_target == InfraTarget::None
+            && !dest_addr.is_multicast()
+            && dest_addr.bytes != [0; 6]
+            && !self.debug.debug_no_wmedium
+            && !ieee80211.get_bssid().is_some_and(|b| self.key_store.has_bssid(&b))
+        {
+            stations = true;
         }
 
         (infra_target, stations)
