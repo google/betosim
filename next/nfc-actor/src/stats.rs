@@ -123,49 +123,50 @@ impl NfcStats {
     }
 
     // Telemetry increments (Bailey)
-    pub fn incr_nci_commands_rx(&self) {
+    pub(crate) fn incr_nci_commands_rx(&self) {
         self.nci_commands_rx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_nci_responses_tx(&self) {
+    pub(crate) fn incr_nci_responses_tx(&self) {
         self.nci_responses_tx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_nci_notifications_tx(&self) {
+    pub(crate) fn incr_nci_notifications_tx(&self) {
         self.nci_notifications_tx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_nci_data_rx(&self) {
+    pub(crate) fn incr_nci_data_rx(&self) {
         self.nci_data_rx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_nci_data_tx(&self) {
+    pub(crate) fn incr_nci_data_tx(&self) {
         self.nci_data_tx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_rf_taps_tx(&self) {
+    pub(crate) fn incr_rf_taps_tx(&self) {
         self.rf_taps_tx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_rf_taps_rx(&self) {
+    pub(crate) fn incr_rf_taps_rx(&self) {
         self.rf_taps_rx.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_card_emulation_count(&self) {
+    pub(crate) fn incr_card_emulation_count(&self) {
         self.card_emulation_count.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_tag_emulation_count(&self) {
+    pub(crate) fn incr_tag_emulation_count(&self) {
         self.tag_emulation_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn incr_nci_error(&self) {
+    pub(crate) fn incr_nci_error(&self) {
         self.nci_errors.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_casimir_error(&self) {
+    pub(crate) fn incr_casimir_error(&self) {
         self.casimir_errors.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_rf_error(&self) {
+    pub(crate) fn incr_rf_error(&self) {
         self.rf_errors.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_other_error(&self) {
+    #[cfg(test)]
+    fn incr_other_error(&self) {
         self.other_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     // API increments (Ours)
-    pub fn incr(&self, api: NfcApi) {
+    pub(crate) fn incr(&self, api: NfcApi) {
         if let Some(counter) = self.nfc_apis.data.get(api as usize) {
             counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -204,7 +205,7 @@ impl NfcStats {
     }
 
     // Export to API proto (Ours)
-    pub fn to_api_proto(&self) -> NfcApiStats {
+    fn to_api_proto(&self) -> NfcApiStats {
         let mut nfc = NfcApiStats::new();
 
         // Android Framework API mappings (aligned with Wi-Fi & UWB)
@@ -265,22 +266,22 @@ impl NfcStats {
 }
 
 impl NfcServiceStats {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
-    pub fn incr_get_status_count(&self) {
+    pub(crate) fn incr_get_status_count(&self) {
         self.get_status.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_set_power_count(&self) {
+    pub(crate) fn incr_set_power_count(&self) {
         self.set_power.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_poll_count(&self) {
+    pub(crate) fn incr_poll_count(&self) {
         self.poll.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn incr_send_apdu_count(&self) {
+    pub(crate) fn incr_send_apdu_count(&self) {
         self.send_apdu.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn to_proto(&self) -> netsim_proto::stats::NfcServiceStats {
+    pub(crate) fn to_proto(&self) -> netsim_proto::stats::NfcServiceStats {
         let mut proto = netsim_proto::stats::NfcServiceStats::new();
         proto.set_get_status(saturate_u32(self.get_status.load(Ordering::Relaxed)));
         proto.set_set_power(saturate_u32(self.set_power.load(Ordering::Relaxed)));

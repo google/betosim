@@ -23,7 +23,7 @@ mod client;
 
 // Re-export core types
 pub use ::casimir;
-pub use actor_framework::ResourceActor;
+use actor_framework::ResourceActor;
 pub use client::NfcClient;
 pub use error::NfcError;
 pub use nfc_actor::{NfcAction, NfcActionResult, NfcActor, NfcMode};
