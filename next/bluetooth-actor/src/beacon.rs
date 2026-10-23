@@ -22,6 +22,8 @@
 //! NOTE: This module is currently missing the complete setup for converting
 //! `BeaconParams` into the appropriate HCI commands for full configuration.
 
+use std::{sync::Arc, time::Duration};
+
 use netsim_model::{BeaconParams, ChipError, ChipId, Interval};
 use netsim_packets::{
     Address as PacketsAddress, AdvertisingFilterPolicy, AdvertisingType, Enable,
@@ -32,7 +34,7 @@ use rootcanal::{Address, Rootcanal};
 use zerocopy::U16;
 
 use crate::{
-    beacon_utils::{MAX_AD_PAYLOAD_LEN, construct_data},
+    beacon_utils::{MAX_AD_PAYLOAD_LEN, construct_data, resolve_tx_power_dbm},
     utils::send_hci_command,
 };
 
@@ -49,20 +51,88 @@ const ADV_CHANNELS_ALL: u8 = 0x07;
 
 /// Creates a new `BeaconChip`.
 pub(crate) fn create(
-    rootcanal: &Rootcanal,
+    rootcanal: &Arc<Rootcanal>,
     chip_id: ChipId,
     params: &BeaconParams,
     device_name: &str,
-) -> Result<(), ChipError> {
+) -> Result<Option<tokio::task::AbortHandle>, ChipError> {
     // Reset the controller first.
     send_hci_command(rootcanal, chip_id, Reset {})?;
+    configure(rootcanal, chip_id, params, device_name, false)
+}
 
+/// Updates an existing `BeaconChip` with new advertising parameters and data.
+pub(crate) fn update(
+    rootcanal: &Arc<Rootcanal>,
+    chip_id: ChipId,
+    params: &BeaconParams,
+    device_name: &str,
+) -> Result<Option<tokio::task::AbortHandle>, ChipError> {
+    configure(rootcanal, chip_id, params, device_name, true)
+}
+
+fn configure(
+    rootcanal: &Arc<Rootcanal>,
+    chip_id: ChipId,
+    params: &BeaconParams,
+    device_name: &str,
+    disable_first: bool,
+) -> Result<Option<tokio::task::AbortHandle>, ChipError> {
     let address: Address = params.ble_beacon.address.parse().map_err(|err| {
         ChipError::InvalidArguments(Box::from(format!(
             "Invalid beacon address '{}': {}",
             params.ble_beacon.address, err
         )))
     })?;
+
+    let tx_power_dbm = resolve_tx_power_dbm(params.ble_beacon.settings.as_ref());
+
+    let adv_data = if let Some(adv_data) = &params.ble_beacon.adv_data {
+        construct_data(
+            adv_data,
+            adv_data.include_device_name.then_some(device_name),
+            true,
+            tx_power_dbm,
+        )
+    } else {
+        construct_data(&netsim_model::AdvertiseData::default(), None, true, tx_power_dbm)
+    };
+
+    let mut adv_data_payload = [0u8; MAX_AD_PAYLOAD_LEN];
+    let Some(dest) = adv_data_payload.get_mut(..adv_data.len()) else {
+        return Err(ChipError::InvalidArguments(Box::from(format!(
+            "Advertising data exceeds maximum payload size of {MAX_AD_PAYLOAD_LEN} bytes"
+        ))));
+    };
+    dest.copy_from_slice(&adv_data);
+
+    let scan_resp_data = if let Some(scan_resp) = &params.ble_beacon.scan_response {
+        construct_data(
+            scan_resp,
+            scan_resp.include_device_name.then_some(device_name),
+            false,
+            tx_power_dbm,
+        )
+    } else {
+        vec![]
+    };
+
+    let mut scan_resp_payload = [0u8; MAX_AD_PAYLOAD_LEN];
+    let Some(dest) = scan_resp_payload.get_mut(..scan_resp_data.len()) else {
+        return Err(ChipError::InvalidArguments(Box::from(format!(
+            "Scan response data exceeds maximum payload size of {MAX_AD_PAYLOAD_LEN} bytes"
+        ))));
+    };
+    dest.copy_from_slice(&scan_resp_data);
+
+    if disable_first {
+        // Disable advertising before reconfiguring parameters.
+        send_hci_command(
+            rootcanal,
+            chip_id,
+            LeSetAdvertisingEnable { advertising_enable: Enable::DISABLED },
+        )?;
+    }
 
     let interval_ms = params
         .ble_beacon
@@ -101,20 +171,6 @@ pub(crate) fn create(
         },
     )?;
 
-    let adv_data = if let Some(adv_data) = &params.ble_beacon.adv_data {
-        construct_data(adv_data, adv_data.include_device_name.then_some(device_name), true)
-    } else {
-        construct_data(&netsim_model::AdvertiseData::default(), None, true)
-    };
-
-    let mut adv_data_payload = [0u8; MAX_AD_PAYLOAD_LEN];
-    let Some(dest) = adv_data_payload.get_mut(..adv_data.len()) else {
-        return Err(ChipError::InvalidArguments(Box::from(format!(
-            "Advertising data exceeds maximum payload size of {MAX_AD_PAYLOAD_LEN} bytes"
-        ))));
-    };
-    dest.copy_from_slice(&adv_data);
-
     send_hci_command(
         rootcanal,
         chip_id,
@@ -123,21 +179,6 @@ pub(crate) fn create(
             advertising_data: adv_data_payload,
         },
     )?;
-
-    // LE Set Scan Response Data
-    let scan_resp_data = if let Some(scan_resp) = &params.ble_beacon.scan_response {
-        construct_data(scan_resp, scan_resp.include_device_name.then_some(device_name), false)
-    } else {
-        vec![]
-    };
-
-    let mut scan_resp_payload = [0u8; MAX_AD_PAYLOAD_LEN];
-    let Some(dest) = scan_resp_payload.get_mut(..scan_resp_data.len()) else {
-        return Err(ChipError::InvalidArguments(Box::from(format!(
-            "Scan response data exceeds maximum payload size of {MAX_AD_PAYLOAD_LEN} bytes"
-        ))));
-    };
-    dest.copy_from_slice(&scan_resp_data);
 
     send_hci_command(
         rootcanal,
@@ -155,5 +196,21 @@ pub(crate) fn create(
         LeSetAdvertisingEnable { advertising_enable: Enable::ENABLED },
     )?;
 
-    Ok(())
+    let timeout_handle =
+        params.ble_beacon.settings.as_ref().map(|s| s.timeout).filter(|&t| t > 0).map(
+            |timeout_ms| {
+                let rc = Arc::clone(rootcanal);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+                    let _ = send_hci_command(
+                        &rc,
+                        chip_id,
+                        LeSetAdvertisingEnable { advertising_enable: Enable::DISABLED },
+                    );
+                })
+                .abort_handle()
+            },
+        );
+
+    Ok(timeout_handle)
 }

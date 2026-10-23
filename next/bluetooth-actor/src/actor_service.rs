@@ -169,7 +169,13 @@ impl ActorService for BluetoothActor {
         // 4. Create Chip Info in Context
         match &mode {
             BluetoothMode::Beacon(params) => {
-                crate::beacon::create(&self.rootcanal, chip_id, params, &chip.name)?
+                let device_name =
+                    if chip.product_name.is_empty() { &chip.name } else { &chip.product_name };
+                if let Some(handle) =
+                    crate::beacon::create(&self.rootcanal, chip_id, params, device_name)?
+                {
+                    self.beacon_timeouts.insert(chip_id, handle);
+                }
             }
             BluetoothMode::Device(params) => {
                 crate::device::create(&self.rootcanal, chip_id, params)?
@@ -180,6 +186,9 @@ impl ActorService for BluetoothActor {
             BluetoothMode::Sniffer(params) => {
                 crate::sniffer::create(&self.rootcanal, chip_id, params)?
             }
+        }
+        if let Some(netsim_model::ChipVariant::Bluetooth(ref mut bluetooth)) = chip.variant {
+            bluetooth.mode = mode;
         }
         self.chips.write().insert(chip_id, chip.clone());
         self.initial_chips.insert(chip_id, chip);
@@ -209,6 +218,13 @@ impl ActorService for BluetoothActor {
             Some(netsim_model::ChipVariantUpdate::Bluetooth(bt_update))
                 if bt_update.preset.is_some() || bt_update.bt_properties.is_some()
         );
+        let has_beacon_update = matches!(
+            &update.variant,
+            Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+                ble_beacon: Some(_),
+                ..
+            }))
+        );
 
         let mut chip = {
             let chips = self.chips.read();
@@ -218,6 +234,21 @@ impl ActorService for BluetoothActor {
 
         if should_update_properties {
             self.apply_chip_properties(id, &chip)?;
+        }
+
+        if has_beacon_update
+            && let Some(ChipVariant::Bluetooth(bt)) = &chip.variant
+            && let BluetoothMode::Beacon(params) = &bt.mode
+        {
+            let device_name =
+                if chip.product_name.is_empty() { &chip.name } else { &chip.product_name };
+            let new_handle = crate::beacon::update(&self.rootcanal, id, params, device_name)?;
+            if let Some(old_handle) = self.beacon_timeouts.remove(&id) {
+                old_handle.abort();
+            }
+            if let Some(handle) = new_handle {
+                self.beacon_timeouts.insert(id, handle);
+            }
         }
 
         self.chips.write().insert(id, chip.clone());
@@ -236,6 +267,10 @@ impl ActorService for BluetoothActor {
         if let Some(chip) = chip_to_delete {
             let chip_id = ChipId(chip.id);
             let device_id = chip.device_id;
+
+            if let Some(handle) = self.beacon_timeouts.remove(&chip_id) {
+                handle.abort();
+            }
 
             info!("Deleting chip {chip_id}");
             self.rootcanal.remove_controller(chip_id.0).to_chip_error()?;
@@ -269,6 +304,10 @@ impl ActorService for BluetoothActor {
                     invalid_packets.lock().clear();
                 }
 
+                if let Some(handle) = self.beacon_timeouts.remove(&id) {
+                    handle.abort();
+                }
+
                 let initial_chip =
                     self.initial_chips.get(&id).ok_or(BluetoothError::not_found(id))?;
 
@@ -280,6 +319,17 @@ impl ActorService for BluetoothActor {
                     *chip = initial_chip.clone();
                     chip.clone()
                 };
+                if let Some(ChipVariant::Bluetooth(bt)) = &chip.variant
+                    && let BluetoothMode::Beacon(params) = &bt.mode
+                {
+                    let device_name =
+                        if chip.product_name.is_empty() { &chip.name } else { &chip.product_name };
+                    if let Some(handle) =
+                        crate::beacon::update(&self.rootcanal, id, params, device_name)?
+                    {
+                        self.beacon_timeouts.insert(id, handle);
+                    }
+                }
                 Ok(BluetoothActionResult::Chip(Box::new(chip)))
             }
             BluetoothAction::GetStatistics => {
@@ -365,5 +415,87 @@ impl BluetoothActor {
                 .map_err(|e| BluetoothError::Rootcanal(Box::new(e)))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use actor_framework::ResourceClient;
+    use device_actor::client::DeviceClient;
+    use netsim_model::{
+        AdvertiseData, AdvertiseSettings, BeaconParams, BleBeacon, BluetoothUpdate, ChipClient,
+        ChipCreate, ChipUpdate, ChipVariantUpdate, DeviceId, TxPower,
+    };
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_beacon_lifecycle_update_reset_delete() {
+        let (device_tx, _device_rx) = mpsc::channel(10);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+        let (actor, client) = crate::new();
+        tokio::spawn(async move {
+            actor.run(BluetoothActor::new(device_client, false)).await;
+        });
+
+        let id = ChipId(1);
+        let mut chip = Chip::new_test_ble("test-beacon");
+        chip.id = id.0;
+        chip.device_id = DeviceId(1);
+        chip.product_name = "BeaconProduct".to_string();
+        chip.variant = Some(ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
+            address: "11:22:33:44:55:66".to_string(),
+            mode: BluetoothMode::Beacon(Box::new(BeaconParams {
+                ble_beacon: BleBeacon {
+                    address: "11:22:33:44:55:66".to_string(),
+                    settings: Some(AdvertiseSettings {
+                        tx_power: Some(TxPower::Dbm(-5)),
+                        scannable: true,
+                        timeout: 5000,
+                        ..Default::default()
+                    }),
+                    adv_data: Some(AdvertiseData {
+                        include_device_name: true,
+                        include_tx_power_level: true,
+                        ..Default::default()
+                    }),
+                    scan_response: Some(AdvertiseData {
+                        include_device_name: true,
+                        ..Default::default()
+                    }),
+                },
+            })),
+            ..Default::default()
+        })));
+        let params = ChipCreate { packet_stream: None, packet_sink: None, chip };
+
+        let created = client.0.create_with_id(id, params).await.expect("create beacon");
+        assert_eq!(created, id);
+
+        let update = ChipUpdate {
+            variant: Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+                ble_beacon: Some(BleBeacon {
+                    address: "11:22:33:44:55:77".to_string(),
+                    settings: Some(AdvertiseSettings {
+                        tx_power: Some(TxPower::Dbm(1)),
+                        timeout: 50,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let updated = client.update(id, update).await.expect("update beacon");
+        assert!(matches!(&updated.variant, Some(ChipVariant::Bluetooth(_))));
+        if let Some(ChipVariant::Bluetooth(bt)) = &updated.variant {
+            assert_eq!(bt.address, "11:22:33:44:55:77");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        client.reset(id).await.expect("reset beacon");
+        client.delete(id).await.expect("delete beacon");
     }
 }

@@ -227,12 +227,34 @@ async fn test_chip_update() {
         z: 0.0,
         ..Default::default()
     });
+    let mut chip_patch = netsim_proto::model::Chip::new();
+    chip_patch.name = "beacon0".to_string();
+    let mut beacon_patch = netsim_proto::model::chip::BleBeacon::new();
+    let mut settings = netsim_proto::model::chip::ble_beacon::AdvertiseSettings::new();
+    settings.set_dbm(-12);
+    settings.timeout = 500;
+    beacon_patch.settings = MessageField::some(settings);
+    let mut adv_data = netsim_proto::model::chip::ble_beacon::AdvertiseData::new();
+    adv_data.include_tx_power_level = true;
+    adv_data.manufacturer_data = vec![0xAA, 0xBB];
+    beacon_patch.adv_data = MessageField::some(adv_data);
+    chip_patch.set_ble_beacon(beacon_patch);
+    patch_fields.chips.push(chip_patch);
     patch_req.device = MessageField::some(patch_fields);
 
     world.when_patch_device(&patch_req).await;
 
-    // Verify position update reflected in device list
+    // Verify position and BLE beacon update reflected in device list
     world.then_device_position_is(device_id, 50.0, 50.0).await;
+    let devices = world.when_list_devices().await;
+    let device = devices.iter().find(|d| d.id == device_id).expect("Device missing");
+    let Some(netsim_proto::model::chip::Chip::BleBeacon(b)) = &device.chips[0].chip else {
+        panic!("Expected BleBeacon chip in ListDevice response");
+    };
+    assert_eq!(b.settings.dbm(), -12);
+    assert_eq!(b.settings.timeout, 500);
+    assert!(b.adv_data.include_tx_power_level);
+    assert_eq!(b.adv_data.manufacturer_data, vec![0xAA, 0xBB]);
 }
 
 // Scenario: Radio State Propagation

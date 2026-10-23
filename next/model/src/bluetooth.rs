@@ -50,6 +50,8 @@ pub struct BluetoothUpdate {
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bt_properties: Option<BtControllerProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ble_beacon: Option<beacon::BleBeacon>,
 }
 
 impl BluetoothUpdate {
@@ -63,6 +65,58 @@ impl BluetoothUpdate {
             bluetooth.bt_properties.config.preset = Some(preset.clone());
         }
         bluetooth.preset = bluetooth.bt_properties.config.preset.clone();
+        if let (Some(patch), BluetoothMode::Beacon(beacon_params)) =
+            (&self.ble_beacon, &mut bluetooth.mode)
+        {
+            if !patch.address.is_empty() {
+                bluetooth.address = patch.address.clone();
+                beacon_params.ble_beacon.address = patch.address.clone();
+            }
+            if let Some(patch_settings) = &patch.settings {
+                let settings = beacon_params
+                    .ble_beacon
+                    .settings
+                    .get_or_insert_with(beacon::AdvertiseSettings::default);
+                if let Some(interval) = &patch_settings.interval {
+                    settings.interval = Some(interval.clone());
+                }
+                if let Some(tx_power) = &patch_settings.tx_power {
+                    settings.tx_power = Some(tx_power.clone());
+                }
+                settings.scannable |= patch_settings.scannable;
+                if patch_settings.timeout != 0 {
+                    settings.timeout = patch_settings.timeout;
+                }
+            }
+            if let Some(patch_adv) = &patch.adv_data {
+                let adv = beacon_params
+                    .ble_beacon
+                    .adv_data
+                    .get_or_insert_with(beacon::AdvertiseData::default);
+                adv.include_device_name |= patch_adv.include_device_name;
+                adv.include_tx_power_level |= patch_adv.include_tx_power_level;
+                if !patch_adv.manufacturer_data.is_empty() {
+                    adv.manufacturer_data = patch_adv.manufacturer_data.clone();
+                }
+                if !patch_adv.services.is_empty() {
+                    adv.services = patch_adv.services.clone();
+                }
+            }
+            if let Some(patch_scan) = &patch.scan_response {
+                let scan = beacon_params
+                    .ble_beacon
+                    .scan_response
+                    .get_or_insert_with(beacon::AdvertiseData::default);
+                scan.include_device_name |= patch_scan.include_device_name;
+                scan.include_tx_power_level |= patch_scan.include_tx_power_level;
+                if !patch_scan.manufacturer_data.is_empty() {
+                    scan.manufacturer_data = patch_scan.manufacturer_data.clone();
+                }
+                if !patch_scan.services.is_empty() {
+                    scan.services = patch_scan.services.clone();
+                }
+            }
+        }
     }
 }
 
@@ -342,5 +396,68 @@ mod tests {
         assert_eq!(PacketType::from_i32(100), None);
         assert_eq!(PacketType::from_u8(4), Some(PacketType::Event));
         assert_eq!(PacketType::from_u8(255), None);
+    }
+
+    #[test]
+    fn test_bluetooth_update_apply_ble_beacon() {
+        let mut bt = Bluetooth {
+            address: "00:11:22:33:44:55".to_string(),
+            mode: BluetoothMode::Beacon(Box::new(BeaconParams {
+                ble_beacon: beacon::BleBeacon {
+                    address: "00:11:22:33:44:55".to_string(),
+                    settings: None,
+                    adv_data: None,
+                    scan_response: None,
+                },
+            })),
+            ..Default::default()
+        };
+
+        let update = BluetoothUpdate {
+            ble_beacon: Some(beacon::BleBeacon {
+                address: "AA:BB:CC:DD:EE:FF".to_string(),
+                settings: Some(beacon::AdvertiseSettings {
+                    interval: Some(beacon::Interval::Milliseconds(250)),
+                    tx_power: Some(beacon::TxPower::Dbm(-5)),
+                    scannable: true,
+                    timeout: 500,
+                }),
+                adv_data: Some(beacon::AdvertiseData {
+                    include_device_name: true,
+                    include_tx_power_level: true,
+                    manufacturer_data: vec![1, 2, 3],
+                    services: vec![beacon::Service { uuid: "180D".to_string(), data: vec![4] }],
+                }),
+                scan_response: Some(beacon::AdvertiseData {
+                    include_device_name: true,
+                    include_tx_power_level: false,
+                    manufacturer_data: vec![5, 6],
+                    services: vec![beacon::Service { uuid: "180F".to_string(), data: vec![7] }],
+                }),
+            }),
+            ..Default::default()
+        };
+
+        update.apply(&mut bt);
+        assert_eq!(bt.address, "AA:BB:CC:DD:EE:FF");
+        assert!(matches!(&bt.mode, BluetoothMode::Beacon(_)));
+        if let BluetoothMode::Beacon(params) = &bt.mode {
+            assert_eq!(params.ble_beacon.address, "AA:BB:CC:DD:EE:FF");
+            let settings = params.ble_beacon.settings.as_ref().unwrap();
+            assert_eq!(settings.interval, Some(beacon::Interval::Milliseconds(250)));
+            assert_eq!(settings.tx_power, Some(beacon::TxPower::Dbm(-5)));
+            assert!(settings.scannable);
+            assert_eq!(settings.timeout, 500);
+            let adv = params.ble_beacon.adv_data.as_ref().unwrap();
+            assert!(adv.include_device_name);
+            assert!(adv.include_tx_power_level);
+            assert_eq!(adv.manufacturer_data, vec![1, 2, 3]);
+            assert_eq!(adv.services.len(), 1);
+            let scan = params.ble_beacon.scan_response.as_ref().unwrap();
+            assert!(scan.include_device_name);
+            assert!(!scan.include_tx_power_level);
+            assert_eq!(scan.manufacturer_data, vec![5, 6]);
+            assert_eq!(scan.services.len(), 1);
+        }
     }
 }

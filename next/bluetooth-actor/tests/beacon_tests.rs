@@ -138,3 +138,183 @@ async fn test_beacon_advertises_standard_ble_flags() {
     assert!(!reports.is_empty(), "Expected at least one scan report");
     assert_eq!(reports[0].payload, vec![0x02, 0x01, 0x04]);
 }
+
+// Scenario: Beacon advertisement reflects configured TX power level
+#[tokio::test]
+async fn test_beacon_advertises_configured_tx_power() {
+    let mut world = world::World::new();
+
+    world.given_beacon("Beacon").await;
+    world.given_scanner("Scanner").await;
+
+    let id = *world.chips.get("Beacon").unwrap();
+    let update = netsim_model::ChipUpdate {
+        variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+            ble_beacon: Some(netsim_model::BleBeacon {
+                settings: Some(netsim_model::AdvertiseSettings {
+                    tx_power: Some(netsim_model::TxPower::TxPowerLevel(
+                        netsim_model::AdvertiseTxPower::Low,
+                    )),
+                    scannable: true,
+                    ..Default::default()
+                }),
+                adv_data: Some(netsim_model::AdvertiseData {
+                    include_tx_power_level: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    world.client.0.update(id, update).await.expect("Failed to patch beacon");
+
+    // Flags (0x02, 0x01, 0x04) + TX Power Level (-15 dBm = 0xF1)
+    let expected = vec![0x02, 0x01, 0x04, 0x02, 0x0A, (-15i8) as u8];
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        let reports = world.receive_scan_report("Scanner").await;
+        if reports.iter().any(|r| r.payload == expected) {
+            return;
+        }
+    }
+    panic!("Scanner did not observe patched TX power payload {:?}", expected);
+}
+
+// Scenario: Beacon patch updates manufacturer data dynamically
+#[tokio::test]
+async fn test_beacon_patch_updates_advertising_data() {
+    let mut world = world::World::new();
+
+    world.given_beacon("Beacon").await;
+    world.given_scanner("Scanner").await;
+
+    let id = *world.chips.get("Beacon").unwrap();
+    let update = netsim_model::ChipUpdate {
+        variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+            ble_beacon: Some(netsim_model::BleBeacon {
+                settings: Some(netsim_model::AdvertiseSettings {
+                    interval: Some(netsim_model::Interval::Milliseconds(50)),
+                    tx_power: Some(netsim_model::TxPower::Dbm(-8)),
+                    scannable: true,
+                    ..Default::default()
+                }),
+                adv_data: Some(netsim_model::AdvertiseData {
+                    include_tx_power_level: true,
+                    manufacturer_data: vec![0xDE, 0xAD],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    world.client.0.update(id, update).await.expect("Failed to patch beacon");
+
+    // Flags (3) + Manufacturer Data (4) + TX Power (-8 dBm) (3)
+    let expected = vec![0x02, 0x01, 0x04, 0x03, 0xFF, 0xDE, 0xAD, 0x02, 0x0A, (-8i8) as u8];
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        let reports = world.receive_scan_report("Scanner").await;
+        if reports.iter().any(|r| r.payload == expected) {
+            return;
+        }
+    }
+    panic!("Scanner did not observe patched advertising data {:?}", expected);
+}
+
+// Scenario: Beacon stops advertising after configured timeout expires
+#[tokio::test]
+async fn test_beacon_timeout_disables_advertising() {
+    let mut world = world::World::new();
+
+    world.given_beacon("Beacon").await;
+    world.given_scanner("Scanner").await;
+
+    let id = *world.chips.get("Beacon").unwrap();
+    let update = netsim_model::ChipUpdate {
+        variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+            ble_beacon: Some(netsim_model::BleBeacon {
+                settings: Some(netsim_model::AdvertiseSettings {
+                    interval: Some(netsim_model::Interval::Milliseconds(30)),
+                    scannable: true,
+                    timeout: 120,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    world.client.0.update(id, update).await.expect("Failed to patch beacon with timeout");
+
+    // Wait for timeout to expire plus buffer
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // Drain any buffered packets received before timeout
+    let rx = world.sinks.get_mut("Scanner").unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // Verify no new packets arrive over the next 200ms
+    let res = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+    assert!(res.is_err(), "Expected no advertising packets after beacon timeout expired");
+}
+
+// Scenario: Re-patching beacon timeout cancels the previous timeout task
+#[tokio::test]
+async fn test_beacon_repatch_cancels_previous_timeout() {
+    let mut world = world::World::new();
+
+    world.given_beacon("Beacon").await;
+    world.given_scanner("Scanner").await;
+
+    let id = *world.chips.get("Beacon").unwrap();
+
+    // First patch with a short timeout (150ms)
+    let first_update = netsim_model::ChipUpdate {
+        variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+            ble_beacon: Some(netsim_model::BleBeacon {
+                settings: Some(netsim_model::AdvertiseSettings {
+                    interval: Some(netsim_model::Interval::Milliseconds(30)),
+                    scannable: true,
+                    timeout: 150,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    world.client.0.update(id, first_update).await.expect("Failed first beacon patch");
+
+    // Re-patch immediately with a much longer timeout (2000ms)
+    let second_update = netsim_model::ChipUpdate {
+        variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+            ble_beacon: Some(netsim_model::BleBeacon {
+                settings: Some(netsim_model::AdvertiseSettings {
+                    interval: Some(netsim_model::Interval::Milliseconds(30)),
+                    scannable: true,
+                    timeout: 2000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    world.client.0.update(id, second_update).await.expect("Failed second beacon patch");
+
+    // Sleep past the first timeout (250ms > 150ms)
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let rx = world.sinks.get_mut("Scanner").unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // Beacon should still be advertising because the 150ms timeout was cancelled
+    let reports = world.receive_scan_report("Scanner").await;
+    assert!(!reports.is_empty(), "Expected beacon to continue advertising after cancelled timeout");
+}

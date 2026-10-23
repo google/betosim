@@ -36,6 +36,20 @@ const AD_TYPE_MANUFACTURER_SPECIFIC: u8 = 0xFF;
 const AD_FLAG_BR_EDR_NOT_SUPPORTED: u8 = 0x04;
 const FLAGS_DATA: [u8; 3] = [0x02, AD_TYPE_FLAGS, AD_FLAG_BR_EDR_NOT_SUPPORTED];
 
+/// Resolves the transmit power in dBm from `AdvertiseSettings`.
+pub(crate) fn resolve_tx_power_dbm(settings: Option<&netsim_model::AdvertiseSettings>) -> i8 {
+    match settings.and_then(|s| s.tx_power.as_ref()) {
+        Some(netsim_model::TxPower::TxPowerLevel(level)) => match level {
+            netsim_model::AdvertiseTxPower::UltraLow => -21,
+            netsim_model::AdvertiseTxPower::Low => -15,
+            netsim_model::AdvertiseTxPower::Medium => -7,
+            netsim_model::AdvertiseTxPower::High => 1,
+        },
+        Some(netsim_model::TxPower::Dbm(dbm)) => (*dbm).clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+        None => DEFAULT_TX_POWER_DBM,
+    }
+}
+
 /// Helper to construct advertising or scan response data payload.
 ///
 /// Per Bluetooth Core Specification Supplement (CSS) Part A, Section 1.3.1,
@@ -46,6 +60,7 @@ pub(crate) fn construct_data(
     adv_data: &netsim_model::AdvertiseData,
     device_name: Option<&str>,
     include_flags: bool,
+    tx_power_dbm: i8,
 ) -> Vec<u8> {
     let mut data = Vec::new();
     if include_flags {
@@ -79,7 +94,7 @@ pub(crate) fn construct_data(
     }
     // Tx Power Level
     if adv_data.include_tx_power_level && data.len() + TX_POWER_TOTAL_LEN <= MAX_AD_PAYLOAD_LEN {
-        data.extend([TX_POWER_AD_LEN, AD_TYPE_TX_POWER_LEVEL, DEFAULT_TX_POWER_DBM as u8]);
+        data.extend([TX_POWER_AD_LEN, AD_TYPE_TX_POWER_LEVEL, tx_power_dbm as u8]);
     }
 
     // Service UUIDs (Grouped by length into single AD structures)
@@ -171,7 +186,15 @@ pub const fn is_le_advertising_report(packet: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{construct_data as construct_data_with_tx_power, *};
+
+    fn construct_data(
+        adv_data: &netsim_model::AdvertiseData,
+        device_name: Option<&str>,
+        include_flags: bool,
+    ) -> Vec<u8> {
+        construct_data_with_tx_power(adv_data, device_name, include_flags, DEFAULT_TX_POWER_DBM)
+    }
 
     #[test]
     fn test_construct_data_basic() {
@@ -397,5 +420,27 @@ mod tests {
         // Mismatched subevent code (e.g. 0x01 LE Connection Complete)
         let wrong_subevent = [0x04, 0x3E, 0x02, 0x01, 0x01];
         assert!(!is_le_advertising_report(&wrong_subevent));
+    }
+
+    #[test]
+    fn test_resolve_tx_power_dbm() {
+        assert_eq!(resolve_tx_power_dbm(None), DEFAULT_TX_POWER_DBM);
+
+        let mut settings = netsim_model::AdvertiseSettings::default();
+        settings.tx_power = None;
+        assert_eq!(resolve_tx_power_dbm(Some(&settings)), DEFAULT_TX_POWER_DBM);
+
+        for (level, expected) in [
+            (netsim_model::AdvertiseTxPower::UltraLow, -21),
+            (netsim_model::AdvertiseTxPower::Low, -15),
+            (netsim_model::AdvertiseTxPower::Medium, -7),
+            (netsim_model::AdvertiseTxPower::High, 1),
+        ] {
+            settings.tx_power = Some(netsim_model::TxPower::TxPowerLevel(level));
+            assert_eq!(resolve_tx_power_dbm(Some(&settings)), expected);
+        }
+
+        settings.tx_power = Some(netsim_model::TxPower::Dbm(-12));
+        assert_eq!(resolve_tx_power_dbm(Some(&settings)), -12);
     }
 }
