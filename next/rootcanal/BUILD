@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_rust//rust:defs.bzl", "rust_test_suite")
 load("//next:defs.bzl", "netsim_rust_library")
 
 # Rootcanal
@@ -25,9 +24,10 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "rootcanal",
     edition = "2024",
-    enable_integration_test = False,
     test_deps = [
         "@pdl-runtime",
+        "@tokio",
+        "@tracing-subscriber",
     ],
     visibility = ["//next:__subpackages__"],
     deps = [
@@ -38,28 +38,5 @@ netsim_rust_library(
         "@rootcanal//:rootcanal_rs",
         "@thiserror",
         "@tracing",
-    ],
-)
-
-rust_test_suite(
-    name = "tests",
-    size = "small",
-    srcs = glob(["tests/**/*.rs"]),
-    edition = "2024",
-    rustc_flags = [
-        "-C",
-        "link-arg=-lc",
-    ],
-    tags = ["general_tests"],
-    deps = [
-        ":rootcanal",
-        "//next/packets",
-        "@bytes",
-        "@cxx.rs//:cxx",
-        "@pdl-runtime",
-        "@rootcanal//:rootcanal_rs",
-        "@tokio",
-        "@tracing",
-        "@tracing-subscriber",
     ],
 )

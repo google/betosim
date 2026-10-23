@@ -78,7 +78,45 @@ rust_test_host {
         "libpdl_runtime",
         "librootcanal_rs",
         "libthiserror",
+        "libtokio",
         "libtracing",
+        "libtracing_subscriber",
+    ],
+    shared_libs: [
+        "lib_rootcanal_ffi",
+    ],
+}
+
+rust_test_host {
+    name: "libnetsim_next_rootcanal_integration_tests",
+    crate_name: "rootcanal_tests",
+    edition: "2024",
+    crate_root: "tests/mod.rs",
+    test_suites: [
+        "general_tests",
+    ],
+    srcs: [
+        "tests/hci_exchange.rs",
+        "tests/ll_exchange.rs",
+        "tests/mod.rs",
+        "tests/world.rs",
+    ],
+    features: [
+        "cuttlefish",
+        "testing",
+    ],
+    lints: "none",
+    rustlibs: [
+        "libbytes",
+        "libnetsim_next_packets_testing",
+        "libnetsim_next_rootcanal_testing",
+        "libparking_lot",
+        "libpdl_runtime",
+        "librootcanal_rs",
+        "libthiserror",
+        "libtokio",
+        "libtracing",
+        "libtracing_subscriber",
     ],
     shared_libs: [
         "lib_rootcanal_ffi",
