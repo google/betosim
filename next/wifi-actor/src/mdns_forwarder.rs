@@ -23,10 +23,19 @@ const MDNS_IP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const MDNS_MULTICAST_MAC: [u8; 6] = [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB];
 const MDNS_SRC_MAC: [u8; 6] = [0x02, 0x15, 0xB2, 0x00, 0x00, 0x01];
+const SLIRP_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+
+/// Rewrites host/container socket source IPv4 addresses to the SLIRP virtual
+/// gateway IP (`10.0.2.2`) so guest Wi-Fi clients see an on-link sender whose
+/// follow-up unicast responses route back to the host/container loopback.
+fn resolve_mdns_source_ip(_src_ip: Ipv4Addr) -> Ipv4Addr {
+    SLIRP_GATEWAY_IP
+}
 
 fn create_mdns_frame(packet: &[u8], ip_addr: Ipv4Addr) -> Vec<u8> {
+    let src_ip = resolve_mdns_source_ip(ip_addr);
     PacketBuilder::new(MDNS_MULTICAST_MAC, MDNS_SRC_MAC, ether_type::IPV4)
-        .ipv4(ip_addr.octets(), MDNS_IP.octets(), IP_P_UDP)
+        .ipv4(src_ip.octets(), MDNS_IP.octets(), IP_P_UDP)
         .udp(MDNS_PORT, MDNS_PORT)
         .payload(packet)
 }
@@ -106,7 +115,7 @@ mod tests {
         assert_eq!(ipv4.ihl(), 5);
         assert_eq!(ipv4.ttl, 64);
         assert_eq!(ipv4.protocol, IP_P_UDP);
-        assert_eq!(ipv4.source_addr, ip_addr.octets());
+        assert_eq!(ipv4.source_addr, SLIRP_GATEWAY_IP.octets());
         assert_eq!(ipv4.dest_addr, MDNS_IP.octets());
         assert_eq!(ipv4.total_length.get() as usize, ip_bytes.len());
         assert_ne!(ipv4.header_checksum.get(), 0);
@@ -117,7 +126,25 @@ mod tests {
         assert_eq!(udp.dest_port.get(), MDNS_PORT);
         assert_eq!(udp.length.get() as usize, udp_bytes.len());
         assert_ne!(udp.checksum.get(), 0);
-        assert_eq!(udp_checksum(udp_bytes, ip_addr, MDNS_IP), u16::MAX);
+        assert_eq!(udp_checksum(udp_bytes, SLIRP_GATEWAY_IP, MDNS_IP), u16::MAX);
         assert_eq!(udp_payload, packet);
+    }
+
+    #[test]
+    fn test_mdns_forwarder_isolates_container_source_ip_to_slirp_gateway() {
+        let packet = b"container mdns announcement";
+        for outer_ip in [
+            Ipv4Addr::new(172, 17, 0, 2),
+            Ipv4Addr::new(192, 168, 1, 50),
+            Ipv4Addr::LOCALHOST,
+            SLIRP_GATEWAY_IP,
+        ] {
+            let frame = create_mdns_frame(packet, outer_ip);
+            let (_eth, ip_bytes) = EthernetFrame::parse(&frame).expect("valid ethernet frame");
+            let (ipv4, udp_bytes) = Ipv4Header::parse(ip_bytes).expect("valid ipv4 header");
+            assert_eq!(ipv4.source_addr, SLIRP_GATEWAY_IP.octets());
+            assert_eq!(ipv4_checksum(&ip_bytes[..ipv4.header_length()]), 0);
+            assert_eq!(udp_checksum(udp_bytes, SLIRP_GATEWAY_IP, MDNS_IP), u16::MAX);
+        }
     }
 }

@@ -311,6 +311,10 @@ impl SlirpActor {
         self.backend_type
     }
 
+    pub fn http_proxy(&self) -> Option<&str> {
+        self.http_proxy.as_deref()
+    }
+
     #[cfg(not(feature = "cuttlefish"))]
     fn subnet_params(&self) -> SlirpSubnetParams {
         SlirpSubnetParams {
@@ -422,5 +426,125 @@ impl Drop for SlirpActor {
             info!("Shutting down Slirp backend instance");
             instance.shutdown();
         }
+    }
+}
+
+/// Timeout for probing reachability of an inherited ambient loopback
+/// `http_proxy`.
+pub const AMBIENT_PROXY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn extract_loopback_proxy_addrs(proxy: &str) -> Option<Vec<SocketAddr>> {
+    let (scheme, rest) = match proxy.split_once("://") {
+        Some((s, r)) => (Some(s), r),
+        None => (None, proxy),
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    if host_port.is_empty() {
+        return None;
+    }
+
+    let default_port =
+        if scheme.is_some_and(|s| s.eq_ignore_ascii_case("https")) { 443 } else { 80 };
+
+    let (host, with_port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (ipv6_host, tail) = bracketed.split_once(']')?;
+        let port = if let Some(port_str) = tail.strip_prefix(':') {
+            port_str.parse::<u16>().ok()?
+        } else if tail.is_empty() {
+            default_port
+        } else {
+            return None;
+        };
+        (ipv6_host, format!("[{ipv6_host}]:{port}"))
+    } else if let Some((h, p)) = host_port.rsplit_once(':') {
+        if h.contains(':') {
+            return None;
+        }
+        let port = p.parse::<u16>().ok()?;
+        (h, format!("{h}:{port}"))
+    } else {
+        (host_port, format!("{host_port}:{default_port}"))
+    };
+
+    let is_loopback_host = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !is_loopback_host {
+        return None;
+    }
+
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<SocketAddr> =
+        with_port.to_socket_addrs().ok()?.filter(|a| a.ip().is_loopback()).collect();
+    if addrs.is_empty() { None } else { Some(addrs) }
+}
+
+/// Validates an inherited ambient `http_proxy` value.
+///
+/// When `netsimd` runs inside an isolated container network namespace, an
+/// inherited `http_proxy=http://127.0.0.1:<port>` (or `localhost:<port>`,
+/// `[::1]:<port>`) from the outer host environment may have no listener inside
+/// the container. If `proxy` targets a loopback address and no resolved
+/// loopback address accepts a TCP connection within
+/// [`AMBIENT_PROXY_PROBE_TIMEOUT`], logs a warning and returns `None` so SLIRP
+/// falls back to direct egress instead of blackholing guest TCP traffic.
+pub fn validate_ambient_http_proxy(proxy: Option<String>) -> Option<String> {
+    let proxy = proxy?;
+    let trimmed = proxy.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(addrs) = extract_loopback_proxy_addrs(trimmed)
+        && !addrs.iter().any(|addr| {
+            std::net::TcpStream::connect_timeout(addr, AMBIENT_PROXY_PROBE_TIMEOUT).is_ok()
+        })
+    {
+        tracing::warn!(
+            "Ambient http_proxy '{trimmed}' is unreachable on loopback in current network namespace; falling back to direct SLIRP egress"
+        );
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+
+    use super::*;
+
+    #[test]
+    fn test_validate_ambient_http_proxy_unreachable_loopback_cleared() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        assert_eq!(
+            validate_ambient_http_proxy(Some(format!("http://127.0.0.1:{closed_port}"))),
+            None
+        );
+        assert_eq!(validate_ambient_http_proxy(Some(format!("localhost:{closed_port}"))), None);
+        assert_eq!(
+            validate_ambient_http_proxy(Some(format!("http://user:pass@[::1]:{closed_port}"))),
+            None
+        );
+    }
+
+    #[test]
+    fn test_validate_ambient_http_proxy_reachable_loopback_preserved() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let open_port = listener.local_addr().unwrap().port();
+        let proxy = format!("http://127.0.0.1:{open_port}");
+
+        assert_eq!(validate_ambient_http_proxy(Some(proxy.clone())), Some(proxy));
+    }
+
+    #[test]
+    fn test_validate_ambient_http_proxy_non_loopback_preserved() {
+        let proxy = "http://proxy.example.com:8080".to_string();
+        assert_eq!(validate_ambient_http_proxy(Some(proxy.clone())), Some(proxy));
+
+        let ip_proxy = "http://192.168.1.10:3128".to_string();
+        assert_eq!(validate_ambient_http_proxy(Some(ip_proxy.clone())), Some(ip_proxy));
     }
 }

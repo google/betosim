@@ -23,8 +23,8 @@ mod slirp_client;
 use actor_framework::ResourceActor;
 pub use error::SlirpError;
 pub use slirp_actor::{
-    SlirpActor, SlirpBackend, SlirpConfig, SlirpCreate, SlirpIpv4Lease, SlirpIpv6Lease, SlirpLease,
-    SlirpReq, SlirpStatus,
+    AMBIENT_PROXY_PROBE_TIMEOUT, SlirpActor, SlirpBackend, SlirpConfig, SlirpCreate,
+    SlirpIpv4Lease, SlirpIpv6Lease, SlirpLease, SlirpReq, SlirpStatus, validate_ambient_http_proxy,
 };
 pub use slirp_client::SlirpClient;
 

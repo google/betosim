@@ -50,3 +50,23 @@ async fn test_http_proxy_wiring() {
         run_http_proxy_wiring_test(backend).await;
     }
 }
+
+#[tokio::test]
+async fn test_unreachable_ambient_loopback_http_proxy_falls_back_to_direct_egress() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let validated =
+        slirp_actor::validate_ambient_http_proxy(Some(format!("http://127.0.0.1:{closed_port}")));
+    assert_eq!(validated, None);
+
+    let actor = SlirpActor::new_with_backend(
+        slirp_actor::SlirpConfig::default(),
+        validated,
+        None,
+        SlirpBackend::Native,
+    )
+    .await;
+    assert_eq!(actor.http_proxy(), None);
+}
