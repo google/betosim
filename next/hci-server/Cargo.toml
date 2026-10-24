@@ -16,6 +16,11 @@
 name = "hci-server"
 version = "0.1.0"
 edition = "2024"
+autotests = false
+
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
 
 [dependencies]
 bytes = "1.4"
@@ -30,6 +35,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 
 [dev-dependencies]
+actor-framework = { path = "../actor-framework", features = ["testing"] }
 hci-server = { path = ".", features = ["testing"] }
 
 [features]

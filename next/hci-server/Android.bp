@@ -76,8 +76,42 @@ rust_test_host {
     rustlibs: [
         "libbytes",
         "libfutures",
+        "libnetsim_next_actor_framework_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_device_api_testing",
+        "libnetsim_next_model_testing",
+        "libnetsim_next_packet_stream_testing",
+        "libtokio",
+        "libtokio_stream",
+        "libtokio_util",
+        "libtracing",
+    ],
+}
+
+rust_test_host {
+    name: "libnetsim_next_hci_server_integration_tests",
+    crate_name: "hci_server_tests",
+    edition: "2024",
+    crate_root: "tests/mod.rs",
+    test_suites: [
+        "general_tests",
+    ],
+    srcs: [
+        "tests/mod.rs",
+        "tests/world.rs",
+    ],
+    features: [
+        "cuttlefish",
+        "testing",
+    ],
+    lints: "none",
+    rustlibs: [
+        "libbytes",
+        "libfutures",
+        "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_device_actor_testing",
+        "libnetsim_next_device_api_testing",
+        "libnetsim_next_hci_server_testing",
         "libnetsim_next_model_testing",
         "libnetsim_next_packet_stream_testing",
         "libtokio",

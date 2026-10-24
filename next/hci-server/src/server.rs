@@ -143,7 +143,13 @@ async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: D
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use actor_framework::MockActorClient;
+    use device_actor::DeviceActor;
+    use device_api::{DeviceAction, DeviceActionResult, DeviceId};
     use futures::SinkExt;
+    use netsim_model::ChipId;
 
     use super::*;
 
@@ -170,5 +176,58 @@ mod tests {
         assert_eq!(request.device_config.name, "socket-127.0.0.1:1234");
         assert!(request.device_config.visible);
         assert!(!request.device_config.builtin);
+    }
+
+    #[tokio::test]
+    async fn test_handle_hci_client_broken_pipe_after_socket_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_addr = listener.local_addr().unwrap();
+
+        let mut client_socket = TcpStream::connect(bind_addr).await.unwrap();
+        let (server_socket, peer_addr) = listener.accept().await.unwrap();
+
+        let (req_tx, mut req_rx) = mpsc::channel(1);
+        let mut mock = MockActorClient::<DeviceActor>::new();
+        mock.expect_perform_action().once().returning(move |id, action| {
+            assert!(id.is_none());
+            match action {
+                DeviceAction::AddChipByGuid { params } => {
+                    req_tx.try_send(*params).unwrap();
+                    Ok(DeviceActionResult::AddChipByGuidSuccess {
+                        device_id: DeviceId(1),
+                        chip_id: ChipId(1),
+                    })
+                }
+                other => panic!("Unexpected DeviceAction: {other:?}"),
+            }
+        });
+
+        handle_hci_client(server_socket, peer_addr, DeviceClient::new(Box::new(mock))).await;
+
+        let mut added = req_rx.recv().await.unwrap();
+        let packet_stream = added.packet_stream.take().unwrap();
+        let mut packet_sink = added.packet_sink.take().unwrap();
+
+        // Dropping `packet_stream` closes `stream_rx`, so the next H4 frame from the socket
+        // causes `stream_tx.send` to fail and terminates the read task cleanly.
+        drop(packet_stream);
+        client_socket.write_all(&[0x01, 0x03, 0x0c, 0x00]).await.unwrap();
+
+        // Dropping `client_socket` closes the peer TCP connection; subsequent writes on
+        // `socket_tx` fail and terminate the write task, causing `packet_sink` to return
+        // `io::ErrorKind::BrokenPipe`.
+        drop(client_socket);
+        let payload = Bytes::from_static(&[0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00]);
+        let err = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match packet_sink.send(payload.clone()).await {
+                    Ok(()) => tokio::time::sleep(Duration::from_millis(1)).await,
+                    Err(err) => return err,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for BrokenPipe error after socket disconnect");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     }
 }

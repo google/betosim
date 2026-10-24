@@ -21,6 +21,9 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "hci_server",
     edition = "2024",
+    test_deps = [
+        "//next/actor-framework",
+    ],
     deps = [
         "//next/device-actor",
         "//next/device-api",
