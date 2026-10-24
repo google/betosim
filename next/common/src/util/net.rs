@@ -79,6 +79,45 @@ pub fn bind_tcp_loopback(port: u16) -> std::io::Result<TcpListener> {
     }
 }
 
+/// Binds a TCP loopback listener on `requested_port`, falling back to an
+/// OS-assigned ephemeral port (`0`) when `!is_explicit` and `requested_port`
+/// fails with [`std::io::ErrorKind::AddrInUse`].
+///
+/// Returns `Ok(Some(listener))` on success, `Ok(None)` when `!is_explicit` and
+/// binding fails (logging a warning), or `Err(error)` when `is_explicit` and
+/// binding `requested_port` fails.
+pub fn bind_tcp_loopback_with_ephemeral_fallback(
+    requested_port: u16,
+    is_explicit: bool,
+    server_name: &str,
+) -> std::io::Result<Option<TcpListener>> {
+    match bind_tcp_loopback(requested_port) {
+        Ok(listener) => Ok(Some(listener)),
+        Err(error) if !is_explicit && error.kind() == std::io::ErrorKind::AddrInUse => {
+            warn!(
+                %error,
+                requested_port,
+                "{server_name} port {requested_port} in use; falling back to ephemeral port 0"
+            );
+            match bind_tcp_loopback(0) {
+                Ok(listener) => Ok(Some(listener)),
+                Err(fallback_error) => {
+                    warn!(%fallback_error, "Failed to bind {server_name} on ephemeral port");
+                    Ok(None)
+                }
+            }
+        }
+        Err(error) => {
+            if is_explicit {
+                Err(error)
+            } else {
+                warn!(%error, "Failed to start {server_name}");
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -166,5 +205,26 @@ mod tests {
         let mut buf = [0u8; 4];
         server_stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ping");
+    }
+
+    #[tokio::test]
+    async fn test_bind_tcp_loopback_with_ephemeral_fallback() {
+        let occupied = bind_tcp_loopback(0).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        // Implicit default port in use falls back to OS-assigned ephemeral port 0.
+        let fallback =
+            bind_tcp_loopback_with_ephemeral_fallback(occupied_port, false, "HCI socket server")
+                .unwrap()
+                .expect("Expected ephemeral fallback listener");
+        let fallback_port = fallback.local_addr().unwrap().port();
+        assert_ne!(fallback_port, 0);
+        assert_ne!(fallback_port, occupied_port);
+
+        // Explicitly requested port in use fails with AddrInUse.
+        let explicit_err =
+            bind_tcp_loopback_with_ephemeral_fallback(occupied_port, true, "HCI socket server")
+                .unwrap_err();
+        assert_eq!(explicit_err.kind(), std::io::ErrorKind::AddrInUse);
     }
 }

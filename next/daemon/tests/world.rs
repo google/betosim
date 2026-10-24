@@ -156,16 +156,57 @@ impl World {
         &self._temp_dir
     }
 
-    /// Lets the OS assign random available ports unless a scenario set them.
+    /// Lets the OS assign random available ports unless a scenario set them or
+    /// tests instance-specific default port resolution.
     fn with_test_ports(mut args: daemon::Args) -> daemon::Args {
-        if args.hci_port.is_none() {
+        if args.instance.is_none() && args.hci_port.is_none() {
             args.hci_port = Some(0);
         }
         #[cfg(feature = "cuttlefish")]
-        if args.test_port.is_none() {
+        if args.instance.is_none() && args.test_port.is_none() {
             args.test_port = Some(0);
         }
         args
+    }
+
+    /// Then `netsim_{instance}.ini` records non-zero ephemeral `hci.port` (and
+    /// `test.port` under `cuttlefish`) distinct from the occupied default ports
+    /// and matching the running daemon's bound ports.
+    pub fn then_ini_records_ephemeral_hci_and_test_ports(
+        &self,
+        instance: u16,
+        occupied_hci_port: u16,
+        #[cfg(feature = "cuttlefish")] occupied_test_port: u16,
+    ) {
+        let daemon = self.daemon.as_ref().expect("Daemon not available");
+        let ini_path = self._temp_dir.join(common::util::ini_file::get_ini_filename(instance));
+        let content = std::fs::read_to_string(&ini_path).expect("Failed to read netsim ini");
+        let ini_map = common::util::ini_file::parse_ini(
+            &content,
+            &common::util::ini_file::IniParserOptions::default(),
+        )
+        .expect("Failed to parse netsim ini");
+
+        let recorded_hci_port: u16 = ini_map
+            .get("hci.port")
+            .expect("hci.port must be recorded in netsim.ini")
+            .parse()
+            .expect("hci.port must be u16");
+        assert_ne!(recorded_hci_port, 0);
+        assert_ne!(recorded_hci_port, occupied_hci_port);
+        assert_eq!(daemon.hci_port(), Some(recorded_hci_port));
+
+        #[cfg(feature = "cuttlefish")]
+        {
+            let recorded_test_port: u16 = ini_map
+                .get("test.port")
+                .expect("test.port must be recorded in netsim.ini")
+                .parse()
+                .expect("test.port must be u16");
+            assert_ne!(recorded_test_port, 0);
+            assert_ne!(recorded_test_port, occupied_test_port);
+            assert_eq!(daemon.test_port(), Some(recorded_test_port));
+        }
     }
 
     /// When another netsimd starts in this World's discovery directory

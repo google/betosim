@@ -466,3 +466,33 @@ async fn test_websocket_bt_properties_disable_cis_feature() {
     world.when_send_websocket_binary(&[0x01, 0x03, 0x20, 0x00]).await;
     world.then_websocket_receives_le_features_with_cis_cleared().await;
 }
+
+// Scenario: HCI and Rootcanal control servers fall back to ephemeral ports and
+// record them in netsim.ini when default ports are already in use
+//   Given the default hci_port (6402 + instance - 1) and test_port (7500 + instance - 1) are occupied
+//   When netsimd starts without explicit --hci-port or --test-port overrides
+//   Then netsimd falls back to OS-assigned ephemeral ports and writes hci.port (and test.port) to netsim.ini
+#[tokio::test]
+async fn test_daemon_hci_and_test_port_ephemeral_fallback_recorded_in_ini() {
+    let instance = 200 + (rand::random::<u16>() % 200);
+    let default_hci_port = common::util::os_utils::get_hci_port(0, instance - 1) as u16;
+    let _occupied_hci = common::util::net::bind_tcp_loopback(default_hci_port).unwrap();
+    #[cfg(feature = "cuttlefish")]
+    let default_test_port = 7500 + instance - 1;
+    #[cfg(feature = "cuttlefish")]
+    let _occupied_test = common::util::net::bind_tcp_loopback(default_test_port).unwrap();
+
+    let mut args = daemon::Args::default();
+    args.logtostderr = true;
+    args.no_shutdown = true;
+    args.instance = Some(instance);
+
+    let world = World::new_with_args(args).await;
+
+    world.then_ini_records_ephemeral_hci_and_test_ports(
+        instance,
+        default_hci_port,
+        #[cfg(feature = "cuttlefish")]
+        default_test_port,
+    );
+}
