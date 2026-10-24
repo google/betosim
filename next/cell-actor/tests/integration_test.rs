@@ -65,6 +65,23 @@ async fn test_get_chip() {
 }
 
 #[tokio::test]
+async fn test_get_and_list_chip_states_across_idle_ringing_and_down() {
+    let mut world = World::new().await;
+    world.given_cell_chip(1).await;
+    world.given_voice_registered_home(1).await;
+    world.then_cell_state_is(1, "idle").await;
+    world.then_listed_cell_states_are(&[(1, true, "idle")]).await;
+
+    world.when_incoming_call(1, "123456").await;
+    world.then_cell_state_is(1, "ringing").await;
+    world.then_listed_cell_states_are(&[(1, true, "ringing")]).await;
+
+    world.when_set_chip_enabled(1, false).await;
+    world.then_cell_state_is(1, "down").await;
+    world.then_listed_cell_states_are(&[(1, false, "down")]).await;
+}
+
+#[tokio::test]
 async fn test_delete_chip_non_blocking() {
     let mut world = World::new().await;
     world.given_cell_chip(2).await;

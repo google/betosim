@@ -46,6 +46,37 @@ impl CellActor {
         }
         network_configs
     }
+
+    fn get_chip_for_modem(&self, id: u32, enabled: bool) -> Option<Chip> {
+        let info = self.controller.get_modem_info(id).ok()?;
+        Some(Chip {
+            kind: ChipKind::CELLULAR,
+            id: info.id,
+            name: format!("modem-{}", info.id),
+            enabled,
+            variant: Some(ChipVariant::Cell(Cell {
+                radio: Radio { state: Some(enabled), ..Default::default() },
+                state: if !enabled {
+                    MODEM_STATE_DOWN.to_string()
+                } else if info.ringing {
+                    MODEM_STATE_RINGING.to_string()
+                } else {
+                    MODEM_STATE_IDLE.to_string()
+                },
+                sim_type: None,
+                sim_profile: None,
+                quirks: info.quirks,
+                sms_count: info.sms_count,
+                rssi: info.rssi,
+                ber: info.ber,
+                voice_registration: info.voice_registration,
+                data_registration: info.data_registration,
+                active_calls: info.calls,
+                network_configs: info.network_configs,
+            })),
+            ..Default::default()
+        })
+    }
 }
 
 impl ActorService for CellActor {
@@ -183,38 +214,8 @@ impl ActorService for CellActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
-        if let Ok(info) = self.controller.get_modem_info(id.0) {
-            let enabled = self.active_chips.get(&id).map(|s| s.enabled).unwrap_or(true);
-            Ok(Some(Chip {
-                kind: ChipKind::CELLULAR,
-                id: info.id,
-                name: format!("modem-{}", info.id),
-                enabled,
-                variant: Some(ChipVariant::Cell(Cell {
-                    radio: Radio { state: Some(enabled), ..Default::default() },
-                    state: if !enabled {
-                        MODEM_STATE_DOWN.to_string()
-                    } else if info.ringing {
-                        MODEM_STATE_RINGING.to_string()
-                    } else {
-                        MODEM_STATE_IDLE.to_string()
-                    },
-                    sim_type: None,
-                    sim_profile: None,
-                    quirks: info.quirks,
-                    sms_count: info.sms_count,
-                    rssi: info.rssi,
-                    ber: info.ber,
-                    voice_registration: info.voice_registration,
-                    data_registration: info.data_registration,
-                    active_calls: info.calls,
-                    network_configs: info.network_configs,
-                })),
-                ..Default::default()
-            }))
-        } else {
-            Ok(None)
-        }
+        let enabled = self.active_chips.get(&id).map(|s| s.enabled).unwrap_or(true);
+        Ok(self.get_chip_for_modem(id.0, enabled))
     }
 
     async fn handle_update(
@@ -327,38 +328,10 @@ impl ActorService for CellActor {
         &mut self,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Vec<Self::Entity>, Self::Error> {
-        let mut chips = Vec::new();
-        for (id, state) in &self.active_chips {
-            if let Ok(info) = self.controller.get_modem_info(id.0) {
-                chips.push(Chip {
-                    kind: ChipKind::CELLULAR,
-                    id: info.id,
-                    name: format!("modem-{}", info.id),
-                    enabled: state.enabled,
-                    variant: Some(ChipVariant::Cell(Cell {
-                        radio: Radio { state: Some(state.enabled), ..Default::default() },
-                        state: if !state.enabled {
-                            MODEM_STATE_DOWN.to_string()
-                        } else if info.ringing {
-                            MODEM_STATE_RINGING.to_string()
-                        } else {
-                            MODEM_STATE_IDLE.to_string()
-                        },
-                        sim_type: None,
-                        sim_profile: None,
-                        quirks: info.quirks,
-                        sms_count: info.sms_count,
-                        rssi: info.rssi,
-                        ber: info.ber,
-                        voice_registration: info.voice_registration,
-                        data_registration: info.data_registration,
-                        active_calls: info.calls,
-                        network_configs: info.network_configs,
-                    })),
-                    ..Default::default()
-                });
-            }
-        }
-        Ok(chips)
+        Ok(self
+            .active_chips
+            .iter()
+            .filter_map(|(id, state)| self.get_chip_for_modem(id.0, state.enabled))
+            .collect())
     }
 }

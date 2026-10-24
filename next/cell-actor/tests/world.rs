@@ -231,12 +231,24 @@ impl World {
             .expect("receive sms");
     }
 
+    pub(crate) async fn when_incoming_call(&self, id: u32, number: &str) {
+        self.client
+            .perform_action(ChipId(id), CellAction::IncomingCall { number: number.to_string() })
+            .await
+            .expect("incoming call");
+    }
+
     pub(crate) async fn when_try_incoming_call(&mut self, id: u32, number: &str) {
         let res = self
             .client
             .perform_action(ChipId(id), CellAction::IncomingCall { number: number.to_string() })
             .await;
         self.last_error = res.err();
+    }
+
+    pub(crate) async fn when_set_chip_enabled(&self, id: u32, enabled: bool) {
+        let update = ChipUpdate { enabled: Some(enabled), ..Default::default() };
+        self.client.update(ChipId(id), update).await.expect("update chip enabled");
     }
 
     pub(crate) async fn when_update_network_configs(
@@ -309,6 +321,26 @@ impl World {
 
     pub(crate) async fn then_cell_state_is(&self, id: u32, expected_state: &str) {
         assert_eq!(self.read_cell(id).await.state, expected_state);
+    }
+
+    pub(crate) async fn then_listed_cell_states_are(&self, expected: &[(u32, bool, &str)]) {
+        let mut chips = self.client.list().await.expect("list cell chips");
+        chips.sort_by_key(|chip| chip.id);
+        let actual: Vec<(u32, bool, String)> = chips
+            .into_iter()
+            .map(|chip| match chip.variant {
+                Some(ChipVariant::Cell(cell)) => {
+                    assert_eq!(cell.radio.state, Some(chip.enabled));
+                    (chip.id, chip.enabled, cell.state)
+                }
+                other => panic!("expected Cell variant for chip {}, got {other:?}", chip.id),
+            })
+            .collect();
+        let expected_vec: Vec<(u32, bool, String)> = expected
+            .iter()
+            .map(|(id, enabled, state)| (*id, *enabled, (*state).to_string()))
+            .collect();
+        assert_eq!(actual, expected_vec);
     }
 
     pub(crate) async fn then_cell_sms_count_is(&self, id: u32, expected: u32) {
