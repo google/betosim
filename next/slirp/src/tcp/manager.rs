@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::{
-    collections::{HashMap, VecDeque},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    collections::{HashMap, HashSet, VecDeque},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 
@@ -34,6 +34,10 @@ const BUFFER_POOL_CAPACITY: usize = 100;
 pub(crate) const MAX_DATA_RETRIES: u32 = 5;
 pub(crate) const MAX_SYN_RETRIES: u32 = 5;
 
+const fn default_gateway_ipv6() -> Ipv6Addr {
+    Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 2)
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TcpManager {
     pub(crate) connections: HashMap<u64, TcpConnection>,
@@ -41,9 +45,13 @@ pub struct TcpManager {
     pub(crate) buffer_pool: Vec<Vec<u8>>,
     pub(crate) next_conn_id: u64,
     pub(crate) gateway_ip: Ipv4Addr,
+    #[serde(skip, default = "default_gateway_ipv6")]
+    gateway_ipv6: Ipv6Addr,
     pub(crate) next_virtual_port: u16,
     #[serde(skip)]
     pub(crate) guestfwd: Vec<crate::GuestFwdRule>,
+    #[serde(default)]
+    pub(super) incoming_connections: HashSet<u64>,
 }
 
 #[derive(Debug)]
@@ -78,7 +86,7 @@ impl<'a> SendTcpPacketArgs<'a> {
 }
 
 impl TcpManager {
-    pub fn new(gateway_ip: Ipv4Addr) -> Self {
+    pub(crate) fn with_gateways(gateway_ip: Ipv4Addr, gateway_ipv6: Ipv6Addr) -> Self {
         let mut buffer_pool = Vec::with_capacity(BUFFER_POOL_CAPACITY);
         for _ in 0..BUFFER_POOL_CAPACITY {
             buffer_pool.push(vec![0; DEFAULT_BUFFER_SIZE]);
@@ -88,8 +96,40 @@ impl TcpManager {
             buffer_pool,
             next_conn_id: 1,
             gateway_ip,
+            gateway_ipv6,
             next_virtual_port: 49152,
             guestfwd: Vec::new(),
+            incoming_connections: HashSet::new(),
+        }
+    }
+
+    pub fn new(gateway_ip: Ipv4Addr) -> Self {
+        Self::with_gateways(gateway_ip, default_gateway_ipv6())
+    }
+
+    pub(crate) fn set_gateway_ipv6(&mut self, gateway_ipv6: Ipv6Addr) {
+        self.gateway_ipv6 = gateway_ipv6;
+    }
+
+    pub(super) fn resolve_destination(&self, dst_addr: SocketAddr) -> SocketAddr {
+        crate::resolve_guest_destination(
+            &self.guestfwd,
+            dst_addr,
+            self.gateway_ip,
+            self.gateway_ipv6,
+        )
+        .unwrap_or(dst_addr)
+    }
+
+    pub(crate) fn resolve_restore_destination(
+        &self,
+        conn_id: u64,
+        host_addr: SocketAddr,
+    ) -> SocketAddr {
+        if self.incoming_connections.contains(&conn_id) {
+            host_addr
+        } else {
+            self.resolve_destination(host_addr)
         }
     }
 
@@ -237,6 +277,7 @@ impl TcpManager {
 
     pub fn remove_connection(&mut self, conn_id: u64) {
         self.connections.remove(&conn_id);
+        self.incoming_connections.remove(&conn_id);
     }
 
     pub fn handle_remote_closed(
@@ -265,11 +306,13 @@ impl TcpManager {
             match conn.state {
                 State::TimeWait => {
                     // Connection is already closed, just remove it.
+                    self.incoming_connections.remove(&conn_id);
                     return;
                 }
                 State::SynSent => {
                     conn.retransmissions += 1;
                     if conn.retransmissions >= MAX_SYN_RETRIES {
+                        self.incoming_connections.remove(&conn_id);
                         responses.push(SlirpResponse::CloseConnection {
                             conn_id,
                             guest_addr: conn.guest_addr,
@@ -280,6 +323,7 @@ impl TcpManager {
                 _ => {
                     conn.retransmissions += 1;
                     if conn.retransmissions >= MAX_DATA_RETRIES {
+                        self.incoming_connections.remove(&conn_id);
                         responses.push(SlirpResponse::CloseConnection {
                             conn_id,
                             guest_addr: conn.guest_addr,
@@ -440,6 +484,7 @@ impl TcpManager {
         };
 
         self.connections.insert(conn_id, conn);
+        self.incoming_connections.insert(conn_id);
 
         // 3. Send SYN packet to guest
         let args = SendTcpPacketArgs {

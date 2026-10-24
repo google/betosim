@@ -95,12 +95,11 @@ impl Slirp {
         arp_table.add_entry(config.host_ipv4, config.gateway_mac);
         let mut ndp_table = NdpTable::new();
         ndp_table.add_entry(config.host_ipv6, config.gateway_mac);
-        let gateway_ip = config.host_ipv4;
 
         let mut timer_manager = TimerManager::new(clock);
         timer_manager.schedule(Duration::from_secs(600), TimerEvent::NdpRouterAdvertisement);
 
-        let mut tcp_manager = TcpManager::new(gateway_ip);
+        let mut tcp_manager = TcpManager::with_gateways(config.host_ipv4, config.host_ipv6);
         tcp_manager.guestfwd = Self::get_effective_guestfwd(&config);
 
         Self {
@@ -898,6 +897,7 @@ impl Slirp {
         self.ndp_table = state.ndp_table;
         self.dhcp_manager = state.dhcp_manager;
         self.tcp_manager = state.tcp_manager;
+        self.tcp_manager.set_gateway_ipv6(self.config.host_ipv6);
         self.tcp_manager.guestfwd = Self::get_effective_guestfwd(&self.config);
         self.udp_manager = state.udp_manager;
         self.tftp_manager = tftp::TftpManager::new();
@@ -927,7 +927,9 @@ impl Slirp {
             responses.push(SlirpResponse::EstablishConnection(
                 conn_id,
                 ConnectionArgs::Tcp(TcpConnectionArgs {
-                    destination: conn.host_addr,
+                    destination: self
+                        .tcp_manager
+                        .resolve_restore_destination(conn_id, conn.host_addr),
                     guest_ip: conn.guest_addr.ip(),
                     guest_port: conn.guest_addr.port(),
                 }),
@@ -973,6 +975,30 @@ struct SlirpStateOwned {
     dhcp_manager: DhcpManager,
     tcp_manager: TcpManager,
     udp_manager: UdpManager,
+}
+
+fn resolve_guest_destination(
+    guestfwd: &[GuestFwdRule],
+    dst_addr: SocketAddr,
+    host_ipv4: Ipv4Addr,
+    host_ipv6: Ipv6Addr,
+) -> Option<SocketAddr> {
+    if let Some(rule) = guestfwd.iter().find(|rule| rule.virtual_addr == dst_addr) {
+        return Some(rule.host_addr);
+    }
+    let port = dst_addr.port();
+    if port == 0 || port == 53 {
+        return None;
+    }
+    match dst_addr.ip() {
+        IpAddr::V4(ip) if ip == host_ipv4 => {
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+        }
+        IpAddr::V6(ip) if ip == host_ipv6 => {
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))
+        }
+        _ => None,
+    }
 }
 
 fn synthesize_offending_tcp_packet(guest_addr: SocketAddr, host_addr: SocketAddr) -> Vec<u8> {

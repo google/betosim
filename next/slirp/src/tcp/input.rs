@@ -106,14 +106,14 @@ impl TcpManager {
             );
 
             if is_rst {
-                if let Some((conn_id, conn)) = self
-                    .find_connection_by_addrs(src_addr, dst_addr)
-                    .and_then(|id| self.connections.remove(&id).map(|c| (id, c)))
-                {
-                    responses.push(SlirpResponse::CloseConnection {
-                        conn_id,
-                        guest_addr: conn.guest_addr,
-                    });
+                if let Some(conn_id) = self.find_connection_by_addrs(src_addr, dst_addr) {
+                    self.incoming_connections.remove(&conn_id);
+                    if let Some(conn) = self.connections.remove(&conn_id) {
+                        responses.push(SlirpResponse::CloseConnection {
+                            conn_id,
+                            guest_addr: conn.guest_addr,
+                        });
+                    }
                 }
                 return;
             }
@@ -148,12 +148,7 @@ impl TcpManager {
                 let conn_id = self.next_conn_id;
                 self.next_conn_id += 1;
 
-                let destination = self
-                    .guestfwd
-                    .iter()
-                    .find(|rule| rule.virtual_addr == dst_addr)
-                    .map(|rule| rule.host_addr)
-                    .unwrap_or(dst_addr);
+                let destination = self.resolve_destination(dst_addr);
 
                 let conn_info = TcpConnectionArgs {
                     destination,
@@ -431,6 +426,8 @@ impl TcpManager {
                     }
                     if !should_remove {
                         self.connections.insert(conn_id, conn);
+                    } else {
+                        self.incoming_connections.remove(&conn_id);
                     }
                 }
 

@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use std::{
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 
 use bytes::Bytes;
-use netsim_packets::{EthernetFrame, IP_P_UDP, Ipv4Builder, MacAddr, UdpPacketBuilder};
+use netsim_packets::{
+    EthernetFrame, IP_P_TCP, IP_P_UDP, Ipv4Builder, Ipv6Builder, MacAddr, TcpBuilder,
+    UdpPacketBuilder, ether_type,
+};
 use slirp::{Config, ConnectionArgs, Slirp, SlirpRequest, SlirpResponse};
 use slirp_host::TokioHost;
 use tokio::sync::mpsc;
@@ -813,4 +816,355 @@ async fn test_icmp_proxy_integration() {
     // Verify ICMP checksum is valid!
     let computed_checksum = netsim_packets::ipv4_checksum(ip_payload);
     assert_eq!(computed_checksum, 0, "ICMP reply checksum is invalid!");
+}
+
+struct World {
+    config: Config,
+    slirp_request_sender: mpsc::Sender<SlirpRequest>,
+    test_response_receiver: mpsc::Receiver<SlirpResponse>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    guest_ip: IpAddr,
+    gateway_ip: IpAddr,
+    guest_port: u16,
+    host_port: u16,
+    guest_iss: u32,
+    gateway_iss: u32,
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+impl World {
+    async fn new() -> Self {
+        let config = Config::default();
+        let (slirp_request_sender, mut slirp_request_receiver) = mpsc::channel(100);
+        let (slirp_response_sender, slirp_response_receiver) = mpsc::channel(100);
+        let (guest_packet_sender, _guest_packet_receiver) = mpsc::channel(100);
+        let (test_response_sender, test_response_receiver) = mpsc::channel(100);
+
+        let mut slirp = Slirp::new(config.clone());
+        let slirp_response_sender_clone = slirp_response_sender.clone();
+        let slirp_task = tokio::spawn(async move {
+            while let Some(request) = slirp_request_receiver.recv().await {
+                let responses = slirp.handle_request(request);
+                for response in responses {
+                    slirp_response_sender_clone.send(response).await.ok();
+                }
+            }
+        });
+
+        let mut host = TokioHost::from_channels(
+            slirp_request_sender.clone(),
+            slirp_response_receiver,
+            guest_packet_sender,
+            Some(test_response_sender),
+            config.clone(),
+        );
+        let host_task = tokio::spawn(async move {
+            host.run().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        Self {
+            config,
+            slirp_request_sender,
+            test_response_receiver,
+            tasks: vec![slirp_task, host_task],
+            guest_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            gateway_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            guest_port: 0,
+            host_port: 0,
+            guest_iss: 1000,
+            gateway_iss: 0,
+        }
+    }
+
+    async fn given_ipv4_tcp_echo_server(&mut self) -> u16 {
+        use tokio::net::TcpListener;
+        let listener =
+            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let echo_task = tokio::spawn(run_echo_tcp_server(listener));
+        self.tasks.push(echo_task);
+        self.guest_ip = IpAddr::V4(self.config.guest_ipv4);
+        self.gateway_ip = IpAddr::V4(self.config.host_ipv4);
+        self.host_port = port;
+        port
+    }
+
+    async fn given_ipv6_tcp_echo_server(&mut self) -> u16 {
+        use tokio::net::TcpListener;
+        let listener =
+            TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let echo_task = tokio::spawn(run_echo_tcp_server(listener));
+        self.tasks.push(echo_task);
+        self.guest_ip = IpAddr::V6(self.config.guest_ipv6);
+        self.gateway_ip = IpAddr::V6(self.config.host_ipv6);
+        self.host_port = port;
+        port
+    }
+
+    async fn when_guest_connects_tcp_to_gateway(&mut self, guest_port: u16, dst_port: u16) {
+        self.guest_port = guest_port;
+        self.host_port = dst_port;
+        let guest_tcp_addr = SocketAddr::new(self.guest_ip, self.guest_port);
+        let gateway_tcp_addr = SocketAddr::new(self.gateway_ip, self.host_port);
+        let syn_packet = create_dual_stack_tcp_packet(
+            guest_tcp_addr,
+            gateway_tcp_addr,
+            self.guest_iss,
+            0,
+            netsim_packets::TCP_FLAG_SYN,
+            &[],
+        );
+        self.slirp_request_sender.send(SlirpRequest::Packet(syn_packet)).await.unwrap();
+    }
+
+    async fn then_guest_receives_tcp_syn_ack_from_gateway(&mut self, expected_src_port: u16) {
+        let expected_ethertype =
+            if self.guest_ip.is_ipv4() { ether_type::IPV4 } else { ether_type::IPV6 };
+        let gateway_ip = self.gateway_ip;
+        let gateway_iss = recv_matching_packet(&mut self.test_response_receiver, |p| {
+            let (eth_frame, eth_payload) = EthernetFrame::parse(p)?;
+            if eth_frame.ethertype.get() != expected_ethertype {
+                return None;
+            }
+            let (src_ip, _dst_ip, l4) = parse_ip_endpoints(expected_ethertype, eth_payload)?;
+            let (tcp_header, _) = netsim_packets::TcpHeader::parse(l4)?;
+            if tcp_header.syn()
+                && tcp_header.ack()
+                && tcp_header.source_port.get() == expected_src_port
+            {
+                assert_eq!(src_ip, gateway_ip);
+                Some(tcp_header.sequence_num.get())
+            } else {
+                None
+            }
+        })
+        .await
+        .expect("Failed to receive SYN-ACK for gateway TCP");
+        self.gateway_iss = gateway_iss;
+    }
+
+    async fn when_guest_completes_tcp_handshake_and_sends(&mut self, payload: &[u8]) {
+        let guest_tcp_addr = SocketAddr::new(self.guest_ip, self.guest_port);
+        let gateway_tcp_addr = SocketAddr::new(self.gateway_ip, self.host_port);
+        let ack_packet = create_dual_stack_tcp_packet(
+            guest_tcp_addr,
+            gateway_tcp_addr,
+            self.guest_iss + 1,
+            self.gateway_iss + 1,
+            netsim_packets::TCP_FLAG_ACK,
+            &[],
+        );
+        self.slirp_request_sender.send(SlirpRequest::Packet(ack_packet)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let data_packet = create_dual_stack_tcp_packet(
+            guest_tcp_addr,
+            gateway_tcp_addr,
+            self.guest_iss + 1,
+            self.gateway_iss + 1,
+            netsim_packets::TCP_FLAG_ACK | netsim_packets::TCP_FLAG_PSH,
+            payload,
+        );
+        self.slirp_request_sender.send(SlirpRequest::Packet(data_packet)).await.unwrap();
+    }
+
+    async fn then_guest_receives_tcp_echo_from_gateway(&mut self, expected_payload: &[u8]) {
+        let expected_ethertype =
+            if self.guest_ip.is_ipv4() { ether_type::IPV4 } else { ether_type::IPV6 };
+        let gateway_ip = self.gateway_ip;
+        let guest_ip = self.guest_ip;
+        let host_port = self.host_port;
+        let expected_payload_vec = expected_payload.to_vec();
+        let tcp_echo_received = recv_matching_packet(&mut self.test_response_receiver, |p| {
+            let (eth_frame, eth_payload) = EthernetFrame::parse(p)?;
+            if eth_frame.ethertype.get() != expected_ethertype {
+                return None;
+            }
+            let (src_ip, dst_ip, l4) = parse_ip_endpoints(expected_ethertype, eth_payload)?;
+            let (tcp_header, payload) = netsim_packets::TcpHeader::parse(l4)?;
+            if tcp_header.source_port.get() == host_port && payload == expected_payload_vec {
+                assert_eq!(src_ip, gateway_ip);
+                assert_eq!(dst_ip, guest_ip);
+                Some(())
+            } else {
+                None
+            }
+        })
+        .await
+        .is_some();
+        assert!(
+            tcp_echo_received,
+            "Failed to receive echoed TCP data from gateway loopback server"
+        );
+    }
+}
+
+async fn recv_matching_packet<T>(
+    receiver: &mut mpsc::Receiver<SlirpResponse>,
+    predicate: impl Fn(&Bytes) -> Option<T>,
+) -> Option<T> {
+    for _ in 0..20 {
+        let Ok(Some(resp)) =
+            tokio::time::timeout(Duration::from_millis(2000), receiver.recv()).await
+        else {
+            return None;
+        };
+        if let SlirpResponse::Packet(p) = resp
+            && let Some(res) = predicate(&p)
+        {
+            return Some(res);
+        }
+    }
+    None
+}
+
+fn wrap_ethernet(ethertype: u16, ip_bytes: &[u8]) -> Bytes {
+    let mut eth_data = vec![0u8; 14 + ip_bytes.len()];
+    let (eth_header_slice, eth_payload_slice) = eth_data.split_at_mut(14);
+    let eth_frame = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
+    eth_frame.dst_addr = MacAddr { bytes: [0xde, 0xad, 0xbe, 0xef, 0x12, 0x35] }; // gateway
+    eth_frame.src_addr = MacAddr { bytes: [0xde, 0xad, 0xbe, 0xef, 0x12, 0x34] }; // guest
+    eth_frame.ethertype = ethertype.into();
+    eth_payload_slice.copy_from_slice(ip_bytes);
+
+    Bytes::from(eth_data)
+}
+
+fn create_dual_stack_tcp_packet(
+    src: SocketAddr,
+    dst: SocketAddr,
+    seq: u32,
+    ack: u32,
+    flags: u16,
+    payload: &[u8],
+) -> Bytes {
+    let (ethertype, ip_bytes) = match (src, dst) {
+        (SocketAddr::V4(s), SocketAddr::V4(d)) => {
+            let mut tcp_data = vec![0u8; 20 + payload.len()];
+            let mut tcp_builder = TcpBuilder::new(&mut tcp_data, *s.ip(), *d.ip()).unwrap();
+            tcp_builder
+                .source_port(s.port())
+                .dest_port(d.port())
+                .sequence_num(seq)
+                .ack_num(ack)
+                .flags(flags)
+                .window_size(8192);
+            tcp_builder.payload(payload).unwrap();
+            tcp_builder.build().unwrap();
+
+            let mut ip_data = vec![0u8; 20 + tcp_data.len()];
+            let mut ipv4_builder =
+                Ipv4Builder::new(&mut ip_data, IP_P_TCP, *s.ip(), *d.ip()).unwrap();
+            ipv4_builder.payload(&tcp_data).unwrap();
+            ipv4_builder.build().unwrap();
+            (ether_type::IPV4, ip_data)
+        }
+        (SocketAddr::V6(s), SocketAddr::V6(d)) => {
+            let mut tcp_data = vec![0u8; 20 + payload.len()];
+            let mut tcp_builder = TcpBuilder::new_v6(&mut tcp_data, *s.ip(), *d.ip()).unwrap();
+            tcp_builder
+                .source_port(s.port())
+                .dest_port(d.port())
+                .sequence_num(seq)
+                .ack_num(ack)
+                .flags(flags)
+                .window_size(8192);
+            tcp_builder.payload(payload).unwrap();
+            tcp_builder.build().unwrap();
+
+            let mut ip_data = vec![0u8; 40 + tcp_data.len()];
+            let mut ipv6_builder =
+                Ipv6Builder::new(&mut ip_data, IP_P_TCP, *s.ip(), *d.ip()).unwrap();
+            ipv6_builder.payload(&tcp_data).unwrap();
+            ipv6_builder.build().unwrap();
+            (ether_type::IPV6, ip_data)
+        }
+        _ => panic!("Mismatched IP versions for TCP packet: src={src}, dst={dst}"),
+    };
+
+    wrap_ethernet(ethertype, &ip_bytes)
+}
+
+async fn run_echo_tcp_server(listener: tokio::net::TcpListener) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    while let Ok((mut stream, _)) = listener.accept().await {
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = stream.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                if stream.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+fn parse_ip_endpoints(ethertype: u16, payload: &[u8]) -> Option<(IpAddr, IpAddr, &[u8])> {
+    match ethertype {
+        ether_type::IPV4 => {
+            let (hdr, l4) = netsim_packets::Ipv4Header::parse(payload)?;
+            Some((IpAddr::V4(hdr.source_addr.into()), IpAddr::V4(hdr.dest_addr.into()), l4))
+        }
+        ether_type::IPV6 => {
+            let (hdr, l4) = netsim_packets::Ipv6Header::parse(payload)?;
+            Some((IpAddr::V6(hdr.source_addr.into()), IpAddr::V6(hdr.dest_addr.into()), l4))
+        }
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_tcp_ipv4_integration() {
+    // Scenario: Guest connects via IPv4 TCP to gateway port and receives echo from host loopback
+    // Given an IPv4 TCP echo server on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_ipv4_tcp_echo_server().await;
+
+    // When the guest initiates a TCP connection to gateway:<host_port>
+    let guest_port = 12345;
+    world.when_guest_connects_tcp_to_gateway(guest_port, host_port).await;
+
+    // Then the guest receives a SYN-ACK packet from the gateway
+    world.then_guest_receives_tcp_syn_ack_from_gateway(host_port).await;
+
+    // When the guest completes the handshake and sends payload data
+    let payload = b"hello_tcp_gateway_loopback";
+    world.when_guest_completes_tcp_handshake_and_sends(payload).await;
+
+    // Then the guest receives the echoed payload from the gateway
+    world.then_guest_receives_tcp_echo_from_gateway(payload).await;
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_tcp_ipv6_integration() {
+    // Scenario: Guest connects via IPv6 TCP to gateway port and receives echo from host loopback
+    // Given an IPv6 TCP echo server on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_ipv6_tcp_echo_server().await;
+
+    // When the guest initiates a TCP connection to gateway:<host_port>
+    let guest_port = 12345;
+    world.when_guest_connects_tcp_to_gateway(guest_port, host_port).await;
+
+    // Then the guest receives a SYN-ACK packet from the gateway
+    world.then_guest_receives_tcp_syn_ack_from_gateway(host_port).await;
+
+    // When the guest completes the handshake and sends payload data
+    let payload = b"hello_tcp_gateway_loopback";
+    world.when_guest_completes_tcp_handshake_and_sends(payload).await;
+
+    // Then the guest receives the echoed payload from the gateway
+    world.then_guest_receives_tcp_echo_from_gateway(payload).await;
 }

@@ -24,7 +24,7 @@ use netsim_packets::{
     EthernetFrame, IP_P_ICMP, IP_P_ICMPV6, IP_P_TCP, IP_P_UDP, IcmpHeader, Icmpv6Header,
     Ipv4Builder, Ipv4Header, Ipv6Builder, Ipv6Header, MacAddr, NeighborAdvertisement,
     NeighborSolicitation, NeighborSolicitationBuilder, TcpBuilder, TcpHeader, UdpHeader,
-    UdpPacketBuilder,
+    UdpPacketBuilder, ether_type,
 };
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -974,6 +974,16 @@ fn test_save_restore_integration() {
         _ => panic!("Expected EstablishConnection"),
     };
 
+    // 4. Populate Incoming TCP State (Hostfwd Connection)
+    let inbound_conn_id = 999;
+    let guest_inbound_addr: SocketAddr = "10.0.2.15:8080".parse().unwrap();
+    let responses_inbound = slirp_a.handle_request(SlirpRequest::AcceptIncoming {
+        conn_id: inbound_conn_id,
+        host_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        guest_addr: guest_inbound_addr,
+    });
+    assert_eq!(responses_inbound.len(), 1, "Should send SYN to guest");
+
     // ----------------------------------------------------
     // SUSPEND: Save State
     // ----------------------------------------------------
@@ -987,24 +997,34 @@ fn test_save_restore_integration() {
     let responses_restore = slirp_b.restore_state(&state_bytes).unwrap();
     assert_eq!(
         responses_restore.len(),
-        3,
-        "Should return Reset and EstablishConnection for active TCP and UDP flows"
+        4,
+        "Should return Reset and EstablishConnection for active TCP, incoming hostfwd TCP, and \
+         UDP flows"
     );
     assert_eq!(responses_restore[0], SlirpResponse::Reset);
 
     let mut has_tcp = false;
+    let mut has_inbound_tcp = false;
     let mut has_udp = false;
 
     for resp in responses_restore.into_iter().skip(1) {
         match resp {
-            SlirpResponse::EstablishConnection(_, ConnectionArgs::Tcp(args)) => {
+            SlirpResponse::EstablishConnection(id, ConnectionArgs::Tcp(args)) if id == conn_id => {
                 has_tcp = true;
                 assert_eq!(
                     args.destination,
-                    SocketAddr::new(IpAddr::V4(config.host_ipv4), host_port)
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port)
                 );
                 assert_eq!(args.guest_ip, IpAddr::V4(config.guest_ipv4));
                 assert_eq!(args.guest_port, guest_port);
+            }
+            SlirpResponse::EstablishConnection(id, ConnectionArgs::Tcp(args))
+                if id == inbound_conn_id =>
+            {
+                has_inbound_tcp = true;
+                assert_eq!(args.destination, SocketAddr::new(IpAddr::V4(config.host_ipv4), 49152));
+                assert_eq!(args.guest_ip, guest_inbound_addr.ip());
+                assert_eq!(args.guest_port, guest_inbound_addr.port());
             }
             SlirpResponse::EstablishConnection(id, ConnectionArgs::Udp(args)) => {
                 has_udp = true;
@@ -1018,6 +1038,7 @@ fn test_save_restore_integration() {
     }
 
     assert!(has_tcp, "Missing TCP restore");
+    assert!(has_inbound_tcp, "Missing inbound TCP restore");
     assert!(has_udp, "Missing UDP restore");
 
     // ----------------------------------------------------
@@ -1165,7 +1186,7 @@ fn test_tcp_ipv6_integration() {
                     ConnectionArgs::Tcp(args) => {
                         assert_eq!(
                             args.destination,
-                            SocketAddr::new(IpAddr::V6(host_ip), host_port)
+                            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), host_port)
                         );
                         assert_eq!(args.guest_ip, IpAddr::V6(guest_ip));
                         assert_eq!(args.guest_port, guest_port);
@@ -2264,4 +2285,159 @@ fn test_dns_over_tcp_redirection_integration() {
 
     assert!(has_establish, "Missing EstablishConnection");
     assert!(has_packet, "Missing Packet");
+}
+
+fn build_ipv4_tcp_syn_frame(config: &Config, src_port: u16, dst_port: u16, seq: u32) -> Bytes {
+    let mut tcp_syn = vec![0u8; 20];
+    let mut tcp_builder =
+        TcpBuilder::new(&mut tcp_syn, config.guest_ipv4, config.host_ipv4).unwrap();
+    tcp_builder
+        .source_port(src_port)
+        .dest_port(dst_port)
+        .sequence_num(seq)
+        .ack_num(0)
+        .flags(netsim_packets::TCP_FLAG_SYN)
+        .window_size(8192);
+    tcp_builder.build();
+
+    let mut ip_syn = vec![0u8; 20 + tcp_syn.len()];
+    let (ip_header_slice, ip_payload_slice) = ip_syn.split_at_mut(20);
+    let mut ipv4_builder =
+        Ipv4Builder::new(ip_header_slice, IP_P_TCP, config.guest_ipv4, config.host_ipv4).unwrap();
+    ipv4_builder.payload_len(tcp_syn.len());
+    ipv4_builder.build();
+    ip_payload_slice.copy_from_slice(&tcp_syn);
+
+    let mut eth_syn = vec![0u8; 14 + ip_syn.len()];
+    let (eth_header_slice, eth_payload_slice) = eth_syn.split_at_mut(14);
+    let eth_frame_syn = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
+    eth_frame_syn.dst_addr = config.gateway_mac;
+    eth_frame_syn.src_addr = config.guest_mac;
+    eth_frame_syn.ethertype = ether_type::IPV4.into();
+    eth_payload_slice.copy_from_slice(&ip_syn);
+
+    Bytes::from(eth_syn)
+}
+
+struct World {
+    config: Config,
+    slirp: Slirp,
+    last_responses: Vec<SlirpResponse>,
+}
+
+impl World {
+    fn new() -> Self {
+        let config = Config::default();
+        let slirp = Slirp::new(config.clone());
+        Self { config, slirp, last_responses: Vec::new() }
+    }
+
+    fn given_guestfwd_rule(&mut self, virtual_addr: SocketAddr, host_addr: SocketAddr) {
+        self.config.guestfwd = vec![crate::GuestFwdRule { virtual_addr, host_addr }];
+        self.slirp = Slirp::new(self.config.clone());
+    }
+
+    fn given_no_dns_servers(&mut self) {
+        self.config.dns_servers = Vec::new();
+        self.slirp = Slirp::new(self.config.clone());
+    }
+
+    fn when_guest_sends_ipv4_tcp_syn(&mut self, src_port: u16, dst_port: u16) {
+        let eth_syn = build_ipv4_tcp_syn_frame(&self.config, src_port, dst_port, 1000);
+        self.last_responses = self.slirp.handle_request(SlirpRequest::Packet(eth_syn));
+    }
+
+    fn then_tcp_connection_established(&self, expected_dest: SocketAddr, expected_guest_port: u16) {
+        let has_establish = self.last_responses.iter().any(|resp| {
+            if let SlirpResponse::EstablishConnection(_, ConnectionArgs::Tcp(args)) = resp {
+                assert_eq!(args.destination, expected_dest);
+                assert_eq!(args.guest_ip, IpAddr::V4(self.config.guest_ipv4));
+                assert_eq!(args.guest_port, expected_guest_port);
+                true
+            } else {
+                false
+            }
+        });
+        assert!(has_establish, "Expected EstablishConnection to {expected_dest}");
+    }
+
+    fn then_guest_receives_ipv4_tcp_syn_ack(&self, expected_src_port: u16, expected_dst_port: u16) {
+        let has_syn_ack = self.last_responses.iter().any(|resp| {
+            if let SlirpResponse::Packet(p) = resp {
+                let (_, eth_payload) = EthernetFrame::parse(p).unwrap();
+                let (ip_header, ip_payload) = Ipv4Header::parse(eth_payload).unwrap();
+                assert_eq!(Ipv4Addr::from(ip_header.source_addr), self.config.host_ipv4);
+                let (tcp_header, _) = TcpHeader::parse(ip_payload).unwrap();
+                assert_eq!(tcp_header.source_port.get(), expected_src_port);
+                assert_eq!(tcp_header.dest_port.get(), expected_dst_port);
+                assert!(tcp_header.syn() && tcp_header.ack());
+                true
+            } else {
+                false
+            }
+        });
+        assert!(has_syn_ack, "Expected TCP SYN-ACK packet from port {expected_src_port}");
+    }
+}
+
+#[test]
+fn test_tcp_gateway_loopback_nat_ipv4_integration() {
+    // Scenario: Guest connects to host gateway port and gets translated to loopback
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends a TCP SYN packet targeting the gateway
+    let guest_port = 12345;
+    let loopback_port = 8080;
+    world.when_guest_sends_ipv4_tcp_syn(guest_port, loopback_port);
+
+    // Then a TCP connection is established to container loopback
+    world.then_tcp_connection_established(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), loopback_port),
+        guest_port,
+    );
+    // And the guest receives a TCP SYN-ACK packet from the gateway
+    world.then_guest_receives_ipv4_tcp_syn_ack(loopback_port, guest_port);
+}
+
+#[test]
+fn test_tcp_gateway_guestfwd_precedence_integration() {
+    // Scenario: Explicit guestfwd rule takes precedence over default gateway loopback translation
+    // Given a Slirp stack with an explicit guestfwd rule for gateway:9090 -> 192.168.1.100:9090
+    let mut world = World::new();
+    let guestfwd_port = 9090;
+    let explicit_host_dest: SocketAddr = "192.168.1.100:9090".parse().unwrap();
+    world.given_guestfwd_rule(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)), guestfwd_port),
+        explicit_host_dest,
+    );
+
+    // When the guest sends a TCP SYN packet to gateway:9090
+    let guest_port = 12346;
+    world.when_guest_sends_ipv4_tcp_syn(guest_port, guestfwd_port);
+
+    // Then a TCP connection is established to the explicit guestfwd target
+    world.then_tcp_connection_established(explicit_host_dest, guest_port);
+    // And the guest receives a TCP SYN-ACK packet from the gateway
+    world.then_guest_receives_ipv4_tcp_syn_ack(guestfwd_port, guest_port);
+}
+
+#[test]
+fn test_tcp_gateway_reserved_dns_port_not_rewritten_integration() {
+    // Scenario: Gateway DNS port (53) without configured DNS servers is not redirected to loopback
+    // Given a Slirp stack with no configured DNS servers
+    let mut world = World::new();
+    world.given_no_dns_servers();
+
+    // When the guest sends a TCP SYN packet to gateway port 53
+    let guest_port = 12347;
+    world.when_guest_sends_ipv4_tcp_syn(guest_port, 53);
+
+    // Then a TCP connection is established to the gateway's external host IPv4, not loopback
+    world.then_tcp_connection_established(
+        SocketAddr::new(IpAddr::V4(world.config.host_ipv4), 53),
+        guest_port,
+    );
+    // And the guest receives a TCP SYN-ACK packet from the gateway
+    world.then_guest_receives_ipv4_tcp_syn_ack(53, guest_port);
 }
