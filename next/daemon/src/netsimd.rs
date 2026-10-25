@@ -301,6 +301,10 @@ async fn is_netsimd_alive(grpc_port: u16) -> bool {
         return false;
     }
     let addr = format!("localhost:{grpc_port}");
+    if !common::util::ini_file::is_server_reachable(&addr) {
+        debug!("is_netsimd_alive fast TCP probe failed for {addr}");
+        return false;
+    }
     let env = PROBE_ENV.get_or_init(|| Arc::new(grpcio::Environment::new(1))).clone();
     for attempt in 1..=LIVENESS_PROBE_ATTEMPTS {
         let channel = grpcio::ChannelBuilder::new(env.clone()).connect(&addr);
@@ -1805,9 +1809,20 @@ mod tests {
     async fn test_is_netsimd_alive_rejects_unresponsive_port() {
         assert!(!is_netsimd_alive(0).await);
 
+        // A closed port in the current network namespace (e.g. a port belonging
+        // to another container's isolated network namespace sharing /tmp) must
+        // be rejected by the 100 ms TCP reachability probe without waiting for
+        // the 2 x 400 ms gRPC channel deadlines.
+        let closed_listener = std::net::TcpListener::bind("localhost:0").unwrap();
+        let closed_port = closed_listener.local_addr().unwrap().port();
+        drop(closed_listener);
+        let closed_probe_start = std::time::Instant::now();
+        assert!(!is_netsimd_alive(closed_port).await);
+        assert!(closed_probe_start.elapsed() < Duration::from_millis(400));
+
         // A listener that never completes the HTTP/2 handshake models a
         // wedged netsimd that still holds its port open.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind("localhost:0").unwrap();
         let dead_port = listener.local_addr().unwrap().port();
 
         let probe_start = std::time::Instant::now();

@@ -15,12 +15,28 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     env,
+    net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
+    time::Duration,
 };
 
-use tracing::error;
+use tracing::{error, warn};
 
 use super::os_utils::get_discovery_directory_with_env;
+
+/// Maximum time spent probing a resolved socket address from `netsim.ini`.
+pub const SERVER_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Checks whether `addr` accepts a TCP connection in the current network
+/// namespace within [`SERVER_PROBE_TIMEOUT`].
+pub fn is_server_reachable(addr: &str) -> bool {
+    let Ok(sock_addrs) = addr.to_socket_addrs() else {
+        return false;
+    };
+    sock_addrs
+        .into_iter()
+        .any(|sock_addr| TcpStream::connect_timeout(&sock_addr, SERVER_PROBE_TIMEOUT).is_ok())
+}
 
 #[derive(Default)]
 pub struct IniParserOptions {
@@ -141,7 +157,19 @@ where
             return None;
         }
     };
-    map.get(key).map(|s| if s.contains(':') { s.to_string() } else { format!("localhost:{s}") })
+    let addr = map
+        .get(key)
+        .map(|s| if s.contains(':') { s.to_string() } else { format!("localhost:{s}") })?;
+    if !is_server_reachable(&addr) {
+        warn!(
+            key,
+            %addr,
+            ?filepath,
+            "Server address in netsim ini file is unreachable in current network namespace"
+        );
+        return None;
+    }
+    Some(addr)
 }
 
 fn get_address_by_key(instance_num: u16, key: &str) -> Option<String> {
@@ -284,27 +312,72 @@ mod tests {
             }
         };
 
-        // Test case 1: Only grpc.port exists
-        let ini_content = "grpc.port=1234\ntcp.port=5678\nws.port=7681\n";
+        // Test case 1: Reachable loopback ports resolved as localhost:<port>
+        let grpc_listener = std::net::TcpListener::bind("localhost:0").unwrap();
+        let tcp_listener = std::net::TcpListener::bind("localhost:0").unwrap();
+        let ws_listener = std::net::TcpListener::bind("localhost:0").unwrap();
+        let grpc_port = grpc_listener.local_addr().unwrap().port();
+        let tcp_port = tcp_listener.local_addr().unwrap().port();
+        let ws_port = ws_listener.local_addr().unwrap().port();
+
+        let ini_content =
+            format!("grpc.port={grpc_port}\ntcp.port={tcp_port}\nws.port={ws_port}\n");
         std::fs::write(tmp_dir_path.join("netsim.ini"), ini_content).unwrap();
 
         let grpc_addr = super::get_address_by_key_with_env(&mock_env, 1, "grpc.port");
-        assert_eq!(grpc_addr.unwrap(), "localhost:1234");
+        assert_eq!(grpc_addr.unwrap(), format!("localhost:{grpc_port}"));
 
         let tcp_addr = super::get_address_by_key_with_env(&mock_env, 1, "tcp.port");
-        assert_eq!(tcp_addr.unwrap(), "localhost:5678");
+        assert_eq!(tcp_addr.unwrap(), format!("localhost:{tcp_port}"));
 
         let ws_addr = super::get_address_by_key_with_env(&mock_env, 1, "ws.port");
-        assert_eq!(ws_addr.unwrap(), "localhost:7681");
+        assert_eq!(ws_addr.unwrap(), format!("localhost:{ws_port}"));
 
-        // Test case 2: Port with address-like value
-        let ini_content = "grpc.port=[::1]:1235\ntcp.port=1.2.3.4:5679\n";
+        // Test case 2: Port with explicit host:port value
+        let explicit_grpc = std::net::TcpListener::bind("localhost:0").unwrap();
+        let explicit_tcp = std::net::TcpListener::bind("localhost:0").unwrap();
+        let explicit_grpc_addr = explicit_grpc.local_addr().unwrap().to_string();
+        let explicit_tcp_addr = explicit_tcp.local_addr().unwrap().to_string();
+
+        let ini_content = format!("grpc.port={explicit_grpc_addr}\ntcp.port={explicit_tcp_addr}\n");
         std::fs::write(tmp_dir_path.join("netsim.ini"), ini_content).unwrap();
 
         let grpc_addr = super::get_address_by_key_with_env(&mock_env, 1, "grpc.port");
-        assert_eq!(grpc_addr.unwrap(), "[::1]:1235");
+        assert_eq!(grpc_addr.unwrap(), explicit_grpc_addr);
 
         let tcp_addr = super::get_address_by_key_with_env(&mock_env, 1, "tcp.port");
-        assert_eq!(tcp_addr.unwrap(), "1.2.3.4:5679");
+        assert_eq!(tcp_addr.unwrap(), explicit_tcp_addr);
+    }
+
+    #[test]
+    fn test_get_address_by_key_rejects_unreachable_port() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tmp_dir_path = temp_dir.path().to_path_buf();
+        let tmp_dir_path_clone = tmp_dir_path.clone();
+
+        let mock_env = move |key: &str| {
+            if key == "TMPDIR" {
+                Ok(tmp_dir_path_clone.to_str().unwrap().to_string())
+            } else {
+                Err(env::VarError::NotPresent)
+            }
+        };
+
+        let closed_listener = std::net::TcpListener::bind("localhost:0").unwrap();
+        let closed_port = closed_listener.local_addr().unwrap().port();
+        drop(closed_listener);
+
+        assert!(!super::is_server_reachable(&format!("localhost:{closed_port}")));
+        assert!(!super::is_server_reachable("invalid:address:port"));
+
+        let ini_content = format!(
+            "grpc.port={closed_port}\ntcp.port={closed_port}\nws.port={closed_port}\nhttp.port={closed_port}\n"
+        );
+        std::fs::write(tmp_dir_path.join("netsim.ini"), ini_content).unwrap();
+
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "grpc.port").is_none());
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "tcp.port").is_none());
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "ws.port").is_none());
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "http.port").is_none());
     }
 }

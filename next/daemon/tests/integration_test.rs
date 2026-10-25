@@ -296,6 +296,49 @@ async fn test_startup_evicts_stale_lock_of_unresponsive_owner() {
     world.then_discovery_file_advertises_port(world.grpc_port);
 }
 
+// Scenario: Start daemon when shared discovery directory advertises a port from
+// another container's isolated network namespace
+//   Given netsim.ini in a shared /tmp or TMPDIR advertises a gRPC port that is
+//     not listening in the current network namespace
+//   And the other container's netsimd still holds netsim.ini.lock
+//   When I start netsimd in the same discovery directory
+//   Then the 100 ms TCP liveness probe rejects the unreachable port
+//   And netsimd evicts the cross-namespace lock and starts as Owner on a reachable port
+#[tokio::test]
+async fn test_startup_evicts_cross_namespace_unreachable_port_and_starts_daemon() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("netsim_cross_ns_lock_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
+
+    let ephemeral_listener = std::net::TcpListener::bind("localhost:0").unwrap();
+    let unreachable_port = ephemeral_listener.local_addr().unwrap().port();
+    drop(ephemeral_listener);
+
+    let foreign_ini = daemon::IniFile::new_for_dir(temp_dir.clone(), 1).unwrap();
+    let Ok(daemon::IniFileAccess::Writer(foreign_writer)) = foreign_ini.try_acquire() else {
+        panic!("Foreign container owner should be Writer");
+    };
+    let mut foreign_data = HashMap::new();
+    foreign_data.insert("pid".to_string(), std::process::id().to_string());
+    foreign_data.insert("grpc.port".to_string(), unreachable_port.to_string());
+    let foreign_guard = foreign_writer.write(&foreign_data).unwrap();
+
+    let mut args = daemon::Args::default();
+    args.logtostderr = true;
+    args.no_shutdown = true;
+
+    let mut world = World::new_with_args_in_dir(temp_dir, args).await;
+    world.when_spawn_daemon().await;
+
+    assert!(world.grpc_port != 0);
+    assert!(!foreign_guard.still_owns_lock());
+    world.then_discovery_file_advertises_port(world.grpc_port);
+    assert!(common::util::ini_file::is_server_reachable(&format!("localhost:{}", world.grpc_port)));
+
+    drop(foreign_guard);
+    world.then_discovery_file_advertises_port(world.grpc_port);
+}
+
 // Scenario: Start daemon while a responsive owner holds netsim.ini.lock
 //   Given a running Netsim Daemon
 //   When I start another netsimd in the same discovery directory
