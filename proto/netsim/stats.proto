@@ -335,6 +335,14 @@ message NciDataStats {
   optional int32 receive = 2;
 }
 
+// Non-fatal error count for a single error code bucket in a netsim session.
+message NetsimErrorStats {
+  // Crate u32 error code (e.g. 66001; 0 = empty slot).
+  optional uint32 error_code = 1;
+  // Occurrence count in session.
+  optional uint32 count = 2;
+}
+
 // Statistics for a netsim session.
 message NetsimStats {
   // The length of the session in seconds
@@ -359,6 +367,8 @@ message NetsimStats {
   optional NfcServiceStats nfc_service_stats = 10;
   // Combined API statistics
   optional ApiStats api_stats = 12;
+  // Non-fatal runtime error statistics (max 256 per session)
+  repeated NetsimErrorStats error_stats = 13;
 
   reserved 11;
 }
