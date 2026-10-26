@@ -54,7 +54,23 @@ fn to_native_config(config: &libslirp_rs::SlirpConfig) -> slirp::Config {
     }
 }
 
+/// Bit 31 partitions native SLIRP loop task IDs from client forwarding tasks in
+/// actor-framework's task ID namespace, preventing task ID collisions.
+const NATIVE_TASK_ID_BIT: u32 = 0x8000_0000;
+
 impl SlirpActor {
+    fn alloc_native_task_id(&mut self) -> u32 {
+        let id = NATIVE_TASK_ID_BIT | (self.next_task_id & !NATIVE_TASK_ID_BIT);
+        self.next_task_id = self.next_task_id.wrapping_add(1);
+        id
+    }
+
+    fn alloc_client_task_id(&mut self) -> u32 {
+        let id = self.next_client_task_id & !NATIVE_TASK_ID_BIT;
+        self.next_client_task_id = self.next_client_task_id.wrapping_add(1);
+        id
+    }
+
     fn init_backend(&mut self, ctx: &mut DynContext<Self>) -> Result<(), SlirpError> {
         match self.backend_type {
             #[cfg(not(feature = "cuttlefish"))]
@@ -149,8 +165,7 @@ impl SlirpActor {
             Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(downlink_rx)),
         );
 
-        let task_id = self.next_task_id;
-        self.next_task_id += 1;
+        let task_id = self.alloc_native_task_id();
         self.active_task_id = Some(task_id);
 
         ctx.spawn(
@@ -266,10 +281,11 @@ impl ActorService for SlirpActor {
                     e.insert(ClientInfo::new(downlink_tx, notifier, isolated));
                     ctx.add_stream(client_id, stream);
 
+                    let client_task_id = self.alloc_client_task_id();
                     // Spawn isolated background forwarding task on SlirpActor's
                     // runtime context
                     ctx.spawn(
-                        client_id,
+                        client_task_id,
                         Box::pin(async move {
                             use futures::sink::SinkExt;
                             while let Some(bytes) = downlink_rx.recv().await {
@@ -277,7 +293,7 @@ impl ActorService for SlirpActor {
                                     break;
                                 }
                             }
-                            client_id
+                            client_task_id
                         }),
                     );
                 } else {
@@ -300,6 +316,10 @@ impl ActorService for SlirpActor {
             SlirpReq::SwitchBackend(new_backend) => {
                 if self.backend_type != new_backend {
                     tracing::info!("SlirpActor: Switching backend to {:?}", new_backend);
+                    self.active_task_id = None;
+                    if let Some(stream_id) = self.active_stream_id.take() {
+                        ctx.remove_typed_stream(stream_id);
+                    }
                     if let Some(old_instance) = self.backend_instance.take() {
                         old_instance.shutdown();
                     }
@@ -318,12 +338,16 @@ impl ActorService for SlirpActor {
 mod tests {
     use std::time::Duration;
 
-    use actor_framework::Context;
+    use actor_framework::{ActorLifecycle, Context};
     use tokio::sync::mpsc;
 
     use super::*;
 
-    struct ServiceTestContext;
+    #[derive(Default)]
+    struct ServiceTestContext {
+        spawned_tasks: Vec<u32>,
+        removed_typed_streams: Vec<usize>,
+    }
 
     impl Context<SlirpActor> for ServiceTestContext {
         fn set_interval(&mut self, _duration: Duration) {}
@@ -335,8 +359,11 @@ mod tests {
             _stream: actor_framework::BoxTypedStream<bytes::Bytes>,
         ) {
         }
-        fn remove_typed_stream(&mut self, _id: usize) {}
-        fn spawn(&mut self, _id: u32, task: futures::future::BoxFuture<'static, u32>) {
+        fn remove_typed_stream(&mut self, id: usize) {
+            self.removed_typed_streams.push(id);
+        }
+        fn spawn(&mut self, id: u32, task: futures::future::BoxFuture<'static, u32>) {
+            self.spawned_tasks.push(id);
             tokio::spawn(task);
         }
         fn abort(&mut self, _id: u32) {}
@@ -351,6 +378,18 @@ mod tests {
         fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {}
     }
 
+    fn make_register_req(client_id: u32) -> (SlirpReq, mpsc::UnboundedReceiver<bytes::Bytes>) {
+        let (tx_out, rx_out) = mpsc::unbounded_channel::<bytes::Bytes>();
+        let (_stream_tx, stream_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
+        let stream = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(stream_rx));
+        let sink: netsim_model::PacketSink =
+            Box::pin(futures::sink::unfold(tx_out, |tx, bytes| async move {
+                let _ = tx.send(bytes);
+                Ok(tx)
+            }));
+        (SlirpReq::Register { client_id, stream, sink, notifier: None, isolated: false }, rx_out)
+    }
+
     // Proxy support is implemented in the C-FFI backend (libslirp-rs).
     // On cuttlefish builds, netsim uses the Native backend which does not
     // support HTTP proxies.
@@ -363,7 +402,7 @@ mod tests {
             None,
         )
         .await;
-        let mut ctx = ServiceTestContext;
+        let mut ctx = ServiceTestContext::default();
 
         let (tx_out, _rx_out) = mpsc::unbounded_channel::<bytes::Bytes>();
         let (_stream_tx, stream_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
@@ -388,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_packet_before_register_returns_error() {
         let mut actor = SlirpActor::new(Default::default(), None, None).await;
-        let mut ctx = ServiceTestContext;
+        let mut ctx = ServiceTestContext::default();
 
         let result = actor
             .handle_action(
@@ -406,7 +445,7 @@ mod tests {
         let mut actor =
             SlirpActor::new(Default::default(), Some("http://127.0.0.1:8080".to_string()), None)
                 .await;
-        let mut ctx = ServiceTestContext;
+        let mut ctx = ServiceTestContext::default();
 
         let (tx_out, _rx_out) = mpsc::unbounded_channel::<bytes::Bytes>();
         let (_stream_tx, stream_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
@@ -441,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn test_none_http_proxy_registers_successfully() {
         let mut actor = SlirpActor::new(Default::default(), None, None).await;
-        let mut ctx = ServiceTestContext;
+        let mut ctx = ServiceTestContext::default();
 
         let (tx_out, _rx_out) = mpsc::unbounded_channel::<bytes::Bytes>();
         let (_stream_tx, stream_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
@@ -461,5 +500,90 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert!(actor.backend_instance.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_native_backend_client_id_does_not_collide_with_active_task_id() {
+        let mut actor =
+            SlirpActor::new_with_backend(Default::default(), None, None, SlirpBackend::Native)
+                .await;
+        let mut ctx = ServiceTestContext::default();
+
+        let (req1, _rx1) = make_register_req(1);
+        actor.handle_action(None, req1, &mut ctx).await.unwrap();
+
+        let (req2, _rx2) = make_register_req(NATIVE_TASK_ID_BIT | 1);
+        actor.handle_action(None, req2, &mut ctx).await.unwrap();
+
+        let (req3, _rx3) = make_register_req(u32::MAX - 1);
+        actor.handle_action(None, req3, &mut ctx).await.unwrap();
+
+        assert_eq!(actor.active_task_id, Some(NATIVE_TASK_ID_BIT | 1));
+        assert_eq!(ctx.spawned_tasks.len(), 4);
+        assert_eq!(ctx.spawned_tasks[0], NATIVE_TASK_ID_BIT | 1);
+        assert_eq!(ctx.spawned_tasks[1..], [1, 2, 3]);
+
+        actor.handle_action(None, SlirpReq::Unregister { client_id: 1 }, &mut ctx).await.unwrap();
+        actor.on_task_closed(1, &mut ctx).await;
+
+        assert!(actor.backend_instance.is_some());
+        assert_eq!(actor.active_task_id, Some(NATIVE_TASK_ID_BIT | 1));
+        assert!(
+            actor
+                .handle_action(
+                    None,
+                    SlirpReq::SendPacket(bytes::Bytes::from_static(b"test")),
+                    &mut ctx
+                )
+                .await
+                .is_ok()
+        );
+
+        actor.on_task_closed(NATIVE_TASK_ID_BIT | 1, &mut ctx).await;
+        assert!(actor.backend_instance.is_none());
+        assert!(actor.active_task_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_switch_backend_clears_stale_active_task_and_stream_ids() {
+        let mut actor =
+            SlirpActor::new_with_backend(Default::default(), None, None, SlirpBackend::Native)
+                .await;
+        let mut ctx = ServiceTestContext::default();
+
+        let (req1, _rx1) = make_register_req(1);
+        actor.handle_action(None, req1, &mut ctx).await.unwrap();
+        assert!(actor.active_task_id.is_some());
+        let old_stream_id = actor.active_stream_id.unwrap();
+
+        actor.handle_action(None, SlirpReq::Unregister { client_id: 1 }, &mut ctx).await.unwrap();
+
+        actor
+            .handle_action(None, SlirpReq::SwitchBackend(SlirpBackend::CFfi), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(actor.active_task_id.is_none());
+        assert!(actor.active_stream_id.is_none());
+        assert!(ctx.removed_typed_streams.contains(&old_stream_id));
+
+        let mut actor2 =
+            SlirpActor::new_with_backend(Default::default(), None, None, SlirpBackend::Native)
+                .await;
+        let mut ctx2 = ServiceTestContext::default();
+
+        let (req2, _rx2) = make_register_req(1);
+        actor2.handle_action(None, req2, &mut ctx2).await.unwrap();
+        let old_task_id2 = actor2.active_task_id.unwrap();
+
+        actor2
+            .handle_action(None, SlirpReq::SwitchBackend(SlirpBackend::CFfi), &mut ctx2)
+            .await
+            .unwrap();
+
+        assert_ne!(actor2.active_task_id, Some(old_task_id2));
+
+        actor2.on_task_closed(old_task_id2, &mut ctx2).await;
+        assert!(actor2.backend_instance.is_some());
     }
 }

@@ -221,6 +221,7 @@ pub struct SlirpActor {
     pub(crate) next_stream_id: usize,
     pub(crate) active_stream_id: Option<usize>,
     pub(crate) next_task_id: u32,
+    pub(crate) next_client_task_id: u32,
     pub(crate) active_task_id: Option<u32>,
 }
 
@@ -303,6 +304,7 @@ impl SlirpActor {
             next_stream_id: 1,
             active_stream_id: None,
             next_task_id: 1,
+            next_client_task_id: 1,
             active_task_id: None,
         }
     }
