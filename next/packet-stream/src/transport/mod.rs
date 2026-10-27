@@ -20,11 +20,9 @@
 // Public API modules
 #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
 pub mod dual_fd;
-pub mod h4;
 pub mod modem;
 pub mod nci;
 pub mod traits;
-pub mod types;
 pub mod uci;
 
 // Platform-specific socket implementations
@@ -35,6 +33,8 @@ pub mod windows;
 
 // Internal implementation modules
 pub(crate) mod adapters;
+mod h4;
+mod types;
 
 // Re-export public API only
 use std::path::PathBuf;

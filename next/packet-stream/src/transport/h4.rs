@@ -17,11 +17,11 @@ use tokio_util::codec::Decoder;
 use tracing::warn;
 
 /* H4 message type */
-pub const H4_CMD_TYPE: u8 = 1;
-pub const H4_ACL_TYPE: u8 = 2;
-pub const H4_SCO_TYPE: u8 = 3;
-pub const H4_EVT_TYPE: u8 = 4;
-pub const H4_ISO_TYPE: u8 = 5;
+const H4_CMD_TYPE: u8 = 1;
+const H4_ACL_TYPE: u8 = 2;
+const H4_SCO_TYPE: u8 = 3;
+const H4_EVT_TYPE: u8 = 4;
+const H4_ISO_TYPE: u8 = 5;
 
 /* HCI message preamble size */
 const HCI_CMD_PREAMBLE_SIZE: usize = 3;

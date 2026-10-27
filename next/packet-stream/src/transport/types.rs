@@ -60,7 +60,7 @@ impl TransportType {
         TransportType::Fd { in_fd, out_fd }
     }
 
-    pub async fn create_listener(&self) -> Result<super::Listener> {
+    pub(crate) async fn create_listener(&self) -> Result<super::Listener> {
         match self {
             TransportType::Tcp { addr, port } => {
                 let listener = TcpTransportListener::bind(addr, *port).await?;
@@ -77,7 +77,7 @@ impl TransportType {
         }
     }
 
-    pub async fn create_stream(&self) -> Result<(PacketStream, PacketSink)> {
+    pub(crate) async fn create_stream(&self) -> Result<(PacketStream, PacketSink)> {
         match self {
             TransportType::Tcp { addr, port } => {
                 let stream = TcpStream::connect(format!("{addr}:{port}")).await?;

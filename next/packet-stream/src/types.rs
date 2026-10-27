@@ -62,7 +62,4 @@ impl std::fmt::Display for StreamAddress {
     }
 }
 
-pub use netsim_types::{
-    BtControllerFeatures, BtControllerProperties, BtControllerQuirks, BtControllerVendorFeatures,
-    Chip, ChipInfo, ChipKind, DeviceInfo,
-};
+pub use netsim_types::{BtControllerProperties, Chip, ChipInfo, ChipKind, DeviceInfo};

@@ -72,24 +72,19 @@
 //! - `PacketStream` / `PacketSink`: Traits for reading and writing packets.
 
 pub mod error; // Error types
-pub mod streams; // High-level connection management
+mod streams; // High-level connection management
 pub mod transport; // Transport implementations (includes socket)
-pub mod types; // Core data types
+mod types; // Core data types
 
 // Core public API - only expose what users actually need
-pub use error::{PacketStreamError, ProtocolError, SocketError};
+pub use error::PacketStreamError;
 // Streams architecture re-exports - Streams is the only public entry point
 pub use streams::{InitInfo, Streams};
 // Core streaming types - public API only (transport internals hidden)
 pub use transport::TransportType;
 #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
-pub use transport::dual_fd::{ChipConfig, DeviceConfig, DualFdConfig, DualFdListener};
+pub use transport::dual_fd::{DualFdConfig, DualFdListener};
 pub use transport::{
     CrossPlatformListener, CrossPlatformStream, ListenerConfig, SocketConfig, SocketType,
 };
-pub use types::StreamAddress;
-
-pub use crate::types::{
-    BtControllerFeatures, BtControllerProperties, BtControllerQuirks, BtControllerVendorFeatures,
-    Chip, ChipInfo, ChipKind, DeviceInfo,
-};
+pub use types::{BtControllerProperties, Chip, ChipInfo, ChipKind, DeviceInfo, StreamAddress};
