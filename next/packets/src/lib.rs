@@ -195,16 +195,19 @@ pub use ethernet::{
 };
 // hci commands and types
 pub use hci::commands::{
-    HciCommand, HciCommandHeader, LeSetAdvertisingData, LeSetAdvertisingEnable,
-    LeSetAdvertisingParameters, LeSetEventMask, LeSetScanEnable, LeSetScanParameters,
-    LeSetScanResponseData, Reset, SetEventMask,
+    HciCommand, HciCommandHeader, LeClearAdvertisingSets, LeSetAdvertisingData,
+    LeSetAdvertisingEnable, LeSetAdvertisingParameters, LeSetEventMask,
+    LeSetExtendedAdvertisingData, LeSetExtendedAdvertisingEnable,
+    LeSetExtendedAdvertisingParameters, LeSetExtendedScanResponseData, LeSetScanEnable,
+    LeSetScanParameters, LeSetScanResponseData, Reset, SetEventMask,
 };
 pub use hci::{
     events::{HciEvent, LeMetaEvent, parse_hci_event},
     types::{
-        Address, AdvertisingFilterPolicy, AdvertisingType, Enable, GapDataType,
-        LeAdvertisingEventType, LeScanType, LeScanningFilterPolicy, OwnAddressType,
-        PeerAddressType,
+        Address, AdvertisingEventProperties, AdvertisingFilterPolicy, AdvertisingType, Enable,
+        EnabledSet, FragmentPreference, GapDataType, LeAdvertisingEventType, LeScanType,
+        LeScanningFilterPolicy, Operation, OwnAddressType, PeerAddressType, PrimaryPhyType,
+        SecondaryPhyType,
     },
 };
 // ICMP and NDP headers/builders

@@ -14,7 +14,9 @@
 
 use std::fmt;
 
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout, U16, Unaligned, byteorder::LittleEndian,
+};
 
 /// Generic enable/disable.
 #[derive(
@@ -200,4 +202,84 @@ impl fmt::Display for GapDataType {
             _ => write!(f, "Unknown ({:#04X})", self.0),
         }
     }
+}
+
+/// Advertising Event Properties for LE Set Extended Advertising Parameters.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Unaligned, Immutable, KnownLayout,
+)]
+#[repr(transparent)]
+pub struct AdvertisingEventProperties(pub U16<LittleEndian>);
+
+impl AdvertisingEventProperties {
+    pub const LEGACY_ADV_IND: Self = Self(U16::from_bytes([0x13, 0x00]));
+    pub const LEGACY_ADV_DIRECT_IND_LOW: Self = Self(U16::from_bytes([0x15, 0x00]));
+    pub const LEGACY_ADV_DIRECT_IND_HIGH: Self = Self(U16::from_bytes([0x1D, 0x00]));
+    pub const LEGACY_ADV_SCAN_IND: Self = Self(U16::from_bytes([0x12, 0x00]));
+    pub const LEGACY_ADV_NONCONN_IND: Self = Self(U16::from_bytes([0x10, 0x00]));
+}
+
+/// Primary PHY Type for LE Extended Advertising.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Unaligned, Immutable, KnownLayout,
+)]
+#[repr(transparent)]
+pub struct PrimaryPhyType(pub u8);
+
+impl PrimaryPhyType {
+    pub const LE_1M: Self = Self(0x01);
+    pub const LE_CODED: Self = Self(0x03);
+}
+
+/// Secondary PHY Type for LE Extended Advertising.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Unaligned, Immutable, KnownLayout,
+)]
+#[repr(transparent)]
+pub struct SecondaryPhyType(pub u8);
+
+impl SecondaryPhyType {
+    pub const NO_PACKETS: Self = Self(0x00);
+    pub const LE_1M: Self = Self(0x01);
+    pub const LE_2M: Self = Self(0x02);
+    pub const LE_CODED: Self = Self(0x03);
+}
+
+/// Operation for LE Set Extended Advertising Data and Scan Response Data.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Unaligned, Immutable, KnownLayout,
+)]
+#[repr(transparent)]
+pub struct Operation(pub u8);
+
+impl Operation {
+    pub const INTERMEDIATE_FRAGMENT: Self = Self(0x00);
+    pub const FIRST_FRAGMENT: Self = Self(0x01);
+    pub const LAST_FRAGMENT: Self = Self(0x02);
+    pub const COMPLETE_ADVERTISEMENT: Self = Self(0x03);
+    pub const UNCHANGED_DATA: Self = Self(0x04);
+}
+
+/// Fragment Preference for LE Set Extended Advertising Data and Scan Response
+/// Data.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Unaligned, Immutable, KnownLayout,
+)]
+#[repr(transparent)]
+pub struct FragmentPreference(pub u8);
+
+impl FragmentPreference {
+    pub const CONTROLLER_MAY_FRAGMENT: Self = Self(0x00);
+    pub const CONTROLLER_SHOULD_NOT: Self = Self(0x01);
+}
+
+/// Enabled Set entry for LE Set Extended Advertising Enable.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, FromBytes, IntoBytes, Unaligned, Immutable, KnownLayout,
+)]
+#[repr(C)]
+pub struct EnabledSet {
+    pub advertising_handle: u8,
+    pub duration: U16<LittleEndian>,
+    pub max_extended_advertising_events: u8,
 }
