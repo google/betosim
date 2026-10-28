@@ -21,7 +21,7 @@ import platform
 import zipfile
 
 from tasks.task import Task
-from utils import AOSP_ROOT, platform_to_target_name
+from utils import NETSIM_ROOT, platform_to_target_name
 
 
 class ZipArtifactTask(Task):
@@ -32,6 +32,44 @@ class ZipArtifactTask(Task):
     self.out = Path(args.out_dir)
     self.target = args.target or platform.system()
     self.dist = Path(args.dist_dir).absolute()
+
+  def _verify_proto_files(self, search_dir: Path):
+    """Verifies staged proto/ files match netsim and rootcanal protos."""
+    expected_netsim_protos = [
+        p for p in sorted((NETSIM_ROOT / "proto" / "netsim").glob("*.proto"))
+        if p.is_file()
+    ]
+    if not expected_netsim_protos:
+      raise FileNotFoundError(
+          f"No source .proto files found in {NETSIM_ROOT / 'proto' / 'netsim'}"
+      )
+    expected_rel = {
+        f"proto/netsim/{p.name}" for p in expected_netsim_protos
+    } | {"proto/rootcanal/configuration.proto"}
+
+    proto_root = search_dir / "proto"
+    actual_rel = (
+        {
+            p.relative_to(search_dir).as_posix()
+            for p in proto_root.rglob("*")
+            if p.is_file() or p.is_symlink()
+        }
+        if proto_root.is_dir()
+        else set()
+    )
+
+    missing = sorted(expected_rel - actual_rel)
+    if missing:
+      raise FileNotFoundError(
+          "Missing required .proto files in release distribution: "
+          + ", ".join(missing)
+      )
+    unexpected = sorted(actual_rel - expected_rel)
+    if unexpected:
+      raise ValueError(
+          "Unexpected files under proto/ in release distribution: "
+          + ", ".join(unexpected)
+      )
 
   def do_run(self):
     # Make sure the dist directory exists.
@@ -48,7 +86,8 @@ class ZipArtifactTask(Task):
           f"Artifact directory not found: {search_dir}. Skipping zip."
       )
       return True
-    search_glob = search_dir.glob("**/*")
+    self._verify_proto_files(search_dir)
+    search_glob = sorted(search_dir.glob("**/*"))
 
     logging.info("Creating zip file: %s", zip_fname)
     with zipfile.ZipFile(
@@ -56,7 +95,9 @@ class ZipArtifactTask(Task):
     ) as zipf:
       logging.info("Searching %s", search_dir)
       for fname in search_glob:
-        arcname = fname.relative_to(search_dir)
+        if not fname.is_file():
+          continue
+        arcname = fname.relative_to(search_dir).as_posix()
         logging.info("Adding %s as %s", fname, arcname)
         zipf.write(fname, arcname)
     return True
