@@ -20,17 +20,18 @@ use parking_lot::RwLock;
 use pica::{Handle, RangingEstimator, RangingMeasurement};
 use tracing::warn;
 
-use crate::{ranging::Pose, uwb_actor::UwbChipState};
+use crate::{radio_model::RangingDataSet, ranging::Pose, uwb_actor::UwbChipState};
 
 /// UWB Ranging Estimator that uses shared chip state to calculate ranging
 /// measurements.
 pub(crate) struct UwbRangingEstimator {
     shared_chips: Arc<RwLock<HashMap<Handle, UwbChipState>>>,
+    data_set: RangingDataSet,
 }
 
 impl UwbRangingEstimator {
     pub(crate) fn new(shared_chips: Arc<RwLock<HashMap<Handle, UwbChipState>>>) -> Self {
-        Self { shared_chips }
+        Self { shared_chips, data_set: RangingDataSet::default() }
     }
 }
 
@@ -49,8 +50,14 @@ impl RangingEstimator for UwbRangingEstimator {
 
         match a_pose.compute_ranging(&b_pose) {
             Ok((range, azimuth, elevation)) => {
-                // TODO(b/484364478): sampled ranging support
-                Some(RangingMeasurement { range: range as u16, azimuth, elevation })
+                let mut rng = rand::rng();
+                let (sampled_range, sampled_az, sampled_el) =
+                    self.data_set.sample_ranging(&mut rng, range, azimuth, elevation);
+                Some(RangingMeasurement {
+                    range: sampled_range,
+                    azimuth: sampled_az,
+                    elevation: sampled_el,
+                })
             }
             Err(error) => {
                 warn!(%error, "Failed to estimate ranging measurement");
@@ -160,9 +167,9 @@ mod tests {
         shared_chips.write().insert(handle_b, chip_b);
 
         let measurement = estimator.estimate(&handle_a, &handle_b).expect("ranging succeeds");
-        assert_eq!(measurement.range, 1000);
-        assert_eq!(measurement.azimuth, 90);
-        assert_eq!(measurement.elevation, 0);
+        assert!((980..=1020).contains(&measurement.range));
+        assert!((87..=93).contains(&measurement.azimuth));
+        assert!((-3..=3).contains(&measurement.elevation));
     }
 
     #[test]
@@ -182,9 +189,9 @@ mod tests {
 
         let measurement =
             estimator.estimate(&handle_anchor, &handle_device).expect("anchor ranging succeeds");
-        assert_eq!(measurement.range, 500);
-        assert_eq!(measurement.azimuth, 0);
-        assert_eq!(measurement.elevation, -90);
+        assert!((480..=520).contains(&measurement.range));
+        assert!((-3..=3).contains(&measurement.azimuth));
+        assert!((-90..=-87).contains(&measurement.elevation));
     }
 
     #[test]
@@ -205,13 +212,13 @@ mod tests {
         let m_b_to_a = estimator.estimate(&handle_b, &handle_a).expect("b to a succeeds");
 
         // Distance in cm is symmetric (10m = 1000cm)
-        assert_eq!(m_a_to_b.range, 1000);
-        assert_eq!(m_b_to_a.range, 1000);
+        assert!((980..=1020).contains(&m_a_to_b.range));
+        assert!((980..=1020).contains(&m_b_to_a.range));
 
         // Direction vectors are opposite
-        assert_eq!(m_a_to_b.azimuth, 0);
-        assert_eq!(m_a_to_b.elevation, 0);
-        assert_eq!(m_b_to_a.azimuth, 180);
-        assert_eq!(m_b_to_a.elevation, 0);
+        assert!((-3..=3).contains(&m_a_to_b.azimuth));
+        assert!((-3..=3).contains(&m_a_to_b.elevation));
+        assert!(m_b_to_a.azimuth >= 177 || m_b_to_a.azimuth <= -177);
+        assert!((-3..=3).contains(&m_b_to_a.elevation));
     }
 }

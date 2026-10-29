@@ -12,6 +12,7 @@ rust_library_host {
     crate_root: "src/lib.rs",
     srcs: [
         "src/lib.rs",
+        "src/sample_ranging_data.csv",
     ],
     features: [
         "cuttlefish",
@@ -29,6 +30,7 @@ rust_library_host {
         "libparking_lot",
         "libpdl_runtime",
         "libpica",
+        "librand",
         "libserde",
         "libthiserror",
         "libtokio",
@@ -47,6 +49,7 @@ rust_library_host {
     crate_root: "src/lib.rs",
     srcs: [
         "src/lib.rs",
+        "src/sample_ranging_data.csv",
     ],
     features: [
         "cuttlefish",
@@ -64,6 +67,7 @@ rust_library_host {
         "libparking_lot",
         "libpdl_runtime",
         "libpica",
+        "librand",
         "libserde",
         "libthiserror",
         "libtokio",
@@ -84,6 +88,10 @@ rust_test_host {
     ],
     srcs: [
         "src/lib.rs",
+        "src/sample_ranging_data.csv",
+    ],
+    data: [
+        "src/sample_ranging_data.csv",
     ],
     features: [
         "cuttlefish",
@@ -103,6 +111,7 @@ rust_test_host {
         "libparking_lot",
         "libpdl_runtime",
         "libpica",
+        "librand",
         "libserde",
         "libthiserror",
         "libtokio",
@@ -122,6 +131,7 @@ rust_test_host {
         "general_tests",
     ],
     srcs: [
+        "src/sample_ranging_data.csv",
         "tests/chip_create_test.rs",
         "tests/chip_lifecycle_test.rs",
         "tests/mod.rs",
@@ -130,6 +140,9 @@ rust_test_host {
         "tests/reset_test.rs",
         "tests/stats_test.rs",
         "tests/world.rs",
+    ],
+    data: [
+        "src/sample_ranging_data.csv",
     ],
     features: [
         "cuttlefish",
@@ -150,6 +163,7 @@ rust_test_host {
         "libparking_lot",
         "libpdl_runtime",
         "libpica",
+        "librand",
         "libserde",
         "libthiserror",
         "libtokio",

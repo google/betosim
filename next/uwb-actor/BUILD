@@ -28,6 +28,7 @@ DEPS = [
     "@parking_lot",
     "@pdl-runtime",
     "@pica",
+    "@rand",
     "@tokio",
     "@serde",
     "@glam",
@@ -36,6 +37,7 @@ DEPS = [
 netsim_rust_library(
     name = "uwb-actor",
     srcs = glob(["src/**/*.rs"]),
+    compile_data = ["src/sample_ranging_data.csv"],
     crate_features = ["testing"],
     crate_name = "uwb_actor",
     crate_root = "src/lib.rs",

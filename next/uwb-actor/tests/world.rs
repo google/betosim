@@ -326,8 +326,11 @@ impl World {
             uci::ShortMacTwoWaySessionInfoNtf::decode(&packet).expect("ranging info notification");
 
         assert_eq!(ntf.two_way_ranging_measurements.len(), 1, "Expected exactly one measurement");
-        // TODO(b/484364478) this won't match exactly with sampled ranging
-        assert_eq!(ntf.two_way_ranging_measurements[0].distance, expected_range);
+        let tolerance = (6.0 * (expected_range as f32 / 500.0).max(1.0)).ceil() as u16;
+        assert!(
+            (expected_range.saturating_sub(tolerance)..=expected_range.saturating_add(tolerance))
+                .contains(&ntf.two_way_ranging_measurements[0].distance)
+        );
     }
 
     pub async fn when_create_anchor(

@@ -18,11 +18,11 @@ use glam::{EulerRot, Quat, Vec3};
 
 use crate::UwbError;
 
-const CM_PER_METER: f32 = 100.0;
+pub(crate) const CM_PER_METER: f32 = 100.0;
 const MIN_AZIMUTH_DEGREES: f32 = -180.0;
 const MAX_AZIMUTH_DEGREES: f32 = 180.0;
-const MIN_ELEVATION_DEGREES: f32 = -90.0;
-const MAX_ELEVATION_DEGREES: f32 = 90.0;
+pub(crate) const MIN_ELEVATION_DEGREES: f32 = -90.0;
+pub(crate) const MAX_ELEVATION_DEGREES: f32 = 90.0;
 
 /// helper function for performing division with zero division check
 fn checked_div(num: f32, den: f32) -> Option<f32> {

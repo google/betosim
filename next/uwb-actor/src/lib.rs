@@ -16,6 +16,7 @@ mod actions;
 mod client;
 mod error;
 mod lifecycle;
+mod radio_model;
 mod ranging;
 mod ranging_estimator;
 mod service;

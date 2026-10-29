@@ -142,11 +142,11 @@ async fn test_ranging_between_chip_and_anchor() {
     world.when_ranging_is_triggered(chip_a, 1).await;
 
     let m = world.then_single_ranging_measurement_is_received(chip_a).await;
-    assert_eq!(m.distance, 500);
-    assert_eq!(m.aoa_azimuth, (90i16 << 7) as u16);
-    assert_eq!(m.aoa_elevation, (53i16 << 7) as u16);
-    assert_eq!(m.aoa_destination_azimuth, (-90i16 << 7) as u16);
-    assert_eq!(m.aoa_destination_elevation, (-53i16 << 7) as u16);
+    assert!((480..=520).contains(&m.distance));
+    assert!((87..=93).contains(&((m.aoa_azimuth as i16) >> 7)));
+    assert!((50..=56).contains(&((m.aoa_elevation as i16) >> 7)));
+    assert!((-93..=-87).contains(&((m.aoa_destination_azimuth as i16) >> 7)));
+    assert!((-56..=-50).contains(&((m.aoa_destination_elevation as i16) >> 7)));
 
     world
         .client
@@ -166,11 +166,12 @@ async fn test_ranging_between_chip_and_anchor() {
     world.when_ranging_is_triggered(chip_a, 1).await;
 
     let m2 = world.then_single_ranging_measurement_is_received(chip_a).await;
-    assert_eq!(m2.distance, 1000);
-    assert_eq!(m2.aoa_azimuth, 0);
-    assert_eq!(m2.aoa_elevation, 0);
-    assert_eq!(m2.aoa_destination_azimuth, (180i16 << 7) as u16);
-    assert_eq!(m2.aoa_destination_elevation, 0);
+    assert!((980..=1020).contains(&m2.distance));
+    assert!((-3..=3).contains(&((m2.aoa_azimuth as i16) >> 7)));
+    assert!((-3..=3).contains(&((m2.aoa_elevation as i16) >> 7)));
+    let dest_az = (m2.aoa_destination_azimuth as i16) >> 7;
+    assert!(dest_az >= 177 || dest_az <= -177);
+    assert!((-3..=3).contains(&((m2.aoa_destination_elevation as i16) >> 7)));
 
     world.client.delete(ChipId(anchor_id)).await.unwrap();
     assert_eq!(world.client.read_count_for_testing().await.unwrap(), 1);
