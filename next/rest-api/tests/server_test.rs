@@ -559,3 +559,130 @@ async fn test_ap_rest_endpoints_lifecycle_and_error_cases() {
     let bad_id_delete = server.handle_request(&Method::DELETE, "/v1/aps/invalid-id", &[]).await;
     assert_eq!(bad_id_delete.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_handle_request_devices_patch_and_reset() {
+    let (chip_tx, mut chip_rx) = tokio::sync::mpsc::channel(8);
+    tokio::spawn(async move {
+        let mut stored_chip = netsim_model::Chip::default();
+        while let Some(req) = chip_rx.recv().await {
+            match req {
+                netsim_model::ChipRequest::Create { id, mut params, respond_to } => {
+                    params.chip.id = id.0;
+                    stored_chip = params.chip;
+                    let _ = respond_to.send(Ok(()));
+                }
+                netsim_model::ChipRequest::Update { patch, respond_to, .. } => {
+                    patch.apply(&mut stored_chip);
+                    let _ = respond_to.send(Ok(stored_chip.clone()));
+                }
+                netsim_model::ChipRequest::Reset { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(stored_chip.clone()));
+                }
+                netsim_model::ChipRequest::GetStatistics { respond_to } => {
+                    let _ = respond_to.send(Ok(Vec::new().into_boxed_slice()));
+                }
+                netsim_model::ChipRequest::Delete { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let mut chip_clients: std::collections::HashMap<ChipKind, Box<dyn netsim_model::ChipClient>> =
+        std::collections::HashMap::new();
+    chip_clients.insert(ChipKind::WIFI, Box::new(netsim_model::RadioChipClient::new(chip_tx)));
+    let (device_runner, device_client) = device_actor::new();
+    let device_actor_inst = device_actor::DeviceActor::new(
+        chip_clients,
+        Arc::new(std::sync::atomic::AtomicU32::new(1000)),
+        None,
+        Box::new(MockLinkClient),
+        None,
+        None,
+        "0.3.92".to_string(),
+        None,
+        None,
+        Arc::new(netsim_model::FrontendStats::default()),
+    );
+    tokio::spawn(device_runner.run(device_actor_inst));
+
+    let shared_keys = Arc::new(ap_actor::SharedKeyStore::new());
+    let ap_actor = ap_actor::ApActor::new(shared_keys);
+    let (ap_runner, ap_client_base) = actor_framework::ResourceActor::new(32);
+    let ap_client = ApClient::new(ap_client_base);
+    tokio::spawn(ap_runner.run(ap_actor));
+    let link_client = Arc::new(MockLinkClient);
+
+    let server = RestServer::new(
+        device_client.clone(),
+        link_client,
+        ap_client,
+        capture_actor::new().1,
+        "0.3.92".to_string(),
+    );
+
+    // 1. GET /v1/devices starts empty
+    let list_resp = server.handle_request(&Method::GET, "/v1/devices", &[]).await;
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_bytes = list_resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(std::str::from_utf8(&list_bytes).unwrap(), r#"{"devices":[]}"#);
+
+    // 2. Create a device with a Wi-Fi chip via device_client
+    let created_id = device_client
+        .create_device(netsim_model::DeviceCreate {
+            device_config: netsim_model::DeviceConfig::new(
+                "test-phone",
+                true,
+                netsim_model::Pose::default(),
+                false,
+            ),
+            chip: netsim_model::DeviceChipCreate::new(
+                "wifi-chip",
+                "TestMfg",
+                "TestProduct",
+                netsim_model::ChipCreateVariant::Wifi(netsim_model::WifiCreate::default()),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created_id, DeviceId(1));
+
+    // 3. PATCH /v1/devices/1 - 200 OK (move pose + disable Wi-Fi radio)
+    let patch_body = br#"{"pose":{"position":{"x":10.0,"y":20.0,"z":5.0}},"chips":[{"variant":{"Wifi":{"state":false}}}]}"#;
+    let patch_resp = server.handle_request(&Method::PATCH, "/v1/devices/1", patch_body).await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+    let patch_bytes = patch_resp.into_body().collect().await.unwrap().to_bytes();
+    let patched_device: netsim_model::Device = serde_json::from_slice(&patch_bytes).unwrap();
+    assert_eq!(patched_device.id, 1);
+    assert_eq!(patched_device.pose.position, netsim_model::Position { x: 10.0, y: 20.0, z: 5.0 });
+    assert_eq!(
+        patched_device.chips[0].variant,
+        Some(netsim_model::ChipVariant::Wifi(netsim_model::Wifi {
+            radio: netsim_model::Radio { state: Some(false), ..Default::default() }
+        }))
+    );
+
+    // 4. PATCH /v1/devices/99 - 404 Not Found
+    let missing_resp = server.handle_request(&Method::PATCH, "/v1/devices/99", patch_body).await;
+    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
+
+    // 5. PATCH /v1/devices/not-an-id - 400 Bad Request
+    let bad_id_resp =
+        server.handle_request(&Method::PATCH, "/v1/devices/not-an-id", patch_body).await;
+    assert_eq!(bad_id_resp.status(), StatusCode::BAD_REQUEST);
+
+    // 6. PATCH /v1/devices/1 with malformed JSON - 400 Bad Request
+    let bad_json_resp = server.handle_request(&Method::PATCH, "/v1/devices/1", b"{bad json").await;
+    assert_eq!(bad_json_resp.status(), StatusCode::BAD_REQUEST);
+
+    // 7. POST /v1/devices:reset - 204 No Content and removes dynamic device
+    let reset_resp = server.handle_request(&Method::POST, "/v1/devices:reset", &[]).await;
+    assert_eq!(reset_resp.status(), StatusCode::NO_CONTENT);
+
+    let after_reset = server.handle_request(&Method::GET, "/v1/devices", &[]).await;
+    assert_eq!(after_reset.status(), StatusCode::OK);
+    let after_bytes = after_reset.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(std::str::from_utf8(&after_bytes).unwrap(), r#"{"devices":[]}"#);
+}

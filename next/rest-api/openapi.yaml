@@ -53,6 +53,11 @@ components:
       properties:
         position: *Position
         orientation: *Orientation
+    PoseUpdate: &PoseUpdate
+      required: []
+      properties:
+        position: *Position
+        orientation: *Orientation
     DeviceInfo: &DeviceInfo
       properties:
         name: *str
@@ -75,6 +80,37 @@ components:
         device_id: *int
         enabled: &bool
           type: boolean
+    RadioUpdate: &RadioUpdate
+      required: []
+      properties:
+        state: *bool
+    BluetoothUpdate: &BluetoothUpdate
+      required: []
+      properties:
+        low_energy: *RadioUpdate
+        classic: *RadioUpdate
+        preset: *str
+    CellUpdate: &CellUpdate
+      required: []
+      properties:
+        radio: *RadioUpdate
+        state: *str
+    ChipVariantUpdate: &ChipVariantUpdate
+      required: []
+      properties:
+        Bluetooth: *BluetoothUpdate
+        Wifi: *RadioUpdate
+        Uwb: *RadioUpdate
+        Cell: *CellUpdate
+        CellularData: *RadioUpdate
+        Ethernet: *RadioUpdate
+        Nfc: *RadioUpdate
+    ChipUpdate: &ChipUpdate
+      required: []
+      properties:
+        id: *int
+        enabled: *bool
+        variant: *ChipVariantUpdate
     Device: &Device
       x-rust-type: netsim_model::Device
       required: [id, name, visible, pose, builtin, chips]
@@ -86,6 +122,14 @@ components:
         builtin: *bool
         chips: [*Chip]
         device_info: *DeviceInfo
+    DeviceUpdate: &DeviceUpdate
+      x-rust-type: netsim_model::DeviceUpdate
+      required: []
+      properties:
+        name: *str
+        visible: *bool
+        pose: *PoseUpdate
+        chips: [*ChipUpdate]
     ListDeviceResponse: &ListDeviceResponse
       properties:
         devices: [*Device]
@@ -157,6 +201,34 @@ paths:
       responses:
         <<: *err_resp
         '200': *ListDeviceResponse
+  /v1/devices/{id}:
+    parameters: [*Id]
+    patch:
+      operationId: PatchDevice
+      tags: [DeviceService]
+      summary: Updates a simulated device's pose or radio state.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceUpdate'
+            example:
+              pose:
+                position:
+                  x: 1.0
+                  y: 2.0
+                  z: 3.0
+      responses:
+        <<: *err_resp
+        '200': *Device
+  /v1/devices:reset:
+    post:
+      operationId: ResetDevices
+      tags: [DeviceService]
+      summary: Resets all simulated devices, links, and access points.
+      responses:
+        <<: *err_resp
+        '200': *Empty
   /v1/links:
     get:
       operationId: ListLinks

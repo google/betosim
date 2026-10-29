@@ -99,6 +99,7 @@ pub(crate) mod api {
 
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
     pub struct DeviceUpdate {
+        #[serde(default)]
         pub id: u32,
         pub name: Option<String>,
         pub visible: Option<bool>,

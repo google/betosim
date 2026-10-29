@@ -207,3 +207,115 @@ async fn test_rest_access_point_lifecycle() {
         .expect_err("Patching deleted AP must 404");
     assert_eq!(err.status().map(|s| s.as_u16()), Some(404));
 }
+
+// Scenario: Reset Devices and Access Points over REST
+//   Given a running Netsim Daemon with a created beacon device and a dynamic AP
+//   When I call POST /v1/devices:reset over REST
+//   Then the dynamic beacon device is removed and dynamic APs are reset to the default AP
+#[tokio::test]
+async fn test_rest_reset_devices_and_aps() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    let rest_client = NetsimRestClient::new("localhost", world.http_port);
+
+    // Create a beacon device and a dynamic AP
+    let device_name = "reset-test-beacon";
+    let device_id = world.when_create_device(device_name, "beacon-chip").await;
+    assert!(device_id > 0);
+    let create_ap_req = ApCreate { ssid: "DynamicAp".to_string(), ..Default::default() };
+    let created_ap =
+        rest_client.create_ap(&create_ap_req).send().await.expect("Failed to create AP");
+    assert!(created_ap.id > 0);
+
+    // Verify both are present before reset
+    let devices_before = rest_client.get_devices().send().await.expect("Failed to list devices");
+    assert!(devices_before.devices.iter().any(|d| d.name == device_name));
+    let aps_before = rest_client.get_aps().send().await.expect("Failed to list APs");
+    assert!(aps_before.aps.iter().any(|ap| ap.id == created_ap.id));
+
+    // When I reset over REST
+    rest_client.reset().send().await.expect("Failed to reset devices via REST");
+
+    // Then the beacon device and dynamic AP are gone
+    let devices_after = rest_client.get_devices().send().await.expect("Failed to list devices");
+    assert!(
+        !devices_after.devices.iter().any(|d| d.name == device_name),
+        "Beacon device must be removed after reset: {devices_after:?}"
+    );
+    let aps_after = rest_client.get_aps().send().await.expect("Failed to list APs");
+    assert!(
+        !aps_after.aps.iter().any(|ap| ap.id == created_ap.id),
+        "Dynamic AP must be removed after reset: {aps_after:?}"
+    );
+    assert!(aps_after.aps.iter().any(|ap| ap.id == 0), "Default AP must remain after reset");
+}
+
+// Scenario: Patch Device Pose and Radio State over REST
+//   Given a running Netsim Daemon with a created device
+//   When I call PATCH /v1/devices/{id} to move the device and toggle its BLE radio
+//   Then PATCH returns 200 OK with the updated Device and GET /v1/devices reflects the changes
+#[tokio::test]
+async fn test_rest_patch_device_pose_and_radio() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    let rest_client = NetsimRestClient::new("localhost", world.http_port);
+
+    let device_name = "patch-test-device";
+    let device_id = world.when_create_device(device_name, "beacon-chip").await;
+    assert!(device_id > 0);
+
+    // 1. Move device over REST
+    let move_patch = netsim_model::DeviceUpdate {
+        pose: netsim_model::PoseUpdate {
+            position: Some(netsim_model::Position { x: 1.5, y: 2.5, z: 3.5 }),
+            orientation: None,
+        },
+        ..Default::default()
+    };
+    let moved = rest_client
+        .patch_device(device_id, &move_patch)
+        .send()
+        .await
+        .expect("Failed to patch device pose via REST");
+    assert_eq!(moved.id, device_id);
+    assert_eq!(moved.pose.position, netsim_model::Position { x: 1.5, y: 2.5, z: 3.5 });
+
+    // 2. Toggle BLE radio off over REST
+    let radio_patch = netsim_model::DeviceUpdate {
+        chips: Some(vec![netsim_model::ChipUpdate {
+            variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(
+                netsim_model::BluetoothUpdate {
+                    low_energy: netsim_model::RadioUpdate { state: Some(false) },
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+    let toggled = rest_client
+        .patch_device(device_id, &radio_patch)
+        .send()
+        .await
+        .expect("Failed to patch device radio via REST");
+    assert_eq!(toggled.id, device_id);
+    assert!(!toggled.chips[0].is_le_enabled());
+
+    // 3. Read back via GET /v1/devices and verify both pose and radio state persisted
+    let listed = rest_client.get_devices().send().await.expect("Failed to list devices");
+    let dev = listed
+        .devices
+        .iter()
+        .find(|d| d.id == device_id)
+        .expect("Patched device missing from GET /v1/devices");
+    assert_eq!(dev.pose.position, netsim_model::Position { x: 1.5, y: 2.5, z: 3.5 });
+    assert!(!dev.chips[0].is_le_enabled());
+
+    // 4. Patching a non-existent device returns 404 Not Found
+    let err = rest_client
+        .patch_device(9999, &move_patch)
+        .send()
+        .await
+        .expect_err("Patching non-existent device must return 404");
+    assert_eq!(err.status().map(|s| s.as_u16()), Some(404));
+}

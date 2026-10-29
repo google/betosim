@@ -389,18 +389,6 @@ impl From<crate::VersionResponse> for JsonResponse {
     }
 }
 
-impl From<crate::Device> for JsonResponse {
-    fn from(device: crate::Device) -> Self {
-        Self(json_response(&device))
-    }
-}
-
-impl From<Vec<crate::Device>> for JsonResponse {
-    fn from(devices: Vec<crate::Device>) -> Self {
-        Self(json_response(&crate::ListDeviceResponse::from(devices)))
-    }
-}
-
 impl From<crate::Link> for JsonResponse {
     fn from(link: crate::Link) -> Self {
         Self(json_response(&link))
@@ -567,7 +555,9 @@ impl RestServer {
         let resp: JsonResponse = match crate::openapi::find_route(crate::ROUTES, method, path) {
             Some((route, params)) => match route.op {
                 crate::Op::GetVersion => self.get_version().into(),
-                crate::Op::ListDevices => self.device_client.list().await.into(),
+                crate::Op::ListDevices => self.list_devices().await.into(),
+                crate::Op::PatchDevice => self.patch_device(&params, body).await.into(),
+                crate::Op::ResetDevices => self.reset_devices().await.into(),
                 crate::Op::ListLinks => self.link_client.list().await.into(),
                 crate::Op::ListAps => self.ap_client.list_aps().await.into(),
                 crate::Op::CreateAp => self.create_ap(body).await.into(),

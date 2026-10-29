@@ -176,10 +176,12 @@ rust_test_host {
         "src/openapi/reserved_idents.inc",
         "tests/capture_stream_test.rs",
         "tests/client_test.rs",
+        "tests/device_bdd_test.rs",
         "tests/mod.rs",
         "tests/openapi.yaml",
         "tests/openapi_test.rs",
         "tests/server_test.rs",
+        "tests/world.rs",
     ],
     data: [
         "src/openapi/reserved_idents.inc",

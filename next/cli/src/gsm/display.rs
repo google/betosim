@@ -20,7 +20,7 @@ use crate::display::{
     Displayer, format_call_direction, format_call_state, format_registration_status,
 };
 
-impl fmt::Display for Displayer<'_, &ListCellsResponse> {
+impl fmt::Display for Displayer<&ListCellsResponse> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         if self.value.cells.is_empty() {
@@ -67,7 +67,7 @@ impl fmt::Display for Displayer<'_, &ListCellsResponse> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &Cell> {
+impl fmt::Display for Displayer<&Cell> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         writeln!(f, "{:indent$}Cell ID: {}", "", self.value.id)?;

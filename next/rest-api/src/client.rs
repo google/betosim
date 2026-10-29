@@ -33,7 +33,7 @@ use hyper::{Method, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{ErrorResponse, ListApResponse, ListDeviceResponse, ListLinkResponse, VersionResponse};
+use crate::{ErrorResponse, ListApResponse, ListLinkResponse, VersionResponse};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -114,11 +114,6 @@ impl NetsimRestClient {
     /// `GET /v1/version`
     pub fn get_version(&self) -> RestRequest<'_, VersionResponse> {
         self.get(crate::path::VERSION)
-    }
-
-    /// `GET /v1/devices`
-    pub fn get_devices(&self) -> RestRequest<'_, ListDeviceResponse> {
-        self.get(crate::path::DEVICES)
     }
 
     /// `GET /v1/links`

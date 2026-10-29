@@ -361,7 +361,7 @@ pub mod steps {
             .find(|d| d["name"].as_str() == Some(&netsim_device))
             .ok_or_else(|| format!("Device '{}' not found in netsim devices", netsim_device))?;
 
-        let pos = &device["position"];
+        let pos = device.get("pose").and_then(|p| p.get("position")).unwrap_or(&device["position"]);
         let act_x = pos["x"].as_f64().unwrap_or(0.0) as f32;
         let act_y = pos["y"].as_f64().unwrap_or(0.0) as f32;
         let act_z = pos["z"].as_f64().unwrap_or(0.0) as f32;

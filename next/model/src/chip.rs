@@ -396,6 +396,7 @@ pub struct ChipUpdate {
     pub name: Option<String>,
     pub manufacturer: Option<String>,
     pub product_name: Option<String>,
+    #[serde(default)]
     pub pose: PoseUpdate,
     pub variant: Option<ChipVariantUpdate>,
     pub links: Option<Vec<(ChipId, i8)>>,

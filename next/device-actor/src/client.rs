@@ -90,7 +90,7 @@ impl DeviceClient {
             return Err(ClientError::Send("Device ID or Name must be provided".to_string()));
         };
         update.id = device_id.0;
-        self.update(device_id, update).await
+        self.update(device_id, update).await.map(|_| ())
     }
 
     /// Updates an existing device's properties.
@@ -98,9 +98,9 @@ impl DeviceClient {
         &self,
         id: DeviceId,
         update: device_api::DeviceUpdate,
-    ) -> Result<(), ClientError> {
+    ) -> Result<device_api::Device, ClientError> {
         debug!("Sending update request for device {}", id);
-        self.inner.update(id, update).err_into::<ClientError>().await.map(|_| ())
+        self.inner.update(id, update).err_into::<ClientError>().await
     }
 
     /// Resets a device to its default state. If `id` is `None`, performs a

@@ -22,10 +22,7 @@ use netsim_proto::{
     model::{
         self, Chip, ChipCreate as ChipCreateProto, DeviceCreate as DeviceCreateProto, Orientation,
         Position,
-        chip::{
-            BleBeacon as Chip_Ble_Beacon, Bluetooth as Chip_Bluetooth, Chip as Chip_Type,
-            Radio as Chip_Radio,
-        },
+        chip::{BleBeacon as Chip_Ble_Beacon, Bluetooth as Chip_Bluetooth, Chip as Chip_Type},
         chip_create,
     },
 };
@@ -53,82 +50,78 @@ fn chip_kind_to_proto(chip_kind: ArgsChipKind) -> ChipKind {
     }
 }
 
+pub(crate) fn radio_to_device_update(cmd: &crate::args::Radio) -> netsim_model::DeviceUpdate {
+    let chip_state = match cmd.status {
+        UpDownStatus::Up => true,
+        UpDownStatus::Down => false,
+    };
+    let radio = netsim_model::RadioUpdate { state: Some(chip_state) };
+    let variant = match cmd.radio_type {
+        RadioType::Wifi => {
+            netsim_model::ChipVariantUpdate::Wifi(netsim_model::WifiUpdate { radio })
+        }
+        RadioType::Uwb => netsim_model::ChipVariantUpdate::Uwb(netsim_model::UwbUpdate { radio }),
+        RadioType::Nfc => netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate { radio }),
+        RadioType::Ethernet => {
+            netsim_model::ChipVariantUpdate::Ethernet(netsim_model::EthernetUpdate { radio })
+        }
+        RadioType::Cellular => {
+            let state = if chip_state {
+                netsim_model::MODEM_STATE_IDLE
+            } else {
+                netsim_model::MODEM_STATE_DOWN
+            };
+            netsim_model::ChipVariantUpdate::Cell(netsim_model::CellUpdate {
+                radio,
+                state: Some(state.to_string()),
+                ..Default::default()
+            })
+        }
+        RadioType::CellularData => {
+            netsim_model::ChipVariantUpdate::CellularData(netsim_model::CellularDataUpdate {
+                radio,
+            })
+        }
+        RadioType::Ble => {
+            netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+                low_energy: radio,
+                ..Default::default()
+            })
+        }
+        RadioType::Classic => {
+            netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+                classic: radio,
+                ..Default::default()
+            })
+        }
+    };
+    netsim_model::DeviceUpdate {
+        chips: Some(vec![netsim_model::ChipUpdate {
+            variant: Some(variant),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn move_to_device_update(cmd: &crate::args::Move) -> netsim_model::DeviceUpdate {
+    netsim_model::DeviceUpdate {
+        pose: netsim_model::PoseUpdate {
+            position: Some(netsim_model::Position {
+                x: cmd.x,
+                y: cmd.y,
+                z: cmd.z.unwrap_or_default(),
+            }),
+            orientation: None,
+        },
+        ..Default::default()
+    }
+}
+
 impl Command {
     /// Return the generated request protobuf message
     pub(crate) fn get_request(&self) -> Result<GrpcRequest> {
         Ok(match self {
-            Command::Radio(cmd) => {
-                let mut chip = Chip { ..Default::default() };
-                let chip_state = match cmd.status {
-                    UpDownStatus::Up => true,
-                    UpDownStatus::Down => false,
-                };
-                if cmd.radio_type == RadioType::Wifi {
-                    let mut wifi_chip = Chip_Radio::new();
-                    wifi_chip.state = chip_state.into();
-                    chip.set_wifi(wifi_chip);
-                    chip.kind = ChipKind::WIFI.into();
-                } else if cmd.radio_type == RadioType::Uwb {
-                    let mut uwb_chip = Chip_Radio::new();
-                    uwb_chip.state = chip_state.into();
-                    chip.set_uwb(uwb_chip);
-                    chip.kind = ChipKind::UWB.into();
-                } else if cmd.radio_type == RadioType::Nfc {
-                    let mut nfc_chip = Chip_Radio::new();
-                    nfc_chip.state = chip_state.into();
-                    chip.set_nfc(nfc_chip);
-                    chip.kind = ChipKind::NFC.into();
-                } else if cmd.radio_type == RadioType::Ethernet {
-                    let mut eth_chip = Chip_Radio::new();
-                    eth_chip.state = chip_state.into();
-                    chip.set_ethernet(eth_chip);
-                    chip.kind = ChipKind::ETHERNET.into();
-                } else if cmd.radio_type == RadioType::Cellular {
-                    let mut cell_chip = Chip_Radio::new();
-                    cell_chip.state = chip_state.into();
-                    chip.set_cellular(cell_chip);
-                    chip.kind = ChipKind::CELLULAR.into();
-                } else if cmd.radio_type == RadioType::CellularData {
-                    let mut cell_data_chip = Chip_Radio::new();
-                    cell_data_chip.state = chip_state.into();
-                    chip.set_cellular_data(cell_data_chip);
-                    chip.kind = ChipKind::CELLULAR_DATA.into();
-                } else {
-                    let mut bt_chip = Chip_Bluetooth::new();
-                    let mut bt_chip_radio = Chip_Radio::new();
-                    bt_chip_radio.state = chip_state.into();
-                    if cmd.radio_type == RadioType::Ble {
-                        bt_chip.low_energy = Some(bt_chip_radio).into();
-                    } else {
-                        bt_chip.classic = Some(bt_chip_radio).into();
-                    }
-                    chip.kind = ChipKind::BLUETOOTH.into();
-                    chip.set_bt(bt_chip);
-                }
-                let mut result = frontend::PatchDeviceRequest::new();
-                let mut device = PatchDeviceFieldsProto::new();
-                device.name = Some(cmd.name.clone());
-                device.chips.push(chip);
-                result.device = Some(device).into();
-                GrpcRequest::PatchDevice(result)
-            }
-            Command::Move(cmd) => {
-                let mut result = frontend::PatchDeviceRequest::new();
-                let mut device = PatchDeviceFieldsProto::new();
-                let position = Position {
-                    x: cmd.x,
-                    y: cmd.y,
-                    z: cmd.z.unwrap_or_default(),
-                    ..Default::default()
-                };
-                device.name = Some(cmd.name.clone());
-                device.position = Some(position).into();
-                result.device = Some(device).into();
-                GrpcRequest::PatchDevice(result)
-            }
-            Command::Devices(_) => GrpcRequest::ListDevice,
-            Command::Reset => GrpcRequest::Reset,
-
             Command::Capture(cmd) => match cmd {
                 Capture::List(_) => GrpcRequest::ListCapture,
                 Capture::Get(_) => {
@@ -532,7 +525,6 @@ mod tests {
             DeviceCreate as DeviceCreateProto, Link as LinkProto, Orientation, Position,
             chip::{
                 BleBeacon as BleBeaconProto, Bluetooth as Chip_Bluetooth, Chip as ChipKindProto,
-                Radio as Chip_Radio,
                 ble_beacon::{
                     AdvertiseData as AdvertiseDataProto,
                     AdvertiseSettings as AdvertiseSettingsProto,
@@ -606,361 +598,368 @@ mod tests {
         assert_eq!(requests, expected_requests);
     }
 
-    fn get_expected_radio(
-        name: &str,
-        radio_type: &str,
-        state: &str,
-    ) -> frontend::PatchDeviceRequest {
-        let mut chip = model::Chip { ..Default::default() };
+    fn test_radio_command(
+        command: &str,
+        expected_command: Command,
+        expected_update: netsim_model::DeviceUpdate,
+    ) {
+        let parsed = NetsimArgs::parse_from(command.split_whitespace()).command;
+        assert_eq!(parsed, expected_command);
+        assert!(parsed.get_request().is_err());
+        let Command::Radio(ref radio) = parsed else {
+            panic!("Expected Command::Radio, got {parsed:?}");
+        };
+        assert_eq!(radio_to_device_update(radio), expected_update);
+    }
+
+    fn test_move_command(
+        command: &str,
+        expected_command: Command,
+        expected_update: netsim_model::DeviceUpdate,
+    ) {
+        let parsed = NetsimArgs::parse_from(command.split_whitespace()).command;
+        assert_eq!(parsed, expected_command);
+        assert!(parsed.get_request().is_err());
+        let Command::Move(ref mv) = parsed else {
+            panic!("Expected Command::Move, got {parsed:?}");
+        };
+        assert_eq!(move_to_device_update(mv), expected_update);
+    }
+
+    fn get_expected_radio(radio_type: &str, state: &str) -> netsim_model::DeviceUpdate {
         let chip_state = state == "up";
-        if radio_type == "wifi" {
-            let mut wifi_chip = Chip_Radio::new();
-            wifi_chip.state = chip_state.into();
-            chip.set_wifi(wifi_chip);
-            chip.kind = ChipKind::WIFI.into();
-        } else if radio_type == "uwb" {
-            let mut uwb_chip = Chip_Radio::new();
-            uwb_chip.state = chip_state.into();
-            chip.set_uwb(uwb_chip);
-            chip.kind = ChipKind::UWB.into();
-        } else if radio_type == "nfc" {
-            let mut nfc_chip = Chip_Radio::new();
-            nfc_chip.state = chip_state.into();
-            chip.set_nfc(nfc_chip);
-            chip.kind = ChipKind::NFC.into();
-        } else if radio_type == "ethernet" {
-            let mut eth_chip = Chip_Radio::new();
-            eth_chip.state = chip_state.into();
-            chip.set_ethernet(eth_chip);
-            chip.kind = ChipKind::ETHERNET.into();
-        } else if radio_type == "cellular" {
-            let mut cell_chip = Chip_Radio::new();
-            cell_chip.state = chip_state.into();
-            chip.set_cellular(cell_chip);
-            chip.kind = ChipKind::CELLULAR.into();
-        } else if radio_type == "cellular-data" {
-            let mut cell_data_chip = Chip_Radio::new();
-            cell_data_chip.state = chip_state.into();
-            chip.set_cellular_data(cell_data_chip);
-            chip.kind = ChipKind::CELLULAR_DATA.into();
-        } else {
-            let mut bt_chip = Chip_Bluetooth::new();
-            let mut bt_chip_radio = Chip_Radio::new();
-            bt_chip_radio.state = chip_state.into();
-            if radio_type == "ble" {
-                bt_chip.low_energy = Some(bt_chip_radio).into();
-            } else {
-                bt_chip.classic = Some(bt_chip_radio).into();
+        let radio = netsim_model::RadioUpdate { state: Some(chip_state) };
+        let variant = match radio_type {
+            "wifi" => netsim_model::ChipVariantUpdate::Wifi(netsim_model::WifiUpdate { radio }),
+            "uwb" => netsim_model::ChipVariantUpdate::Uwb(netsim_model::UwbUpdate { radio }),
+            "nfc" => netsim_model::ChipVariantUpdate::Nfc(netsim_model::NfcUpdate { radio }),
+            "ethernet" => {
+                netsim_model::ChipVariantUpdate::Ethernet(netsim_model::EthernetUpdate { radio })
             }
-            chip.kind = ChipKind::BLUETOOTH.into();
-            chip.set_bt(bt_chip);
+            "cellular" => {
+                let state = if chip_state {
+                    netsim_model::MODEM_STATE_IDLE
+                } else {
+                    netsim_model::MODEM_STATE_DOWN
+                };
+                netsim_model::ChipVariantUpdate::Cell(netsim_model::CellUpdate {
+                    radio,
+                    state: Some(state.to_string()),
+                    ..Default::default()
+                })
+            }
+            "cellular-data" => {
+                netsim_model::ChipVariantUpdate::CellularData(netsim_model::CellularDataUpdate {
+                    radio,
+                })
+            }
+            "ble" => netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+                low_energy: radio,
+                ..Default::default()
+            }),
+            _ => netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
+                classic: radio,
+                ..Default::default()
+            }),
+        };
+        netsim_model::DeviceUpdate {
+            chips: Some(vec![netsim_model::ChipUpdate {
+                variant: Some(variant),
+                ..Default::default()
+            }]),
+            ..Default::default()
         }
-        let mut result = frontend::PatchDeviceRequest::new();
-        let mut device = PatchDeviceFieldsProto::new();
-        device.name = Some(name.to_string());
-        device.chips.push(chip);
-        result.device = Some(device).into();
-        result
     }
 
     #[test]
     fn test_radio_ble() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio ble down 1000",
             Command::Radio(Radio {
                 radio_type: RadioType::Ble,
                 status: UpDownStatus::Down,
                 name: "1000".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("1000", "ble", "down")),
+            get_expected_radio("ble", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio ble up 1000",
             Command::Radio(Radio {
                 radio_type: RadioType::Ble,
                 status: UpDownStatus::Up,
                 name: "1000".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("1000", "ble", "up")),
+            get_expected_radio("ble", "up"),
         );
     }
 
     #[test]
     fn test_radio_ble_aliases() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio ble Down 1000",
             Command::Radio(Radio {
                 radio_type: RadioType::Ble,
                 status: UpDownStatus::Down,
                 name: "1000".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("1000", "ble", "down")),
+            get_expected_radio("ble", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio ble Up 1000",
             Command::Radio(Radio {
                 radio_type: RadioType::Ble,
                 status: UpDownStatus::Up,
                 name: "1000".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("1000", "ble", "up")),
+            get_expected_radio("ble", "up"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio ble DOWN 1000",
             Command::Radio(Radio {
                 radio_type: RadioType::Ble,
                 status: UpDownStatus::Down,
                 name: "1000".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("1000", "ble", "down")),
+            get_expected_radio("ble", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio ble UP 1000",
             Command::Radio(Radio {
                 radio_type: RadioType::Ble,
                 status: UpDownStatus::Up,
                 name: "1000".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("1000", "ble", "up")),
+            get_expected_radio("ble", "up"),
         );
     }
 
     #[test]
     fn test_radio_classic() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio classic down 100",
             Command::Radio(Radio {
                 radio_type: RadioType::Classic,
                 status: UpDownStatus::Down,
                 name: "100".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("100", "classic", "down")),
+            get_expected_radio("classic", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio classic up 100",
             Command::Radio(Radio {
                 radio_type: RadioType::Classic,
                 status: UpDownStatus::Up,
                 name: "100".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("100", "classic", "up")),
+            get_expected_radio("classic", "up"),
         );
     }
 
     #[test]
     fn test_radio_wifi() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio wifi down a",
             Command::Radio(Radio {
                 radio_type: RadioType::Wifi,
                 status: UpDownStatus::Down,
                 name: "a".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("a", "wifi", "down")),
+            get_expected_radio("wifi", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio wifi up b",
             Command::Radio(Radio {
                 radio_type: RadioType::Wifi,
                 status: UpDownStatus::Up,
                 name: "b".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("b", "wifi", "up")),
+            get_expected_radio("wifi", "up"),
         );
     }
 
     #[test]
     fn test_radio_uwb() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio uwb down a",
             Command::Radio(Radio {
                 radio_type: RadioType::Uwb,
                 status: UpDownStatus::Down,
                 name: "a".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("a", "uwb", "down")),
+            get_expected_radio("uwb", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio uwb up b",
             Command::Radio(Radio {
                 radio_type: RadioType::Uwb,
                 status: UpDownStatus::Up,
                 name: "b".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("b", "uwb", "up")),
+            get_expected_radio("uwb", "up"),
         );
     }
 
     #[test]
     fn test_radio_nfc() {
         for (status_str, status) in [("down", UpDownStatus::Down), ("up", UpDownStatus::Up)] {
-            test_command(
+            test_radio_command(
                 &format!("netsim-cli radio nfc {status_str} a"),
                 Command::Radio(Radio { radio_type: RadioType::Nfc, status, name: "a".to_string() }),
-                GrpcRequest::PatchDevice(get_expected_radio("a", "nfc", status_str)),
+                get_expected_radio("nfc", status_str),
             );
         }
     }
 
     #[test]
     fn test_radio_ethernet() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio ethernet down a",
             Command::Radio(Radio {
                 radio_type: RadioType::Ethernet,
                 status: UpDownStatus::Down,
                 name: "a".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("a", "ethernet", "down")),
+            get_expected_radio("ethernet", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio ethernet up b",
             Command::Radio(Radio {
                 radio_type: RadioType::Ethernet,
                 status: UpDownStatus::Up,
                 name: "b".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("b", "ethernet", "up")),
+            get_expected_radio("ethernet", "up"),
         );
     }
 
     #[test]
     fn test_radio_cellular() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio cellular down a",
             Command::Radio(Radio {
                 radio_type: RadioType::Cellular,
                 status: UpDownStatus::Down,
                 name: "a".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("a", "cellular", "down")),
+            get_expected_radio("cellular", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio cellular up b",
             Command::Radio(Radio {
                 radio_type: RadioType::Cellular,
                 status: UpDownStatus::Up,
                 name: "b".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("b", "cellular", "up")),
+            get_expected_radio("cellular", "up"),
         );
     }
 
     #[test]
     fn test_radio_cellular_data() {
-        test_command(
+        test_radio_command(
             "netsim-cli radio cellular-data down a",
             Command::Radio(Radio {
                 radio_type: RadioType::CellularData,
                 status: UpDownStatus::Down,
                 name: "a".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("a", "cellular-data", "down")),
+            get_expected_radio("cellular-data", "down"),
         );
-        test_command(
+        test_radio_command(
             "netsim-cli radio cellular-data up b",
             Command::Radio(Radio {
                 radio_type: RadioType::CellularData,
                 status: UpDownStatus::Up,
                 name: "b".to_string(),
             }),
-            GrpcRequest::PatchDevice(get_expected_radio("b", "cellular-data", "up")),
+            get_expected_radio("cellular-data", "up"),
         );
     }
 
-    fn get_expected_move(
-        name: &str,
-        x: f32,
-        y: f32,
-        z: Option<f32>,
-    ) -> frontend::PatchDeviceRequest {
-        let mut result = frontend::PatchDeviceRequest::new();
-        let mut device = PatchDeviceFieldsProto::new();
-        let position = Position { x, y, z: z.unwrap_or_default(), ..Default::default() };
-        device.name = Some(name.to_string());
-        device.position = Some(position).into();
-        result.device = Some(device).into();
-        result
+    fn get_expected_move(x: f32, y: f32, z: Option<f32>) -> netsim_model::DeviceUpdate {
+        netsim_model::DeviceUpdate {
+            pose: netsim_model::PoseUpdate {
+                position: Some(netsim_model::Position { x, y, z: z.unwrap_or_default() }),
+                orientation: None,
+            },
+            ..Default::default()
+        }
     }
 
     #[test]
     fn test_move_int() {
-        test_command(
+        test_move_command(
             "netsim-cli move 1 1 2 3",
             Command::Move(Move { name: "1".to_string(), x: 1.0, y: 2.0, z: Some(3.0) }),
-            GrpcRequest::PatchDevice(get_expected_move("1", 1.0, 2.0, Some(3.0))),
+            get_expected_move(1.0, 2.0, Some(3.0)),
         )
     }
 
     #[test]
     fn test_move_float() {
-        test_command(
+        test_move_command(
             "netsim-cli move 1000 1.2 3.4 5.6",
             Command::Move(Move { name: "1000".to_string(), x: 1.2, y: 3.4, z: Some(5.6) }),
-            GrpcRequest::PatchDevice(get_expected_move("1000", 1.2, 3.4, Some(5.6))),
+            get_expected_move(1.2, 3.4, Some(5.6)),
         )
     }
 
     #[test]
     fn test_move_mixed() {
-        test_command(
+        test_move_command(
             "netsim-cli move 1000 1.1 2 3.4",
             Command::Move(Move { name: "1000".to_string(), x: 1.1, y: 2.0, z: Some(3.4) }),
-            GrpcRequest::PatchDevice(get_expected_move("1000", 1.1, 2.0, Some(3.4))),
+            get_expected_move(1.1, 2.0, Some(3.4)),
         )
     }
 
     #[test]
     fn test_move_no_z() {
-        test_command(
+        test_move_command(
             "netsim-cli move 1000 1.2 3.4",
             Command::Move(Move { name: "1000".to_string(), x: 1.2, y: 3.4, z: None }),
-            GrpcRequest::PatchDevice(get_expected_move("1000", 1.2, 3.4, None)),
+            get_expected_move(1.2, 3.4, None),
         )
     }
 
     #[test]
     fn test_devices() {
-        test_command(
-            "netsim-cli devices",
-            Command::Devices(Devices::default()),
-            GrpcRequest::ListDevice,
-        )
+        let cmd = NetsimArgs::parse_from("netsim-cli devices".split_whitespace()).command;
+        assert_eq!(cmd, Command::Devices(Devices::default()));
+        assert!(cmd.get_request().is_err());
     }
 
     #[test]
     fn test_devices_json_parsing() {
-        test_command(
-            "netsim-cli devices --json",
-            Command::Devices(Devices { continuous: false, json: true }),
-            GrpcRequest::ListDevice,
-        )
+        let cmd = NetsimArgs::parse_from("netsim-cli devices --json".split_whitespace()).command;
+        assert_eq!(cmd, Command::Devices(Devices { continuous: false, json: true }));
+        assert!(cmd.get_request().is_err());
     }
 
     #[test]
     fn test_devices_json_output_and_parsing() {
-        use protobuf_json_mapping::{parse_from_str, print_to_string};
+        let dev = netsim_model::Device {
+            id: 1,
+            name: "test_device".to_string(),
+            chips: vec![netsim_model::Chip {
+                id: 100,
+                kind: netsim_model::ChipKind::BLUETOOTH,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
 
-        let mut dev = DeviceProto::new();
-        dev.id = 1;
-        dev.name = "test_device".to_string();
+        let resp = netsim_rest_api::ListDeviceResponse { devices: vec![dev] };
 
-        let mut chip = ChipProto::new();
-        chip.id = 100;
-        chip.kind = ChipKind::BLUETOOTH.into();
-        dev.chips.push(chip);
-
-        let mut resp = ListDeviceResponse::new();
-        resp.devices.push(dev);
-
-        let json_str = print_to_string(&resp).unwrap();
+        let json_str = serde_json::to_string(&resp).unwrap();
 
         // Verify it contains expected data
         assert!(json_str.contains("test_device"));
         assert!(json_str.contains("100")); // Check for chip ID
 
         // Parse it back
-        let parsed_resp: ListDeviceResponse = parse_from_str(&json_str).unwrap();
+        let parsed_resp: netsim_rest_api::ListDeviceResponse =
+            serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(parsed_resp.devices.len(), 1);
         assert_eq!(parsed_resp.devices[0].name, "test_device");
@@ -970,7 +969,9 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        test_command("netsim-cli reset", Command::Reset, GrpcRequest::Reset)
+        let cmd = NetsimArgs::parse_from("netsim-cli reset".split_whitespace()).command;
+        assert_eq!(cmd, Command::Reset);
+        assert!(cmd.get_request().is_err());
     }
 
     #[test]

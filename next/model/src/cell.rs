@@ -61,7 +61,7 @@ pub struct Quirks {
 /// Cellular technology specific chip information.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
-    #[serde(flatten)]
+    #[serde(default)]
     pub radio: crate::chip::Radio,
     /// A string representing the current state of the cellular modem.
     pub state: String,
@@ -196,7 +196,7 @@ pub enum ModemAction {
 /// Cellular specific chip updates.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CellUpdate {
-    #[serde(flatten)]
+    #[serde(default)]
     pub radio: crate::chip::RadioUpdate,
     pub state: Option<String>,
     /// Cellular network configurations for future data calls.
@@ -215,5 +215,45 @@ impl CellUpdate {
         if let Some(cfgs) = &self.network_configs {
             cell.network_configs.clone_from(cfgs);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chip::{Radio, RadioUpdate};
+
+    #[test]
+    fn test_cell_serde_json_roundtrip() {
+        let cell = Cell {
+            radio: Radio { state: Some(true), range: 0.0, tx_count: 10, rx_count: 20 },
+            state: MODEM_STATE_IDLE.to_string(),
+            rssi: 15,
+            ber: 1,
+            sms_count: 2,
+            voice_registration: RegistrationStatus::RegisteredHome,
+            data_registration: RegistrationStatus::Roaming,
+            active_calls: vec![Call {
+                number: "12345".to_string(),
+                state: CallState::Active,
+                direction: CallDirection::MobileOriginated,
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cell).unwrap();
+        let decoded: Cell = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, cell);
+    }
+
+    #[test]
+    fn test_cell_update_serde_json_roundtrip() {
+        let update = CellUpdate {
+            radio: RadioUpdate { state: Some(false) },
+            state: Some(MODEM_STATE_DOWN.to_string()),
+            network_configs: None,
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        let decoded: CellUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, update);
     }
 }

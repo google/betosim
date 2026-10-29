@@ -14,5 +14,7 @@
 
 mod capture_stream_test;
 mod client_test;
+mod device_bdd_test;
 mod openapi_test;
 mod server_test;
+mod world;

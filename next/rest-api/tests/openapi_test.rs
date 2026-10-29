@@ -313,6 +313,8 @@ fn test_netsim_openapi_spec() {
             "DeleteAp",
             "DisconnectAp",
             "ListDevices",
+            "PatchDevice",
+            "ResetDevices",
             "ListLinks",
             "GetVersion"
         ]
@@ -325,6 +327,10 @@ fn test_netsim_openapi_spec() {
     assert!(cpp.contains("struct ListApResponse {"), "{cpp}");
     assert!(cpp.contains("struct ApCreate {"), "{cpp}");
     assert!(cpp.contains("std::optional<std::string> ssid;"), "{cpp}");
+    assert!(cpp.contains("struct RadioUpdate {"), "{cpp}");
+    assert!(cpp.contains("std::optional<std::string> preset;"), "{cpp}");
+    assert!(cpp.contains("struct ChipVariantUpdate {"), "{cpp}");
+    assert!(cpp.contains("std::optional<ChipVariantUpdate> variant;"), "{cpp}");
 
     let py = generate_python(&doc);
     assert!(py.contains("class WifiMode(StrEnum):\n    A = \"a\""), "{py}");

@@ -181,17 +181,20 @@ impl DeviceActor {
             });
         }
 
-        // Identify BT chips for state fetching
-        let mut bt_chips = Vec::new();
+        // Identify BT and CELLULAR chips for state fetching
+        let mut state_chips = Vec::new();
         for device in self.devices.values() {
             for chip in &device.device.chips {
-                if chip.kind == netsim_model::ChipKind::BLUETOOTH {
-                    bt_chips.push((chip.kind, chip.id));
+                if matches!(
+                    chip.kind,
+                    netsim_model::ChipKind::BLUETOOTH | netsim_model::ChipKind::CELLULAR
+                ) {
+                    state_chips.push((chip.kind, chip.id));
                 }
             }
         }
 
-        for (kind, id) in bt_chips {
+        for (kind, id) in state_chips {
             if let Some(client) = self.chip_clients.get(&kind) {
                 let id = ChipId(id);
                 state_futures.push(async move {
@@ -225,6 +228,13 @@ impl DeviceActor {
         let mut stats_list = Vec::new();
         for device_entry in self.devices.values_mut() {
             for chip in &mut device_entry.device.chips {
+                if chip.kind == netsim_model::ChipKind::CELLULAR
+                    && let Some(fresh_chip) = chip_state_map.get(&ChipId(chip.id))
+                {
+                    chip.enabled = fresh_chip.enabled;
+                    chip.variant = fresh_chip.variant.clone();
+                }
+
                 let stream_stats = device_entry.chip_stats.get(&ChipId(chip.id));
                 let duration_secs =
                     stream_stats.map(|s| s.start_time.elapsed().as_secs()).unwrap_or(0);

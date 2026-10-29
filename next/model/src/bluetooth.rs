@@ -45,7 +45,9 @@ impl Default for Bluetooth {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BluetoothUpdate {
+    #[serde(default)]
     pub classic: RadioUpdate,
+    #[serde(default)]
     pub low_energy: RadioUpdate,
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

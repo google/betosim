@@ -14,16 +14,12 @@
 
 use std::fmt;
 
-use netsim_proto::{
-    cell::{Cell, RegistrationStatus},
-    frontend::ListDeviceResponse,
-    model::{
-        self,
-        chip::ble_beacon::{AdvertiseData, AdvertiseSettings, advertise_settings},
-    },
+use netsim_model::{
+    AdvertiseData, AdvertiseSettings, BleBeacon, BluetoothMode, CallState, Chip, ChipVariant,
+    Device, Interval, Position, Radio, RegistrationStatus as ModelRegistrationStatus, TxPower,
 };
-use netsim_rest_api::ListLinkResponse;
-use protobuf::MessageField;
+use netsim_proto::cell::RegistrationStatus;
+use netsim_rest_api::{ListDeviceResponse, ListLinkResponse};
 
 const INDENT_WIDTH: usize = 2;
 
@@ -41,6 +37,20 @@ pub(crate) fn format_registration_status(status: RegistrationStatus) -> &'static
     }
 }
 
+fn format_model_registration_status(status: ModelRegistrationStatus) -> &'static str {
+    match status {
+        ModelRegistrationStatus::NotRegistered => "unregistered",
+        ModelRegistrationStatus::RegisteredHome => "home",
+        ModelRegistrationStatus::Searching => "searching",
+        ModelRegistrationStatus::Denied => "denied",
+        ModelRegistrationStatus::Unknown => "unknown",
+        ModelRegistrationStatus::Roaming => "roaming",
+        ModelRegistrationStatus::RegisteredSmsOnlyHome => "sms-only-home",
+        ModelRegistrationStatus::RegisteredSmsOnlyRoaming => "sms-only-roaming",
+        ModelRegistrationStatus::Emergency => "emergency",
+    }
+}
+
 pub(crate) fn format_call_state(state: netsim_proto::cell::call::State) -> &'static str {
     match state {
         netsim_proto::cell::call::State::UNKNOWN => "unknown",
@@ -50,6 +60,18 @@ pub(crate) fn format_call_state(state: netsim_proto::cell::call::State) -> &'sta
         netsim_proto::cell::call::State::ALERTING => "alerting",
         netsim_proto::cell::call::State::INCOMING => "incoming",
         netsim_proto::cell::call::State::WAITING => "waiting",
+    }
+}
+
+fn format_model_call_state(state: CallState) -> &'static str {
+    match state {
+        CallState::Unknown => "unknown",
+        CallState::Active => "active",
+        CallState::Holding => "holding",
+        CallState::Dialing => "dialing",
+        CallState::Alerting => "alerting",
+        CallState::Incoming => "incoming",
+        CallState::Waiting => "waiting",
     }
 }
 
@@ -65,22 +87,16 @@ pub(crate) fn format_call_direction(
 
 /// # Invariants
 /// Displayed values **do not** end in a newline.
-pub(crate) struct Displayer<'a, T> {
+pub(crate) struct Displayer<T> {
     pub(crate) value: T,
     pub(crate) verbose: bool,
     pub(crate) indent: usize,
-    pub(crate) cells: Option<&'a [Cell]>,
 }
 
-impl<'a, T> Displayer<'a, T> {
+impl<T> Displayer<T> {
     /// Returns a new displayer for values of the provided type.
     pub(crate) fn new(value: T, verbose: bool) -> Self {
-        Displayer { value, verbose, indent: 0, cells: None }
-    }
-
-    pub(crate) fn with_cells(mut self, cells: &'a [Cell]) -> Self {
-        self.cells = Some(cells);
-        self
+        Displayer { value, verbose, indent: 0 }
     }
 
     pub(crate) fn indent(&mut self, current_indent: usize) -> &Self {
@@ -93,24 +109,20 @@ impl<'a, T> Displayer<'a, T> {
 /// [`std::path::Path::display`]. Bounded so it never shadows other `display()`
 /// methods (e.g. `PathBuf` still reaches `Path::display`).
 pub(crate) trait DisplayExt {
-    fn display(&self, verbose: bool) -> Displayer<'_, &Self> {
+    fn display(&self, verbose: bool) -> Displayer<&Self> {
         Displayer::new(self, verbose)
     }
 }
 
-impl<T: ?Sized> DisplayExt for T where for<'a> Displayer<'a, &'a T>: fmt::Display {}
+impl<T: ?Sized> DisplayExt for T where for<'a> Displayer<&'a T>: fmt::Display {}
 
-impl fmt::Display for Displayer<'_, &ListDeviceResponse> {
+impl fmt::Display for Displayer<&ListDeviceResponse> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
 
         let mut devices = self.value.devices.iter().peekable();
         while let Some(device) = devices.next() {
-            let mut device_displayer = Displayer::new(device, self.verbose);
-            if let Some(cells) = self.cells {
-                device_displayer = device_displayer.with_cells(cells);
-            }
-            write!(f, "{:indent$}{}", "", device_displayer)?;
+            write!(f, "{:indent$}{}", "", Displayer::new(device, self.verbose))?;
             if devices.peek().is_some() {
                 // We print the newline here instead of in the Device displayer because we don't
                 // want a newline before the very first device.
@@ -122,7 +134,7 @@ impl fmt::Display for Displayer<'_, &ListDeviceResponse> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::Device> {
+impl fmt::Display for Displayer<&Device> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 9;
@@ -132,14 +144,11 @@ impl fmt::Display for Displayer<'_, &model::Device> {
             "{:indent$}{:width$} {}",
             "",
             self.value.name,
-            Displayer::new(self.value.position.as_ref().unwrap_or_default(), self.verbose)
+            Displayer::new(&self.value.pose.position, self.verbose)
         )?;
 
         for chip in self.value.chips.iter() {
             let mut chip_displayer = Displayer::new(chip, self.verbose);
-            if let Some(cells) = self.cells {
-                chip_displayer = chip_displayer.with_cells(cells);
-            }
             write!(f, "{:indent$}{}", "", chip_displayer.indent(self.indent))?;
         }
 
@@ -147,141 +156,137 @@ impl fmt::Display for Displayer<'_, &model::Device> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::Chip> {
+impl fmt::Display for Displayer<&Chip> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 9;
 
-        match self.value.chip.as_ref() {
-            Some(model::chip::Chip::BleBeacon(ble_beacon)) => {
-                let radio = ble_beacon.bt.low_energy.as_ref().unwrap_or_default();
-                let beacon_width = 16 + width;
+        match self.value.variant.as_ref() {
+            Some(ChipVariant::Bluetooth(bt)) => match &bt.mode {
+                BluetoothMode::Beacon(beacon_params) => {
+                    let beacon_width = 16 + width;
 
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:beacon_width$} {}",
-                    "",
-                    format!("beacon-ble ({}):", self.value.name),
-                    Displayer::new(radio, self.verbose),
-                )?;
-
-                if self.verbose {
                     writeln!(f)?;
-                    write!(f, "{}", Displayer::new(ble_beacon, self.verbose).indent(self.indent))?;
+                    write!(
+                        f,
+                        "{:indent$}{:beacon_width$} {}",
+                        "",
+                        format!("beacon-ble ({}):", self.value.name),
+                        Displayer::new(&bt.low_energy, self.verbose),
+                    )?;
+
+                    if self.verbose {
+                        writeln!(f)?;
+                        write!(
+                            f,
+                            "{}",
+                            Displayer::new(&beacon_params.ble_beacon, self.verbose)
+                                .indent(self.indent)
+                        )?;
+                    }
                 }
-            }
-            Some(model::chip::Chip::Bt(bt)) => {
-                if let Some(ble) = bt.low_energy.as_ref() {
+                _ => {
                     writeln!(f)?;
                     write!(
                         f,
                         "{:indent$}{:width$}{}",
                         "",
                         "ble: ",
-                        Displayer::new(ble, self.verbose)
+                        Displayer::new(&bt.low_energy, self.verbose)
                     )?;
-                };
 
-                if let Some(classic) = bt.classic.as_ref() {
                     writeln!(f)?;
                     write!(
                         f,
                         "{:indent$}{:width$}{}",
                         "",
                         "classic: ",
-                        Displayer::new(classic, self.verbose)
+                        Displayer::new(&bt.classic, self.verbose)
                     )?;
-                };
-            }
-            Some(model::chip::Chip::Wifi(wifi)) => {
+                }
+            },
+            Some(ChipVariant::Wifi(wifi)) => {
                 writeln!(f)?;
                 write!(
                     f,
                     "{:indent$}{:width$}{}",
                     "",
                     "wifi: ",
-                    Displayer::new(wifi, self.verbose)
+                    Displayer::new(&wifi.radio, self.verbose)
                 )?;
             }
-            Some(model::chip::Chip::Uwb(uwb)) => {
+            Some(ChipVariant::Uwb(uwb)) => {
                 writeln!(f)?;
-                write!(f, "{:indent$}{:width$}{}", "", "uwb: ", Displayer::new(uwb, self.verbose))?;
+                write!(
+                    f,
+                    "{:indent$}{:width$}{}",
+                    "",
+                    "uwb: ",
+                    Displayer::new(&uwb.radio, self.verbose)
+                )?;
             }
-            Some(model::chip::Chip::Ethernet(eth)) => {
+            Some(ChipVariant::Ethernet(eth)) => {
                 writeln!(f)?;
                 write!(
                     f,
                     "{:indent$}{:width$}{}",
                     "",
                     "ethernet: ",
-                    Displayer::new(eth, self.verbose)
+                    Displayer::new(&eth.radio, self.verbose)
                 )?;
             }
-            Some(model::chip::Chip::Cellular(cell)) => {
+            Some(ChipVariant::Cell(cell)) => {
                 writeln!(f)?;
-                write!(f, "{:indent$}{:width$}", "", "cellular: ",)?;
-                // Note: The Chip ID matches the Cell ID. This is guaranteed by the backend
-                // (next/grpc-server/src/cell.rs setting cell.id = chip.id).
-                let cell_detail =
-                    self.cells.and_then(|cells| cells.iter().find(|c| c.id == self.value.id));
-                if let Some(detail) = cell_detail {
-                    write!(f, "state: {} | rssi: {}", detail.state, detail.rssi,)?;
+                write!(f, "{:indent$}{:width$}", "", "cellular: ")?;
+                if !cell.state.is_empty() {
+                    write!(f, "state: {} | rssi: {}", cell.state, cell.rssi)?;
                     if self.verbose {
-                        write!(f, " | ber: {} | sms_count: {}", detail.ber, detail.sms_count,)?;
+                        write!(f, " | ber: {} | sms_count: {}", cell.ber, cell.sms_count)?;
                     }
                     write!(
                         f,
                         " | voice: {} | data: {}",
-                        format_registration_status(
-                            detail.voice_registration.enum_value_or_default()
-                        ),
-                        format_registration_status(
-                            detail.data_registration.enum_value_or_default()
-                        )
+                        format_model_registration_status(cell.voice_registration),
+                        format_model_registration_status(cell.data_registration)
                     )?;
-                    if !detail.active_calls.is_empty() {
+                    if !cell.active_calls.is_empty() {
                         write!(f, " | active_calls: ")?;
-                        let mut calls = detail.active_calls.iter().peekable();
+                        let mut calls = cell.active_calls.iter().peekable();
                         while let Some(call) = calls.next() {
-                            write!(
-                                f,
-                                "{}({})",
-                                call.number,
-                                format_call_state(call.state.enum_value_or_default())
-                            )?;
+                            write!(f, "{}({})", call.number, format_model_call_state(call.state))?;
                             if calls.peek().is_some() {
                                 write!(f, ", ")?;
                             }
                         }
                     }
                 } else {
-                    write!(f, "{}", Displayer::new(cell, self.verbose))?;
+                    write!(f, "{}", Displayer::new(&cell.radio, self.verbose))?;
                 }
             }
-            Some(model::chip::Chip::CellularData(cell_data)) => {
+            Some(ChipVariant::CellularData(cell_data)) => {
                 writeln!(f)?;
                 write!(
                     f,
                     "{:indent$}{:width$}{}",
                     "",
                     "cellular-data: ",
-                    Displayer::new(cell_data, self.verbose)
+                    Displayer::new(&cell_data.radio, self.verbose)
                 )?;
             }
-            Some(model::chip::Chip::Nfc(nfc)) => {
+            Some(ChipVariant::Nfc(nfc)) => {
                 writeln!(f)?;
-                write!(f, "{:indent$}{:width$}{}", "", "nfc: ", Displayer::new(nfc, self.verbose))?;
+                write!(
+                    f,
+                    "{:indent$}{:width$}{}",
+                    "",
+                    "nfc: ",
+                    Displayer::new(&nfc.radio, self.verbose)
+                )?;
             }
-            _ => {
+            None => {
                 if self.verbose {
                     writeln!(f)?;
-                    write!(
-                        f,
-                        "{:indent$}Unknown chip (Kind: {:?})",
-                        "",
-                        self.value.kind.enum_value_or_default()
-                    )?
+                    write!(f, "{:indent$}Unknown chip (Kind: {:?})", "", self.value.kind)?
                 }
             }
         }
@@ -290,35 +295,33 @@ impl fmt::Display for Displayer<'_, &model::Chip> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::chip::BleBeacon> {
+impl fmt::Display for Displayer<&BleBeacon> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let address_width = 16;
         write!(f, "{:indent$}address: {:address_width$}", "", self.value.address)?;
 
-        if self.value.settings.is_some()
-            && self.value.settings != MessageField::some(AdvertiseSettings::default())
+        if let Some(settings) =
+            self.value.settings.as_ref().filter(|s| **s != AdvertiseSettings::default())
         {
             writeln!(f)?;
             write!(
                 f,
                 "{:indent$}advertise settings:{}",
                 "",
-                Displayer::new(self.value.settings.as_ref().unwrap_or_default(), self.verbose)
-                    .indent(self.indent)
+                Displayer::new(settings, self.verbose).indent(self.indent)
             )?;
         }
 
-        if self.value.adv_data.is_some()
-            && self.value.adv_data != MessageField::some(AdvertiseData::default())
+        if let Some(adv_data) =
+            self.value.adv_data.as_ref().filter(|data| **data != AdvertiseData::default())
         {
             writeln!(f)?;
             write!(
                 f,
                 "{:indent$}advertise packet data:{}",
                 "",
-                Displayer::new(self.value.adv_data.as_ref().unwrap_or_default(), self.verbose)
-                    .indent(self.indent)
+                Displayer::new(adv_data, self.verbose).indent(self.indent)
             )?;
         }
 
@@ -328,7 +331,7 @@ impl fmt::Display for Displayer<'_, &model::chip::BleBeacon> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::Position> {
+impl fmt::Display for Displayer<&Position> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let precision = 2;
@@ -349,7 +352,7 @@ impl fmt::Display for Displayer<'_, &model::Position> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::chip::ble_beacon::AdvertiseSettings> {
+impl fmt::Display for Displayer<&AdvertiseSettings> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 25;
@@ -378,7 +381,7 @@ impl fmt::Display for Displayer<'_, &model::chip::ble_beacon::AdvertiseSettings>
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::chip::ble_beacon::AdvertiseData> {
+impl fmt::Display for Displayer<&AdvertiseData> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 25;
@@ -416,45 +419,48 @@ impl fmt::Display for Displayer<'_, &model::chip::ble_beacon::AdvertiseData> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &advertise_settings::Interval> {
+impl fmt::Display for Displayer<&Interval> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 25;
 
         match self.value {
-            advertise_settings::Interval::Milliseconds(interval) => {
+            Interval::Milliseconds(interval) => {
                 write!(f, "{:indent$}{:width$}: {} ms", "", "interval", interval)
             }
-            advertise_settings::Interval::AdvertiseMode(mode) => {
+            Interval::AdvertiseMode(mode) => {
                 write!(f, "{:indent$}{:width$}: {:?}", "", "advertise mode", mode)
             }
-            _ => Err(fmt::Error),
         }
     }
 }
 
-impl fmt::Display for Displayer<'_, &advertise_settings::Tx_power> {
+impl fmt::Display for Displayer<&TxPower> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 25;
 
         match self.value {
-            advertise_settings::Tx_power::Dbm(dbm) => {
+            TxPower::Dbm(dbm) => {
                 write!(f, "{:indent$}{:width$}: {} dBm", "", "tx power", dbm)
             }
-            advertise_settings::Tx_power::TxPowerLevel(level) => {
+            TxPower::TxPowerLevel(level) => {
                 write!(f, "{:indent$}{:width$}: {:?}", "", "tx power level", level)
             }
-            _ => Err(fmt::Error),
         }
     }
 }
 
-impl fmt::Display for Displayer<'_, &model::chip::Radio> {
+impl fmt::Display for Displayer<&Radio> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let count_width = 9;
-        write!(f, "{:indent$}{}", "", Displayer::new(&self.value.state, self.verbose),)?;
+        write!(
+            f,
+            "{:indent$}{}",
+            "",
+            Displayer::new(&self.value.state.unwrap_or(true), self.verbose),
+        )?;
 
         write!(
             f,
@@ -466,21 +472,12 @@ impl fmt::Display for Displayer<'_, &model::chip::Radio> {
     }
 }
 
-impl fmt::Display for Displayer<'_, &Option<bool>> {
+impl fmt::Display for Displayer<&bool> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 9;
 
-        write!(
-            f,
-            "{:indent$}{:width$}",
-            "",
-            match self.value {
-                Some(true) => "up",
-                Some(false) => "down",
-                None => "unknown",
-            }
-        )
+        write!(f, "{:indent$}{:width$}", "", if *self.value { "up" } else { "down" })
     }
 }
 
@@ -493,7 +490,7 @@ impl fmt::Display for LinkChipIdDisplay {
     }
 }
 
-impl fmt::Display for Displayer<'_, &ListLinkResponse> {
+impl fmt::Display for Displayer<&ListLinkResponse> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let chip_width = 10;
@@ -564,27 +561,30 @@ impl fmt::Display for Displayer<'_, &ListLinkResponse> {
 
 #[cfg(test)]
 mod tests {
-    use netsim_proto::{
-        cell::{Call, Cell, RegistrationStatus, call::State as CallState},
-        model::{
-            Chip as ChipMsg,
-            chip::{Chip as ChipProto, Radio},
-        },
+    use netsim_model::{
+        Call, CallDirection, CallState, Cell, CellularData, Chip, ChipVariant, Ethernet, Nfc,
+        Radio, RegistrationStatus,
     };
-    use protobuf::EnumOrUnknown;
 
     use super::*;
 
     #[test]
     fn test_display_cellular_chip_no_detail() {
-        let mut chip = ChipMsg::new();
-        chip.id = 1;
-        chip.name = "cellular-chip".to_string();
-        let mut radio = Radio::new();
-        radio.state = Some(true).into();
-        radio.rx_count = 10;
-        radio.tx_count = 20;
-        chip.chip = Some(ChipProto::Cellular(radio));
+        let chip = Chip {
+            id: 1,
+            name: "cellular-chip".to_string(),
+            variant: Some(ChipVariant::Cell(Cell {
+                radio: Radio {
+                    state: Some(true),
+                    rx_count: 10,
+                    tx_count: 20,
+                    ..Default::default()
+                },
+                state: String::new(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
 
         // We need to set indent to 2 to match how it is printed in Device
         let mut displayer = Displayer::new(&chip, false);
@@ -598,22 +598,21 @@ mod tests {
 
     #[test]
     fn test_display_cellular_chip_with_detail() {
-        let mut chip = ChipMsg::new();
-        chip.id = 42;
-        chip.name = "cellular-chip".to_string();
-        let mut radio = Radio::new();
-        radio.state = Some(true).into();
-        chip.chip = Some(ChipProto::Cellular(radio));
+        let chip = Chip {
+            id: 42,
+            name: "cellular-chip".to_string(),
+            variant: Some(ChipVariant::Cell(Cell {
+                radio: Radio { state: Some(true), ..Default::default() },
+                state: "idle".to_string(),
+                rssi: 15,
+                voice_registration: RegistrationStatus::RegisteredHome,
+                data_registration: RegistrationStatus::Roaming,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
 
-        let mut cell = Cell::new();
-        cell.id = 42;
-        cell.state = "idle".to_string();
-        cell.rssi = 15;
-        cell.voice_registration = EnumOrUnknown::new(RegistrationStatus::REGISTERED_HOME);
-        cell.data_registration = EnumOrUnknown::new(RegistrationStatus::ROAMING);
-
-        let cells = vec![cell];
-        let mut displayer = Displayer::new(&chip, false).with_cells(&cells);
+        let mut displayer = Displayer::new(&chip, false);
         displayer.indent = 2;
         let output = format!("{}", displayer);
 
@@ -623,29 +622,28 @@ mod tests {
 
     #[test]
     fn test_display_cellular_chip_with_detail_verbose_and_calls() {
-        let mut chip = ChipMsg::new();
-        chip.id = 42;
-        chip.name = "cellular-chip".to_string();
-        let mut radio = Radio::new();
-        radio.state = Some(true).into();
-        chip.chip = Some(ChipProto::Cellular(radio));
+        let chip = Chip {
+            id: 42,
+            name: "cellular-chip".to_string(),
+            variant: Some(ChipVariant::Cell(Cell {
+                radio: Radio { state: Some(true), ..Default::default() },
+                state: "active".to_string(),
+                rssi: 15,
+                ber: 2,
+                sms_count: 5,
+                voice_registration: RegistrationStatus::RegisteredHome,
+                data_registration: RegistrationStatus::Roaming,
+                active_calls: vec![Call {
+                    number: "12345".to_string(),
+                    state: CallState::Active,
+                    direction: CallDirection::MobileOriginated,
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
 
-        let mut cell = Cell::new();
-        cell.id = 42;
-        cell.state = "active".to_string();
-        cell.rssi = 15;
-        cell.ber = 2;
-        cell.sms_count = 5;
-        cell.voice_registration = EnumOrUnknown::new(RegistrationStatus::REGISTERED_HOME);
-        cell.data_registration = EnumOrUnknown::new(RegistrationStatus::ROAMING);
-
-        let mut call = Call::new();
-        call.number = "12345".to_string();
-        call.state = EnumOrUnknown::new(CallState::ACTIVE);
-        cell.active_calls.push(call);
-
-        let cells = vec![cell];
-        let mut displayer = Displayer::new(&chip, true).with_cells(&cells); // verbose = true
+        let mut displayer = Displayer::new(&chip, true); // verbose = true
         displayer.indent = 2;
         let output = format!("{}", displayer);
 
@@ -655,14 +653,19 @@ mod tests {
 
     #[test]
     fn test_display_nfc_chip() {
-        let mut chip = ChipMsg::new();
-        chip.id = 1;
-        chip.name = "nfc-chip".to_string();
-        let mut radio = Radio::new();
-        radio.state = Some(true).into();
-        radio.rx_count = 10;
-        radio.tx_count = 20;
-        chip.chip = Some(ChipProto::Nfc(radio));
+        let chip = Chip {
+            id: 1,
+            name: "nfc-chip".to_string(),
+            variant: Some(ChipVariant::Nfc(Nfc {
+                radio: Radio {
+                    state: Some(true),
+                    rx_count: 10,
+                    tx_count: 20,
+                    ..Default::default()
+                },
+            })),
+            ..Default::default()
+        };
 
         let mut displayer = Displayer::new(&chip, false);
         displayer.indent = 2;
@@ -674,14 +677,14 @@ mod tests {
 
     #[test]
     fn test_display_ethernet_chip() {
-        let mut chip = ChipMsg::new();
-        chip.id = 2;
-        chip.name = "eth-chip".to_string();
-        let mut radio = Radio::new();
-        radio.state = Some(true).into();
-        radio.rx_count = 5;
-        radio.tx_count = 15;
-        chip.chip = Some(ChipProto::Ethernet(radio));
+        let chip = Chip {
+            id: 2,
+            name: "eth-chip".to_string(),
+            variant: Some(ChipVariant::Ethernet(Ethernet {
+                radio: Radio { state: Some(true), rx_count: 5, tx_count: 15, ..Default::default() },
+            })),
+            ..Default::default()
+        };
 
         let mut displayer = Displayer::new(&chip, false);
         displayer.indent = 2;
@@ -693,14 +696,19 @@ mod tests {
 
     #[test]
     fn test_display_cellular_data_chip() {
-        let mut chip = ChipMsg::new();
-        chip.id = 3;
-        chip.name = "cell-data-chip".to_string();
-        let mut radio = Radio::new();
-        radio.state = Some(true).into();
-        radio.rx_count = 100;
-        radio.tx_count = 200;
-        chip.chip = Some(ChipProto::CellularData(radio));
+        let chip = Chip {
+            id: 3,
+            name: "cell-data-chip".to_string(),
+            variant: Some(ChipVariant::CellularData(CellularData {
+                radio: Radio {
+                    state: Some(true),
+                    rx_count: 100,
+                    tx_count: 200,
+                    ..Default::default()
+                },
+            })),
+            ..Default::default()
+        };
 
         let mut displayer = Displayer::new(&chip, false);
         displayer.indent = 2;

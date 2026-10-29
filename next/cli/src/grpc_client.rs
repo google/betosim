@@ -42,7 +42,6 @@ pub(crate) trait ClientResponseReadable {
 #[derive(Debug, PartialEq)]
 pub(crate) enum GrpcRequest {
     ListDevice,
-    Reset,
     ListCapture,
     CreateDevice(frontend::CreateDeviceRequest),
     DeleteChip(frontend::DeleteChipRequest),
@@ -60,7 +59,6 @@ pub(crate) enum GrpcRequest {
 #[derive(Debug, PartialEq)]
 pub(crate) enum GrpcResponse {
     ListDevice(frontend::ListDeviceResponse),
-    Reset,
     ListCapture(frontend::ListCaptureResponse),
     CreateDevice(frontend::CreateDeviceResponse),
     DeleteChip,
@@ -100,10 +98,6 @@ impl GrpcMethodExecutor for FrontendServiceClient {
         match grpc_request {
             GrpcRequest::ListDevice => {
                 Ok(GrpcResponse::ListDevice(self.list_device(&empty::Empty::new())?))
-            }
-            GrpcRequest::Reset => {
-                self.reset(&empty::Empty::new())?;
-                Ok(GrpcResponse::Reset)
             }
             GrpcRequest::ListCapture => {
                 Ok(GrpcResponse::ListCapture(self.list_capture(&empty::Empty::new())?))
