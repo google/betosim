@@ -91,60 +91,53 @@ async fn rewrite_request_to_absolute_form<R: AsyncRead + Unpin>(
     // --- Try to find a valid Host header ---
     let host = header_lines
         .iter()
-        .find(|h| h.to_lowercase().starts_with("host:"))
-        .and_then(|h| h.split_once(':'))
-        .map(|(_, value)| value.trim())
+        .find_map(|h| {
+            let (name, value) = h.split_once(':')?;
+            name.eq_ignore_ascii_case("host").then_some(value.trim())
+        })
         .filter(|v| !v.is_empty());
 
     // --- Rewrite if Host is present, otherwise pass through ---
     let final_request_line = if let Some(host) = host {
-        let request_parts: Vec<&str> = request_line.split_whitespace().collect();
-        let [method, path, version] = match request_parts.as_slice() {
-            [m, p, v] => [*m, *p, *v],
-            _ => return Err(Error::MalformedRequestLine(request_line.trim_end().to_string())),
+        let mut parts = request_line.split_whitespace();
+        let (Some(method), Some(path), Some(version), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(Error::MalformedRequestLine(request_line.trim_end().to_string()));
         };
-        let absolute_uri = format!("http://{}{}", host, path);
-        format!("{} {} {}\r\n", method, absolute_uri, version)
+        format!("{method} http://{host}{path} {version}\r\n")
     } else {
         // If no valid Host header, use the original request line.
         warn!("No valid Host header found. Passing request through without rewrite.");
         request_line
     };
 
-    if let Some(auth_header) = auth_header {
-        header_lines.push(auth_header);
-    }
+    header_lines.extend(auth_header);
 
     // --- Assemble the final request ---
-    let mut final_request = String::new();
-    final_request.push_str(&final_request_line);
-    for header in header_lines {
-        final_request.push_str(&header);
-    }
+    let mut final_request = final_request_line;
+    final_request.extend(header_lines);
     final_request.push_str("\r\n");
 
     Ok(final_request)
 }
 
-/// Creates a proxy stream that forwards data to a given server SocketAddr
+/// Creates a proxy stream that forwards data to a given proxy `SocketAddr`
 /// after performing a header rewrite on the initial data.
 ///
-/// This function first connects to the destination to ensure it's available,
+/// This function first connects to the proxy to ensure it's available,
 /// then sets up an intermediate TCP pipe and returns a stream that the caller
 /// can write to.
 ///
 /// # Arguments
-/// * `destination_addr`: The `SocketAddr` of the final destination server.
+/// * `proxy_addr`: The `SocketAddr` of the HTTP proxy server.
+/// * `auth_header`: Optional `Proxy-Authorization` header (including trailing CRLF) to include in the rewritten request.
 pub(crate) async fn connect_with_header_rewrite(
     proxy_addr: SocketAddr,
     auth_header: Option<String>,
 ) -> Result<TcpStream> {
-    // If a proxy is specified, connect there. Otherwise, connect to the
-    // original destination.
-    let connect_addr = proxy_addr;
-
-    // 1. Connect to the next hop (either proxy or final destination).
-    let mut destination_stream = TcpStream::connect(connect_addr).await?;
+    // 1. Connect to the proxy.
+    let mut destination_stream = TcpStream::connect(proxy_addr).await?;
 
     // 2. Create the intermediate listener on a random port.
     let listener = TcpListener::bind("127.0.0.1:0").await?;

@@ -22,6 +22,7 @@ use tokio::{
 
 use crate::{Error, Result, rewriter};
 
+const HTTP_PORT: u16 = 80;
 const HTTP_VERSION: &str = "1.1";
 
 /// Establishes a TCP connection to a target address through an HTTP proxy.
@@ -52,17 +53,10 @@ impl Connector {
     /// If no password is provided, it defaults to an empty password per RFC
     /// 7617.
     pub(crate) fn auth_header(&self) -> Option<String> {
-        if let Some(username) = &self.username {
-            let password = self.password.as_deref().unwrap_or("");
-            let encoded_auth = base64_encode(format!("{}:{}", username, password).as_bytes());
-            let auth_header = format!(
-                "Proxy-Authorization: Basic {}\r\n",
-                String::from_utf8_lossy(&encoded_auth)
-            );
-            Some(auth_header)
-        } else {
-            None
-        }
+        let username = self.username.as_deref()?;
+        let password = self.password.as_deref().unwrap_or_default();
+        let encoded_auth = base64_encode(format!("{username}:{password}"));
+        Some(format!("Proxy-Authorization: Basic {encoded_auth}\r\n"))
     }
 
     /// Establishes a TCP connection to the given address.
@@ -70,10 +64,8 @@ impl Connector {
     /// If the address is on port 80, it will be rewritten to an absolute-form
     /// request. Otherwise, it will connect directly.
     pub async fn connect(&self, addr: SocketAddr) -> Result<TcpStream> {
-        let proxy_addr = self.proxy_addr();
-        let auth_header = self.auth_header();
-        if addr.port() == 80 {
-            rewriter::connect_with_header_rewrite(proxy_addr, auth_header).await
+        if addr.port() == HTTP_PORT {
+            rewriter::connect_with_header_rewrite(self.proxy_addr(), self.auth_header()).await
         } else {
             self.connect_with_tunnel(addr).await
         }
@@ -108,8 +100,8 @@ impl Connector {
     }
 }
 
-fn base64_encode(src: &[u8]) -> Vec<u8> {
-    general_purpose::STANDARD.encode(src).into_bytes()
+fn base64_encode(src: impl AsRef<[u8]>) -> String {
+    general_purpose::STANDARD.encode(src)
 }
 
 #[cfg(test)]
@@ -196,14 +188,14 @@ mod tests {
     fn test_proxy_base64_encode_success() {
         let input = b"hello world";
         let encoded = base64_encode(input);
-        assert_eq!(encoded, b"aGVsbG8gd29ybGQ=");
+        assert_eq!(encoded, "aGVsbG8gd29ybGQ=");
     }
 
     #[test]
     fn test_proxy_base64_encode_empty_input() {
         let input = b"";
         let encoded = base64_encode(input);
-        assert_eq!(encoded, b"");
+        assert_eq!(encoded, "");
     }
 
     #[tokio::test]
