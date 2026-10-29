@@ -19,16 +19,32 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use futures::{SinkExt, stream::StreamExt};
+use futures::stream::StreamExt;
 use tokio::net::TcpListener;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::{
     error::{PacketStreamError, Result},
     streams::InitInfo,
-    transport::traits::{PacketSink, PacketStream, TransportListener},
+    transport::traits::{PacketSink, PacketStream, TransportListener, into_packet_stream_sink},
     types::{ChipInfo, StreamAddress},
 };
+
+async fn accept_framed_stream<S>(stream: S) -> Result<(PacketStream, PacketSink, ChipInfo)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    let (mut stream, sink) = into_packet_stream_sink(stream);
+
+    // Perform the init_info handshake
+    let first_message = stream.next().await.ok_or(PacketStreamError::ConnectionClosed)??;
+    let init_info: InitInfo = serde_json::from_slice(&first_message).map_err(|e| {
+        PacketStreamError::Protocol(crate::error::ProtocolError::InvalidFormat(format!(
+            "Failed to parse init_info: {e}"
+        )))
+    })?;
+
+    Ok((stream, sink, init_info.chip_info))
+}
 
 /// TCP listener adapter
 pub struct TcpTransportListener {
@@ -51,21 +67,9 @@ impl TransportListener for TcpTransportListener {
     async fn accept(&mut self) -> Result<(PacketStream, PacketSink, ChipInfo, String)> {
         let (stream, peer_addr) = self.inner.accept().await?;
         let guid = peer_addr.to_string();
-        let framed = Framed::new(stream, LengthDelimitedCodec::new());
-        let (sink, mut stream) = framed.split();
+        let (stream, sink, chip_info) = accept_framed_stream(stream).await?;
 
-        // Perform the init_info handshake
-        let first_message = stream.next().await.ok_or(PacketStreamError::ConnectionClosed)??;
-        let init_info: InitInfo = serde_json::from_slice(&first_message).map_err(|e| {
-            PacketStreamError::Protocol(crate::error::ProtocolError::InvalidFormat(format!(
-                "Failed to parse init_info: {e}"
-            )))
-        })?;
-
-        let stream = stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-        let sink = sink.sink_map_err(PacketStreamError::Io);
-
-        Ok((Box::pin(stream), Box::pin(sink), init_info.chip_info, guid))
+        Ok((stream, sink, chip_info, guid))
     }
 
     fn local_addr(&self) -> Result<StreamAddress> {
@@ -106,25 +110,13 @@ impl UdsTransportListener {
 impl TransportListener for UdsTransportListener {
     async fn accept(&mut self) -> Result<(PacketStream, PacketSink, ChipInfo, String)> {
         let (stream, _) = self.inner.accept().await?;
-        let framed = Framed::new(stream, LengthDelimitedCodec::new());
-        let (sink, mut stream) = framed.split();
-
-        // Perform the init_info handshake
-        let first_message = stream.next().await.ok_or(PacketStreamError::ConnectionClosed)??;
-        let init_info: InitInfo = serde_json::from_slice(&first_message).map_err(|e| {
-            PacketStreamError::Protocol(crate::error::ProtocolError::InvalidFormat(format!(
-                "Failed to parse init_info: {e}"
-            )))
-        })?;
-
-        let stream = stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
-        let sink = sink.sink_map_err(PacketStreamError::Io);
+        let (stream, sink, chip_info) = accept_framed_stream(stream).await?;
 
         let mut count = self.conn_counter.lock().unwrap();
         let guid = format!("uds-{}", *count);
         *count += 1;
 
-        Ok((Box::pin(stream), Box::pin(sink), init_info.chip_info, guid))
+        Ok((stream, sink, chip_info, guid))
     }
 
     fn local_addr(&self) -> Result<StreamAddress> {

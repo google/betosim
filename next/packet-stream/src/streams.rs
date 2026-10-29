@@ -81,7 +81,6 @@ impl Streams {
         name: impl Into<String>,
         transport_type: TransportType,
     ) -> Result<()> {
-        let name = name.into();
         if !transport_type.supports_listener() {
             return Err(crate::error::PacketStreamError::InvalidConfig(format!(
                 "Stream type {} does not support listeners",
@@ -89,54 +88,33 @@ impl Streams {
             )));
         }
 
-        let mut listener = transport_type.create_listener().await?;
+        let name = name.into();
+        let listener = transport_type.create_listener().await?;
         let addr = listener.local_addr()?;
         info!("Starting {name} listener on {addr}");
-
-        self.listener_addresses.insert(name.clone(), addr.clone());
-
-        let listener_name = name.clone();
-        let connection_tx = self.connection_tx.clone();
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-
-        let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.recv() => {
-                        info!("Shutting down {listener_name} listener");
-                        let _ = listener.shutdown().await;
-                        break;
-                    }
-                    result = listener.accept() => {
-                        match result {
-                            Ok(stream_tuple) => {
-                                if connection_tx.send((listener_name.clone(), stream_tuple)).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                error!(%error, "Listener {listener_name} accept error");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        self.listener_tasks.insert(name.clone(), task);
+        self.register_listener(name, addr, Box::new(listener));
         Ok(())
     }
 
     pub fn add_listener(
         &mut self,
         name: impl Into<String>,
-        mut listener: Box<dyn TransportListener + Send>,
+        listener: Box<dyn TransportListener + Send>,
     ) -> Result<()> {
         let name = name.into();
         let addr = listener.local_addr()?;
         info!("Adding {name} listener on {addr}");
+        self.register_listener(name, addr, listener);
+        Ok(())
+    }
 
-        self.listener_addresses.insert(name.clone(), addr.clone());
+    fn register_listener(
+        &mut self,
+        name: String,
+        addr: StreamAddress,
+        mut listener: Box<dyn TransportListener + Send>,
+    ) {
+        self.listener_addresses.insert(name.clone(), addr);
 
         let listener_name = name.clone();
         let connection_tx = self.connection_tx.clone();
@@ -166,8 +144,7 @@ impl Streams {
             }
         });
 
-        self.listener_tasks.insert(name.clone(), task);
-        Ok(())
+        self.listener_tasks.insert(name, task);
     }
 
     pub async fn start_from_config(&mut self, config: &ListenerConfig) -> Result<()> {
