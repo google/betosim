@@ -106,7 +106,7 @@ impl CallState {
 /// hung up (and `CallId` slots are immediately reused), `handle_ring_timeout`
 /// checks this token so a stale timer from an earlier call does not drop a
 /// newer incoming call.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RingToken(u32);
 
 impl RingToken {

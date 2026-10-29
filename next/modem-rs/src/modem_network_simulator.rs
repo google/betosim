@@ -47,32 +47,12 @@ pub enum NetworkEvent {
 }
 
 // Internal representation of a scheduled event
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ScheduledEvent {
+    // Must be first so derived Ord orders primarily by deadline.
     pub when: Instant,
     pub modem_id: ModemId,
     pub event: ModemEvent,
-}
-
-impl PartialEq for ScheduledEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.when == other.when
-    }
-}
-
-impl Eq for ScheduledEvent {}
-
-impl PartialOrd for ScheduledEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScheduledEvent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse ordering to make BinaryHeap a min-heap
-        other.when.cmp(&self.when)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1072,6 +1052,37 @@ mod tests {
         // 5. Check that the event was handled.
         let response = modem_handler.wait_for_response();
         assert_eq!(response, b"TEST_EVENT_FIRED\r\n");
+    }
+
+    #[test]
+    fn test_event_loop_fires_earliest_event_first() {
+        let clock = Arc::new(MockClock::default());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut simulator = ModemNetworkSimulator::new_with_clock(clock.clone(), tx);
+
+        let modem_id: ModemId = 1;
+        let (mut modem_handler, sink) = MockModemHandler::new(false);
+        simulator.new_modem(modem_id, sink, None, None, Quirks::default(), Vec::new()).unwrap();
+
+        simulator.schedule_event(modem_id, Duration::from_millis(200), ModemEvent::TestEvent);
+        simulator.schedule_event(modem_id, Duration::from_millis(10), ModemEvent::TestEvent);
+
+        let (events, next_duration) = simulator.tick();
+        assert!(events.is_empty());
+        assert_eq!(next_duration, Some(Duration::from_millis(10)));
+        assert_eq!(modem_handler.try_get_response(), None);
+
+        clock.advance(Duration::from_millis(10));
+        let (_events, next_duration) = simulator.tick();
+        assert_eq!(next_duration, Some(Duration::from_millis(190)));
+        assert_eq!(modem_handler.wait_for_response(), b"TEST_EVENT_FIRED\r\n");
+        assert_eq!(modem_handler.try_get_response(), None);
+
+        clock.advance(Duration::from_millis(190));
+        let (_events, next_duration) = simulator.tick();
+        assert!(next_duration.is_none());
+        assert_eq!(modem_handler.wait_for_response(), b"TEST_EVENT_FIRED\r\n");
+        assert_eq!(modem_handler.try_get_response(), None);
     }
 
     #[test]
