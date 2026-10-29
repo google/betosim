@@ -52,15 +52,6 @@ use tokio::{
     task::JoinSet,
 };
 use tracing::{debug, error, info, warn};
-#[cfg(feature = "cuttlefish")]
-use {
-    packet_stream::{
-        ChipInfo as PsChipInfo, DualFdConfig, DualFdListener, InitInfo as PsInitInfo,
-        transport::traits::TransportListener,
-    },
-    tokio::{net::TcpStream, select},
-    tokio_util::codec::{Framed, LengthDelimitedCodec},
-};
 
 use crate::{
     args::Args,
@@ -68,7 +59,7 @@ use crate::{
         FileIdentity, IniFile, IniFileAccess, IniFileInitialized, IniFileUninitialized,
         NetsimConfig,
     },
-    logger,
+    logger, platform,
     version::{get_version, strip_version_suffix},
 };
 
@@ -91,7 +82,7 @@ pub enum RunResult {
     InitializationError(String),
 }
 
-fn init_error<E: std::fmt::Display>(e: E) -> RunResult {
+pub(crate) fn init_error<E: std::fmt::Display>(e: E) -> RunResult {
     RunResult::InitializationError(e.to_string())
 }
 
@@ -458,9 +449,8 @@ pub struct NetsimDaemon {
     /// The WebSocket listener task, aborted when the daemon is dropped so the
     /// WebSocket port does not outlive it.
     ws_task: Option<tokio::task::JoinHandle<()>>,
-    /// The Rootcanal control listener task, aborted when the daemon is dropped.
-    #[cfg(feature = "cuttlefish")]
-    test_task: Option<tokio::task::JoinHandle<()>>,
+    /// Platform-specific tasks, aborted when the daemon is dropped.
+    platform_tasks: platform::PlatformTasks,
     /// The DeviceActor task handle.
     device_task: tokio::task::JoinHandle<()>,
     /// The CaptureActor task handle.
@@ -490,10 +480,7 @@ impl Drop for NetsimDaemon {
         if let Some(task) = &self.ws_task {
             task.abort();
         }
-        #[cfg(feature = "cuttlefish")]
-        if let Some(task) = &self.test_task {
-            task.abort();
-        }
+        self.platform_tasks.abort();
         self.device_task.abort();
         self.capture_task.abort();
     }
@@ -539,14 +526,8 @@ impl NetsimDaemon {
 
         logger::init("netsim", args.verbose);
 
-        #[cfg(feature = "cuttlefish")]
-        if let Some(connector_instance) = args.connector_instance {
-            Self::redirect_daemon_logs(&args, Some(connector_instance));
-            info!("netsim startup (Connector mode)");
-            return match Self::run_netsimd_connector(args, connector_instance).await {
-                Ok(()) => Err(RunResult::ExitedNormally),
-                Err(err) => Err(RunResult::InitializationError(err)),
-            };
+        if let Some(result) = platform::run_connector_mode_if_requested(&args).await {
+            return Err(result);
         }
 
         info!("netsim startup");
@@ -563,21 +544,7 @@ impl NetsimDaemon {
         // Log all args
         info!("{args:#?}");
 
-        // Resolve TAP configuration early to validate permissions/availability.
-        #[cfg(all(target_os = "linux", not(feature = "cuttlefish")))]
-        let wifi_tap = args.wifi.wifi_tap.clone().or_else(|| {
-            if args.wifi.wifi_cvd_tap { Some("cvd-etap-%02d".to_string()) } else { None }
-        });
-
-        // Pre-check TAP permissions if configured.
-        // We do this BEFORE redirection so the user can see the error in the
-        // console.
-        #[cfg(all(target_os = "linux", not(feature = "cuttlefish")))]
-        if let Some(ref tap_config) = wifi_tap
-            && let Err(e) = wifi_actor::TapGateway::preflight_check(tap_config)
-        {
-            return Err(RunResult::InitializationError(format!("TAP configuration failed: {}", e)));
-        }
+        platform::preflight_check(&args)?;
 
         info!(
             "Netsim Version: {}, OS: {}, Arch: {}",
@@ -648,7 +615,7 @@ impl NetsimDaemon {
         }
     }
 
-    fn redirect_daemon_logs(args: &Args, connector_instance: Option<u16>) {
+    pub(crate) fn redirect_daemon_logs(args: &Args, connector_instance: Option<u16>) {
         if !args.logtostderr {
             if let Err(error) =
                 redirect_std_stream(&get_instance_name(args.instance, connector_instance))
@@ -687,10 +654,7 @@ impl NetsimDaemon {
         let mut listener_addresses = HashMap::new();
         let mut streams = Streams::new();
 
-        #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
-        if let Some(fd_startup_str) = &args.fd_startup_str {
-            Self::init_dualfd_listener(fd_startup_str, &mut streams).await;
-        }
+        platform::init_transport_listeners(&args, &mut streams).await;
 
         // Setup Link Server
         let (link_runner, link_client) = link_actor::new();
@@ -739,22 +703,7 @@ impl NetsimDaemon {
             // If --wifi-cvd-tap is set, it implies explicit "cvd-etap-%02d"
             // pattern for pooling. If --wifi-tap is set, it
             // overrides everything.
-            let wifi_tap = {
-                #[cfg(target_os = "linux")]
-                {
-                    args.wifi.wifi_tap.clone().or_else(|| {
-                        if args.wifi.wifi_cvd_tap {
-                            Some("cvd-etap-%02d".to_string())
-                        } else {
-                            None
-                        }
-                    })
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    None
-                }
-            };
+            let wifi_tap = args.wifi.resolved_tap();
 
             // TAP preflight check is now done in `new_with_dirs` before lock
             // acquisition.
@@ -859,37 +808,35 @@ impl NetsimDaemon {
             }
         }
 
-        // Rootcanal legacy control server
-        #[cfg(feature = "cuttlefish")]
-        let (actual_test_addr, test_task) = {
-            let mut addr = None;
-            let mut task = None;
-            let is_explicit_test = args.test_port.is_some();
-            let test_port = args.test_port.unwrap_or_else(|| 7500 + instance_num - 1);
-            if let Some(listener) = bind_tcp_loopback_with_ephemeral_fallback(
-                test_port,
-                is_explicit_test,
-                "Rootcanal control server",
-            )
-            .map_err(|error| {
-                init_error(format!(
-                    "Failed to bind requested Rootcanal control server port {test_port}: {error}"
-                ))
-            })? {
-                let local_addr = listener.local_addr().map_err(init_error)?;
-                addr = Some(local_addr);
-                // Spawn legacy Rootcanal control server for host-side test
-                // runners (like pts-bot/mmi2grpc).
-                task = Some(tokio::spawn(rootcanal_server::run(listener, device_client.clone())));
-            }
-            (addr, task)
-        };
+        // Write the current daemon's information to the INI file.
+        // Clients will use this to connect.
+        let mut ini_data = HashMap::from([
+            ("pid".to_string(), std::process::id().to_string()),
+            ("grpc.port".to_string(), actual_grpc_port.to_string()),
+            ("http.port".to_string(), actual_http_port.to_string()),
+        ]);
+        if let Some(port) = actual_hci_port {
+            ini_data.insert("hci.port".to_string(), port.to_string());
+        }
+        if let Some(ws_port) = actual_ws_port {
+            ini_data.insert("ws.port".to_string(), ws_port.to_string());
+        }
+        if let Some(StreamAddress::Uds(path)) = listener_addresses.get("netsim_uds") {
+            ini_data.insert("uds.path".to_string(), path.to_string_lossy().to_string());
+        }
+
+        let platform_tasks = platform::start_servers(
+            &args,
+            instance_num,
+            &device_client,
+            &mut listener_addresses,
+            &mut ini_data,
+        )?;
 
         let mut actual_tcp_port = None;
         let resolved_tcp_port_opt =
             resolve_port_with_env(args.tcp_port, "NETSIM_TCP_PORT", |name| std::env::var(name));
-        let should_start_tcp =
-            if cfg!(feature = "cuttlefish") { true } else { resolved_tcp_port_opt.is_some() };
+        let should_start_tcp = platform::should_start_tcp_listener(resolved_tcp_port_opt);
 
         if should_start_tcp {
             let tcp_port = resolved_tcp_port_opt.unwrap_or(0);
@@ -907,29 +854,9 @@ impl NetsimDaemon {
                 actual_tcp_port = Some(socket_addr.port());
             }
         }
-        // Write the current daemon's information to the INI file.
-        // Clients will use this to connect.
-        let mut ini_data = HashMap::from([
-            ("pid".to_string(), std::process::id().to_string()),
-            ("grpc.port".to_string(), actual_grpc_port.to_string()),
-        ]);
-        if let Some(port) = actual_hci_port {
-            ini_data.insert("hci.port".to_string(), port.to_string());
-        }
-        #[cfg(feature = "cuttlefish")]
-        if let Some(addr) = actual_test_addr {
-            listener_addresses.insert("netsim_rootcanal".to_string(), StreamAddress::Tcp(addr));
-            ini_data.insert("test.port".to_string(), addr.port().to_string());
-        }
+
         if let Some(port) = actual_tcp_port {
             ini_data.insert("tcp.port".to_string(), port.to_string());
-        }
-        if let Some(ws_port) = actual_ws_port {
-            ini_data.insert("ws.port".to_string(), ws_port.to_string());
-        }
-        ini_data.insert("http.port".to_string(), actual_http_port.to_string());
-        if let Some(StreamAddress::Uds(path)) = listener_addresses.get("netsim_uds") {
-            ini_data.insert("uds.path".to_string(), path.to_string_lossy().to_string());
         }
 
         // Setup Bluetooth Server
@@ -1035,7 +962,7 @@ impl NetsimDaemon {
         let test_beacons = match (args.test_beacons, args.no_test_beacons) {
             (true, false) => true,
             (false, true) => false,
-            (false, false) => cfg!(feature = "cuttlefish"),
+            (false, false) => platform::default_test_beacons(),
             (true, true) => {
                 return Err(init_error(
                     "unexpected flag combination: cannot set both --test-beacons and --no-test-beacons",
@@ -1081,8 +1008,7 @@ impl NetsimDaemon {
             hci_task,
             ws_port: actual_ws_port,
             ws_task,
-            #[cfg(feature = "cuttlefish")]
-            test_task,
+            platform_tasks,
             device_task,
             capture_task,
             artifact_dir,
@@ -1120,7 +1046,6 @@ impl NetsimDaemon {
     }
 
     /// Gets the Rootcanal test port, if the server is running.
-    #[cfg(feature = "cuttlefish")]
     pub fn test_port(&self) -> Option<u16> {
         self.listener_addresses.get("netsim_rootcanal").and_then(|addr| match addr {
             StreamAddress::Tcp(socket_addr) => Some(socket_addr.port()),
@@ -1187,30 +1112,6 @@ impl NetsimDaemon {
             None => {
                 // Should not happen as we have multiple tasks
                 true
-            }
-        }
-    }
-
-    #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
-    async fn init_dualfd_listener(fd_startup_str: &str, streams: &mut Streams) {
-        if fd_startup_str.is_empty() {
-            return;
-        }
-        match serde_json::from_str::<DualFdConfig>(fd_startup_str) {
-            Ok(config) => match DualFdListener::new(config).await {
-                Ok(listener) => {
-                    if let Err(error) = streams.add_listener("netsim_dualfd", Box::new(listener)) {
-                        error!(%error, "Failed to add DualFdListener");
-                    } else {
-                        info!("Added DualFdListener");
-                    }
-                }
-                Err(error) => {
-                    error!(%error, "Failed to create DualFdListener");
-                }
-            },
-            Err(error) => {
-                error!(%error, "Failed to parse fd_startup_str JSON");
             }
         }
     }
@@ -1432,268 +1333,6 @@ async fn run_async() -> RunResult {
     }
 }
 
-#[cfg(feature = "cuttlefish")]
-const RETRY_INTERVAL: Duration = Duration::from_secs(1);
-
-#[cfg(feature = "cuttlefish")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ConnectorTarget {
-    WebSocket(String),
-    Tcp(String),
-}
-
-#[cfg(feature = "cuttlefish")]
-impl NetsimDaemon {
-    fn resolve_connector_target(
-        ws_addr: Option<String>,
-        tcp_addr: Option<String>,
-    ) -> Option<ConnectorTarget> {
-        ws_addr.map(ConnectorTarget::WebSocket).or_else(|| tcp_addr.map(ConnectorTarget::Tcp))
-    }
-
-    async fn bridge_packets<S, K>(
-        packet_stream: &mut PacketStream,
-        packet_sink: &mut PacketSink,
-        mut remote_stream: S,
-        mut remote_sink: K,
-        chip_id: &str,
-        transport_name: &str,
-    ) -> bool
-    where
-        S: futures::Stream<Item = io::Result<bytes::Bytes>> + Unpin,
-        K: futures::Sink<bytes::Bytes, Error = io::Error> + Unpin,
-    {
-        enum BridgeError {
-            Guest(String),
-            Remote(String),
-        }
-
-        select! {
-            res = async {
-                while let Some(packet) = packet_stream.next().await {
-                    let packet =
-                        packet.map_err(|e| BridgeError::Guest(format!("read error: {e}")))?;
-                    remote_sink
-                        .send(packet)
-                        .await
-                        .map_err(|e| BridgeError::Remote(format!("write error: {e}")))?;
-                }
-                Ok::<(), BridgeError>(())
-            } => {
-                match res {
-                    Err(BridgeError::Guest(error)) => {
-                        error!(
-                            %error,
-                            %chip_id,
-                            "Upstream bridge failed for chip (Guest)"
-                        );
-                        true
-                    }
-                    Err(BridgeError::Remote(error)) => {
-                        error!(
-                            %error,
-                            %chip_id,
-                            %transport_name,
-                            "Upstream bridge failed for chip"
-                        );
-                        false
-                    }
-                    Ok(()) => true, // Guest FD reader hit EOF, break loop permanently!
-                }
-            }
-            res = async {
-                while let Some(packet) = remote_stream.next().await {
-                    let packet =
-                        packet.map_err(|e| BridgeError::Remote(format!("read error: {e}")))?;
-                    packet_sink
-                        .send(packet)
-                        .await
-                        .map_err(|e| BridgeError::Guest(format!("write error: {e}")))?;
-                }
-                Ok::<(), BridgeError>(())
-            } => {
-                match res {
-                    Err(BridgeError::Guest(error)) => {
-                        error!(
-                            %error,
-                            %chip_id,
-                            "Downstream bridge failed for chip (Guest)"
-                        );
-                        true
-                    }
-                    Err(BridgeError::Remote(error)) => {
-                        error!(
-                            %error,
-                            %chip_id,
-                            %transport_name,
-                            "Downstream bridge failed for chip"
-                        );
-                        false
-                    }
-                    Ok(()) => false, // Remote stream disconnected, need to reconnect
-                }
-            }
-        }
-    }
-
-    async fn run_chip_bridge(
-        mut packet_stream: PacketStream,
-        mut packet_sink: PacketSink,
-        chip_info: PsChipInfo,
-        device_guid: String,
-        target: ConnectorTarget,
-    ) {
-        let chip_id = chip_info.chip.as_ref().map_or("Unknown".to_string(), |c| c.id.clone());
-
-        loop {
-            let is_guest_disconnected = match &target {
-                ConnectorTarget::WebSocket(server_addr) => {
-                    let path = websocket_server::client::build_packet_stream_path(
-                        &chip_info,
-                        &device_guid,
-                    );
-                    match websocket_server::client::connect(server_addr, &path).await {
-                        Ok((ws_stream, ws_sink)) => {
-                            info!(
-                                "Connected WebSocket forwarder to primary daemon for chip {chip_id}"
-                            );
-                            Self::bridge_packets(
-                                &mut packet_stream,
-                                &mut packet_sink,
-                                ws_stream,
-                                ws_sink,
-                                &chip_id,
-                                "WebSocket",
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            warn!(
-                                %error,
-                                "Failed to connect to primary daemon WebSocket {server_addr}{path}"
-                            );
-                            false
-                        }
-                    }
-                }
-                ConnectorTarget::Tcp(server_addr) => match TcpStream::connect(server_addr).await {
-                    Ok(tcp_stream_raw) => {
-                        let init_info = PsInitInfo {
-                            chip_info: chip_info.clone(),
-                            transport_type: "TCP Forwarder".to_string(),
-                        };
-
-                        let mut framed_tcp =
-                            Framed::new(tcp_stream_raw, LengthDelimitedCodec::new());
-
-                        let init_json = match serde_json::to_vec(&init_info) {
-                            Ok(json) => json,
-                            Err(error) => {
-                                error!(%error, "Failed to serialize InitInfo");
-                                break;
-                            }
-                        };
-
-                        if let Err(error) = framed_tcp.send(bytes::Bytes::from(init_json)).await {
-                            error!(%error, "Failed to send InitInfo");
-                            false
-                        } else {
-                            info!("Sent initial ChipInfo to primary daemon for chip {chip_id}");
-
-                            let (tcp_sink, tcp_stream) = framed_tcp.split();
-                            let tcp_stream = tcp_stream.map(|res| res.map(bytes::BytesMut::freeze));
-                            Self::bridge_packets(
-                                &mut packet_stream,
-                                &mut packet_sink,
-                                tcp_stream,
-                                tcp_sink,
-                                &chip_id,
-                                "TCP",
-                            )
-                            .await
-                        }
-                    }
-                    Err(error) => {
-                        warn!(%error, "Failed to connect to primary daemon TCP port");
-                        false
-                    }
-                },
-            };
-
-            if is_guest_disconnected {
-                info!("Guest radio transport disconnected permanently for chip {chip_id}");
-                break;
-            }
-
-            info!(
-                "Forwarder stream disconnected, re-establishing session in 1s for chip {chip_id}..."
-            );
-            tokio::time::sleep(RETRY_INTERVAL).await;
-        }
-        info!("Duplex bridge closed for chip {chip_id}");
-    }
-
-    /// Orchestrates the Cuttlefish packet forwarder connector daemon.
-    async fn run_netsimd_connector(args: Args, connector_instance: u16) -> Result<(), String> {
-        let Some(fd_startup_str) = args.fd_startup_str else {
-            return Err("Failed to start netsimd forwarder, missing `-s` arg".to_string());
-        };
-
-        let dual_fd_config: DualFdConfig = serde_json::from_str(&fd_startup_str)
-            .map_err(|e| format!("Could not parse startup info JSON: {e}"))?;
-
-        let Some(target) = Self::resolve_connector_target(
-            common::util::ini_file::get_ws_server_address(connector_instance),
-            common::util::ini_file::get_tcp_server_address(connector_instance),
-        ) else {
-            return Err(format!(
-                "No primary netsimd ws or tcp port found for instance {connector_instance}"
-            ));
-        };
-
-        info!("Starting in Connector mode to {target:?}");
-
-        let mut join_set = JoinSet::new();
-
-        let mut listener = DualFdListener::new(dual_fd_config)
-            .await
-            .map_err(|e| format!("Failed to create DualFdListener: {e}"))?;
-
-        loop {
-            tokio::select! {
-                res = listener.accept() => {
-                    match res {
-                        Ok((packet_stream, packet_sink, chip_info, guid)) => {
-                            join_set.spawn(Self::run_chip_bridge(
-                                packet_stream,
-                                packet_sink,
-                                chip_info,
-                                guid,
-                                target.clone(),
-                            ));
-                        }
-                        Err(error) => {
-                            error!(%error, "Error accepting connection");
-                            break;
-                        }
-                    }
-                }
-                res = join_set.join_next(), if !join_set.is_empty() => {
-                    if let Some(res) = res {
-                        if let Err(e) = res {
-                            return Err(format!("Bridge task panicked: {e}"));
-                        }
-                        return Err("A guest radio transport disconnected".to_string());
-                    }
-                }
-            }
-        }
-
-        info!("Connector forwarder disconnected unexpectedly");
-        Err("Connector forwarder disconnected unexpectedly from guest FDs".to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1858,65 +1497,5 @@ mod tests {
         assert!(!finished_in_time);
         assert!(start.elapsed() < Duration::from_secs(1));
         drop(unblock_zip_tx);
-    }
-
-    #[cfg(feature = "cuttlefish")]
-    #[test]
-    fn test_resolve_connector_target() {
-        assert_eq!(
-            NetsimDaemon::resolve_connector_target(
-                Some("localhost:7681".to_string()),
-                Some("localhost:5678".to_string()),
-            ),
-            Some(ConnectorTarget::WebSocket("localhost:7681".to_string()))
-        );
-        assert_eq!(
-            NetsimDaemon::resolve_connector_target(None, Some("localhost:5678".to_string())),
-            Some(ConnectorTarget::Tcp("localhost:5678".to_string()))
-        );
-        assert_eq!(NetsimDaemon::resolve_connector_target(None, None), None);
-    }
-
-    #[cfg(feature = "cuttlefish")]
-    #[tokio::test]
-    async fn test_run_chip_bridge_websocket_loopback() {
-        let listener = bind_tcp_loopback(0).unwrap();
-        let ws_addr = listener.local_addr().unwrap().to_string();
-        let (_runner, device_client) = device_actor::new();
-        tokio::spawn(websocket_server::server::run(listener, device_client));
-
-        let (guest_in_tx, guest_in_rx) = mpsc::channel(4);
-        let (guest_out_tx, mut guest_out_rx) = mpsc::channel(4);
-        let stream: PacketStream =
-            Box::pin(futures::stream::unfold(guest_in_rx, |mut rx| async move {
-                rx.recv().await.map(|item| (Ok(item), rx))
-            }));
-        let sink: PacketSink =
-            Box::pin(futures::sink::unfold(guest_out_tx, |tx, item: bytes::Bytes| async move {
-                tx.send(item)
-                    .await
-                    .map_err(|e| packet_stream::PacketStreamError::Io(io::Error::other(e)))?;
-                Ok(tx)
-            }));
-
-        let mut chip_info = ChipInfo::new("cvd-1", ChipKind::BLUETOOTH);
-        if let Some(chip) = &mut chip_info.chip {
-            chip.loopback = true;
-        }
-
-        let bridge = tokio::spawn(NetsimDaemon::run_chip_bridge(
-            stream,
-            sink,
-            chip_info,
-            "dualfd-cvd-1".to_string(),
-            ConnectorTarget::WebSocket(ws_addr),
-        ));
-
-        let payload = bytes::Bytes::from_static(&[0x01, 0x03, 0x0c, 0x00]);
-        guest_in_tx.send(payload.clone()).await.unwrap();
-        assert_eq!(guest_out_rx.recv().await.unwrap(), payload);
-
-        drop(guest_in_tx);
-        bridge.await.unwrap();
     }
 }

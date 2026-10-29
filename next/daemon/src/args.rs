@@ -204,6 +204,28 @@ pub struct WifiConfig {
     pub wifi_cvd_tap: bool,
 }
 
+impl WifiConfig {
+    /// Resolves the effective Linux TAP interface name or pool pattern,
+    /// prioritizing `--wifi-tap` over `--wifi-cvd-tap`.
+    #[must_use]
+    pub(crate) fn resolved_tap(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(tap) = &self.wifi_tap {
+                return Some(tap.clone());
+            }
+            if self.wifi_cvd_tap {
+                return Some("cvd-etap-%02d".to_string());
+            }
+            None
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum ClapWifiMode {
     A,
@@ -383,5 +405,28 @@ mod tests {
             Args::parse_from(["netsimd", "--http-proxy", "  http://proxy.example.com:8080  "]);
         args.sanitize();
         assert_eq!(args.http_proxy, Some("http://proxy.example.com:8080".to_string()));
+    }
+
+    #[test]
+    fn test_wifi_config_resolved_tap_precedence() {
+        let config_default = WifiConfig::default();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(config_default.resolved_tap(), None);
+
+            let config_cvd = WifiConfig { wifi_cvd_tap: true, ..Default::default() };
+            assert_eq!(config_cvd.resolved_tap(), Some("cvd-etap-%02d".to_string()));
+
+            let config_both = WifiConfig {
+                wifi_tap: Some("tap-custom".to_string()),
+                wifi_cvd_tap: true,
+                ..Default::default()
+            };
+            assert_eq!(config_both.resolved_tap(), Some("tap-custom".to_string()));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(config_default.resolved_tap(), None);
+        }
     }
 }

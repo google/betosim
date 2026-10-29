@@ -40,6 +40,9 @@ DAEMON_SRCS = [
     "src/lib.rs",
     "src/logger.rs",
     "src/netsimd.rs",
+    "src/platform/cuttlefish.rs",
+    "src/platform/mod.rs",
+    "src/platform/standard.rs",
     "src/test_beacons.rs",
     "src/version.rs",
 ]

@@ -207,6 +207,12 @@ impl World {
             assert_ne!(recorded_test_port, occupied_test_port);
             assert_eq!(daemon.test_port(), Some(recorded_test_port));
         }
+
+        #[cfg(not(feature = "cuttlefish"))]
+        {
+            assert!(!ini_map.contains_key("test.port"));
+            assert_eq!(daemon.test_port(), None);
+        }
     }
 
     /// When another netsimd starts in this World's discovery directory

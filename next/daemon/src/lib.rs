@@ -30,6 +30,7 @@ pub(crate) mod cuttlefish;
 pub(crate) mod ini_file;
 pub(crate) mod logger;
 pub(crate) mod netsimd;
+pub(crate) mod platform;
 pub(crate) mod test_beacons;
 pub(crate) mod version;
 
