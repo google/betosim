@@ -14,13 +14,22 @@
 
 """thiserror bazel build rule"""
 
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    data = ["build/probe.rs"],
+    edition = "2021",
+    version = "2.0.18",
+)
+
 rust_library(
     name = "thiserror",
-    srcs = glob(["**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]),
     crate_features = [
         "default",
         "std",
@@ -31,7 +40,5 @@ rust_library(
     proc_macro_deps = [
         "@thiserror-impl",
     ],
-    rustc_env = {
-        "OUT_DIR": "../out",
-    },
+    deps = [":build_script"],
 )

@@ -171,13 +171,15 @@ pub struct DualFdListener {
     config: DualFdConfig,
     /// Streams established from pre-existing FDs (e.g., inherited pipes) that
     /// do not need to accept connections dynamically.
-    pending_static_streams:
-        VecDeque<(DeviceInfo, String, Option<i32>, Option<String>, (OwnedFd, OwnedFd))>,
-    listening_sockets: Vec<(DeviceInfo, String, Option<i32>, Option<String>, AsyncFd<OwnedFd>)>,
+    pending_static_streams: VecDeque<StaticStreamEntry>,
+    listening_sockets: Vec<ListeningSocketEntry>,
 }
 
+type StaticStreamEntry = (DeviceInfo, String, Option<i32>, Option<String>, (OwnedFd, OwnedFd));
+type ListeningSocketEntry = (DeviceInfo, String, Option<i32>, Option<String>, AsyncFd<OwnedFd>);
+
 impl DualFdListener {
-    pub async fn new(config: DualFdConfig) -> Result<Self> {
+    pub fn new(config: DualFdConfig) -> Result<Self> {
         let mut listener =
             Self { config, pending_static_streams: VecDeque::new(), listening_sockets: Vec::new() };
         listener.prepare_streams()?;
@@ -189,10 +191,8 @@ impl DualFdListener {
         self.listening_sockets.clear();
         for device in &self.config.devices {
             let mut device_info = device.device_info.clone().unwrap_or_default();
-            if device_info.name.is_empty() {
-                if let Some(name) = &device.name {
-                    device_info.name.clone_from(name);
-                }
+            if let Some(name) = device.name.as_ref().filter(|_| device_info.name.is_empty()) {
+                device_info.name.clone_from(name);
             }
             if device_info.id.is_empty() {
                 device_info.id.clone_from(&device_info.name);
@@ -438,7 +438,7 @@ mod tests {
         );
 
         let config: DualFdConfig = serde_json::from_str(&json_config).unwrap();
-        let mut listener = DualFdListener::new(config).await.unwrap();
+        let mut listener = DualFdListener::new(config).unwrap();
 
         let client_path = socket_path.clone();
         let client_task = tokio::spawn(async move {
@@ -555,7 +555,7 @@ mod tests {
 
             let config: DualFdConfig = serde_json::from_str(&json_config)
                 .unwrap_or_else(|e| panic!("Failed to parse config for test '{}': {e}", tc.name));
-            let mut listener = DualFdListener::new(config).await.unwrap();
+            let mut listener = DualFdListener::new(config).unwrap();
 
             let (_stream, _sink, chip_info, _guid) = listener.accept().await.unwrap();
             let dev_info = chip_info.device_info.unwrap_or_default();

@@ -14,9 +14,25 @@
 
 # General Bazel settings
 common --enable_platform_specific_config
+
+# In-tree Android monorepo registry configuration (default)
 common --registry=file:///%workspace%/registry
 common --registry=file:///%workspace%/../../build/bazel/registry
 common --registry=https://bcr.bazel.build
+build --host_platform='@host_platform//:host'
+
+# Standalone / GitHub checkout configuration
+common:standalone --ignore_dev_dependency
+common:standalone --lockfile_mode=off
+common:standalone --define=standalone=true
+common:standalone --repo_env=NETSIM_STANDALONE=1
+common:standalone --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=0
+build:standalone --host_platform='@platforms//host'
+build:standalone --cxxopt=-std=c++20
+build:standalone --host_cxxopt=-std=c++20
+build:standalone --force_pic
+build:standalone --@rules_rust//rust/settings:experimental_use_cc_common_link
+build:standalone --workspace_status_command="python3 scripts/version_stamp.py"
 
 # Credential helper for the GCS-hosted hermetic SDK archives (see
 # --config=hermetic below). scripts/credential_helper.* is a thin launcher
@@ -38,11 +54,10 @@ build --incompatible_autoload_externally=+cc_library,+cc_binary,+cc_test,+proto_
 #
 # The goldfish cc toolchains require `@bazel_tools//tools/cpp:clang` in their
 # exec_compatible_with, which Bazel's default host platform does not provide, so
-# --host_platform must point at @host_platform (declared in MODULE.bazel).
+# the default config sets --host_platform to @host_platform (overridden in standalone).
 # `info` is overridden because of https://github.com/bazelbuild/bazel/issues/25145.
 common --repo_env='BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1'
 build --incompatible_enable_cc_toolchain_resolution
-build --host_platform='@host_platform//:host'
 info --host_platform='@platforms//host'
 build --host_features='-thin_lto'
 

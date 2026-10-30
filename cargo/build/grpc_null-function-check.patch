@@ -1,0 +1,11 @@
+--- a/include/grpcpp/support/callback_common.h	2026-06-23 22:25:53.791806942 -0700
++++ b/include/grpcpp/support/callback_common.h	2026-06-23 22:25:53.795585750 -0700
+@@ -245,7 +245,7 @@
+           // nothing to return or change here, just don't crash the library
+         }
+ #else   // GRPC_ALLOW_EXCEPTIONS
+-        func(ok);
++        if (func) func(ok);
+ #endif  // GRPC_ALLOW_EXCEPTIONS
+       });
+     }

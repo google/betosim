@@ -19,15 +19,31 @@ package(default_visibility = ["//visibility:public"])
 netsim_rust_library(
     name = "slirp-actor",
     srcs = glob(["src/**/*.rs"]),
+    crate_features = select({
+        "//:standalone": ["cuttlefish"],
+        "//conditions:default": [],
+    }),
     crate_name = "slirp_actor",
     edition = "2024",
+    select_deps = select({
+        "//:standalone": [],
+        "//conditions:default": [
+            "//next/http-proxy",
+            "//next/libslirp-rs",
+        ],
+    }),
+    select_testing_deps = select({
+        "//:standalone": [],
+        "//conditions:default": [
+            "//next/http-proxy:testing",
+            "//next/libslirp-rs:testing",
+        ],
+    }),
     test_deps = [
         "@zerocopy",
     ],
     deps = [
         "//next/actor-framework",
-        "//next/http-proxy",
-        "//next/libslirp-rs",
         "//next/model",
         "//next/packets",
         "//next/slirp",

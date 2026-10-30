@@ -67,28 +67,26 @@ pub(crate) fn preflight_check(_args: &Args) -> Result<(), RunResult> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) async fn init_transport_listeners(args: &Args, streams: &mut Streams) {
-    if let Some(fd_startup_str) = &args.fd_startup_str {
-        init_dualfd_listener(fd_startup_str, streams).await;
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
 pub(crate) fn init_transport_listeners(
-    _args: &Args,
-    _streams: &mut Streams,
+    args: &Args,
+    streams: &mut Streams,
 ) -> std::future::Ready<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(fd_startup_str) = &args.fd_startup_str {
+        init_dualfd_listener(fd_startup_str, streams);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (args, streams);
     std::future::ready(())
 }
 
 #[cfg(target_os = "linux")]
-async fn init_dualfd_listener(fd_startup_str: &str, streams: &mut Streams) {
+fn init_dualfd_listener(fd_startup_str: &str, streams: &mut Streams) {
     if fd_startup_str.is_empty() {
         return;
     }
     match serde_json::from_str::<DualFdConfig>(fd_startup_str) {
-        Ok(config) => match DualFdListener::new(config).await {
+        Ok(config) => match DualFdListener::new(config) {
             Ok(listener) => {
                 if let Err(error) = streams.add_listener("netsim_dualfd", Box::new(listener)) {
                     error!(%error, "Failed to add DualFdListener");
@@ -381,7 +379,6 @@ async fn run_netsimd_connector(args: &Args, connector_instance: u16) -> Result<(
     let mut join_set = JoinSet::new();
 
     let mut listener = DualFdListener::new(dual_fd_config)
-        .await
         .map_err(|e| format!("Failed to create DualFdListener: {e}"))?;
 
     loop {

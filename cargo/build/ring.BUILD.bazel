@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
@@ -81,19 +83,23 @@ config_setting(
     ],
 )
 
-# Need to override prefix_symbols.h for Windows since the precompiled files contain
-# `ring_core_0_17_2_`
-#
-# Use sed rather than python3: on Windows, Bazel runs genrule commands through
-# the bundled busybox shell, whose PATH does not include the host interpreters.
-# python3 is available to repository rules (which run in the Bazel server's own
-# environment) but not here, so invoking it fails with exit 127. busybox does
-# provide sed, and this is the command the pre-existing goldfish build used.
-genrule(
-    name = "windows_prefix_symbols",
-    srcs = ["ring_core_generated/prefix_symbols.h"],
-    outs = ["windows_includes/ring_core_generated/prefix_symbols.h"],
-    cmd = "sed 's/ring_core_android_platform_/ring_core_0_17_2_/g' $< > $@",
+# Derive C and assembly symbol prefix headers from the upstream pregenerated
+# assembly header (`ring_core_0_17_2_`), which is present in both in-tree
+# android-crates-io and upstream crates.io archives.
+expand_template(
+    name = "prefix_symbols",
+    out = "ring_includes/ring_core_generated/prefix_symbols.h",
+    substitutions = {
+        "PREFIX_SYMBOLS_ASM_H": "PREFIX_SYMBOLS_H",
+        "#if defined(__APPLE__)": "#if 0",
+    },
+    template = "pregenerated/tmp/ring_core_generated/prefix_symbols_asm.h",
+)
+
+copy_file(
+    name = "prefix_symbols_asm",
+    src = "pregenerated/tmp/ring_core_generated/prefix_symbols_asm.h",
+    out = "ring_includes/ring_core_generated/prefix_symbols_asm.h",
 )
 
 cc_library(
@@ -223,10 +229,10 @@ cc_library(
         "crypto/**/*.h",
         "crypto/**/*.inl",
         "third_party/fiat/**/*.h",
-    ]) + select({
-        ":windows_x86_64": [":windows_prefix_symbols"],
-        "//conditions:default": glob(["ring_core_generated/**/*.h"]),
-    }),
+    ]) + [
+        ":prefix_symbols",
+        ":prefix_symbols_asm",
+    ],
     copts = [
         "-O3",
         "-fPIC",
@@ -238,42 +244,21 @@ cc_library(
         "-fvisibility=hidden",
         "-DNDEBUG",
     ] + select({
-        # Forced-include of the prefix-renaming header, which must be the
-        # sed-rewritten copy produced by :windows_prefix_symbols and not the
-        # one in the source tree.
-        #
-        # Name it by $(execpath) rather than by a path resolved through -I.
-        # The -I form is ambiguous: `includes` puts both this genfiles
-        # directory and the package root on the -isystem search path, the
-        # package root also contains ring_core_generated/prefix_symbols.h, and
-        # Windows builds are unsandboxed so that source copy is visible on
-        # disk even though it is not a declared input on this platform. It won
-        # the search, so the C sources were compiled with the crate's own
-        # ring_core_android_platform_ prefix while the Rust side was told
-        # RING_CORE_PREFIX=ring_core_0_17_2_, and every C symbol came out
-        # undefined at link time. $(execpath) names one specific file, and
-        # because the header is guarded by ring_core_generated_PREFIX_SYMBOLS_H
-        # the later #include <ring_core_generated/prefix_symbols.h> in
-        # include/ring-core/base.h is then inert whichever copy it finds.
-        #
-        # This is the form the goldfish netsim_build tree uses (spelled there
-        # as the now-deprecated $(location), which expands identically). It
-        # failed with C1083 under MSVC cl.exe, which resolves /FI through
-        # #include "..." rules and never consults the working directory, but
-        # the hermetic toolchain compiles this with clang-cl, which does.
-        ":windows_x86_64": ["/FI$(execpath :windows_prefix_symbols)"],
+        # On unsandboxed Windows, force-include $(execpath :prefix_symbols) so
+        # the generated ring_core_0_17_2_ header wins over any source-tree
+        # ring_core_generated/prefix_symbols.h and its header guard renders
+        # later #include <ring_core_generated/prefix_symbols.h> directives inert.
+        # Relies on clang-cl resolving /FI relative to the execroot.
+        ":windows_x86_64": ["/FI$(execpath :prefix_symbols)"],
         "//conditions:default": [],
     }),
     data = select({
-        ":windows_x86_64": [":windows_prefix_symbols"],
+        ":windows_x86_64": [":prefix_symbols"],
         "//conditions:default": [],
     }),
-    includes = select({
-        ":windows_x86_64": ["windows_includes"],
-        "//conditions:default": [],
-    }) + [
-        ".",
+    includes = [
         "include",
+        "ring_includes",
     ],
 )
 
@@ -290,14 +275,9 @@ rust_library(
     crate_name = "ring",
     crate_root = "src/lib.rs",
     edition = "2021",
-    rustc_env = select({
-        ":windows_x86_64": {
-            "RING_CORE_PREFIX": "ring_core_0_17_2_",
-        },
-        "//conditions:default": {
-            "RING_CORE_PREFIX": "ring_core_android_platform_",
-        },
-    }),
+    rustc_env = {
+        "RING_CORE_PREFIX": "ring_core_0_17_2_",
+    },
     rustc_flags = [
         "--cap-lints=allow",
     ],

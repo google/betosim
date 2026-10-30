@@ -19,9 +19,33 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# gRPC 1.81 removed gpr_set_log_function/gpr_set_log_verbosity, GPR_ASSERT,
+# and the transitive grpc/credentials.h include. Upstream grpcio-sys 0.13 and
+# grpcio 0.13 still reference them (in-tree AOSP patched those files directly),
+# so provide no-op log symbols and force-include the headers/assert macro here.
 cc_library(
     name = "grpc_wrap_deps",
-    srcs = ["grpc_wrap.cc"],
+    srcs = [
+        "grpc_wrap.cc",
+        "@netsim//cargo/build:grpc_log_shim.cc",
+    ],
+    copts = select({
+        "@platforms//os:windows": [
+            "/FIgrpc/credentials.h",
+            "/FIassert.h",
+            "-DGPR_ASSERT=assert",
+            "/wd4005",
+            "-Wno-macro-redefined",
+        ],
+        "//conditions:default": [
+            "-include",
+            "grpc/credentials.h",
+            "-include",
+            "assert.h",
+            "-DGPR_ASSERT=assert",
+            "-Wno-macro-redefined",
+        ],
+    }),
     deps = [
         "@grpc//:grpc++",
     ],
@@ -30,7 +54,11 @@ cc_library(
 
 rust_library(
     name = "grpcio-sys",
-    srcs = glob(["**/*.rs"]),
+    srcs = [
+        "bindings/bindings.rs",
+        "src/grpc_wrap.rs",
+        "src/lib.rs",
+    ],
     crate_features = [
         "_libz-sys",
         "_secure",

@@ -414,9 +414,17 @@ def get_bazel_build_configs(args, env):
   configs = ["release"]
   if args.buildbot:
     configs.append("ci")
-  elif args.hermetic:
-    run_gcloud_auth(env)
-    configs.append("hermetic")
+  else:
+    in_tree = (AOSP_ROOT / "build" / "bazel" / "registry").exists()
+    if not in_tree:
+      configs.insert(0, "standalone")
+      if args.hermetic:
+        logging.warning(
+            "--hermetic is not supported in standalone checkouts; ignoring."
+        )
+    elif args.hermetic:
+      run_gcloud_auth(env)
+      configs.append("hermetic")
 
   build_configs = [f"--config={c}" for c in configs]
   if platform.system().lower() == "windows":

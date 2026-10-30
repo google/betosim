@@ -21,6 +21,10 @@ package(default_visibility = ["//visibility:public"])
 rust_library(
     name = "zerocopy",
     srcs = glob(["**/*.rs"]),
+    compile_data = glob(
+        ["benches/**"],
+        allow_empty = True,
+    ),
     crate_features = [
         "alloc",
         "derive",

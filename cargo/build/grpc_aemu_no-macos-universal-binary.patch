@@ -1,0 +1,11 @@
+--- a/bazel/grpc_build_system.bzl	2026-06-23 22:26:05.958366461 -0700
++++ b/bazel/grpc_build_system.bzl	2026-06-23 22:26:05.961008571 -0700
+@@ -212,7 +212,7 @@
+     native.genrule(
+         name = name,
+         srcs = select({
+-            "@platforms//os:macos": [name + "_universal"],
++            # "@platforms//os:macos": [name + "_universal"],
+             "//conditions:default": [name + "_native"],
+         }),
+         outs = [name + "_binary"],

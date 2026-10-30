@@ -28,16 +28,24 @@ netsim_rust_library(
     # count race conditions, so serial execution (--test-threads=1) is strictly required.
     integration_test_args = ["--test-threads=1"],
     select_deps = select({
+        "//:standalone": [],
+        "//conditions:default": [
+            "@glib//glib",
+            "@libslirp",
+        ],
+    }) + select({
         "@bazel_tools//src/conditions:windows": ["@windows-sys"],
         "@platforms//os:linux": ["@libc"],
         "@platforms//os:macos": ["@libc"],
+    }),
+    target_compatible_with = select({
+        "//:standalone": ["@platforms//:incompatible"],
+        "//conditions:default": [],
     }),
     test_deps = ["//next/packets"],
     deps = [
         "//next/slirp",
         "@bytes",
-        "@glib//glib",
-        "@libslirp",
         "@tokio",
         "@tracing",
     ],

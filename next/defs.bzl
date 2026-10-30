@@ -121,6 +121,7 @@ NetsimDepInfo = provider(
         "transitive_rlibs": "Depset of transitive .rlib files",
         "direct_externs": "Depset of direct crate_name=path strings",
         "transitive_externs": "Depset of transitive crate_name=path strings",
+        "crate_features": "List of crate features",
     },
 )
 
@@ -171,12 +172,17 @@ def _netsim_dep_aspect_impl(target, ctx):
                     direct_rlibs.append(lib)
                     direct_externs_list.append("%s=%s" % (name, lib.path))
 
+    target_features = []
+    if hasattr(ctx.rule.attr, "crate_features"):
+        target_features = ctx.rule.attr.crate_features
+
     return [NetsimDepInfo(
         crate_name = crate_name,
         rlib = lib_file,
         direct_externs = depset(direct_externs_list),
         transitive_rlibs = depset(direct_rlibs, transitive = trans_rlibs),
         transitive_externs = depset(direct_externs, transitive = trans_externs),
+        crate_features = target_features,
     )]
 
 netsim_dep_aspect = aspect(
@@ -287,6 +293,10 @@ def _netsim_clippy_test_impl(ctx):
         t_args.add("--sysroot=%s" % sysroot)
         t_args.add("-L", "%s/lib/rustlib/%s/lib" % (sysroot, target_triple))
         t_args.add_all(ctx.attr.clippy_flags)
+        if NetsimDepInfo in t:
+            for feat in t[NetsimDepInfo].crate_features:
+                if feat != "testing":
+                    t_args.add("--cfg", 'feature="%s"' % feat)
         if info.type == "bin" and not "test" in t.label.name:
             t_args.add("--crate-type=bin")
         elif info.type == "test" or "test" in t.label.name:
@@ -394,13 +404,14 @@ netsim_clippy_test = rule(
     toolchains = ["@rules_rust//rust:toolchain_type"],
 )
 
-def _define_common_targets(name, enable_clippy, enable_rustfmt, targets = []):
+def _define_common_targets(name, enable_clippy, enable_rustfmt, targets = [], target_compatible_with = []):
     # Clippy Linter
     if enable_clippy:
         netsim_clippy_test(
             name = name + "_clippy",
             targets = targets,
             clippy_flags = NETSIM_CLIPPY_FLAGS,
+            target_compatible_with = target_compatible_with,
             testonly = True,
         )
 
@@ -410,7 +421,7 @@ def _define_common_targets(name, enable_clippy, enable_rustfmt, targets = []):
             name = name + "_rustfmt",
             targets = targets,
             # Restrict to Linux for CI validation.
-            target_compatible_with = ["@platforms//os:linux"],
+            target_compatible_with = ["@platforms//os:linux"] + target_compatible_with,
         )
 
 def netsim_rust_library(
@@ -418,6 +429,7 @@ def netsim_rust_library(
         srcs,
         deps = [],
         select_deps = [],
+        select_testing_deps = None,
         testing_deps = [],
         test_deps = [],
         proc_macro_test_deps = [],
@@ -448,6 +460,7 @@ def netsim_rust_library(
         srcs: The source files.
         deps: The dependencies.
         select_deps: The part of deps that uses select()
+        select_testing_deps: The part of testing_deps that uses select(). Defaults to select_deps.
         testing_deps: Dependencies for the "testing" feature.
         test_deps: Dependencies for the unit test and integration test targets.
         proc_macro_test_deps: Proc-macro dependencies for the unit test and integration test targets.
@@ -465,6 +478,9 @@ def netsim_rust_library(
 
     # 1. The Main Library (Always created)
     rustc_flags = NETSIM_RUSTC_FLAGS + kwargs.pop("rustc_flags", [])
+
+    if select_testing_deps == None:
+        select_testing_deps = select_deps
 
     rust_library(
         name = name,
@@ -487,7 +503,7 @@ def netsim_rust_library(
     rust_library(
         name = "testing",
         srcs = srcs,
-        deps = testing_deps + select_deps,
+        deps = testing_deps + select_testing_deps,
         rustc_flags = rustc_flags,
         crate_features = ["testing"] + crate_features,
         **kwargs
@@ -508,7 +524,7 @@ def netsim_rust_library(
             crate_name = kwargs.get("crate_name", name),
             aliases = kwargs.get("aliases", {}),
             rustc_flags = test_flags,
-            deps = testing_deps + select_deps + test_deps,
+            deps = testing_deps + select_testing_deps + test_deps,
             proc_macro_deps = kwargs.get("proc_macro_deps", []) + proc_macro_test_deps,
             edition = kwargs.get("edition", "2021"),
             env = kwargs.get("env", {}),
@@ -549,10 +565,11 @@ def netsim_rust_library(
             srcs = integration_test_srcs,
             args = integration_test_args,
             crate_root = crate_root,
+            crate_features = crate_features,
             aliases = kwargs.get("aliases", {}),
             rustc_flags = test_flags,
             compile_data = kwargs.get("compile_data", []),
-            deps = [":testing"] + testing_deps + select_deps + test_deps,
+            deps = [":testing"] + testing_deps + select_testing_deps + test_deps,
             proc_macro_deps = kwargs.get("proc_macro_deps", []) + proc_macro_test_deps,
             edition = kwargs.get("edition", "2021"),
             env = kwargs.get("env", {}),
@@ -572,11 +589,14 @@ def netsim_rust_library(
     if has_integration_test:
         tgs.append(":integration-test")
 
+    target_compatible_with = kwargs.get("target_compatible_with", [])
+
     _define_common_targets(
         name,
         enable_clippy,
         enable_rustfmt,
         targets = tgs,
+        target_compatible_with = target_compatible_with,
     )
 
     # 6. Documentation
@@ -584,6 +604,8 @@ def netsim_rust_library(
         rust_doc(
             name = "doc",
             crate = ":" + name,
+            crate_features = crate_features,
+            target_compatible_with = target_compatible_with,
             testonly = True,
         )
 
@@ -592,8 +614,9 @@ def netsim_rust_library(
         rust_doc_test(
             name = "doc-test",
             crate = ":" + name,
+            crate_features = crate_features,
+            target_compatible_with = ["@platforms//os:linux"] + target_compatible_with,
             testonly = True,
-            target_compatible_with = ["@platforms//os:linux"],
         )
 
 def netsim_rust_binary(

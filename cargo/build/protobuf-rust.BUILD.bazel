@@ -14,28 +14,28 @@
 
 """protobuf-rust bazel build rule"""
 
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-copy_file(
-    name = "copy_protobuf_build_out",
-    src = "out/version.rs",
-    out = "version.rs",
-    allow_symlink = True,
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    edition = "2021",
+    version = "3.7.2",
 )
 
 rust_library(
     name = "protobuf-rust",
-    srcs = glob(["src/**/*.rs"]) + [":copy_protobuf_build_out"],
+    srcs = glob(["src/**/*.rs"]),
     crate_features = [
         "bytes",
     ],
     crate_name = "protobuf",
     edition = "2021",
-    rustc_env = {"OUT_DIR": ".."},
     deps = [
+        ":build_script",
         "@bytes",
         "@once_cell",
         "@protobuf-support",

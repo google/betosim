@@ -14,13 +14,21 @@
 
 """serde bazel build rule"""
 
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    edition = "2021",
+    version = "1.0.228",
+)
+
 rust_library(
     name = "serde",
-    srcs = glob(["**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]),
     crate_features = [
         "default",
         "derive",
@@ -30,9 +38,10 @@ rust_library(
     ],
     crate_name = "serde",
     crate_root = "src/lib.rs",
-    data = ["out/private.rs"],
     edition = "2021",
     proc_macro_deps = ["@serde_derive"],
-    rustc_env = {"OUT_DIR": "../out"},
-    deps = ["@serde_core"],
+    deps = [
+        ":build_script",
+        "@serde_core",
+    ],
 )

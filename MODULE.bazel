@@ -36,7 +36,9 @@ bazel_dep(name = "rules_pkg", version = "1.1.0")
 bazel_dep(name = "rules_foreign_cc", version = "0.13.0")
 bazel_dep(name = "protobuf", version = "33.5")
 bazel_dep(name = "boringssl", version = "0.20251124.0")
-bazel_dep(name = "glib", version = "2.82.2.bcr.5.aemu")
+
+bazel_dep(name = "glib", version = "2.82.2.bcr.5.aemu", dev_dependency = True)
+
 bazel_dep(name = "cxx.rs", version = "1.0.175")
 single_version_override(
     module_name = "cxx.rs",
@@ -46,18 +48,24 @@ single_version_override(
 
 # repo_name override needed by @grpc
 bazel_dep(name = "protoc-gen-validate", version = "1.3.0", repo_name = "com_envoyproxy_protoc_gen_validate")
-bazel_dep(name = "grpc", version = "1.81.1.aemu")
+bazel_dep(name = "grpc", version = "1.81.1")
+single_version_override(
+    module_name = "grpc",
+    patch_strip = 1,
+    patches = [
+        "//cargo/build:grpc_aemu_no-macos-universal-binary.patch",
+        "//cargo/build:grpc_null-function-check.patch",
+    ],
+)
+
 bazel_dep(name = "c-ares", version = "1.34.6")
 
-# rootcanal asks for fmt 11.1.0, which does not compile against the toolchain's
-# libc++: fmt/format.h defines _LIBCPP_REMOVE_TRANSITIVE_INCLUDES and then uses
-# malloc()/free() in fmt::detail::allocator without including <cstdlib>. Every
-# 11.x release has this bug; 12.0.0 is the first one whose format.h includes
-# <cstdlib>. MVS picks the higher of this and rootcanal's request.
+# @rootcanal's BUILD file depends on @fmt, resolved through netsim's repo
+# mapping. fmt 11.x does not compile against the toolchain's libc++ because
+# fmt/format.h defines _LIBCPP_REMOVE_TRANSITIVE_INCLUDES and uses
+# malloc()/free() without including <cstdlib>; 12.0.0 is the first release
+# that includes <cstdlib>.
 bazel_dep(name = "fmt", version = "12.0.0")
-bazel_dep(name = "rootcanal", version = "0.0.1")
-bazel_dep(name = "casimir", version = "0.0.1")
-bazel_dep(name = "libslirp", version = "0.0.1")
 bazel_dep(name = "rules_java", version = "9.3.0")
 bazel_dep(name = "grpc-java", version = "1.82.0")
 
@@ -78,9 +86,9 @@ bazel_dep(name = "grpc-java", version = "1.82.0")
 # //toolchains/cc, //extensions:toolchain.bzl and //rules:overlay_repository.bzl
 # into a standalone registry module so netsim can depend on the toolchain alone
 # and drop the rest of the emulator build.
-bazel_dep(name = "goldfish_build", version = "0.0.3")
+bazel_dep(name = "goldfish_build", version = "0.0.3", dev_dependency = True)
 
-custom_toolchains = use_extension("@goldfish_build//extensions:toolchain.bzl", "toolchain")
+custom_toolchains = use_extension("@goldfish_build//extensions:toolchain.bzl", "toolchain", dev_dependency = True)
 custom_toolchains.version_file(
     label = "@goldfish_build//toolchains:tool_versions.json",
 )
@@ -99,6 +107,7 @@ host_platform_repository = use_repo_rule("@goldfish_build//platforms:host_platfo
 
 host_platform_repository(
     name = "host_platform",
+    dev_dependency = True,
     host = {
         '{"os": "linux", "arch": "x64"}': "@goldfish_build//platforms:linux_x64",
         '{"os": "macos", "arch": "x64"}': "@goldfish_build//platforms:macos_x64",
@@ -122,6 +131,7 @@ overlay_repository = use_repo_rule("@goldfish_build//rules:overlay_repository.bz
 
 overlay_repository(
     name = "netsim_gcc_lib",
+    dev_dependency = True,
     overlay_files = {"BUILD.bazel": "@goldfish_build//toolchains/cc/linux_clang:gcc_lib.BUILD"},
     path = "../../prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8",
 )
@@ -167,6 +177,7 @@ use_repo(
     "bitflags",
     "byteorder",
     "bytes",
+    "casimir",
     "cfg-if",
     "chacha20",
     "chrono",
@@ -232,6 +243,7 @@ use_repo(
     "jiff",
     "lazy_static",
     "libc",
+    "libslirp",
     "libz-sys",
     "litemap",
     "lock_api",
@@ -284,6 +296,7 @@ use_repo(
     "regex-automata",
     "regex-syntax",
     "ring",
+    "rootcanal",
     "rustix",
     "ryu",
     "scopeguard",

@@ -61,6 +61,12 @@ alias(
     actual = "//next/cli:netsim_stripped",
 )
 
+config_setting(
+    name = "standalone",
+    values = {"define": "standalone=true"},
+    visibility = ["//visibility:public"],
+)
+
 alias(
     name = "netsim",
     actual = "//next/cli:netsim",
