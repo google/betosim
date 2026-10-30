@@ -146,6 +146,9 @@ build:darwin --config=macos
 startup --windows_enable_symlinks
 build:windows --enable_runfiles
 
+# Windows ARM64 (cross-compile)
+build:win_arm64 --platforms=@goldfish_build//platforms:windows_aarch64
+
 build:linux --workspace_status_command="../../prebuilts/python/linux-x86/bin/python3 scripts/version_stamp.py"
 build:macos --workspace_status_command="../../prebuilts/python/darwin-x86/bin/python3 scripts/version_stamp.py"
 build:windows --workspace_status_command="../../prebuilts/python/windows-x86/python scripts/version_stamp.py"

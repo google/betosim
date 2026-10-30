@@ -41,6 +41,10 @@ TARGET_MAP = {
     "windows": "windows_msvc-x86_64",
     "windows_x64": "windows_msvc-x86_64",
     "windows_x86_64": "windows_msvc-x86_64",
+    "windows_arm64": "windows_msvc-aarch64",
+    "windows_aarch64": "windows_msvc-aarch64",
+    "win_arm64": "windows_msvc-aarch64",
+    "win_aarch64": "windows_msvc-aarch64",
     "linux": "linux-x86_64",
     "linux_x64": "linux-x86_64",
     "linux_x86_64": "linux-x86_64",
@@ -117,6 +121,23 @@ def get_netsim_binaries():
 def platform_to_target_name(target):
   """Translates platform to target name"""
   return TARGET_MAP[target.lower().replace("-", "_")]
+
+
+def is_cross_compiling(args) -> bool:
+  """Returns True if targeting a platform different from the current host architecture."""
+  raw_target = getattr(args, "target", None)
+  target = raw_target.lower().replace("-", "_") if raw_target else ""
+  if target in [
+      "windows_arm64",
+      "windows_aarch64",
+      "win_arm64",
+      "win_aarch64",
+  ]:
+    return (
+        platform.system() != "Windows"
+        or platform.machine().lower() not in ["arm64", "aarch64"]
+    )
+  return False
 
 
 def is_presubmit(build_id):
@@ -425,6 +446,16 @@ def get_bazel_build_configs(args, env):
     elif args.hermetic:
       run_gcloud_auth(env)
       configs.append("hermetic")
+
+  raw_target = getattr(args, "target", None)
+  target = raw_target.lower().replace("-", "_") if raw_target else ""
+  if target in [
+      "windows_arm64",
+      "windows_aarch64",
+      "win_arm64",
+      "win_aarch64",
+  ]:
+    configs.append("win_arm64")
 
   build_configs = [f"--config={c}" for c in configs]
   if platform.system().lower() == "windows":

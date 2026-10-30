@@ -28,6 +28,7 @@ from tasks.run_verify_task import RunVerifyTask
 from tasks.task import Task
 from tasks.test_task import TestTask
 from tasks.zip_artifact_task import ZipArtifactTask
+from utils import is_cross_compiling
 
 TASK_ALIASES = ["compile", "runtest"]
 
@@ -77,6 +78,9 @@ def get_tasks(args, env) -> Mapping[str, Task]:
         "RunPyTest",
     ]:
       tasks[task_name].enable(True)
+    if is_cross_compiling(args):
+      tasks["InstallEmulator"].enable(False)
+      tasks["RunPyTest"].enable(False)
     return tasks
 
   # Define the complete task map declaratively.

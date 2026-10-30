@@ -29,6 +29,7 @@ from utils import (
     get_bazel_path,
     get_bazel_startup_options,
     get_bazel_targets,
+    is_cross_compiling,
     run,
 )
 
@@ -51,14 +52,19 @@ class TestTask(Task):
     startup_options = get_bazel_startup_options()
     targets = get_bazel_targets(self.args)
 
+    test_cmd = (
+        ["test", "--build_tests_only", "--run_tests=false"]
+        if is_cross_compiling(self.args)
+        else ["test", "--test_output=streamed"]
+    )
+
     try:
       run(
           [bazel]
           + startup_options
-          + ["test"]
+          + test_cmd
           + targets
-          + build_configs
-          + ["--test_output=streamed"],
+          + build_configs,
           self.env,
           "bazel test",
           NETSIM_ROOT,

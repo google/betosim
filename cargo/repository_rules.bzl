@@ -23,9 +23,25 @@ def _patched_new_local_repository_impl(ctx):
     else:
         src_path = workspace_root + "/" + ctx.attr.path
 
+    os_name = ctx.os.name.lower()
+    if os_name.startswith("windows"):
+        prebuilt_py = workspace_root + "/prebuilts/python/windows-x86/python.exe"
+    elif os_name.startswith("mac") or "darwin" in os_name:
+        prebuilt_py = workspace_root + "/prebuilts/python/darwin-x86/bin/python3"
+    else:
+        prebuilt_py = workspace_root + "/prebuilts/python/linux-x86/bin/python3"
+
+    python_bin = "python3"
+    if ctx.path(prebuilt_py).exists:
+        python_bin = prebuilt_py
+    elif ctx.which("python3"):
+        python_bin = str(ctx.which("python3"))
+    elif ctx.which("python"):
+        python_bin = str(ctx.which("python"))
+
     # Copy source to root using python
     res = ctx.execute([
-        "python3",
+        python_bin,
         "-c",
         "import shutil, sys, os; shutil.copytree(sys.argv[1], sys.argv[2], dirs_exist_ok=True)",
         str(src_path),

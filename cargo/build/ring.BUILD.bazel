@@ -287,5 +287,8 @@ rust_library(
         "@libc",
         "@spin",
         "@untrusted",
-    ],
+    ] + select({
+        ":windows_arm64": ["@windows-sys"],
+        "//conditions:default": [],
+    }),
 )

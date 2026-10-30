@@ -1,0 +1,11 @@
+--- a/upb/port/def.inc
++++ b/upb/port/def.inc
+@@ -392,7 +392,7 @@
+ #define UPB_PRESERVE_NONE
+ #endif
+ 
+-#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
++#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
+ #define UPB_ARM64_ASM 1
+ #else
+ #define UPB_ARM64_ASM 0
