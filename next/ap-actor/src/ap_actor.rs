@@ -294,6 +294,7 @@ pub struct ApState {
     pub(crate) delayed_frames: std::collections::VecDeque<(std::time::Instant, bytes::Bytes)>,
     pub(crate) enabled: bool,
     tx_sequence: u16,
+    pub(crate) start_time: std::time::Instant,
 }
 
 impl ApActor {
@@ -322,6 +323,7 @@ impl Default for ApState {
             delayed_frames: std::collections::VecDeque::new(),
             enabled: true,
             tx_sequence: 0,
+            start_time: std::time::Instant::now(),
         }
     }
 }

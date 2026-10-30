@@ -73,7 +73,7 @@ impl Ieee80211Manager {
             caps |= 0x0010; // Privacy
         }
         let fixed = BeaconFixedFields {
-            timestamp: [0; 8],
+            timestamp: (ap.start_time.elapsed().as_micros() as u64).to_le_bytes(),
             beacon_interval: U16::new(beacon_interval),
             capabilities: U16::new(caps),
         };
@@ -97,7 +97,9 @@ impl Ieee80211Manager {
         write_ie(body, tags::SUPPORTED_RATES, tags::SUPPORTED_RATES_DEFAULT);
 
         // DS Param (Channel)
-        write_ie(body, tags::DS_PARAMETER_SET, &[ap.config.channel]);
+        if ap.config.channel <= 14 {
+            write_ie(body, tags::DS_PARAMETER_SET, &[ap.config.channel]);
+        }
 
         // Country IE (Tag 7)
         if let Some(cc) = &ap.config.country_code
@@ -794,5 +796,82 @@ impl Ieee80211Manager {
         }
 
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract_tsf(frame: &[u8]) -> u64 {
+        let (fixed, _) = BeaconFixedFields::read_from_prefix(&frame[24..])
+            .expect("frame should contain valid BeaconFixedFields at offset 24");
+        u64::from_le_bytes(fixed.timestamp)
+    }
+
+    #[test]
+    fn test_beacon_monotonic_tsf_timestamp() {
+        let manager = Ieee80211Manager::new();
+        let mut ap = ApState::default();
+
+        let b1 = manager.generate_beacon(&mut ap, 100).expect("first beacon should build");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b2 = manager.generate_beacon(&mut ap, 100).expect("second beacon should build");
+
+        let ts1 = extract_tsf(&b1[0]);
+        let ts2 = extract_tsf(&b2[0]);
+        assert!(ts2 > ts1, "expected second beacon TSF ({ts2}) > first beacon TSF ({ts1})");
+    }
+
+    #[test]
+    fn test_probe_resp_monotonic_tsf_timestamp() {
+        let mut manager = Ieee80211Manager::new();
+        let mut ap = ApState::default();
+
+        let header = MacHeader3Addr {
+            frame_control: FrameControl::new(0x0040),
+            duration_id: U16::new(0),
+            addr1: netsim_packets::MacAddr { bytes: [0xFF; 6] },
+            addr2: netsim_packets::MacAddr { bytes: [0x02, 0x00, 0x00, 0x00, 0x01, 0x00] },
+            addr3: netsim_packets::MacAddr { bytes: [0xFF; 6] },
+            sequence_control: ap.next_seq_control(),
+        };
+        let mut raw_req = header.as_bytes().to_vec();
+        write_ie(&mut raw_req, tags::SSID, &[]);
+        let parsed_req = Ieee80211::decode(&raw_req).expect("probe request should decode");
+
+        let r1 = manager
+            .handle_probe_req(&mut ap, &parsed_req, &raw_req, 100)
+            .expect("first probe response should build");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let r2 = manager
+            .handle_probe_req(&mut ap, &parsed_req, &raw_req, 100)
+            .expect("second probe response should build");
+
+        let ts1 = extract_tsf(&r1[0]);
+        let ts2 = extract_tsf(&r2[0]);
+        assert!(ts2 > ts1, "expected second probe resp TSF ({ts2}) > first probe resp TSF ({ts1})");
+    }
+
+    #[test]
+    fn test_ds_parameter_set_ie_channel_filtering() {
+        let manager = Ieee80211Manager::new();
+
+        let mut ap_2g = ApState::default();
+        ap_2g.config.channel = 6;
+        let beacon_2g =
+            manager.generate_beacon(&mut ap_2g, 100).expect("2.4 GHz beacon should build");
+        let ds_ie_2g = IeIterator::new(&beacon_2g[0][36..])
+            .find(|ie| ie.id == tags::DS_PARAMETER_SET)
+            .map(|ie| ie.body);
+        assert_eq!(ds_ie_2g, Some(&[6u8][..]));
+
+        let mut ap_5g = ApState::default();
+        ap_5g.config.channel = 36;
+        let beacon_5g =
+            manager.generate_beacon(&mut ap_5g, 100).expect("5 GHz beacon should build");
+        let has_ds_ie_5g =
+            IeIterator::new(&beacon_5g[0][36..]).any(|ie| ie.id == tags::DS_PARAMETER_SET);
+        assert!(!has_ds_ie_5g, "5 GHz channel 36 must omit DS_PARAMETER_SET IE");
     }
 }
