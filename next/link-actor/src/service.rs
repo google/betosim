@@ -13,19 +13,19 @@
 // limitations under the License.
 
 use actor_framework::{ActorService, DynContext};
-use link_api::LinkAction;
+use link_api::{Link, LinkAction, LinkCreate, LinkId, LinkUpdate};
 use tracing::info;
 
 use crate::{error::LinkError, link_actor::LinkActor};
 
 impl ActorService for LinkActor {
-    type Id = link_api::LinkId;
-    type Create = link_api::LinkCreate;
-    type Update = link_api::LinkUpdate;
+    type Id = LinkId;
+    type Create = LinkCreate;
+    type Update = LinkUpdate;
     type Action = LinkAction;
     type ActionResult = ();
     type Error = LinkError;
-    type Entity = link_api::Link;
+    type Entity = Link;
     type TypedStream = ();
 
     async fn handle_create(
@@ -34,28 +34,26 @@ impl ActorService for LinkActor {
         params: Self::Create,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Id, Self::Error> {
-        // Validate custom ID collision if explicitly provided
-        if id.as_ref().is_some_and(|custom_id| self.get_link(custom_id).is_some()) {
+        if id.is_some_and(|custom_id| self.get_link(custom_id).is_some()) {
             return Err(LinkError::AlreadyExists);
         }
 
-        // Validate chips exist and have matching kinds
-        let sender_kind = self
-            .chip_kind(&params.sender)
-            .ok_or(LinkError::InvalidParam(format!("Sender chip {} not found", params.sender)))?;
-        let receiver_kind = self.chip_kind(&params.receiver).ok_or(LinkError::InvalidParam(
-            format!("Receiver chip {} not found", params.receiver),
-        ))?;
+        let sender_kind = self.chip_kind(params.sender).ok_or_else(|| {
+            LinkError::InvalidParam(format!("sender chip {} not found", params.sender))
+        })?;
+        let receiver_kind = self.chip_kind(params.receiver).ok_or_else(|| {
+            LinkError::InvalidParam(format!("receiver chip {} not found", params.receiver))
+        })?;
 
         if sender_kind != receiver_kind {
             return Err(LinkError::InvalidParam(format!(
-                "Chip kind mismatch: sender={sender_kind}, receiver={receiver_kind}",
+                "chip kind mismatch: sender={sender_kind}, receiver={receiver_kind}",
             )));
         }
 
         if params.sender == params.receiver {
             return Err(LinkError::InvalidParam(format!(
-                "Self-link not allowed: chip={}",
+                "self-link not allowed: chip={}",
                 params.sender
             )));
         }
@@ -70,8 +68,7 @@ impl ActorService for LinkActor {
             None => self.allocate_link_id()?,
         };
 
-        // Create Entity (Link)
-        let link = link_api::Link {
+        let link = Link {
             id,
             sender: params.sender,
             receiver: params.receiver,
@@ -84,8 +81,11 @@ impl ActorService for LinkActor {
         self.insert_link(link);
         self.update_chip_links(sender).await;
         info!(
-            "LinkActor: Set RSSI between sender {sender} and receiver {receiver} on {sender_kind}: {}",
-            params.rssi
+            %sender,
+            %receiver,
+            kind = %sender_kind,
+            rssi = params.rssi,
+            "LinkActor: Created RSSI link",
         );
         Ok(id)
     }
@@ -95,7 +95,7 @@ impl ActorService for LinkActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
-        Ok(self.get_link(&id).cloned())
+        Ok(self.get_link(id).cloned())
     }
 
     async fn handle_update(
@@ -105,9 +105,7 @@ impl ActorService for LinkActor {
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
         let link_clone = {
-            let Some(link) = self.get_link_mut(&id) else {
-                return Err(LinkError::NotFound(id.0));
-            };
+            let link = self.get_link_mut(id).ok_or(LinkError::NotFound(id.0))?;
 
             if let Some(rssi) = update.rssi {
                 link.rssi = rssi;
@@ -117,8 +115,11 @@ impl ActorService for LinkActor {
 
         if let Some(rssi) = update.rssi {
             info!(
-                "LinkActor: Updated RSSI between sender {} and receiver {} on {}: {}",
-                link_clone.sender, link_clone.receiver, link_clone.kind, rssi
+                sender = %link_clone.sender,
+                receiver = %link_clone.receiver,
+                kind = %link_clone.kind,
+                rssi,
+                "LinkActor: Updated RSSI",
             );
             self.update_chip_links(link_clone.sender).await;
         }
@@ -130,18 +131,17 @@ impl ActorService for LinkActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<(), Self::Error> {
-        if let Some(link) = self.remove_link(&id) {
-            let sender = link.sender;
-            let receiver = link.receiver;
-            self.update_chip_links(sender).await;
-            info!(
-                "LinkActor: Deleted RSSI between sender {sender} and receiver {receiver} on {}",
-                link.kind
-            );
-            Ok(())
-        } else {
-            Err(LinkError::NotFound(id.0))
-        }
+        let link = self.remove_link(id).ok_or(LinkError::NotFound(id.0))?;
+        let sender = link.sender;
+        let receiver = link.receiver;
+        self.update_chip_links(sender).await;
+        info!(
+            %sender,
+            %receiver,
+            kind = %link.kind,
+            "LinkActor: Deleted RSSI",
+        );
+        Ok(())
     }
 
     async fn handle_action(
@@ -156,15 +156,16 @@ impl ActorService for LinkActor {
                 self.register_chip(chip_id, chip_kind);
             }
             LinkAction::NotifyChipRemoved(chip_id) => {
-                self.unregister_chip(&chip_id);
+                self.unregister_chip(chip_id);
                 let (removed_count, deleted_senders) = self.remove_chip_links(chip_id);
                 if removed_count > 0 {
                     info!(
-                        "LinkActor: Removed {removed_count} RSSI link(s) associated with chip {chip_id}"
+                        %chip_id,
+                        removed_count,
+                        "LinkActor: Removed RSSI link(s) associated with chip",
                     );
                 }
 
-                // Update the remaining chips that were connected to the removed chip
                 for sender in deleted_senders {
                     self.update_chip_links(sender).await;
                 }

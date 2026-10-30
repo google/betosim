@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use actor_framework::FrameworkError;
 use link_actor::{LinkActor, LinkClient};
-use link_api::{Link, LinkCreate, LinkId, LinkUpdate};
+use link_api::{Link, LinkCreate, LinkError, LinkId, LinkUpdate};
 use netsim_model::{ChipClient, ChipId, ChipKind, MockChipClient};
 
 /// The BDD World for Link Actor tests.
@@ -37,14 +37,11 @@ impl Drop for World {
 impl World {
     /// Creates a new World with default mock clients.
     pub async fn new() -> Self {
-        let mut clients = HashMap::new();
-        clients.insert(
-            ChipKind::BLUETOOTH,
-            Box::new(Self::create_default_mock()) as Box<dyn ChipClient>,
-        );
-        clients
-            .insert(ChipKind::WIFI, Box::new(Self::create_default_mock()) as Box<dyn ChipClient>);
-        clients.insert(ChipKind::UWB, Box::new(Self::create_default_mock()) as Box<dyn ChipClient>);
+        let clients = HashMap::from([
+            (ChipKind::BLUETOOTH, Box::new(Self::create_default_mock()) as Box<dyn ChipClient>),
+            (ChipKind::WIFI, Box::new(Self::create_default_mock()) as Box<dyn ChipClient>),
+            (ChipKind::UWB, Box::new(Self::create_default_mock()) as Box<dyn ChipClient>),
+        ]);
         Self::with_clients(clients).await
     }
 
@@ -88,7 +85,7 @@ impl World {
         sender: ChipId,
         receiver: ChipId,
         rssi: i8,
-    ) -> Result<LinkId, FrameworkError<link_api::LinkError>> {
+    ) -> Result<LinkId, FrameworkError<LinkError>> {
         let params = LinkCreate { sender, receiver, rssi };
         self.client.create(params).await
     }
@@ -108,7 +105,7 @@ impl World {
         &self,
         id: LinkId,
         rssi: i8,
-    ) -> Result<Link, FrameworkError<link_api::LinkError>> {
+    ) -> Result<Link, FrameworkError<LinkError>> {
         self.client.update(id, LinkUpdate { rssi: Some(rssi) }).await?;
         self.client.get(id).await.map(|opt| opt.expect("link exists"))
     }

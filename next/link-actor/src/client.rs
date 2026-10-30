@@ -22,6 +22,7 @@ use std::ops::Deref;
 
 use actor_framework::ResourceClient;
 use futures::TryFutureExt;
+use link_api::{Link, LinkAction, LinkCreate, LinkId, LinkUpdate};
 use netsim_model::{ChipId, ChipKind, ClientError};
 
 use crate::LinkActor;
@@ -57,7 +58,7 @@ use crate::LinkActor;
 /// the link ID and perform an `update()` instead.
 #[derive(Clone, Debug)]
 pub struct LinkClient {
-    pub(crate) inner: ResourceClient<LinkActor>,
+    inner: ResourceClient<LinkActor>,
 }
 
 impl LinkClient {
@@ -68,60 +69,40 @@ impl LinkClient {
 
 #[async_trait::async_trait]
 impl link_api::LinkClient for LinkClient {
-    async fn list(&self) -> Result<Vec<link_api::Link>, ClientError> {
-        self.inner.list().err_into::<ClientError>().await
+    async fn list(&self) -> Result<Vec<Link>, ClientError> {
+        self.inner.list().err_into().await
     }
 
-    async fn create(&self, params: link_api::LinkCreate) -> Result<link_api::LinkId, ClientError> {
-        self.inner.create(params).err_into::<ClientError>().await
+    async fn create(&self, params: LinkCreate) -> Result<LinkId, ClientError> {
+        self.inner.create(params).err_into().await
     }
 
-    async fn update(
-        &self,
-        id: link_api::LinkId,
-        patch: link_api::LinkUpdate,
-    ) -> Result<(), ClientError> {
-        self.inner.update(id, patch).err_into::<ClientError>().await.map(|_| ())
+    async fn update(&self, id: LinkId, patch: LinkUpdate) -> Result<(), ClientError> {
+        self.inner.update(id, patch).err_into().await.map(|_| ())
     }
 
-    async fn delete(&self, id: link_api::LinkId) -> Result<(), ClientError> {
-        self.inner.delete(id).err_into::<ClientError>().await
+    async fn delete(&self, id: LinkId) -> Result<(), ClientError> {
+        self.inner.delete(id).err_into().await
     }
 
-    async fn action(
-        &self,
-        id: Option<link_api::LinkId>,
-        action: link_api::LinkAction,
-    ) -> Result<(), ClientError> {
-        self.inner.perform_action(id, action).err_into::<ClientError>().await.map(|_| ())
+    async fn action(&self, id: Option<LinkId>, action: LinkAction) -> Result<(), ClientError> {
+        self.inner.perform_action(id, action).err_into().await
     }
 
     async fn notify_chip_added(&self, chip_id: ChipId, kind: ChipKind) -> Result<(), ClientError> {
-        self.inner
-            .perform_action(None, link_api::LinkAction::NotifyChipAdded(chip_id, kind))
-            .err_into::<ClientError>()
-            .await
-            .map(|_| ())
+        self.inner.perform_action(None, LinkAction::NotifyChipAdded(chip_id, kind)).err_into().await
     }
 
     async fn notify_chip_removed(&self, chip_id: ChipId) -> Result<(), ClientError> {
-        self.inner
-            .perform_action(None, link_api::LinkAction::NotifyChipRemoved(chip_id))
-            .err_into::<ClientError>()
-            .await
-            .map(|_| ())
+        self.inner.perform_action(None, LinkAction::NotifyChipRemoved(chip_id)).err_into().await
     }
 
     async fn reset(&self) -> Result<(), ClientError> {
-        self.inner
-            .perform_action(None, link_api::LinkAction::Reset)
-            .err_into::<ClientError>()
-            .await
-            .map(|_| ())
+        self.inner.perform_action(None, LinkAction::Reset).err_into().await
     }
 
     async fn shutdown(&self) -> Result<(), ClientError> {
-        self.inner.shutdown().err_into::<ClientError>().await
+        self.inner.shutdown().err_into().await
     }
 }
 

@@ -14,8 +14,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use link_api::Link;
-use netsim_model::{ChipId, ChipKind};
+use link_api::{Link, LinkId};
+use netsim_model::{ChipClient, ChipId, ChipKind, ChipUpdate};
 use tracing::error;
 
 use crate::error::LinkError;
@@ -23,26 +23,27 @@ use crate::error::LinkError;
 /// Context for LinkActor.
 ///
 /// Holds the global state shared across all Link entities.
-///
-/// # State Management
-/// - `lookup`: Maps (Sender, Receiver) to `LinkId` for fast upsert/retrieval.
-/// - `chip_kind_map`: Maps ChipId to ChipKind for validation.
-#[derive(Default)]
 pub struct LinkActor {
     /// Index for fast lookup/upsert: (Sender, Receiver) -> LinkId
-    chip_pairs: HashMap<(ChipId, ChipId), link_api::LinkId>,
+    chip_pairs: HashMap<(ChipId, ChipId), LinkId>,
     /// Map of ChipId to ChipKind for validation
     chip_kind_map: HashMap<ChipId, ChipKind>,
     /// Map of ChipKind to ChipClient for forwarding updates
-    chip_clients: HashMap<ChipKind, Box<dyn netsim_model::ChipClient>>,
-    links: HashMap<link_api::LinkId, Link>,
+    chip_clients: HashMap<ChipKind, Box<dyn ChipClient>>,
+    links: HashMap<LinkId, Link>,
     next_id: u32,
+}
+
+impl Default for LinkActor {
+    fn default() -> Self {
+        Self::new(HashMap::new())
+    }
 }
 
 impl LinkActor {
     const INITIAL_LINK_ID: u32 = 1;
 
-    pub fn new(chip_clients: HashMap<ChipKind, Box<dyn netsim_model::ChipClient>>) -> Self {
+    pub fn new(chip_clients: HashMap<ChipKind, Box<dyn ChipClient>>) -> Self {
         Self {
             chip_pairs: HashMap::new(),
             chip_kind_map: HashMap::new(),
@@ -56,29 +57,29 @@ impl LinkActor {
         id.checked_add(1).unwrap_or(Self::INITIAL_LINK_ID)
     }
 
-    pub(crate) fn allocate_link_id(&mut self) -> Result<link_api::LinkId, LinkError> {
+    pub(crate) fn allocate_link_id(&mut self) -> Result<LinkId, LinkError> {
         let start = self.next_id;
-        while self.links.contains_key(&link_api::LinkId(self.next_id)) {
+        while self.links.contains_key(&LinkId(self.next_id)) {
             self.next_id = Self::wrapping_next_id(self.next_id);
             if self.next_id == start {
-                return Err(LinkError::from("LinkId space exhausted".to_string()));
+                return Err(LinkError::Internal("link ID space exhausted".into()));
             }
         }
-        let id = link_api::LinkId(self.next_id);
+        let id = LinkId(self.next_id);
         self.next_id = Self::wrapping_next_id(self.next_id);
         Ok(id)
     }
 
-    pub(crate) fn chip_kind(&self, chip_id: &ChipId) -> Option<ChipKind> {
-        self.chip_kind_map.get(chip_id).copied()
+    pub(crate) fn chip_kind(&self, chip_id: ChipId) -> Option<ChipKind> {
+        self.chip_kind_map.get(&chip_id).copied()
     }
 
     pub(crate) fn register_chip(&mut self, chip_id: ChipId, kind: ChipKind) {
         self.chip_kind_map.insert(chip_id, kind);
     }
 
-    pub(crate) fn unregister_chip(&mut self, chip_id: &ChipId) {
-        self.chip_kind_map.remove(chip_id);
+    pub(crate) fn unregister_chip(&mut self, chip_id: ChipId) {
+        self.chip_kind_map.remove(&chip_id);
     }
 
     pub(crate) fn has_link_pair(&self, sender: ChipId, receiver: ChipId) -> bool {
@@ -90,16 +91,16 @@ impl LinkActor {
         self.links.insert(link.id, link);
     }
 
-    pub(crate) fn get_link(&self, id: &link_api::LinkId) -> Option<&Link> {
-        self.links.get(id)
+    pub(crate) fn get_link(&self, id: LinkId) -> Option<&Link> {
+        self.links.get(&id)
     }
 
-    pub(crate) fn get_link_mut(&mut self, id: &link_api::LinkId) -> Option<&mut Link> {
-        self.links.get_mut(id)
+    pub(crate) fn get_link_mut(&mut self, id: LinkId) -> Option<&mut Link> {
+        self.links.get_mut(&id)
     }
 
-    pub(crate) fn remove_link(&mut self, id: &link_api::LinkId) -> Option<Link> {
-        self.links.remove(id).inspect(|link| {
+    pub(crate) fn remove_link(&mut self, id: LinkId) -> Option<Link> {
+        self.links.remove(&id).inspect(|link| {
             self.chip_pairs.remove(&(link.sender, link.receiver));
         })
     }
@@ -136,25 +137,24 @@ impl LinkActor {
     }
 
     pub(crate) async fn update_chip_links(&self, chip_id: ChipId) {
-        let Some(kind) = self.chip_kind_map.get(&chip_id) else {
+        let Some(kind) = self.chip_kind(chip_id) else {
             return;
         };
 
-        let Some(client) = self.chip_clients.get(kind) else {
+        let Some(client) = self.chip_clients.get(&kind) else {
             return;
         };
 
         let links: Vec<_> = self
             .links
             .values()
-            .filter(|l| l.sender == chip_id)
-            .map(|l| (l.receiver, l.rssi))
+            .filter_map(|l| (l.sender == chip_id).then_some((l.receiver, l.rssi)))
             .collect();
 
-        let update = netsim_model::ChipUpdate { links: Some(links), ..Default::default() };
+        let update = ChipUpdate { links: Some(links), ..Default::default() };
 
         if let Err(error) = client.update(chip_id, update).await {
-            error!(?error, "Failed to update links for chip {}", chip_id);
+            error!(%error, %chip_id, "Failed to update links for chip");
         }
     }
 }
@@ -165,7 +165,7 @@ mod tests {
 
     fn link(id: u32, sender: u32, receiver: u32, rssi: i8) -> Link {
         Link {
-            id: link_api::LinkId(id),
+            id: LinkId(id),
             sender: ChipId(sender),
             receiver: ChipId(receiver),
             rssi,
@@ -174,15 +174,21 @@ mod tests {
     }
 
     #[test]
+    fn test_default_initializes_next_id_to_initial_link_id() {
+        let mut actor = LinkActor::default();
+        assert_eq!(actor.allocate_link_id().expect("first allocation succeeds"), LinkId(1));
+    }
+
+    #[test]
     fn test_allocate_link_id_wraparound_to_initial_id() {
         let mut actor = LinkActor::new(HashMap::new());
         actor.next_id = u32::MAX;
 
         let first = actor.allocate_link_id().expect("first allocation succeeds");
-        assert_eq!(first, link_api::LinkId(u32::MAX));
+        assert_eq!(first, LinkId(u32::MAX));
 
         let second = actor.allocate_link_id().expect("second allocation wraps to initial id");
-        assert_eq!(second, link_api::LinkId(LinkActor::INITIAL_LINK_ID));
+        assert_eq!(second, LinkId(LinkActor::INITIAL_LINK_ID));
     }
 
     #[test]
@@ -194,11 +200,11 @@ mod tests {
         actor.next_id = 1;
 
         let first = actor.allocate_link_id().expect("allocation skips 1 and 2");
-        assert_eq!(first, link_api::LinkId(3));
+        assert_eq!(first, LinkId(3));
         assert_eq!(actor.next_id, 4);
 
         let second = actor.allocate_link_id().expect("allocation skips 4");
-        assert_eq!(second, link_api::LinkId(5));
+        assert_eq!(second, LinkId(5));
         assert_eq!(actor.next_id, 6);
     }
 
@@ -216,7 +222,7 @@ mod tests {
 
         assert!(actor.has_link_pair(ChipId(3), ChipId(4)));
         assert_eq!(actor.links.len(), 1);
-        assert!(actor.links.contains_key(&link_api::LinkId(4)));
+        assert!(actor.links.contains_key(&LinkId(4)));
         assert!(!actor.has_link_pair(ChipId(1), ChipId(2)));
         assert!(!actor.has_link_pair(ChipId(2), ChipId(1)));
         assert!(!actor.has_link_pair(ChipId(3), ChipId(1)));
@@ -225,12 +231,12 @@ mod tests {
     #[test]
     fn test_remove_link_purges_chip_pairs() {
         let mut actor = LinkActor::new(HashMap::new());
-        let link_id = link_api::LinkId(42);
+        let link_id = LinkId(42);
         actor.insert_link(link(42, 10, 20, -50));
         assert!(actor.has_link_pair(ChipId(10), ChipId(20)));
-        let removed = actor.remove_link(&link_id);
+        let removed = actor.remove_link(link_id);
         assert_eq!(removed.map(|l| l.id), Some(link_id));
         assert!(!actor.has_link_pair(ChipId(10), ChipId(20)));
-        assert_eq!(actor.get_link(&link_id), None);
+        assert_eq!(actor.get_link(link_id), None);
     }
 }

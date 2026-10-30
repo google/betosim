@@ -68,8 +68,8 @@ async fn test_link_propagation() {
         .times(1)
         .returning(|_, _| Ok(netsim_model::Chip::default()));
 
-    let mut clients = HashMap::new();
-    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>);
+    let clients =
+        HashMap::from([(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>)]);
 
     let world = World::with_clients(clients).await;
 
@@ -125,8 +125,8 @@ async fn test_update_link_propagates_patch() {
         .times(1)
         .returning(|_, _| Ok(netsim_model::Chip::default()));
 
-    let mut clients = HashMap::new();
-    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>);
+    let clients =
+        HashMap::from([(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>)]);
 
     let world = World::with_clients(clients).await;
 
@@ -193,8 +193,8 @@ async fn test_chip_removal_propagates_patch() {
         .times(1)
         .returning(|_, _| Ok(netsim_model::Chip::default()));
 
-    let mut clients = HashMap::new();
-    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>);
+    let clients =
+        HashMap::from([(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>)]);
 
     let world = World::with_clients(clients).await;
 
@@ -267,8 +267,8 @@ async fn test_reset_propagates_link_removal_to_chips() {
         .times(1)
         .returning(|_, _| Ok(netsim_model::Chip::default()));
 
-    let mut clients = HashMap::new();
-    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>);
+    let clients =
+        HashMap::from([(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>)]);
 
     let world = World::with_clients(clients).await;
 
@@ -296,8 +296,8 @@ async fn recording_world() -> (World, Arc<Mutex<Vec<ChipUpdateRecord>>>) {
         updates_clone.lock().unwrap().push((id, patch.links));
         Ok(netsim_model::Chip::default())
     });
-    let mut clients: HashMap<ChipKind, Box<dyn ChipClient>> = HashMap::new();
-    clients.insert(ChipKind::BLUETOOTH, Box::new(shared_mock));
+    let clients =
+        HashMap::from([(ChipKind::BLUETOOTH, Box::new(shared_mock) as Box<dyn ChipClient>)]);
     let world = World::with_clients(clients).await;
     (world, recorded_updates)
 }

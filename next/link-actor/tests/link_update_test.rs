@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use link_api::LinkId;
 use netsim_model::ChipId;
 
 use crate::world::World;
@@ -42,6 +43,7 @@ async fn test_update_link_rssi() {
     let links = world.client.list().await.unwrap();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].id, link_id);
+    assert_eq!(links[0].rssi, -70);
 }
 
 // Scenario: Fail to update non-existent link
@@ -53,7 +55,7 @@ async fn test_update_link_rssi() {
 async fn test_update_missing_link_fails() {
     // Given
     let world = World::new().await;
-    let missing_id = link_api::LinkId(999);
+    let missing_id = LinkId(999);
 
     // When
     let result = world.when_update_link(missing_id, -70).await;
