@@ -40,9 +40,10 @@ use std::{
 use bytes::Bytes;
 use log::{info, trace, warn};
 use netsim_packets::{
-    DHCPV6_SERVER_PORT, EthernetFrame, EthernetPacket, IP_P_ICMP, IP_P_ICMPV6, IP_P_TCP, IP_P_UDP,
-    Icmpv6Header, Ipv4Builder, Ipv4Header, Ipv6Builder, Ipv6Header, MacAddr, NeighborSolicitation,
-    RouterAdvertisementBuilder, RouterSolicitation, UdpBuilder, ether_type, icmpv6_checksum,
+    DHCP_SERVER_PORT, DHCPV6_SERVER_PORT, DNS_PORT, EthernetFrame, EthernetPacket, IP_P_ICMP,
+    IP_P_ICMPV6, IP_P_TCP, IP_P_UDP, Icmpv6Header, Ipv4Builder, Ipv4Header, Ipv6Builder,
+    Ipv6Header, MacAddr, NeighborSolicitation, RouterAdvertisementBuilder, RouterSolicitation,
+    TFTP_PORT, UdpBuilder, ether_type, icmpv6_checksum,
 };
 use serde::{Deserialize, Serialize};
 pub use utils::{clock, timers};
@@ -125,16 +126,16 @@ impl Slirp {
         // Add implicit DNS-over-TCP redirection rule for IPv4
         if let Some(dns_ipv4) = config.dns_servers.iter().find(|ip| ip.is_ipv4()) {
             guestfwd.push(GuestFwdRule {
-                virtual_addr: SocketAddr::new(IpAddr::V4(config.host_ipv4), 53),
-                host_addr: SocketAddr::new(*dns_ipv4, 53),
+                virtual_addr: SocketAddr::new(IpAddr::V4(config.host_ipv4), DNS_PORT),
+                host_addr: SocketAddr::new(*dns_ipv4, DNS_PORT),
             });
         }
 
         // Add implicit DNS-over-TCP redirection rule for IPv6
         if let Some(dns_ipv6) = config.dns_servers.iter().find(|ip| ip.is_ipv6()) {
             guestfwd.push(GuestFwdRule {
-                virtual_addr: SocketAddr::new(IpAddr::V6(config.host_ipv6), 53),
-                host_addr: SocketAddr::new(*dns_ipv6, 53),
+                virtual_addr: SocketAddr::new(IpAddr::V6(config.host_ipv6), DNS_PORT),
+                host_addr: SocketAddr::new(*dns_ipv6, DNS_PORT),
             });
         }
 
@@ -156,7 +157,7 @@ impl Slirp {
                         self.udp_manager.handle_reply(conn_id, &data)
                     {
                         // Intercept DNS replies to update cache!
-                        let is_dns_reply = src_addr.port() == 53
+                        let is_dns_reply = src_addr.port() == DNS_PORT
                             && (src_addr.ip() == IpAddr::V4(self.config.host_ipv4)
                                 || src_addr.ip() == IpAddr::V6(self.config.host_ipv6));
                         if is_dns_reply {
@@ -180,33 +181,16 @@ impl Slirp {
             }
             SlirpRequest::ConnectionClosed(conn_id) => {
                 if conn_id >= (1 << 63) {
-                    self.udp_manager.remove_flow(conn_id);
+                    self.close_udp_flow(conn_id, UdpCloseReason::Closed, &mut responses);
                 } else {
-                    if let Some(conn) = self
-                        .tcp_manager
-                        .get_connection(conn_id)
-                        .filter(|c| c.state == State::SynSent)
-                    {
-                        info!(
-                            "TCP connection {conn_id} failed to connect, sending ICMP Host Unreachable"
-                        );
-                        let offending_packet =
-                            synthesize_offending_tcp_packet(conn.guest_addr, conn.host_addr);
-                        if conn.guest_addr.is_ipv6() {
-                            self.icmpv6_manager.send_host_unreachable(
-                                &mut responses,
-                                &self.config,
-                                &offending_packet,
-                            );
-                        } else {
-                            self.icmp_manager.send_host_unreachable(
-                                &mut responses,
-                                &self.config,
-                                &offending_packet,
-                            );
-                        }
-                    }
-                    self.tcp_manager.remove_connection(conn_id);
+                    self.close_tcp_connection(conn_id, &mut responses);
+                }
+            }
+            SlirpRequest::ConnectionRefused(conn_id) => {
+                if conn_id >= (1 << 63) {
+                    self.close_udp_flow(conn_id, UdpCloseReason::Refused, &mut responses);
+                } else {
+                    self.close_tcp_connection(conn_id, &mut responses);
                 }
             }
             SlirpRequest::RemoteClosed(conn_id) => {
@@ -250,6 +234,60 @@ impl Slirp {
         }
         crate::ip_fragment::fragment_outgoing_packets(&mut responses);
         responses
+    }
+
+    fn close_udp_flow(
+        &mut self,
+        conn_id: u64,
+        reason: UdpCloseReason,
+        responses: &mut Vec<SlirpResponse>,
+    ) {
+        let flow_info =
+            self.udp_manager.id_to_flow.get(&conn_id).map(|f| (f.guest_addr, f.original_dest));
+        if let Some((guest_addr, original_dest)) = flow_info {
+            if reason == UdpCloseReason::Refused {
+                let offending_packet =
+                    build_icmp_unreachable_payload(guest_addr, original_dest, Protocol::Udp);
+                if guest_addr.is_ipv6() {
+                    self.icmpv6_manager.send_port_unreachable(
+                        responses,
+                        &self.config,
+                        &offending_packet,
+                    );
+                } else {
+                    self.icmp_manager.send_port_unreachable(
+                        responses,
+                        &self.config,
+                        &offending_packet,
+                    );
+                }
+            }
+            responses.push(SlirpResponse::CloseConnection { conn_id, guest_addr });
+        }
+        self.udp_manager.remove_flow(conn_id);
+    }
+
+    fn close_tcp_connection(&mut self, conn_id: u64, responses: &mut Vec<SlirpResponse>) {
+        let syn_sent_info = self
+            .tcp_manager
+            .get_connection(conn_id)
+            .filter(|c| c.state == State::SynSent)
+            .map(|c| (c.guest_addr, c.host_addr));
+        if let Some((guest_addr, host_addr)) = syn_sent_info {
+            info!("TCP connection {conn_id} failed to connect, sending ICMP Host Unreachable");
+            let offending_packet =
+                build_icmp_unreachable_payload(guest_addr, host_addr, Protocol::Tcp);
+            if guest_addr.is_ipv6() {
+                self.icmpv6_manager.send_host_unreachable(
+                    responses,
+                    &self.config,
+                    &offending_packet,
+                );
+            } else {
+                self.icmp_manager.send_host_unreachable(responses, &self.config, &offending_packet);
+            }
+        }
+        self.tcp_manager.remove_connection(conn_id);
     }
 
     fn handle_packet(&mut self, packet_buf: &[u8], responses: &mut Vec<SlirpResponse>) {
@@ -669,7 +707,7 @@ impl Slirp {
         let src_port = udp_header.source_port.get();
 
         // 1. Handle DHCP (v4 and v6)
-        if !is_ipv6 && dest_port == 67 {
+        if !is_ipv6 && dest_port == DHCP_SERVER_PORT {
             self.dhcp_manager.handle_packet(
                 responses,
                 &self.config,
@@ -695,7 +733,7 @@ impl Slirp {
         let dst_addr = SocketAddr::new(dest_ip, dest_port);
 
         // 1a. Handle TFTP
-        if dest_port == 69 || self.tftp_manager.has_session_with_tid(dest_port) {
+        if dest_port == TFTP_PORT || self.tftp_manager.has_session_with_tid(dest_port) {
             let guest_mac = match packet.ethernet {
                 EthernetPacket::Untagged { frame, .. } => frame.src_addr,
                 EthernetPacket::Vlan { frame, .. } => frame.src_addr,
@@ -712,7 +750,7 @@ impl Slirp {
         }
 
         // 2. Handle DNS Redirection
-        if is_to_gateway && dest_port == 53 {
+        if is_to_gateway && dest_port == DNS_PORT {
             use crate::dns::DnsQueryResult;
             let result = self.dns_proxy.handle_query(
                 udp_payload,
@@ -725,7 +763,7 @@ impl Slirp {
                     self.send_udp_packet_to_guest(responses, dst_addr, src_addr, &reply);
                 }
                 DnsQueryResult::Forward(server_ip) => {
-                    let redirect_dest = SocketAddr::new(server_ip, 53);
+                    let redirect_dest = SocketAddr::new(server_ip, DNS_PORT);
                     self.udp_manager.handle_packet(
                         responses,
                         udp_payload,
@@ -739,25 +777,23 @@ impl Slirp {
             return;
         }
 
-        // 3. Handle Closed Gateway Ports
-        if is_to_gateway {
-            if !is_ipv6 {
-                trace!("UDP packet to closed gateway port: {dest_port}");
-                self.icmp_manager.send_port_unreachable(responses, &self.config, l3_packet);
-            } else {
-                trace!("UDP packet to closed IPv6 gateway port: {dest_port}");
-                self.icmpv6_manager.send_port_unreachable(responses, &self.config, l3_packet);
+        let redirect_dest = resolve_guest_destination(
+            &self.config.guestfwd,
+            dst_addr,
+            self.config.host_ipv4,
+            self.config.host_ipv6,
+        );
+        if is_to_gateway && redirect_dest.is_none() {
+            match dst_addr {
+                SocketAddr::V4(_) => {
+                    self.icmp_manager.send_port_unreachable(responses, &self.config, l3_packet);
+                }
+                SocketAddr::V6(_) => {
+                    self.icmpv6_manager.send_port_unreachable(responses, &self.config, l3_packet);
+                }
             }
             return;
         }
-
-        // 4. Normal UDP Forwarding
-        let redirect_dest = self
-            .config
-            .guestfwd
-            .iter()
-            .find(|rule| rule.virtual_addr == dst_addr)
-            .map(|rule| rule.host_addr);
 
         self.udp_manager.handle_packet(responses, udp_payload, src_addr, dst_addr, redirect_dest);
     }
@@ -977,6 +1013,20 @@ struct SlirpStateOwned {
     udp_manager: UdpManager,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UdpCloseReason {
+    Closed,
+    Refused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Protocol {
+    Tcp,
+    Udp,
+}
+
+// TODO(b/577146519): Add a Config option equivalent to libslirp's disable_host_loopback
+// to opt out of gateway-to-loopback translation.
 fn resolve_guest_destination(
     guestfwd: &[GuestFwdRule],
     dst_addr: SocketAddr,
@@ -987,7 +1037,7 @@ fn resolve_guest_destination(
         return Some(rule.host_addr);
     }
     let port = dst_addr.port();
-    if port == 0 || port == 53 {
+    if port == 0 || port == DNS_PORT {
         return None;
     }
     match dst_addr.ip() {
@@ -1001,26 +1051,44 @@ fn resolve_guest_destination(
     }
 }
 
-fn synthesize_offending_tcp_packet(guest_addr: SocketAddr, host_addr: SocketAddr) -> Vec<u8> {
-    match (guest_addr, host_addr) {
-        (SocketAddr::V4(guest_v4), SocketAddr::V4(host_v4)) => [
-            // Version=4, IHL=5, DSCP/ECN=0, Total Length=28, ID=0, Flags/Frag=0, TTL=0, Proto=TCP(6), Checksum=0
-            &[0x45, 0, 0, 28, 0, 0, 0, 0, 0, 6, 0, 0][..],
+/// Builds the minimal invoking packet (IP header plus the first 8 transport
+/// bytes) quoted in an ICMP (RFC 792) or ICMPv6 (RFC 4443) Destination
+/// Unreachable payload.
+///
+/// Used when an asynchronous host connection fails (UDP
+/// `SlirpRequest::ConnectionRefused` or TCP `SynSent`
+/// `SlirpRequest::ConnectionClosed`) after the original ingress packet buffer
+/// has been consumed; `dst_addr` must be the pre-translation guest-visible
+/// destination so the guest OS matches the error to its originating socket.
+fn build_icmp_unreachable_payload(
+    guest_addr: SocketAddr,
+    dst_addr: SocketAddr,
+    protocol: Protocol,
+) -> Vec<u8> {
+    let (ip_proto, l4_tail): (u8, [u8; 4]) = match protocol {
+        Protocol::Tcp => (IP_P_TCP, [0, 0, 0, 0]), // Sequence Number = 0
+        Protocol::Udp => (IP_P_UDP, [0, 8, 0, 0]), // Length = 8, Checksum = 0
+    };
+    match (guest_addr, dst_addr) {
+        (SocketAddr::V4(guest_v4), SocketAddr::V4(dst_v4)) => [
+            // Version=4, IHL=5, DSCP/ECN=0, Total Length=28, ID=0,
+            // Flags/Frag=0, TTL=0, Checksum=0
+            &[0x45, 0, 0, 28, 0, 0, 0, 0, 0, ip_proto, 0, 0][..],
             &guest_v4.ip().octets(),
-            &host_v4.ip().octets(),
+            &dst_v4.ip().octets(),
             &guest_v4.port().to_be_bytes(),
-            &host_v4.port().to_be_bytes(),
-            &[0, 0, 0, 0], // Sequence Number = 0
+            &dst_v4.port().to_be_bytes(),
+            &l4_tail,
         ]
         .concat(),
-        (SocketAddr::V6(guest_v6), SocketAddr::V6(host_v6)) => [
-            // Version=6, Payload Length=8, Next Header=TCP (6), Hop Limit=64
-            &[0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 6, 64][..],
+        (SocketAddr::V6(guest_v6), SocketAddr::V6(dst_v6)) => [
+            // Version=6, Payload Length=8, Hop Limit=64
+            &[0x60, 0x00, 0x00, 0x00, 0x00, 0x08, ip_proto, 64][..],
             &guest_v6.ip().octets(),
-            &host_v6.ip().octets(),
+            &dst_v6.ip().octets(),
             &guest_v6.port().to_be_bytes(),
-            &host_v6.port().to_be_bytes(),
-            &[0, 0, 0, 0], // Sequence Number = 0
+            &dst_v6.port().to_be_bytes(),
+            &l4_tail,
         ]
         .concat(),
         _ => Vec::new(), // Mismatched families (should not happen)

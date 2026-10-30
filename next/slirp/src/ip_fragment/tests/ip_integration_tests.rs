@@ -233,9 +233,10 @@ fn test_icmp_port_unreachable_integration() {
     let config = Config::default();
     let mut slirp = Slirp::new(config.clone());
 
-    // Send a UDP packet from guest to a closed port on the gateway (e.g., 1234)
+    // Send a UDP packet from guest to an unserved gateway port
+    // (port 0 is reserved and never translated).
     let src_port = 12345;
-    let dst_port = 1234;
+    let dst_port = 0;
     let udp_payload = b"hello";
 
     let mut udp_packet = vec![0u8; 8 + udp_payload.len()];
@@ -1751,7 +1752,8 @@ fn test_icmpv6_port_unreachable_integration() {
     let config = Config::default();
     let mut slirp = Slirp::new(config.clone());
 
-    // Send a UDP packet to a closed gateway port (e.g. 12345)
+    // Send a UDP packet to an unserved gateway port
+    // (port 0 is reserved and never translated).
     let payload = b"hello closed port";
     let udp_header_len = 8;
     let total_udp_len = udp_header_len + payload.len();
@@ -1777,7 +1779,7 @@ fn test_icmpv6_port_unreachable_integration() {
     let mut udp_builder = UdpPacketBuilder::new(
         &mut ipv6_payload[..total_udp_len],
         12345, // src port
-        12345, // dst port (closed!)
+        0,     // dst port (reserved!)
     )
     .unwrap();
     udp_builder.payload_mut().copy_from_slice(payload);
@@ -2287,10 +2289,15 @@ fn test_dns_over_tcp_redirection_integration() {
     assert!(has_packet, "Missing Packet");
 }
 
-fn build_ipv4_tcp_syn_frame(config: &Config, src_port: u16, dst_port: u16, seq: u32) -> Bytes {
+fn build_ipv4_tcp_syn_frame(
+    config: &Config,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+) -> Bytes {
     let mut tcp_syn = vec![0u8; 20];
-    let mut tcp_builder =
-        TcpBuilder::new(&mut tcp_syn, config.guest_ipv4, config.host_ipv4).unwrap();
+    let mut tcp_builder = TcpBuilder::new(&mut tcp_syn, config.guest_ipv4, dst_ip).unwrap();
     tcp_builder
         .source_port(src_port)
         .dest_port(dst_port)
@@ -2303,7 +2310,7 @@ fn build_ipv4_tcp_syn_frame(config: &Config, src_port: u16, dst_port: u16, seq: 
     let mut ip_syn = vec![0u8; 20 + tcp_syn.len()];
     let (ip_header_slice, ip_payload_slice) = ip_syn.split_at_mut(20);
     let mut ipv4_builder =
-        Ipv4Builder::new(ip_header_slice, IP_P_TCP, config.guest_ipv4, config.host_ipv4).unwrap();
+        Ipv4Builder::new(ip_header_slice, IP_P_TCP, config.guest_ipv4, dst_ip).unwrap();
     ipv4_builder.payload_len(tcp_syn.len());
     ipv4_builder.build();
     ip_payload_slice.copy_from_slice(&tcp_syn);
@@ -2317,6 +2324,48 @@ fn build_ipv4_tcp_syn_frame(config: &Config, src_port: u16, dst_port: u16, seq: 
     eth_payload_slice.copy_from_slice(&ip_syn);
 
     Bytes::from(eth_syn)
+}
+
+const ETH_HEADER_LEN: usize = 14;
+const IPV4_HEADER_LEN: usize = 20;
+const IPV6_HEADER_LEN: usize = 40;
+const TCP_HEADER_LEN: usize = 20;
+const UDP_HEADER_LEN: usize = 8;
+
+fn build_ipv6_tcp_syn_frame(
+    config: &Config,
+    dst_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+) -> Bytes {
+    let total_ipv6_len = IPV6_HEADER_LEN + TCP_HEADER_LEN;
+    let total_len = ETH_HEADER_LEN + total_ipv6_len;
+
+    let mut eth_packet = vec![0u8; total_len];
+    let (eth_slice, eth_payload) = eth_packet.split_at_mut(ETH_HEADER_LEN);
+    let eth_frame = EthernetFrame::mut_from_bytes(eth_slice).unwrap();
+    eth_frame.dst_addr = config.gateway_mac;
+    eth_frame.src_addr = config.guest_mac;
+    eth_frame.ethertype = ether_type::IPV6.into();
+
+    let (ipv6_slice, tcp_slice) = eth_payload.split_at_mut(IPV6_HEADER_LEN);
+    let mut ipv6_builder =
+        Ipv6Builder::new(ipv6_slice, IP_P_TCP, config.guest_ipv6, dst_ip).unwrap();
+    ipv6_builder.payload_len(TCP_HEADER_LEN);
+    ipv6_builder.build();
+
+    let mut tcp_builder = TcpBuilder::new_v6(tcp_slice, config.guest_ipv6, dst_ip).unwrap();
+    tcp_builder
+        .source_port(src_port)
+        .dest_port(dst_port)
+        .sequence_num(seq)
+        .ack_num(0)
+        .flags(netsim_packets::TCP_FLAG_SYN)
+        .window_size(8192);
+    tcp_builder.build();
+
+    Bytes::from(eth_packet)
 }
 
 struct World {
@@ -2343,30 +2392,65 @@ impl World {
     }
 
     fn when_guest_sends_ipv4_tcp_syn(&mut self, src_port: u16, dst_port: u16) {
-        let eth_syn = build_ipv4_tcp_syn_frame(&self.config, src_port, dst_port, 1000);
+        self.when_guest_sends_ipv4_tcp_syn_to(self.config.host_ipv4, src_port, dst_port);
+    }
+
+    fn when_guest_sends_ipv4_tcp_syn_to(&mut self, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16) {
+        let eth_syn = build_ipv4_tcp_syn_frame(&self.config, dst_ip, src_port, dst_port, 1000);
         self.last_responses = self.slirp.handle_request(SlirpRequest::Packet(eth_syn));
     }
 
-    fn then_tcp_connection_established(&self, expected_dest: SocketAddr, expected_guest_port: u16) {
-        let has_establish = self.last_responses.iter().any(|resp| {
-            if let SlirpResponse::EstablishConnection(_, ConnectionArgs::Tcp(args)) = resp {
+    fn when_guest_sends_ipv6_tcp_syn_to(&mut self, dst_ip: Ipv6Addr, src_port: u16, dst_port: u16) {
+        let eth_syn = build_ipv6_tcp_syn_frame(&self.config, dst_ip, src_port, dst_port, 1000);
+        self.last_responses = self.slirp.handle_request(SlirpRequest::Packet(eth_syn));
+    }
+
+    fn then_tcp_connection_established(
+        &self,
+        expected_dest: SocketAddr,
+        expected_guest_port: u16,
+    ) -> u64 {
+        let mut conn_id = None;
+        for resp in &self.last_responses {
+            if let SlirpResponse::EstablishConnection(id, ConnectionArgs::Tcp(args)) = resp {
                 assert_eq!(args.destination, expected_dest);
-                assert_eq!(args.guest_ip, IpAddr::V4(self.config.guest_ipv4));
+                match expected_dest.ip() {
+                    IpAddr::V4(_) => {
+                        assert_eq!(args.guest_ip, IpAddr::V4(self.config.guest_ipv4));
+                    }
+                    IpAddr::V6(_) => {
+                        assert_eq!(args.guest_ip, IpAddr::V6(self.config.guest_ipv6));
+                    }
+                }
                 assert_eq!(args.guest_port, expected_guest_port);
-                true
-            } else {
-                false
+                conn_id = Some(*id);
             }
-        });
-        assert!(has_establish, "Expected EstablishConnection to {expected_dest}");
+        }
+        let conn_id =
+            conn_id.unwrap_or_else(|| panic!("Expected EstablishConnection to {expected_dest}"));
+        assert!(conn_id < (1 << 63), "TCP connection ID should have MSB clear");
+        conn_id
     }
 
     fn then_guest_receives_ipv4_tcp_syn_ack(&self, expected_src_port: u16, expected_dst_port: u16) {
+        self.then_guest_receives_ipv4_tcp_syn_ack_from(
+            self.config.host_ipv4,
+            expected_src_port,
+            expected_dst_port,
+        );
+    }
+
+    fn then_guest_receives_ipv4_tcp_syn_ack_from(
+        &self,
+        expected_src_ip: Ipv4Addr,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+    ) {
         let has_syn_ack = self.last_responses.iter().any(|resp| {
             if let SlirpResponse::Packet(p) = resp {
                 let (_, eth_payload) = EthernetFrame::parse(p).unwrap();
                 let (ip_header, ip_payload) = Ipv4Header::parse(eth_payload).unwrap();
-                assert_eq!(Ipv4Addr::from(ip_header.source_addr), self.config.host_ipv4);
+                assert_eq!(Ipv4Addr::from(ip_header.source_addr), expected_src_ip);
                 let (tcp_header, _) = TcpHeader::parse(ip_payload).unwrap();
                 assert_eq!(tcp_header.source_port.get(), expected_src_port);
                 assert_eq!(tcp_header.dest_port.get(), expected_dst_port);
@@ -2376,7 +2460,434 @@ impl World {
                 false
             }
         });
-        assert!(has_syn_ack, "Expected TCP SYN-ACK packet from port {expected_src_port}");
+        assert!(
+            has_syn_ack,
+            "Expected TCP SYN-ACK packet from {expected_src_ip}:{expected_src_port}"
+        );
+    }
+
+    fn when_guest_sends_ipv4_udp(&mut self, src_port: u16, dst_port: u16, payload: &[u8]) {
+        self.when_guest_sends_ipv4_udp_to(self.config.host_ipv4, src_port, dst_port, payload);
+    }
+
+    fn when_guest_sends_ipv4_udp_to(
+        &mut self,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) {
+        let mut udp_packet = vec![0u8; UDP_HEADER_LEN + payload.len()];
+        let mut udp_builder = UdpPacketBuilder::new(&mut udp_packet, src_port, dst_port).unwrap();
+        udp_builder.payload_mut().copy_from_slice(payload);
+        udp_builder.build();
+
+        let mut ipv4_packet = vec![0u8; IPV4_HEADER_LEN + udp_packet.len()];
+        let (ipv4_header_slice, ipv4_payload_slice) = ipv4_packet.split_at_mut(IPV4_HEADER_LEN);
+        let mut ipv4_builder =
+            Ipv4Builder::new(ipv4_header_slice, IP_P_UDP, self.config.guest_ipv4, dst_ip).unwrap();
+        ipv4_builder.payload_len(udp_packet.len());
+        ipv4_builder.build();
+        ipv4_payload_slice.copy_from_slice(&udp_packet);
+
+        let mut eth_packet = vec![0u8; ETH_HEADER_LEN + ipv4_packet.len()];
+        let (eth_header, eth_payload) = eth_packet.split_at_mut(ETH_HEADER_LEN);
+        let eth_frame = EthernetFrame::mut_from_bytes(eth_header).unwrap();
+        eth_frame.dst_addr = self.config.gateway_mac;
+        eth_frame.src_addr = self.config.guest_mac;
+        eth_frame.ethertype = ether_type::IPV4.into();
+        eth_payload.copy_from_slice(&ipv4_packet);
+
+        self.last_responses =
+            self.slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_packet)));
+    }
+
+    fn when_guest_sends_ipv6_udp(&mut self, src_port: u16, dst_port: u16, payload: &[u8]) {
+        let total_udp_len = UDP_HEADER_LEN + payload.len();
+        let total_ipv6_len = IPV6_HEADER_LEN + total_udp_len;
+        let total_len = ETH_HEADER_LEN + total_ipv6_len;
+
+        let mut eth_packet = vec![0u8; total_len];
+        let (eth_slice, eth_payload) = eth_packet.split_at_mut(ETH_HEADER_LEN);
+        let eth_frame = EthernetFrame::mut_from_bytes(eth_slice).unwrap();
+        eth_frame.dst_addr = self.config.gateway_mac;
+        eth_frame.src_addr = self.config.guest_mac;
+        eth_frame.ethertype = ether_type::IPV6.into();
+
+        let (ipv6_slice, ipv6_payload) = eth_payload.split_at_mut(IPV6_HEADER_LEN);
+        let mut ipv6_builder =
+            Ipv6Builder::new(ipv6_slice, IP_P_UDP, self.config.guest_ipv6, self.config.host_ipv6)
+                .unwrap();
+        ipv6_builder.hop_limit(64);
+
+        let mut udp_builder =
+            UdpPacketBuilder::new(&mut ipv6_payload[..total_udp_len], src_port, dst_port).unwrap();
+        udp_builder.payload_mut().copy_from_slice(payload);
+        udp_builder.build();
+
+        ipv6_builder.payload_len(total_udp_len);
+        ipv6_builder.build();
+
+        self.last_responses =
+            self.slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_packet)));
+    }
+
+    fn then_udp_connection_established_and_written(
+        &self,
+        expected_dest: SocketAddr,
+        expected_guest_port: u16,
+        expected_payload: &[u8],
+    ) -> u64 {
+        assert_eq!(
+            self.last_responses.len(),
+            2,
+            "Should return EstablishConnection and WriteToConnection"
+        );
+        let mut conn_id = None;
+        for resp in &self.last_responses {
+            if let SlirpResponse::EstablishConnection(id, ConnectionArgs::Udp(args)) = resp {
+                assert_eq!(args.destination, expected_dest);
+                match expected_dest.ip() {
+                    IpAddr::V4(_) => {
+                        assert_eq!(args.guest_ip, IpAddr::V4(self.config.guest_ipv4));
+                    }
+                    IpAddr::V6(_) => {
+                        assert_eq!(args.guest_ip, IpAddr::V6(self.config.guest_ipv6));
+                    }
+                }
+                assert_eq!(args.guest_port, expected_guest_port);
+                conn_id = Some(*id);
+            }
+        }
+        let conn_id = conn_id.expect("Expected EstablishConnection response");
+        assert!(conn_id >= (1 << 63), "UDP connection ID should have MSB set");
+
+        let has_write = self.last_responses.iter().any(|resp| {
+            matches!(
+                resp,
+                SlirpResponse::WriteToConnection(id, data)
+                    if *id == conn_id && data == expected_payload
+            )
+        });
+        assert!(has_write, "Expected WriteToConnection with payload");
+        conn_id
+    }
+
+    fn when_host_sends_data(&mut self, conn_id: u64, payload: &[u8]) {
+        self.last_responses =
+            self.slirp.handle_request(SlirpRequest::Data(conn_id, Bytes::copy_from_slice(payload)));
+    }
+
+    fn then_guest_receives_ipv4_udp_from_gateway(
+        &self,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+        expected_payload: &[u8],
+    ) {
+        assert_eq!(self.last_responses.len(), 1, "Should return exactly one reply packet");
+        let response_packet = match &self.last_responses[0] {
+            SlirpResponse::Packet(p) => p,
+            _ => panic!("Expected Packet response"),
+        };
+        let (eth_frame_reply, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
+        assert_eq!(eth_frame_reply.dst_addr, self.config.guest_mac);
+        assert_eq!(eth_frame_reply.src_addr, self.config.gateway_mac);
+        let (ip_header_reply, ip_payload_reply) = Ipv4Header::parse(eth_payload_reply).unwrap();
+        assert_eq!(ip_header_reply.protocol, IP_P_UDP);
+        assert_eq!(Ipv4Addr::from(ip_header_reply.source_addr), self.config.host_ipv4);
+        assert_eq!(Ipv4Addr::from(ip_header_reply.dest_addr), self.config.guest_ipv4);
+        let (udp_header_reply, udp_payload_reply) = UdpHeader::parse(ip_payload_reply).unwrap();
+        assert_eq!(udp_header_reply.source_port.get(), expected_src_port);
+        assert_eq!(udp_header_reply.dest_port.get(), expected_dst_port);
+        assert_eq!(udp_payload_reply, expected_payload);
+    }
+
+    fn then_guest_receives_ipv6_udp_from_gateway(
+        &self,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+        expected_payload: &[u8],
+    ) {
+        assert_eq!(self.last_responses.len(), 1, "Should return exactly one reply packet");
+        let response_packet = match &self.last_responses[0] {
+            SlirpResponse::Packet(p) => p,
+            _ => panic!("Expected Packet response"),
+        };
+        let (eth_frame_reply, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
+        assert_eq!(eth_frame_reply.dst_addr, self.config.guest_mac);
+        assert_eq!(eth_frame_reply.src_addr, self.config.gateway_mac);
+        assert_eq!(eth_frame_reply.ethertype.get(), ether_type::IPV6);
+
+        let (ip_header_reply, ip_payload_reply) = Ipv6Header::parse(eth_payload_reply).unwrap();
+        assert_eq!(ip_header_reply.next_header, IP_P_UDP);
+        assert_eq!(Ipv6Addr::from(ip_header_reply.source_addr), self.config.host_ipv6);
+        assert_eq!(Ipv6Addr::from(ip_header_reply.dest_addr), self.config.guest_ipv6);
+
+        let (udp_header_reply, udp_payload_reply) = UdpHeader::parse(ip_payload_reply).unwrap();
+        assert_eq!(udp_header_reply.source_port.get(), expected_src_port);
+        assert_eq!(udp_header_reply.dest_port.get(), expected_dst_port);
+        assert_eq!(udp_payload_reply, expected_payload);
+    }
+
+    fn when_host_closes_connection(&mut self, conn_id: u64) {
+        self.last_responses = self.slirp.handle_request(SlirpRequest::ConnectionClosed(conn_id));
+    }
+
+    fn when_host_refuses_connection(&mut self, conn_id: u64) {
+        self.last_responses = self.slirp.handle_request(SlirpRequest::ConnectionRefused(conn_id));
+    }
+
+    fn then_no_responses(&self) {
+        assert!(
+            self.last_responses.is_empty(),
+            "Expected no responses, got: {:?}",
+            self.last_responses
+        );
+    }
+
+    fn then_guest_receives_ipv4_icmp_port_unreachable_and_close(
+        &self,
+        conn_id: u64,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+    ) {
+        self.then_guest_receives_port_unreachable_and_close(
+            conn_id,
+            IpAddr::V4(self.config.guest_ipv4),
+            ether_type::IPV4,
+            expected_src_port,
+            expected_dst_port,
+            |ip_payload| {
+                let (ip_header, icmp_payload) = Ipv4Header::parse(ip_payload).unwrap();
+                assert_eq!(ip_header.protocol, IP_P_ICMP);
+                assert_eq!(Ipv4Addr::from(ip_header.source_addr), self.config.host_ipv4);
+                assert_eq!(Ipv4Addr::from(ip_header.dest_addr), self.config.guest_ipv4);
+
+                let (icmp_header, icmp_data) = IcmpHeader::parse(icmp_payload).unwrap();
+                assert_eq!(icmp_header.icmp_type, netsim_packets::IcmpType::DestUnreachable as u8);
+                assert_eq!(
+                    icmp_header.icmp_code,
+                    netsim_packets::UnreachableCode::PortUnreachable as u8
+                );
+
+                let offending_ip_header = Ipv4Header::parse(&icmp_data[..20]).unwrap().0;
+                assert_eq!(offending_ip_header.protocol, IP_P_UDP);
+                assert_eq!(Ipv4Addr::from(offending_ip_header.source_addr), self.config.guest_ipv4);
+                assert_eq!(Ipv4Addr::from(offending_ip_header.dest_addr), self.config.host_ipv4);
+                &icmp_data[20..28]
+            },
+        );
+    }
+
+    fn then_guest_receives_ipv6_icmpv6_port_unreachable_and_close(
+        &self,
+        conn_id: u64,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+    ) {
+        self.then_guest_receives_port_unreachable_and_close(
+            conn_id,
+            IpAddr::V6(self.config.guest_ipv6),
+            ether_type::IPV6,
+            expected_src_port,
+            expected_dst_port,
+            |ip_payload| {
+                let (ipv6_header, icmpv6_payload) = Ipv6Header::parse(ip_payload).unwrap();
+                assert_eq!(ipv6_header.next_header, IP_P_ICMPV6);
+                assert_eq!(Ipv6Addr::from(ipv6_header.source_addr), self.config.host_ipv6);
+                assert_eq!(Ipv6Addr::from(ipv6_header.dest_addr), self.config.guest_ipv6);
+
+                let (icmpv6_header, icmpv6_data) = Icmpv6Header::parse(icmpv6_payload).unwrap();
+                assert_eq!(
+                    icmpv6_header.icmpv6_type,
+                    netsim_packets::Icmpv6Type::DestinationUnreachable as u8
+                );
+                assert_eq!(
+                    icmpv6_header.icmpv6_code,
+                    netsim_packets::Icmpv6UnreachableCode::PortUnreachable as u8
+                );
+
+                let offending_ipv6_header = Ipv6Header::parse(&icmpv6_data[..40]).unwrap().0;
+                assert_eq!(offending_ipv6_header.next_header, IP_P_UDP);
+                assert_eq!(
+                    Ipv6Addr::from(offending_ipv6_header.source_addr),
+                    self.config.guest_ipv6
+                );
+                assert_eq!(Ipv6Addr::from(offending_ipv6_header.dest_addr), self.config.host_ipv6);
+                &icmpv6_data[40..48]
+            },
+        );
+    }
+
+    fn then_guest_receives_port_unreachable_and_close(
+        &self,
+        conn_id: u64,
+        expected_guest_ip: IpAddr,
+        expected_ethertype: u16,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+        assert_icmp_and_get_offending_l4: impl Fn(&[u8]) -> &[u8],
+    ) {
+        assert_eq!(
+            self.last_responses.len(),
+            2,
+            "Expected ICMP/ICMPv6 packet and CloseConnection responses, got {:?}",
+            self.last_responses
+        );
+
+        let mut has_close = false;
+        let mut has_icmp = false;
+
+        for resp in &self.last_responses {
+            match resp {
+                SlirpResponse::CloseConnection { conn_id: id, guest_addr } => {
+                    assert_eq!(*id, conn_id);
+                    assert_eq!(guest_addr.port(), expected_src_port);
+                    assert_eq!(guest_addr.ip(), expected_guest_ip);
+                    has_close = true;
+                }
+                SlirpResponse::Packet(p) => {
+                    let (eth_frame, ip_payload) = EthernetFrame::parse(p).unwrap();
+                    assert_eq!(eth_frame.dst_addr, self.config.guest_mac);
+                    assert_eq!(eth_frame.ethertype.get(), expected_ethertype);
+
+                    let offending_l4_header_slice = assert_icmp_and_get_offending_l4(ip_payload);
+                    let (offending_udp_header, _) =
+                        UdpHeader::parse(offending_l4_header_slice).unwrap();
+                    assert_eq!(offending_udp_header.source_port.get(), expected_src_port);
+                    assert_eq!(offending_udp_header.dest_port.get(), expected_dst_port);
+                    has_icmp = true;
+                }
+                _ => panic!("Unexpected response: {resp:?}"),
+            }
+        }
+
+        assert!(has_close, "Missing CloseConnection response");
+        assert!(has_icmp, "Missing ICMP/ICMPv6 Port Unreachable packet response");
+    }
+
+    fn then_close_connection_without_icmp(
+        &self,
+        expected_conn_id: u64,
+        expected_guest_addr: SocketAddr,
+    ) {
+        assert_eq!(
+            self.last_responses.len(),
+            1,
+            "Expected exactly one response, got: {:?}",
+            self.last_responses
+        );
+        match &self.last_responses[0] {
+            SlirpResponse::CloseConnection { conn_id, guest_addr } => {
+                assert_eq!(*conn_id, expected_conn_id);
+                assert_eq!(*guest_addr, expected_guest_addr);
+            }
+            other => panic!("Expected CloseConnection response, got: {other:?}"),
+        }
+        assert_eq!(self.slirp.connection_info().count(), 0);
+    }
+
+    fn then_guest_receives_host_unreachable(
+        &self,
+        expected_ethertype: u16,
+        expected_src_port: u16,
+        expected_dst_port: u16,
+        assert_icmp_and_get_quoted_transport: impl FnOnce(&[u8]) -> &[u8],
+    ) {
+        assert_eq!(
+            self.last_responses.len(),
+            1,
+            "Expected exactly one response, got: {:?}",
+            self.last_responses
+        );
+        let packet = match &self.last_responses[0] {
+            SlirpResponse::Packet(p) => p,
+            other => panic!("Expected Packet response, got: {other:?}"),
+        };
+        let (eth_frame, eth_payload) = EthernetFrame::parse(packet).unwrap();
+        assert_eq!(eth_frame.dst_addr, self.config.guest_mac);
+        assert_eq!(eth_frame.ethertype.get(), expected_ethertype);
+
+        let quoted_l4 = assert_icmp_and_get_quoted_transport(eth_payload);
+        assert!(quoted_l4.len() >= 8);
+        // Only the first 8 bytes of the TCP header are quoted, so
+        // TcpHeader::parse cannot be used.
+        let quoted_src_port = u16::from_be_bytes([quoted_l4[0], quoted_l4[1]]);
+        let quoted_dst_port = u16::from_be_bytes([quoted_l4[2], quoted_l4[3]]);
+        assert_eq!(quoted_src_port, expected_src_port);
+        assert_eq!(quoted_dst_port, expected_dst_port);
+
+        assert_eq!(self.slirp.connection_info().count(), 0);
+    }
+
+    fn then_guest_receives_ipv4_icmp_host_unreachable(
+        &self,
+        expected_guest_port: u16,
+        expected_dst_ip: Ipv4Addr,
+        expected_dst_port: u16,
+    ) {
+        self.then_guest_receives_host_unreachable(
+            ether_type::IPV4,
+            expected_guest_port,
+            expected_dst_port,
+            |ip_payload| {
+                let (ip_header, icmp_payload) = Ipv4Header::parse(ip_payload).unwrap();
+                assert_eq!(ip_header.protocol, IP_P_ICMP);
+                assert_eq!(Ipv4Addr::from(ip_header.source_addr), self.config.host_ipv4);
+                assert_eq!(Ipv4Addr::from(ip_header.dest_addr), self.config.guest_ipv4);
+
+                let (icmp_header, icmp_data) = IcmpHeader::parse(icmp_payload).unwrap();
+                assert_eq!(icmp_header.icmp_type, netsim_packets::IcmpType::DestUnreachable as u8);
+                assert_eq!(
+                    icmp_header.icmp_code,
+                    netsim_packets::UnreachableCode::HostUnreachable as u8
+                );
+
+                let (offending_ip_header, quoted_l4) = Ipv4Header::parse(icmp_data).unwrap();
+                assert_eq!(offending_ip_header.protocol, IP_P_TCP);
+                assert_eq!(Ipv4Addr::from(offending_ip_header.source_addr), self.config.guest_ipv4);
+                assert_eq!(Ipv4Addr::from(offending_ip_header.dest_addr), expected_dst_ip);
+                quoted_l4
+            },
+        );
+    }
+
+    fn then_guest_receives_ipv6_icmpv6_host_unreachable(
+        &self,
+        expected_guest_port: u16,
+        expected_dst_ip: Ipv6Addr,
+        expected_dst_port: u16,
+    ) {
+        self.then_guest_receives_host_unreachable(
+            ether_type::IPV6,
+            expected_guest_port,
+            expected_dst_port,
+            |ip_payload| {
+                let (ipv6_header, icmpv6_payload) = Ipv6Header::parse(ip_payload).unwrap();
+                assert_eq!(ipv6_header.next_header, IP_P_ICMPV6);
+                assert_eq!(Ipv6Addr::from(ipv6_header.source_addr), self.config.host_ipv6);
+                assert_eq!(Ipv6Addr::from(ipv6_header.dest_addr), self.config.guest_ipv6);
+
+                let (icmpv6_header, icmpv6_data) = Icmpv6Header::parse(icmpv6_payload).unwrap();
+                assert_eq!(
+                    icmpv6_header.icmpv6_type,
+                    netsim_packets::Icmpv6Type::DestinationUnreachable as u8
+                );
+                assert_eq!(
+                    icmpv6_header.icmpv6_code,
+                    netsim_packets::Icmpv6UnreachableCode::AddressUnreachable as u8
+                );
+
+                let (offending_ipv6_header, quoted_l4) = Ipv6Header::parse(icmpv6_data).unwrap();
+                assert_eq!(offending_ipv6_header.next_header, IP_P_TCP);
+                assert_eq!(
+                    Ipv6Addr::from(offending_ipv6_header.source_addr),
+                    self.config.guest_ipv6
+                );
+                assert_eq!(Ipv6Addr::from(offending_ipv6_header.dest_addr), expected_dst_ip);
+                quoted_l4
+            },
+        );
     }
 }
 
@@ -2440,4 +2951,313 @@ fn test_tcp_gateway_reserved_dns_port_not_rewritten_integration() {
     );
     // And the guest receives a TCP SYN-ACK packet from the gateway
     world.then_guest_receives_ipv4_tcp_syn_ack(53, guest_port);
+}
+
+#[test]
+fn test_udp_gateway_loopback_ipv4_integration() {
+    // Scenario: Guest sends IPv4 UDP datagram to gateway and receives downlink
+    // reply from gateway
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv4 UDP packet targeting the gateway
+    let src_port = 12345;
+    let dst_port = 1234;
+    let udp_payload = b"hello";
+    world.when_guest_sends_ipv4_udp(src_port, dst_port, udp_payload);
+
+    // Then a UDP connection is established to container loopback with payload
+    // written
+    let conn_id = world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dst_port),
+        src_port,
+        udp_payload,
+    );
+
+    // When the host sends a reply datagram back to the guest
+    let reply_payload = b"reply_payload";
+    world.when_host_sends_data(conn_id, reply_payload);
+
+    // Then the guest receives an IPv4 UDP packet from the gateway with the
+    // reply payload
+    world.then_guest_receives_ipv4_udp_from_gateway(dst_port, src_port, reply_payload);
+}
+
+#[test]
+fn test_udp_gateway_loopback_ipv6_integration() {
+    // Scenario: Guest sends IPv6 UDP datagram to gateway and receives downlink
+    // reply from gateway
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv6 UDP packet targeting the gateway
+    let src_port = 12345;
+    let dst_port = 12345;
+    let payload = b"hello udp gateway loopback";
+    world.when_guest_sends_ipv6_udp(src_port, dst_port, payload);
+
+    // Then a UDP connection is established to container loopback with payload
+    // written
+    let conn_id = world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), dst_port),
+        src_port,
+        payload,
+    );
+
+    // When the host sends a reply datagram back to the guest
+    let reply_payload = b"reply_payload_v6";
+    world.when_host_sends_data(conn_id, reply_payload);
+
+    // Then the guest receives an IPv6 UDP packet from the gateway with the
+    // reply payload
+    world.then_guest_receives_ipv6_udp_from_gateway(dst_port, src_port, reply_payload);
+}
+
+#[test]
+fn test_tcp_non_gateway_destination_not_rewritten_integration() {
+    // Scenario: Guest connects to non-gateway host IP and destination is
+    // preserved
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends a TCP SYN packet targeting an external non-gateway
+    // IP
+    let guest_port = 12348;
+    let remote_port = 8080;
+    let non_gateway_ip = Ipv4Addr::new(192, 168, 1, 50);
+    world.when_guest_sends_ipv4_tcp_syn_to(non_gateway_ip, guest_port, remote_port);
+
+    // Then a TCP connection is established directly to the non-gateway IP
+    // (not loopback!)
+    world.then_tcp_connection_established(
+        SocketAddr::new(IpAddr::V4(non_gateway_ip), remote_port),
+        guest_port,
+    );
+    // And the guest receives a TCP SYN-ACK packet from the non-gateway IP
+    world.then_guest_receives_ipv4_tcp_syn_ack_from(non_gateway_ip, remote_port, guest_port);
+}
+
+#[test]
+fn test_udp_non_gateway_destination_not_rewritten_integration() {
+    // Scenario: Guest sends UDP datagram to non-gateway host IP and destination
+    // is preserved
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv4 UDP packet targeting an external
+    // non-gateway IP
+    let src_port = 12348;
+    let dst_port = 5353;
+    let non_gateway_ip = Ipv4Addr::new(192, 168, 1, 50);
+    let payload = b"udp non gateway";
+    world.when_guest_sends_ipv4_udp_to(non_gateway_ip, src_port, dst_port, payload);
+
+    // Then a UDP connection is established directly to the non-gateway IP
+    // (not loopback!)
+    world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V4(non_gateway_ip), dst_port),
+        src_port,
+        payload,
+    );
+}
+
+#[test]
+fn test_udp_gateway_loopback_port_unreachable_ipv4_integration() {
+    // Scenario: Guest sends IPv4 UDP packet to closed gateway port and receives
+    // ICMP Port Unreachable
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv4 UDP packet targeting a port on the gateway
+    let src_port = 12345;
+    let dst_port = 1234;
+    let udp_payload = b"test udp unreachable";
+    world.when_guest_sends_ipv4_udp(src_port, dst_port, udp_payload);
+
+    // Then a UDP connection is established to container loopback with payload
+    // written
+    let conn_id = world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dst_port),
+        src_port,
+        udp_payload,
+    );
+
+    // When the host refuses the connection (e.g. host port is closed /
+    // ICMP port unreachable on host)
+    world.when_host_refuses_connection(conn_id);
+
+    // Then the guest receives an IPv4 ICMP Port Unreachable packet and
+    // CloseConnection
+    world.then_guest_receives_ipv4_icmp_port_unreachable_and_close(conn_id, src_port, dst_port);
+
+    // And when the host refuses the connection again, no further responses
+    // are emitted
+    world.when_host_refuses_connection(conn_id);
+    world.then_no_responses();
+}
+
+#[test]
+fn test_udp_gateway_loopback_port_unreachable_ipv6_integration() {
+    // Scenario: Guest sends IPv6 UDP packet to closed gateway port and receives
+    // ICMPv6 Port Unreachable
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv6 UDP packet targeting a port on the gateway
+    let src_port = 12345;
+    let dst_port = 12345;
+    let payload = b"test udp v6 unreachable";
+    world.when_guest_sends_ipv6_udp(src_port, dst_port, payload);
+
+    // Then a UDP connection is established to container loopback with payload
+    // written
+    let conn_id = world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), dst_port),
+        src_port,
+        payload,
+    );
+
+    // When the host refuses the connection (e.g. host port is closed /
+    // ICMPv6 port unreachable on host)
+    world.when_host_refuses_connection(conn_id);
+
+    // Then the guest receives an IPv6 ICMPv6 Port Unreachable packet and
+    // CloseConnection
+    world.then_guest_receives_ipv6_icmpv6_port_unreachable_and_close(conn_id, src_port, dst_port);
+
+    // And when the host refuses the connection again, no further responses
+    // are emitted
+    world.when_host_refuses_connection(conn_id);
+    world.then_no_responses();
+}
+
+#[test]
+fn test_udp_gateway_loopback_host_closed_without_icmp_ipv4_integration() {
+    // Scenario: Host closes IPv4 UDP flow for a non-refusal reason (e.g.
+    // ENETUNREACH); slirp tears down the flow without ICMP
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv4 UDP packet targeting a port on the gateway
+    let src_port = 12345;
+    let dst_port = 1234;
+    let udp_payload = b"test udp host closed without icmp";
+    world.when_guest_sends_ipv4_udp(src_port, dst_port, udp_payload);
+
+    // Then a UDP connection is established to container loopback with
+    // payload written
+    let conn_id = world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dst_port),
+        src_port,
+        udp_payload,
+    );
+
+    // When the host closes the connection
+    world.when_host_closes_connection(conn_id);
+
+    // Then slirp emits CloseConnection without ICMP and connection count
+    // drops to 0
+    world.then_close_connection_without_icmp(
+        conn_id,
+        SocketAddr::new(IpAddr::V4(world.config.guest_ipv4), src_port),
+    );
+
+    // And when the host closes the connection again, no further responses
+    // are emitted
+    world.when_host_closes_connection(conn_id);
+    world.then_no_responses();
+}
+
+#[test]
+fn test_udp_gateway_loopback_host_closed_without_icmp_ipv6_integration() {
+    // Scenario: Host closes IPv6 UDP flow for a non-refusal reason (e.g.
+    // ENETUNREACH); slirp tears down the flow without ICMP
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv6 UDP packet targeting a port on the gateway
+    let src_port = 12345;
+    let dst_port = 12345;
+    let payload = b"test udp v6 host closed without icmp";
+    world.when_guest_sends_ipv6_udp(src_port, dst_port, payload);
+
+    // Then a UDP connection is established to container loopback with
+    // payload written
+    let conn_id = world.then_udp_connection_established_and_written(
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), dst_port),
+        src_port,
+        payload,
+    );
+
+    // When the host closes the connection
+    world.when_host_closes_connection(conn_id);
+
+    // Then slirp emits CloseConnection without ICMP and connection count
+    // drops to 0
+    world.then_close_connection_without_icmp(
+        conn_id,
+        SocketAddr::new(IpAddr::V6(world.config.guest_ipv6), src_port),
+    );
+
+    // And when the host closes the connection again, no further responses
+    // are emitted
+    world.when_host_closes_connection(conn_id);
+    world.then_no_responses();
+}
+
+#[test]
+fn test_tcp_connect_failure_sends_icmpv6_host_unreachable_integration() {
+    // Scenario: IPv6 TCP connection failure in SynSent state emits ICMPv6
+    // Address Unreachable quoting the pre-translation gateway destination
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv6 TCP SYN targeting the gateway
+    let guest_port = 12345;
+    let target_port = 8080;
+    let gateway_ipv6 = world.config.host_ipv6;
+    world.when_guest_sends_ipv6_tcp_syn_to(gateway_ipv6, guest_port, target_port);
+
+    // Then a TCP connection is established to container loopback in
+    // SynSent state
+    let conn_id = world.then_tcp_connection_established(
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), target_port),
+        guest_port,
+    );
+
+    // When the host driver closes the connection (e.g. connect failed)
+    world.when_host_closes_connection(conn_id);
+
+    // Then the guest receives an ICMPv6 Address Unreachable packet quoting the
+    // pre-translation gateway destination, and the connection is removed
+    world.then_guest_receives_ipv6_icmpv6_host_unreachable(guest_port, gateway_ipv6, target_port);
+}
+
+#[test]
+fn test_tcp_connection_refused_falls_back_to_host_unreachable_integration() {
+    // Scenario: Host ConnectionRefused on a TCP connection ID falls back to
+    // close_tcp_connection and emits ICMP Host Unreachable quoting the
+    // pre-translation gateway destination
+    // Given a running Slirp stack with default configuration
+    let mut world = World::new();
+
+    // When the guest sends an IPv4 TCP SYN targeting the gateway
+    let guest_port = 12345;
+    let target_port = 8080;
+    let gateway_ipv4 = world.config.host_ipv4;
+    world.when_guest_sends_ipv4_tcp_syn_to(gateway_ipv4, guest_port, target_port);
+
+    // Then a TCP connection is established to container loopback in
+    // SynSent state
+    let conn_id = world.then_tcp_connection_established(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), target_port),
+        guest_port,
+    );
+
+    // When the host driver reports ConnectionRefused for the TCP connection
+    world.when_host_refuses_connection(conn_id);
+
+    // Then the guest receives an ICMP Host Unreachable packet quoting the
+    // pre-translation gateway destination, and the connection is removed
+    world.then_guest_receives_ipv4_icmp_host_unreachable(guest_port, gateway_ipv4, target_port);
 }

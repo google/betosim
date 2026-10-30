@@ -13,4 +13,5 @@
 // limitations under the License.
 
 mod ip_fragmentation_tests;
+mod ip_integration_tests;
 mod ip_reassembly_tests;

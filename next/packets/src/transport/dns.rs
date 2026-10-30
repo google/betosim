@@ -18,6 +18,8 @@ use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, U16, Unaligned, byteorder::NetworkEndian,
 };
 
+pub const DNS_PORT: u16 = 53;
+
 /// Represents the DNS header.
 #[derive(FromBytes, KnownLayout, Unaligned, Immutable, IntoBytes, Debug)]
 #[repr(C)]

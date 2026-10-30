@@ -76,6 +76,7 @@ pub enum SlirpRequest {
     WriteComplete(u64),
     Data(u64, Bytes),
     ConnectionClosed(u64),
+    ConnectionRefused(u64),
     RemoteClosed(u64),
     Timer,
     DeactivateFastPath { conn_id: u64 },
@@ -91,6 +92,7 @@ impl Clone for SlirpRequest {
             SlirpRequest::WriteComplete(id) => SlirpRequest::WriteComplete(*id),
             SlirpRequest::Data(id, d) => SlirpRequest::Data(*id, d.clone()),
             SlirpRequest::ConnectionClosed(id) => SlirpRequest::ConnectionClosed(*id),
+            SlirpRequest::ConnectionRefused(id) => SlirpRequest::ConnectionRefused(*id),
             SlirpRequest::RemoteClosed(id) => SlirpRequest::RemoteClosed(*id),
             SlirpRequest::Timer => SlirpRequest::Timer,
             SlirpRequest::DeactivateFastPath { conn_id } => {
@@ -116,6 +118,7 @@ impl std::fmt::Debug for SlirpRequest {
             SlirpRequest::WriteComplete(id) => write!(f, "WriteComplete({id})"),
             SlirpRequest::Data(id, d) => write!(f, "Data({id}, {} bytes)", d.len()),
             SlirpRequest::ConnectionClosed(id) => write!(f, "ConnectionClosed({id})"),
+            SlirpRequest::ConnectionRefused(id) => write!(f, "ConnectionRefused({id})"),
             SlirpRequest::RemoteClosed(id) => write!(f, "RemoteClosed({id})"),
             SlirpRequest::Timer => write!(f, "Timer"),
             SlirpRequest::DeactivateFastPath { conn_id } => {

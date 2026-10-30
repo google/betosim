@@ -650,15 +650,26 @@ fn register_udp_connection(
 
     // Writer task
     let writer_socket = socket.clone();
+    let writer_slirp_sender = slirp_request_sender.clone();
     let writer_handle = tokio::spawn(async move {
         while let Some(data) = rx.recv().await {
-            writer_socket.send(&data).await.ok();
+            // A send to a closed connected UDP port consumes the pending socket
+            // error, so report the refusal here; the reader may never see it.
+            if let Err(e) = writer_socket.send(&data).await
+                && matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                )
+            {
+                writer_slirp_sender.send(SlirpRequest::ConnectionRefused(conn_id)).await.ok();
+                break;
+            }
         }
     });
 
     // Reader task
     let reader_socket = socket.clone();
-    let slirp_sender = slirp_request_sender.clone();
+    let slirp_sender = slirp_request_sender;
     let reader_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
@@ -671,8 +682,16 @@ fn register_udp_connection(
                             .ok();
                     }
                 }
-                Err(_) => {
-                    slirp_sender.send(SlirpRequest::ConnectionClosed(conn_id)).await.ok();
+                Err(e) => {
+                    let req = if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                    ) {
+                        SlirpRequest::ConnectionRefused(conn_id)
+                    } else {
+                        SlirpRequest::ConnectionClosed(conn_id)
+                    };
+                    slirp_sender.send(req).await.ok();
                     break;
                 }
             }

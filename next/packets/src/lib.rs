@@ -276,15 +276,16 @@ pub mod dhcpv6 {
 }
 pub mod dns {
     pub use crate::transport::{
-        DnsFlags, DnsHeader, DnsPacketBuilder, Opcode, Question, ResourceClass, ResourceType,
-        ResponseCode,
+        DNS_PORT, DnsFlags, DnsHeader, DnsPacketBuilder, Opcode, Question, ResourceClass,
+        ResourceType, ResponseCode,
     };
 }
 pub use transport::{
-    DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, Dhcpv6Header, Dhcpv6OptionHeader, Dhcpv6OptionIterator,
-    DnsFlags, DnsHeader, DnsPacketBuilder, MSG_INFORMATION_REQUEST, MSG_REPLY, OPTION_CLIENTID,
-    OPTION_DNS_SERVERS, OPTION_DOMAIN_LIST, OPTION_SERVERID, Opcode, Question, ResourceClass,
-    ResourceType, ResponseCode, TcpBuilder, UdpBuilder, UdpPacketBuilder,
+    DHCP_SERVER_PORT, DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, DNS_PORT, Dhcpv6Header,
+    Dhcpv6OptionHeader, Dhcpv6OptionIterator, DnsFlags, DnsHeader, DnsPacketBuilder,
+    MSG_INFORMATION_REQUEST, MSG_REPLY, OPTION_CLIENTID, OPTION_DNS_SERVERS, OPTION_DOMAIN_LIST,
+    OPTION_SERVERID, Opcode, Question, ResourceClass, ResourceType, ResponseCode, TFTP_PORT,
+    TcpBuilder, UdpBuilder, UdpPacketBuilder,
 };
 // Checksum helpers
 pub use utils::checksum::{

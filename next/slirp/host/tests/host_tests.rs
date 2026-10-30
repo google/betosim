@@ -1006,6 +1006,109 @@ impl World {
             "Failed to receive echoed TCP data from gateway loopback server"
         );
     }
+
+    async fn given_udp_echo_server(&mut self, ip: IpAddr) -> u16 {
+        use tokio::net::UdpSocket;
+        let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let echo_task = tokio::spawn(run_echo_udp_server(socket));
+        self.tasks.push(echo_task);
+        self.set_udp_endpoints(ip, port)
+    }
+
+    async fn given_unbound_udp_port(&mut self, ip: IpAddr) -> u16 {
+        use tokio::net::UdpSocket;
+        let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        self.set_udp_endpoints(ip, port)
+    }
+
+    fn set_udp_endpoints(&mut self, ip: IpAddr, port: u16) -> u16 {
+        if ip.is_ipv4() {
+            self.guest_ip = IpAddr::V4(self.config.guest_ipv4);
+            self.gateway_ip = IpAddr::V4(self.config.host_ipv4);
+        } else {
+            self.guest_ip = IpAddr::V6(self.config.guest_ipv6);
+            self.gateway_ip = IpAddr::V6(self.config.host_ipv6);
+        }
+        self.host_port = port;
+        port
+    }
+
+    async fn when_guest_sends_udp_to_gateway(
+        &mut self,
+        guest_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) {
+        self.guest_port = guest_port;
+        self.host_port = dst_port;
+        let guest_udp_addr = SocketAddr::new(self.guest_ip, self.guest_port);
+        let gateway_udp_addr = SocketAddr::new(self.gateway_ip, self.host_port);
+        let udp_packet = create_dual_stack_udp_packet(guest_udp_addr, gateway_udp_addr, payload);
+        self.slirp_request_sender.send(SlirpRequest::Packet(udp_packet)).await.unwrap();
+    }
+
+    async fn then_guest_receives_udp_echo_from_gateway(
+        &mut self,
+        expected_src_port: u16,
+        expected_payload: &[u8],
+    ) {
+        let expected_ethertype =
+            if self.guest_ip.is_ipv4() { ether_type::IPV4 } else { ether_type::IPV6 };
+        let gateway_ip = self.gateway_ip;
+        let guest_ip = self.guest_ip;
+        let udp_echo_received = recv_matching_packet(&mut self.test_response_receiver, |p| {
+            let (eth_frame, eth_payload) = EthernetFrame::parse(p)?;
+            if eth_frame.ethertype.get() != expected_ethertype {
+                return None;
+            }
+            let (src_ip, dst_ip, l4) = parse_ip_endpoints(expected_ethertype, eth_payload)?;
+            let (udp_header, payload) = netsim_packets::UdpHeader::parse(l4)?;
+            if udp_header.source_port.get() == expected_src_port && payload == expected_payload {
+                assert_eq!(src_ip, gateway_ip);
+                assert_eq!(dst_ip, guest_ip);
+                Some(())
+            } else {
+                None
+            }
+        })
+        .await
+        .is_some();
+        assert!(
+            udp_echo_received,
+            "Failed to receive echoed UDP data from gateway loopback server"
+        );
+    }
+
+    async fn then_guest_receives_udp_port_unreachable_from_gateway(&mut self) {
+        let expected_ethertype =
+            if self.guest_ip.is_ipv4() { ether_type::IPV4 } else { ether_type::IPV6 };
+        let gateway_ip = self.gateway_ip;
+        let guest_ip = self.guest_ip;
+        let expected_guest_port = self.guest_port;
+        let expected_host_port = self.host_port;
+        let unreachable_received = recv_matching_packet(&mut self.test_response_receiver, |p| {
+            let (eth_frame, eth_payload) = EthernetFrame::parse(p)?;
+            if eth_frame.ethertype.get() != expected_ethertype {
+                return None;
+            }
+            let (src_port, dst_port) = parse_icmp_port_unreachable_udp_ports(
+                expected_ethertype,
+                eth_payload,
+                gateway_ip,
+                guest_ip,
+            )?;
+            (src_port == expected_guest_port && dst_port == expected_host_port).then_some(())
+        })
+        .await
+        .is_some();
+        assert!(
+            unreachable_received,
+            "Failed to receive ICMP/ICMPv6 Port Unreachable from gateway for closed loopback port"
+        );
+    }
 }
 
 async fn recv_matching_packet<T>(
@@ -1125,6 +1228,70 @@ fn parse_ip_endpoints(ethertype: u16, payload: &[u8]) -> Option<(IpAddr, IpAddr,
     }
 }
 
+fn parse_icmp_port_unreachable_udp_ports(
+    ethertype: u16,
+    eth_payload: &[u8],
+    expected_gateway_ip: IpAddr,
+    expected_guest_ip: IpAddr,
+) -> Option<(u16, u16)> {
+    let (outer_src, outer_dst, inner_src, inner_dst, inner_proto, inner_l4) = match ethertype {
+        ether_type::IPV4 => {
+            let (ip_hdr, icmp_payload) = netsim_packets::Ipv4Header::parse(eth_payload)?;
+            if ip_hdr.protocol != netsim_packets::IP_P_ICMP {
+                return None;
+            }
+            let (icmp_hdr, icmp_data) = netsim_packets::IcmpHeader::parse(icmp_payload)?;
+            if icmp_hdr.icmp_type != netsim_packets::IcmpType::DestUnreachable as u8
+                || icmp_hdr.icmp_code != netsim_packets::UnreachableCode::PortUnreachable as u8
+            {
+                return None;
+            }
+            let (inner_ip, inner_l4) = netsim_packets::Ipv4Header::parse(icmp_data)?;
+            (
+                IpAddr::V4(ip_hdr.source_addr.into()),
+                IpAddr::V4(ip_hdr.dest_addr.into()),
+                IpAddr::V4(inner_ip.source_addr.into()),
+                IpAddr::V4(inner_ip.dest_addr.into()),
+                inner_ip.protocol,
+                inner_l4,
+            )
+        }
+        ether_type::IPV6 => {
+            let (ip_hdr, icmpv6_payload) = netsim_packets::Ipv6Header::parse(eth_payload)?;
+            if ip_hdr.next_header != netsim_packets::IP_P_ICMPV6 {
+                return None;
+            }
+            let (icmpv6_hdr, icmpv6_data) = netsim_packets::Icmpv6Header::parse(icmpv6_payload)?;
+            if icmpv6_hdr.icmpv6_type != netsim_packets::Icmpv6Type::DestinationUnreachable as u8
+                || icmpv6_hdr.icmpv6_code
+                    != netsim_packets::Icmpv6UnreachableCode::PortUnreachable as u8
+            {
+                return None;
+            }
+            let (inner_ip, inner_l4) = netsim_packets::Ipv6Header::parse(icmpv6_data)?;
+            (
+                IpAddr::V6(ip_hdr.source_addr.into()),
+                IpAddr::V6(ip_hdr.dest_addr.into()),
+                IpAddr::V6(inner_ip.source_addr.into()),
+                IpAddr::V6(inner_ip.dest_addr.into()),
+                inner_ip.next_header,
+                inner_l4,
+            )
+        }
+        _ => return None,
+    };
+    if outer_src != expected_gateway_ip
+        || outer_dst != expected_guest_ip
+        || inner_src != expected_guest_ip
+        || inner_dst != expected_gateway_ip
+        || inner_proto != IP_P_UDP
+    {
+        return None;
+    }
+    let (udp_hdr, _) = netsim_packets::UdpHeader::parse(inner_l4)?;
+    Some((udp_hdr.source_port.get(), udp_hdr.dest_port.get()))
+}
+
 #[tokio::test]
 async fn test_gateway_loopback_tcp_ipv4_integration() {
     // Scenario: Guest connects via IPv4 TCP to gateway port and receives echo from host loopback
@@ -1167,4 +1334,166 @@ async fn test_gateway_loopback_tcp_ipv6_integration() {
 
     // Then the guest receives the echoed payload from the gateway
     world.then_guest_receives_tcp_echo_from_gateway(payload).await;
+}
+
+fn create_dual_stack_udp_packet(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Bytes {
+    const UDP_HEADER_LEN: usize = 8;
+    const IPV4_HEADER_LEN: usize = 20;
+    const IPV6_HEADER_LEN: usize = 40;
+
+    let (ethertype, ip_bytes) = match (src, dst) {
+        (SocketAddr::V4(s), SocketAddr::V4(d)) => {
+            let total_udp_len = UDP_HEADER_LEN + payload.len();
+            let mut ip_data = vec![0u8; IPV4_HEADER_LEN + total_udp_len];
+            let (ipv4_slice, ipv4_payload) = ip_data.split_at_mut(IPV4_HEADER_LEN);
+            let mut ipv4_builder =
+                Ipv4Builder::new(ipv4_slice, IP_P_UDP, *s.ip(), *d.ip()).unwrap();
+
+            let mut udp_builder =
+                UdpPacketBuilder::new(&mut ipv4_payload[..total_udp_len], s.port(), d.port())
+                    .unwrap();
+            udp_builder.payload_mut().copy_from_slice(payload);
+            udp_builder.build();
+
+            ipv4_builder.payload_len(total_udp_len);
+            ipv4_builder.build().unwrap();
+            (ether_type::IPV4, ip_data)
+        }
+        (SocketAddr::V6(s), SocketAddr::V6(d)) => {
+            let total_udp_len = UDP_HEADER_LEN + payload.len();
+            let mut ip_data = vec![0u8; IPV6_HEADER_LEN + total_udp_len];
+            let (ipv6_slice, ipv6_payload) = ip_data.split_at_mut(IPV6_HEADER_LEN);
+            let mut ipv6_builder =
+                Ipv6Builder::new(ipv6_slice, IP_P_UDP, *s.ip(), *d.ip()).unwrap();
+            ipv6_builder.hop_limit(64);
+
+            let mut udp_builder =
+                UdpPacketBuilder::new(&mut ipv6_payload[..total_udp_len], s.port(), d.port())
+                    .unwrap();
+            udp_builder.payload_mut().copy_from_slice(payload);
+            udp_builder.build();
+
+            ipv6_builder.payload_len(total_udp_len);
+            ipv6_builder.build();
+            (ether_type::IPV6, ip_data)
+        }
+        _ => panic!("Mismatched IP versions in create_dual_stack_udp_packet"),
+    };
+
+    wrap_ethernet(ethertype, &ip_bytes)
+}
+
+async fn run_echo_udp_server(socket: tokio::net::UdpSocket) {
+    let mut buf = [0u8; 1024];
+    while let Ok((n, peer)) = socket.recv_from(&mut buf).await {
+        let _ = socket.send_to(&buf[..n], peer).await;
+    }
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_udp_ipv4_integration() {
+    // Scenario: Guest sends IPv4 UDP datagram to gateway and receives echo from
+    // host loopback
+    // Given an IPv4 UDP echo server on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_udp_echo_server(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
+
+    // When the guest sends a UDP datagram to gateway:<host_port>
+    let guest_port = 23456;
+    let payload = b"hello_udp_gateway_loopback";
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, payload).await;
+
+    // Then the guest receives the echoed UDP datagram from the gateway
+    world.then_guest_receives_udp_echo_from_gateway(host_port, payload).await;
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_udp_ipv6_integration() {
+    // Scenario: Guest sends IPv6 UDP datagram to gateway and receives echo from
+    // host loopback
+    // Given an IPv6 UDP echo server on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_udp_echo_server(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
+
+    // When the guest sends a UDP datagram to gateway:<host_port>
+    let guest_port = 23456;
+    let payload = b"hello_udp_gateway_loopback";
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, payload).await;
+
+    // Then the guest receives the echoed UDP datagram from the gateway
+    world.then_guest_receives_udp_echo_from_gateway(host_port, payload).await;
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_udp_closed_port_ipv4_integration() {
+    // Scenario: Guest sends back-to-back IPv4 UDP datagrams to closed gateway
+    // port and receives ICMP Port Unreachable
+    // Given an unbound IPv4 UDP port on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_unbound_udp_port(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
+
+    // When the guest sends two back-to-back UDP datagrams to
+    // gateway:<host_port>
+    let guest_port = 23457;
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, b"datagram_1").await;
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, b"datagram_2").await;
+
+    // Then the guest receives an ICMP Destination Port Unreachable packet
+    // from the gateway
+    world.then_guest_receives_udp_port_unreachable_from_gateway().await;
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_udp_closed_port_ipv6_integration() {
+    // Scenario: Guest sends back-to-back IPv6 UDP datagrams to closed gateway
+    // port and receives ICMPv6 Port Unreachable
+    // Given an unbound IPv6 UDP port on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_unbound_udp_port(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
+
+    // When the guest sends two back-to-back UDP datagrams to
+    // gateway:<host_port>
+    let guest_port = 23457;
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, b"datagram_1").await;
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, b"datagram_2").await;
+
+    // Then the guest receives an ICMPv6 Destination Port Unreachable packet
+    // from the gateway
+    world.then_guest_receives_udp_port_unreachable_from_gateway().await;
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_udp_closed_port_single_datagram_ipv4_integration() {
+    // Scenario: Guest sends a single IPv4 UDP datagram to closed gateway port;
+    // writer send succeeds and reader recv returns ECONNREFUSED, emitting ICMP
+    // Destination Port Unreachable
+    // Given an unbound IPv4 UDP port on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_unbound_udp_port(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
+
+    // When the guest sends exactly one UDP datagram to gateway:<host_port>
+    let guest_port = 23458;
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, b"datagram_single_v4").await;
+
+    // Then the guest receives an ICMP Destination Port Unreachable packet
+    // from the gateway
+    world.then_guest_receives_udp_port_unreachable_from_gateway().await;
+}
+
+#[tokio::test]
+async fn test_gateway_loopback_udp_closed_port_single_datagram_ipv6_integration() {
+    // Scenario: Guest sends a single IPv6 UDP datagram to closed gateway port;
+    // writer send succeeds and reader recv returns ECONNREFUSED, emitting
+    // ICMPv6 Destination Port Unreachable
+    // Given an unbound IPv6 UDP port on host loopback
+    let mut world = World::new().await;
+    let host_port = world.given_unbound_udp_port(IpAddr::V6(Ipv6Addr::LOCALHOST)).await;
+
+    // When the guest sends exactly one UDP datagram to gateway:<host_port>
+    let guest_port = 23458;
+    world.when_guest_sends_udp_to_gateway(guest_port, host_port, b"datagram_single_v6").await;
+
+    // Then the guest receives an ICMPv6 Destination Port Unreachable packet
+    // from the gateway
+    world.then_guest_receives_udp_port_unreachable_from_gateway().await;
 }

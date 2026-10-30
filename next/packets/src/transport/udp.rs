@@ -20,6 +20,9 @@ use zerocopy::{
 
 use crate::utils::general::ParseResult;
 
+pub const DHCP_SERVER_PORT: u16 = 67;
+pub const TFTP_PORT: u16 = 69;
+
 /// Represents the UDP header.
 #[derive(FromBytes, IntoBytes, Unaligned, KnownLayout, Immutable, Debug)]
 #[repr(C)]
