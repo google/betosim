@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod beacon_rest_test;
 mod capture_stream_test;
 mod client_test;
 mod device_bdd_test;

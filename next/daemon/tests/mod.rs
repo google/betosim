@@ -14,6 +14,7 @@
 
 pub mod access_point_test;
 pub mod avd_config_test;
+pub mod beacon_rest_integration_test;
 pub mod grpc_integration_test;
 pub mod ini_file_test;
 pub mod integration_test;

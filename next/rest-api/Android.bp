@@ -178,6 +178,7 @@ rust_test_host {
     ],
     srcs: [
         "src/openapi/reserved_idents.inc",
+        "tests/beacon_rest_test.rs",
         "tests/capture_stream_test.rs",
         "tests/client_test.rs",
         "tests/device_bdd_test.rs",

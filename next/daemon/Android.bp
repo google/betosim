@@ -198,6 +198,7 @@ rust_test_host {
     srcs: [
         "tests/access_point_test.rs",
         "tests/avd_config_test.rs",
+        "tests/beacon_rest_integration_test.rs",
         "tests/grpc_integration_test.rs",
         "tests/ini_file_test.rs",
         "tests/integration_test.rs",
