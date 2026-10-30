@@ -48,6 +48,7 @@ pub(crate) struct Stats {
     archived_radio_stats: Vec<netsim_proto::stats::NetsimRadioStats>,
     pub(crate) stats_path: std::path::PathBuf,
     frontend_stats: std::sync::Arc<netsim_model::FrontendStats>,
+    error_stats_table: Option<std::sync::Arc<common::util::netsim_logger::ErrorStatsTable>>,
 }
 
 impl Default for Stats {
@@ -83,7 +84,16 @@ impl Stats {
             archived_radio_stats: Vec::new(),
             stats_path,
             frontend_stats,
+            error_stats_table: None,
         }
+    }
+
+    #[cfg(test)]
+    fn set_error_stats_table(
+        &mut self,
+        table: std::sync::Arc<common::util::netsim_logger::ErrorStatsTable>,
+    ) {
+        self.error_stats_table = Some(table);
     }
 
     pub(crate) fn update_device_count(&mut self, current_count: usize, created: bool) {
@@ -209,6 +219,18 @@ impl Stats {
         frontend_proto.set_get_capture(frontend_snap.get_capture);
         frontend_proto.set_delete_device(frontend_snap.delete_device);
         combined.frontend_stats = netsim_proto::protobuf::MessageField::some(frontend_proto);
+
+        let error_records = match &self.error_stats_table {
+            Some(table) => table.snapshot(),
+            None => common::util::netsim_logger::snapshot_error_stats(),
+        };
+        combined.error_stats.clear();
+        combined.error_stats.extend(error_records.into_iter().map(|(code, count)| {
+            let mut rec = netsim_proto::stats::NetsimErrorStats::new();
+            rec.set_error_code(code);
+            rec.set_count(count);
+            rec
+        }));
 
         combined
     }
@@ -472,5 +494,128 @@ mod tests {
             nfc_service_stats: None,
         });
         assert_eq!(proto_empty.api_stats.as_ref().unwrap().nfc_total_calls(), 0);
+    }
+
+    #[test]
+    fn test_error_stats_json_serialization_and_non_destructive_checkpoint() {
+        let table = Arc::new(common::util::netsim_logger::ErrorStatsTable::new());
+        table.record(84002);
+        table.record(66001);
+        table.record(66001);
+
+        let mut stats = Stats::new("1.0.0".to_string(), None, Arc::new(FrontendStats::default()));
+        stats.set_error_stats_table(Arc::clone(&table));
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "netsim_error_stats_checkpoint_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let checkpoint_path = temp_dir.join("netsim_session_stats_checkpoint.json");
+        let shutdown_path = temp_dir.join("netsim_session_stats_shutdown.json");
+
+        // 1. Periodic 10s checkpoint snapshot (non-destructive).
+        let proto_checkpoint = stats.get_combined_stats(CombinedStatsInputs {
+            active_stats: vec![],
+            wifi_stats: None,
+            wifi_api: None,
+            uwb_api: None,
+            nfc_api: None,
+            nfc_stats: None,
+            nfc_service_stats: None,
+        });
+        let wire_bytes =
+            netsim_proto::protobuf::Message::write_to_bytes(&proto_checkpoint).unwrap();
+        let wire_parsed: ProtoNetsimStats =
+            netsim_proto::protobuf::Message::parse_from_bytes(&wire_bytes).unwrap();
+        assert_eq!(wire_parsed.error_stats, proto_checkpoint.error_stats);
+        write_combined_stats(proto_checkpoint, checkpoint_path.clone()).unwrap();
+
+        let json_checkpoint = std::fs::read_to_string(&checkpoint_path).unwrap();
+        let parsed_checkpoint: ProtoNetsimStats =
+            protobuf_json_mapping::parse_from_str(&json_checkpoint).unwrap();
+        let err_checkpoint = &parsed_checkpoint.error_stats;
+        assert_eq!(err_checkpoint.len(), 2);
+        assert!(err_checkpoint[0].has_error_code());
+        assert!(err_checkpoint[0].has_count());
+        assert_eq!(err_checkpoint[0].error_code(), 66001);
+        assert_eq!(err_checkpoint[0].count(), 2);
+        assert_eq!(err_checkpoint[1].error_code(), 84002);
+        assert_eq!(err_checkpoint[1].count(), 1);
+
+        // Exercise generated proto accessors and traits on NetsimErrorStats.
+        let default_ref: &netsim_proto::stats::NetsimErrorStats = Default::default();
+        assert!(!default_ref.has_error_code());
+        assert!(!default_ref.has_count());
+        let mut scratch = err_checkpoint[0].clone();
+        assert!(!format!("{scratch}").is_empty());
+        scratch.clear_error_code();
+        scratch.clear_count();
+        assert_eq!(scratch.error_code(), 0);
+        assert_eq!(scratch.count(), 0);
+        netsim_proto::protobuf::Message::clear(&mut scratch);
+
+        // 2. Subsequent error events before shutdown must accumulate on top of checkpoint counts.
+        table.record(66001);
+        let proto_shutdown = stats.get_combined_stats(CombinedStatsInputs {
+            active_stats: vec![],
+            wifi_stats: None,
+            wifi_api: None,
+            uwb_api: None,
+            nfc_api: None,
+            nfc_stats: None,
+            nfc_service_stats: None,
+        });
+        write_combined_stats(proto_shutdown, shutdown_path.clone()).unwrap();
+
+        let json_shutdown = std::fs::read_to_string(&shutdown_path).unwrap();
+        let parsed_shutdown: ProtoNetsimStats =
+            protobuf_json_mapping::parse_from_str(&json_shutdown).unwrap();
+        let err_shutdown = &parsed_shutdown.error_stats;
+        assert_eq!(err_shutdown.len(), 2);
+        assert_eq!(err_shutdown[0].error_code(), 66001);
+        assert_eq!(err_shutdown[0].count(), 3);
+        assert_eq!(err_shutdown[1].error_code(), 84002);
+        assert_eq!(err_shutdown[1].count(), 1);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_error_stats_payload_size_bound_full_256_buckets() {
+        let table = Arc::new(common::util::netsim_logger::ErrorStatsTable::new());
+        for i in 0..300u32 {
+            table.record(60001 + i);
+        }
+
+        let mut stats = Stats::new("1.0.0".to_string(), None, Arc::new(FrontendStats::default()));
+        stats.set_error_stats_table(Arc::clone(&table));
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "netsim_error_stats_full_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let full_path = temp_dir.join("netsim_session_stats_full.json");
+        let proto = stats.get_combined_stats(CombinedStatsInputs {
+            active_stats: vec![],
+            wifi_stats: None,
+            wifi_api: None,
+            uwb_api: None,
+            nfc_api: None,
+            nfc_stats: None,
+            nfc_service_stats: None,
+        });
+        write_combined_stats(proto.clone(), full_path.clone()).unwrap();
+
+        let full_json = std::fs::read_to_string(&full_path).unwrap();
+        let parsed: ProtoNetsimStats = protobuf_json_mapping::parse_from_str(&full_json).unwrap();
+        assert_eq!(parsed.error_stats.len(), common::util::netsim_logger::MAX_ERROR_BUCKETS);
+
+        assert!(
+            full_json.len() <= 10240,
+            "Expected serialized 256-bucket NetsimStats JSON <= 10240 bytes, got {} bytes",
+            full_json.len()
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

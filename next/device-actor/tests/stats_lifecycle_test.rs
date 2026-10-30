@@ -606,3 +606,30 @@ async fn test_beacon_stats_persistence() {
             .await;
     }
 }
+
+// Scenario: Non-fatal runtime error statistics are persisted to the stats JSON file on shutdown
+//   Given a running Device Actor with a stats file path
+//   When a structured error code is recorded in the global ErrorStatsTable
+//   And I shut down the actor
+//   Then the persisted stats JSON file includes error_stats with the recorded error code
+#[tokio::test]
+async fn test_error_stats_persisted_on_shutdown() {
+    let (path, _) = World::temp_stats_path();
+    // Route a tagged `error!` through the global ErrorStatsLayer installed by init_for_test.
+    common::util::netsim_logger::init_for_test();
+    tracing::error!(code = 66001u32, "injected error for error_stats persistence test");
+    {
+        let mut world = World::new_with_stats(path.clone(), None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        world.detach_stats_cleanup();
+        world.when_shutdown_actor().await;
+    }
+    let content = std::fs::read_to_string(&path).expect("Failed to read stats file");
+    let json: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse JSON");
+    let records = json["error_stats"].as_array().expect("error_stats array missing in stats JSON");
+    assert!(
+        records.iter().any(|r| r["error_code"] == 66001 && r["count"].as_u64().unwrap_or(0) >= 1),
+        "Expected error_code 66001 in persisted error_stats, got: {records:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
