@@ -29,6 +29,7 @@ bytes = "1.5"
 capture-actor = { path = "../capture-actor" }
 device-actor = { path = "../device-actor" }
 form_urlencoded = "1.2"
+futures = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -61,5 +62,6 @@ async-trait = "0.1"
 capture-actor = { path = "../capture-actor", features = ["testing"] }
 capture-api = { path = "../capture-api", features = ["testing"] }
 device-actor = { path = "../device-actor", features = ["testing"] }
+device-api = { path = "../device-api", features = ["testing"] }
 link-api = { path = "../link-api", features = ["testing"] }
 netsim-model = { path = "../model", features = ["testing"] }

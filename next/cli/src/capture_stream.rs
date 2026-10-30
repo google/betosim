@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! WebSocket client for streaming live PCAP captures from
-//! `/v1/capture?chip_id=N`.
+//! WebSocket client for streaming live binary packet and PCAP frames from
+//! `/v1/capture`, `/v1/ble/scan`, and `/v1/ble/sniff`.
 //!
 //! The HTTP/1.1 upgrade handshake is parsed with `httparse`; all RFC 6455
 //! framing (client masking, fragmentation, Ping/Pong, Close) is delegated to
@@ -59,10 +59,19 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const SEC_WEBSOCKET_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const EXPECTED_WEBSOCKET_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
-/// Connects to `/v1/capture?chip_id=<chip_id>` over WebSocket and writes raw
-/// binary PCAP frames to `--output <file>` or `stdout` until the server closes
-/// the stream or `Ctrl+C` is received.
-pub(crate) fn stream_capture(http_server: &str, cmd: &StreamCapture) -> Result<()> {
+/// Connects to `http_server` at `path_and_query` over WebSocket and passes
+/// each binary frame payload to `on_frame(&mut state, payload)` until the
+/// server closes the stream or `Ctrl+C` is received.
+pub(crate) fn stream_frames<T, F>(
+    http_server: &str,
+    path_and_query: &str,
+    state: T,
+    on_frame: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnMut(&mut T, &[u8]) -> io::Result<()> + Send + 'static,
+{
     if http_server.is_empty() {
         return Err("HTTP server address is not available; is netsimd running?".into());
     }
@@ -77,6 +86,19 @@ pub(crate) fn stream_capture(http_server: &str, cmd: &StreamCapture) -> Result<(
         }
     };
 
+    runtime.block_on(stream_frames_with_state(
+        http_server,
+        path_and_query,
+        state,
+        shutdown,
+        on_frame,
+    ))
+}
+
+/// Connects to `/v1/capture?chip_id=<chip_id>` over WebSocket and writes raw
+/// binary PCAP frames to `--output <file>` or `stdout` until the server closes
+/// the stream or `Ctrl+C` is received.
+pub(crate) fn stream_capture(http_server: &str, cmd: &StreamCapture) -> Result<()> {
     let writer: Box<dyn Write + Send> = if let Some(path) = &cmd.output {
         let file = File::create(path)
             .map_err(|e| Error::from(format!("Failed to create file {}: {e}", path.display())))?;
@@ -84,27 +106,24 @@ pub(crate) fn stream_capture(http_server: &str, cmd: &StreamCapture) -> Result<(
     } else {
         Box::new(io::stdout())
     };
-
-    runtime
-        .block_on(stream_capture_with_writer(http_server, cmd.chip_id, writer, shutdown))
-        .map(|_| ())
+    let path = format!("{}?chip_id={}", netsim_rest_api::path::CAPTURE, cmd.chip_id);
+    stream_frames(http_server, &path, writer, write_and_flush).map(|_| ())
 }
 
-/// Connects to `addr` at `/v1/capture?chip_id=<chip_id>`, performs the
-/// WebSocket upgrade handshake, and streams binary PCAP frames into `writer`
-/// on a blocking task until the connection closes or `shutdown` completes.
-async fn stream_capture_with_writer<W, F>(
+async fn stream_frames_with_state<T, S, F>(
     addr: &str,
-    chip_id: u32,
-    mut writer: W,
-    shutdown: F,
-) -> Result<W>
+    path_and_query: &str,
+    mut state: T,
+    shutdown: S,
+    mut on_frame: F,
+) -> Result<T>
 where
-    W: Write + Send + 'static,
-    F: Future<Output = ()>,
+    T: Send + 'static,
+    S: Future<Output = ()>,
+    F: FnMut(&mut T, &[u8]) -> io::Result<()> + Send + 'static,
 {
     let (stream, leftover) =
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_and_handshake(addr, chip_id))
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_and_handshake(addr, path_and_query))
             .await
             .map_err(|e| Error::from(format!("Timed out connecting to {addr}: {e}")))??;
 
@@ -118,7 +137,7 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let stop_reader = Arc::clone(&stop);
     let mut stream_task = tokio::task::spawn_blocking(move || {
-        run_stream_loop(&mut ws, &mut writer, &stop_reader).map(|()| writer)
+        run_stream_loop(&mut ws, &stop_reader, |data| on_frame(&mut state, data)).map(|()| state)
     });
 
     tokio::pin!(shutdown);
@@ -129,16 +148,16 @@ where
             stream_task.await
         }
     };
-    joined.map_err(|e| Error::from(format!("Capture stream task panicked: {e}")))?
+    joined.map_err(|e| Error::from(format!("WebSocket stream task panicked: {e}")))?
 }
 
-/// Reads WebSocket messages from `ws` and writes binary payloads to `writer`
-/// until the server closes the connection, `stop` is set, or `writer` reports
-/// `BrokenPipe` (e.g. Wireshark exited).
-fn run_stream_loop<W: Write>(
+/// Reads WebSocket messages from `ws` and invokes `on_frame` on each binary
+/// payload until the server closes the connection, `stop` is set, or
+/// `on_frame` reports `BrokenPipe` (e.g. Wireshark exited).
+fn run_stream_loop<F: FnMut(&[u8]) -> io::Result<()>>(
     ws: &mut WebSocket<StdTcpStream>,
-    writer: &mut W,
     stop: &AtomicBool,
+    mut on_frame: F,
 ) -> Result<()> {
     // Set once we start (or the server starts) the closing handshake.
     let mut close_deadline: Option<Instant> = None;
@@ -154,7 +173,7 @@ fn run_stream_loop<W: Write>(
                 if close_deadline.is_some() {
                     continue;
                 }
-                if let Err(e) = write_and_flush(writer, &data) {
+                if let Err(e) = on_frame(&data) {
                     if e.kind() != io::ErrorKind::BrokenPipe {
                         return Err(e.into());
                     }
@@ -162,7 +181,7 @@ fn run_stream_loop<W: Write>(
                 }
             }
             Ok(Message::Text(_)) => {
-                return Err("Unsupported WebSocket text frame in PCAP binary stream".into());
+                return Err("Unsupported WebSocket text frame in binary stream".into());
             }
             Ok(Message::Close(_)) => {
                 // Flush the Close reply that tungstenite queued, then wait for
@@ -211,17 +230,17 @@ fn write_and_flush<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Opens a TCP connection to `addr` and completes the RFC 6455 HTTP/1.1
-/// upgrade handshake for `/v1/capture?chip_id=<chip_id>`.
+/// upgrade handshake for `path_and_query`.
 ///
 /// Returns the stream and any bytes the server sent after the 101 response
 /// headers (the start of the first WebSocket frame).
-async fn connect_and_handshake(addr: &str, chip_id: u32) -> Result<(TcpStream, Vec<u8>)> {
+async fn connect_and_handshake(addr: &str, path_and_query: &str) -> Result<(TcpStream, Vec<u8>)> {
     let mut stream = TcpStream::connect(addr)
         .await
         .map_err(|e| Error::from(format!("Failed to connect to {addr}: {e}")))?;
 
     let req = format!(
-        "GET /v1/capture?chip_id={chip_id} HTTP/1.1\r\n\
+        "GET {path_and_query} HTTP/1.1\r\n\
          Host: {addr}\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
@@ -313,7 +332,7 @@ async fn read_error_body(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{io::Read, net::TcpListener, thread};
 
     use tokio::sync::oneshot;
@@ -325,7 +344,21 @@ mod tests {
         0x00, 0xff, 0xff, 0x00, 0x00, 0xc9, 0x00, 0x00, 0x00,
     ];
 
-    fn listen() -> (TcpListener, String) {
+    async fn stream_capture_with_writer<W, F>(
+        addr: &str,
+        chip_id: u32,
+        writer: W,
+        shutdown: F,
+    ) -> Result<W>
+    where
+        W: Write + Send + 'static,
+        F: Future<Output = ()>,
+    {
+        let path = format!("{}?chip_id={chip_id}", netsim_rest_api::path::CAPTURE);
+        stream_frames_with_state(addr, &path, writer, shutdown, write_and_flush).await
+    }
+
+    pub(crate) fn listen() -> (TcpListener, String) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         (listener, addr)
@@ -344,7 +377,10 @@ mod tests {
 
     /// Accepts one client, validates its upgrade request for `expected_path`,
     /// and returns a server-role WebSocket.
-    fn accept_upgrade(listener: &TcpListener, expected_path: &str) -> WebSocket<StdTcpStream> {
+    pub(crate) fn accept_upgrade(
+        listener: &TcpListener,
+        expected_path: &str,
+    ) -> WebSocket<StdTcpStream> {
         let (mut sock, _) = listener.accept().unwrap();
         let req = read_request(&mut sock);
         assert_eq!(req.lines().next().unwrap(), format!("GET {expected_path} HTTP/1.1"));
@@ -371,7 +407,7 @@ mod tests {
     }
 
     /// Reads until tungstenite reports the closing handshake as complete.
-    fn drain_until_closed(ws: &mut WebSocket<StdTcpStream>) {
+    pub(crate) fn drain_until_closed(ws: &mut WebSocket<StdTcpStream>) {
         while ws.read().is_ok() {}
     }
 

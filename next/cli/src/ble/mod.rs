@@ -14,4 +14,4 @@
 
 pub(crate) mod args;
 pub(crate) mod client;
-pub(crate) mod display;
+mod display;

@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::openapi::Route;
 
 pub mod ap_api;
+mod ble_stream;
 mod capture_stream;
 pub mod client;
 pub mod device_api;
@@ -50,6 +51,12 @@ pub mod path {
     /// `GET /v1/capture?chip_id=N`. Kept at top-level alongside `/v1/captures`
     /// since captures are a top-level collection and can span multiple chips.
     pub const CAPTURE: &str = "/v1/capture";
+    /// WebSocket streaming BLE scan HCI advertisement events:
+    /// `GET /v1/ble/scan?x=<f32>&y=<f32>&z=<f32>&active=<bool>`.
+    pub const BLE_SCAN: &str = "/v1/ble/scan";
+    /// WebSocket streaming BLE baseband sniffer packets:
+    /// `GET /v1/ble/sniff?x=<f32>&y=<f32>&z=<f32>`.
+    pub const BLE_SNIFF: &str = "/v1/ble/sniff";
 }
 
 include!(concat!(env!("OUT_DIR"), "/openapi_generated.rs"));

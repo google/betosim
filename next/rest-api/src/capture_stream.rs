@@ -136,22 +136,10 @@ pub(super) async fn upgrade(
     capture_client: &CaptureClient,
     mut req: Request<hyper::body::Incoming>,
 ) -> Response<Full<Bytes>> {
-    let headers = req.headers();
-    if !header_contains(headers, UPGRADE, "websocket")
-        || !header_contains(headers, CONNECTION, "upgrade")
-    {
-        return error_response(StatusCode::BAD_REQUEST, "Expected a WebSocket upgrade request");
-    }
-    if headers.get(SEC_WEBSOCKET_VERSION).is_none_or(|v| v != "13") {
-        let mut resp =
-            error_response(StatusCode::UPGRADE_REQUIRED, "Unsupported WebSocket version");
-        resp.headers_mut().insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
-        return resp;
-    }
-    let Some(key) = headers.get(SEC_WEBSOCKET_KEY).filter(|k| !k.is_empty()) else {
-        return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key");
+    let resp = match switching_protocols(req.headers()) {
+        Handshake::Upgrade(resp) => resp,
+        Handshake::Reject(resp) => return resp,
     };
-    let accept = accept_key(key.as_bytes());
     let Some(chip_id) = parse_chip_id(req.uri().query()) else {
         return error_response(StatusCode::BAD_REQUEST, "Missing or invalid chip_id");
     };
@@ -170,19 +158,50 @@ pub(super) async fn upgrade(
         }
     });
 
-    Response::builder()
-        .status(StatusCode::SWITCHING_PROTOCOLS)
-        .header(UPGRADE, "websocket")
-        .header(CONNECTION, "Upgrade")
-        .header(SEC_WEBSOCKET_ACCEPT, accept)
-        .body(Full::new(Bytes::new()))
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new())))
+    resp
 }
 
-/// Sends each PCAP chunk as a binary message (`OPCODE_BINARY`) until the
-/// capture ends or the client closes (sending a `CLOSE_NORMAL` 1000 status
+pub(super) enum Handshake {
+    Upgrade(Response<Full<Bytes>>),
+    Reject(Response<Full<Bytes>>),
+}
+
+pub(super) fn switching_protocols(headers: &HeaderMap) -> Handshake {
+    if !header_contains(headers, UPGRADE, "websocket")
+        || !header_contains(headers, CONNECTION, "upgrade")
+    {
+        return Handshake::Reject(error_response(
+            StatusCode::BAD_REQUEST,
+            "Expected a WebSocket upgrade request",
+        ));
+    }
+    if headers.get(SEC_WEBSOCKET_VERSION).is_none_or(|v| v != "13") {
+        let mut resp =
+            error_response(StatusCode::UPGRADE_REQUIRED, "Unsupported WebSocket version");
+        resp.headers_mut().insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
+        return Handshake::Reject(resp);
+    }
+    let Some(key) = headers.get(SEC_WEBSOCKET_KEY).filter(|k| !k.is_empty()) else {
+        return Handshake::Reject(error_response(
+            StatusCode::BAD_REQUEST,
+            "Missing Sec-WebSocket-Key",
+        ));
+    };
+    Handshake::Upgrade(
+        Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .header(UPGRADE, "websocket")
+            .header(CONNECTION, "Upgrade")
+            .header(SEC_WEBSOCKET_ACCEPT, accept_key(key.as_bytes()))
+            .body(Full::new(Bytes::new()))
+            .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()))),
+    )
+}
+
+/// Sends each binary packet/chunk as a binary message (`OPCODE_BINARY`) until
+/// the stream ends or the client closes (sending a `CLOSE_NORMAL` 1000 status
 /// code per RFC 6455, Section 5.5.1). Dropping `packets` on return unsubscribes.
-async fn forward(
+pub(super) async fn forward(
     io: impl AsyncRead + AsyncWrite + Send + 'static,
     mut packets: mpsc::Receiver<Bytes>,
 ) {

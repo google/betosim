@@ -504,10 +504,29 @@ impl RestServer {
     /// The error type is [`Infallible`] because every failure is reported as an
     /// HTTP status rather than by dropping the connection.
     pub async fn serve(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-        if req.method() == Method::GET
-            && req.uri().path().trim_end_matches('/') == crate::path::CAPTURE
-        {
-            return Ok(crate::capture_stream::upgrade(&self.capture_client, req).await);
+        if req.method() == Method::GET {
+            match req.uri().path().trim_end_matches('/') {
+                crate::path::CAPTURE => {
+                    return Ok(crate::capture_stream::upgrade(&self.capture_client, req).await);
+                }
+                crate::path::BLE_SCAN => {
+                    return Ok(crate::ble_stream::upgrade(
+                        &self.device_client,
+                        req,
+                        crate::ble_stream::BleStreamKind::Scan,
+                    )
+                    .await);
+                }
+                crate::path::BLE_SNIFF => {
+                    return Ok(crate::ble_stream::upgrade(
+                        &self.device_client,
+                        req,
+                        crate::ble_stream::BleStreamKind::Sniff,
+                    )
+                    .await);
+                }
+                _ => {}
+            }
         }
 
         // Split the head from the body so the path can be borrowed rather than

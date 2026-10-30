@@ -12,49 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Write};
 
 use common::util::time_display::TimeDisplay;
 use netsim_packets::{
     GapDataType, HciEvent, LeAdvertisingEventType, LeMetaEvent, OwnAddressType, parse_hci_event,
 };
-use netsim_proto::ble_service::{ScanResponse, SniffResponse};
 use serde::Serialize;
 
-const H4_EVENT_PACKET_TYPE: u8 = 0x04;
+pub(super) const H4_EVENT_PACKET_TYPE: u8 = 0x04;
 const SCAN_RSP_KEY_OFFSET: u16 = 0x0100;
 
-pub(crate) struct BleEvent {
-    pub timestamp_str: String,
-    pub addr_display: String,
-    pub event_type_str: String,
-    pub rssi: i8,
-    pub data_len: usize,
-    pub raw_hex: String,
-    pub ad_payloads: BTreeMap<u16, AdPayload>,
+pub(super) struct BleEvent {
+    timestamp_str: String,
+    addr_display: String,
+    event_type_str: String,
+    rssi: i8,
+    data_len: usize,
+    raw_hex: String,
+    ad_payloads: BTreeMap<u16, AdPayload>,
 }
 
 #[derive(Clone)]
-pub(crate) struct AdPayload {
-    pub ad_type: u8,
-    pub type_str: String,
-    pub decoded_val: String,
+struct AdPayload {
+    ad_type: u8,
+    type_str: String,
+    decoded_val: String,
 }
 
-pub(crate) fn parse_scan_response(res: &ScanResponse, verbose: bool) -> Vec<BleEvent> {
+pub(super) fn parse_scan_packet(
+    packet: &[u8],
+    duration: std::time::Duration,
+    verbose: bool,
+) -> Vec<BleEvent> {
     let mut events = Vec::new();
-    let now =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let timestamp = TimeDisplay::from_duration(now).utc_display_hms();
+    let timestamp = TimeDisplay::from_duration(duration).utc_display_hms();
 
-    let packet = &res.packet;
     let hex_packet = if verbose {
         packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
     } else {
         String::new()
     };
 
-    let payload = match packet.as_slice() {
+    let payload = match packet {
         [H4_EVENT_PACKET_TYPE, rest @ ..] => rest,
         other => other,
     };
@@ -206,9 +206,11 @@ fn format_hex_data(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn print_json_event(event: &BleEvent, verbose: bool) {
-    use serde::Serialize;
-
+pub(super) fn write_json_event(
+    writer: &mut impl Write,
+    event: &BleEvent,
+    verbose: bool,
+) -> std::io::Result<()> {
     #[derive(Serialize)]
     struct JsonAdPayload<'a> {
         type_id: u8,
@@ -247,17 +249,26 @@ pub(crate) fn print_json_event(event: &BleEvent, verbose: bool) {
     };
 
     match serde_json::to_string(&out) {
-        Ok(json_str) => println!("{}", json_str),
-        Err(e) => eprintln!("Failed to serialize BLE event to JSON: {}", e),
+        Ok(json_str) => {
+            writeln!(writer, "{json_str}")?;
+            writer.flush()
+        }
+        Err(e) => {
+            eprintln!("Failed to serialize BLE event to JSON: {e}");
+            Ok(())
+        }
     }
 }
 
-pub(crate) fn print_sniff_response(res: &SniffResponse, _verbose: bool) {
-    let duration = std::time::Duration::from_micros(res.timestamp as u64);
+pub(super) fn write_sniff_packet(
+    writer: &mut impl Write,
+    packet: &[u8],
+    duration: std::time::Duration,
+) -> std::io::Result<()> {
     let timestamp = TimeDisplay::from_duration(duration).utc_display_hms();
-    let hex_packet = res.packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+    let hex_packet = packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
 
-    let packet_type = match res.packet.first() {
+    let packet_type = match packet.first() {
         None => "EMPTY".to_string(),
         Some(&byte) => {
             let name: Option<&'static str> = match byte {
@@ -301,12 +312,13 @@ pub(crate) fn print_sniff_response(res: &SniffResponse, _verbose: bool) {
         timestamp: timestamp.to_string(),
         packet_type,
         baseband_packet: hex_packet,
-        length: res.packet.len(),
+        length: packet.len(),
     };
 
     if let Ok(json_str) = serde_json::to_string(&out) {
-        println!("{}", json_str);
+        writeln!(writer, "{json_str}")?;
     } else {
-        println!("[{}] Baseband Packet: {}", timestamp, out.baseband_packet);
+        writeln!(writer, "[{}] Baseband Packet: {}", timestamp, out.baseband_packet)?;
     }
+    writer.flush()
 }

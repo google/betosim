@@ -44,8 +44,8 @@ use common::util::{
 use file_handler::FileHandler;
 use grpcio::{ChannelBuilder, EnvBuilder};
 use netsim_proto::{
-    ble_service_grpc::BleServiceClient, cell_grpc::CellServiceClient, frontend,
-    frontend_grpc::FrontendServiceClient, nfc_service_grpc::NfcServiceClient,
+    cell_grpc::CellServiceClient, frontend, frontend_grpc::FrontendServiceClient,
+    nfc_service_grpc::NfcServiceClient,
 };
 use netsim_rest_api::{ListDeviceResponse, NetsimRestClient};
 use tracing::error;
@@ -258,6 +258,9 @@ fn run_rest(
         args::Command::Ap(cmd) => {
             return Some(crate::ap::client::execute(cmd, rest, verbose));
         }
+        args::Command::Ble(cmd) => {
+            return Some(crate::ble::client::execute(cmd, http_server, verbose));
+        }
         _ => return None,
     };
     Some(result.map_err(Error::from))
@@ -309,9 +312,6 @@ fn run(args: NetsimArgs) -> Result<()> {
     let channel =
         ChannelBuilder::new(std::sync::Arc::new(EnvBuilder::new().build())).connect(&server);
     match args.command {
-        args::Command::Ble(cmd) => {
-            crate::ble::client::execute(&cmd, &BleServiceClient::new(channel), verbose)
-        }
         args::Command::Gsm(cmd) => {
             crate::gsm::client::execute(cmd, &CellServiceClient::new(channel), verbose)
         }

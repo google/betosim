@@ -21,10 +21,15 @@ use bytes::Bytes;
 use capture_actor::{CaptureActor, CaptureClient};
 use capture_api::{CaptureCreate, CaptureSender, Direction};
 use device_actor::DeviceClient;
-use netsim_model::{ChipId, ChipKind};
+use device_api::{DeviceAction, DeviceActionResult};
+use futures::SinkExt;
+use netsim_model::{
+    BluetoothMode, ChipId, ChipKind, ChipVariant, DeviceId, Position, ScannerParams,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::mpsc,
     time::{Duration, timeout},
 };
 
@@ -41,6 +46,7 @@ const DLT_BLUETOOTH_H4: u32 = 201;
 struct World {
     addr: SocketAddr,
     capture_client: CaptureClient,
+    device_rx: mpsc::Receiver<actor_framework::ResourceRequest<device_actor::DeviceActor>>,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -62,7 +68,7 @@ impl World {
         .await
         .unwrap();
 
-        let (device_tx, _) = tokio::sync::mpsc::channel(1);
+        let (device_tx, device_rx) = tokio::sync::mpsc::channel(8);
         let device_client =
             DeviceClient::new(Box::new(actor_framework::ResourceClient::new(device_tx)));
         let (ap_tx, _) = tokio::sync::mpsc::channel(1);
@@ -78,7 +84,7 @@ impl World {
             capture_client.clone(),
             "test".to_string(),
         ));
-        World { addr, capture_client, _tasks: vec![capture_task, server_task] }
+        World { addr, capture_client, device_rx, _tasks: vec![capture_task, server_task] }
     }
 
     /// Sends a request for `target` and returns the socket and response head.
@@ -105,6 +111,43 @@ impl World {
     async fn send_packet(&self, packet: &'static [u8]) {
         let tx = self.capture_client.packet_sender(ChipId(1)).await.unwrap();
         tx.send((SystemTime::now(), Direction::Sent, Bytes::from_static(packet))).unwrap();
+    }
+
+    /// Answers one `AddChipByGuid` request on `device_rx`, pushes `packet` to its
+    /// sink, and awaits the `Delete` call triggered when the WebSocket closes.
+    fn expect_ble_stream(
+        &mut self,
+        packet: &'static [u8],
+    ) -> tokio::task::JoinHandle<netsim_model::DeviceAddChip> {
+        let mut rx = std::mem::replace(&mut self.device_rx, mpsc::channel(1).1);
+        tokio::spawn(async move {
+            // Keep `sink` alive until `Delete` arrives so the client drives WebSocket closure
+            // (dropping `sink` immediately closes `packet_rx` and aborts client writes on Windows).
+            let (_sink, params) = match timeout(IO_TIMEOUT, rx.recv()).await.unwrap().unwrap() {
+                actor_framework::ResourceRequest::Action {
+                    id: None,
+                    action: DeviceAction::AddChipByGuid { mut params },
+                    respond_to,
+                } => {
+                    let mut sink = params.packet_sink.take().unwrap();
+                    let _ = respond_to.send(Ok(DeviceActionResult::AddChipByGuidSuccess {
+                        device_id: DeviceId(7),
+                        chip_id: ChipId(11),
+                    }));
+                    sink.send(Bytes::from_static(packet)).await.unwrap();
+                    (sink, *params)
+                }
+                other => panic!("Expected AddChipByGuid, got {other:?}"),
+            };
+            match timeout(IO_TIMEOUT, rx.recv()).await.unwrap().unwrap() {
+                actor_framework::ResourceRequest::Delete { id, respond_to } => {
+                    assert_eq!(id, DeviceId(7));
+                    let _ = respond_to.send(Ok(()));
+                }
+                other => panic!("Expected Delete(DeviceId(7)), got {other:?}"),
+            }
+            params
+        })
     }
 }
 
@@ -215,5 +258,58 @@ async fn test_capture_stream_errors() {
     assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request");
 
     let (_, head) = world.request("/v1/capture?chip_id=1", false).await;
+    assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request");
+}
+
+// Scenario: BLE scan and sniff WebSockets register chips, stream packets, and delete on close
+#[tokio::test]
+async fn test_ble_scan_and_sniff_streams() {
+    let mut world = World::new().await;
+    let actor = world.expect_ble_stream(&[0x04, 0x3e, 0x02, 0x02, 0x00]);
+    let (mut stream, head) = world.request("/v1/ble/scan?x=1.5&y=-2&z=3&active=true", true).await;
+    assert_eq!(status_line(&head), "HTTP/1.1 101 Switching Protocols");
+    assert_eq!(read_frame(&mut stream).await, (0x2, vec![0x04, 0x3e, 0x02, 0x02, 0x00]));
+    write_client_frame(&mut stream, 0x8, &1000u16.to_be_bytes()).await;
+    assert_eq!(read_frame(&mut stream).await.0, 0x8);
+    let scan_add = actor.await.unwrap();
+    assert_eq!(scan_add.device_config.pose.position, Position { x: 1.5, y: -2.0, z: 3.0 });
+    assert!(matches!(
+        scan_add.chip.variant.as_ref(),
+        Some(ChipVariant::Bluetooth(bt))
+            if matches!(bt.mode, BluetoothMode::Scanner(ScannerParams { active: true }))
+    ));
+
+    let mut world = World::new().await;
+    let actor = world.expect_ble_stream(&[0x0b, 0xaa, 0xbb]);
+    let (mut stream, head) = world.request("/v1/ble/sniff", true).await;
+    assert_eq!(status_line(&head), "HTTP/1.1 101 Switching Protocols");
+    assert_eq!(read_frame(&mut stream).await, (0x2, vec![0x0b, 0xaa, 0xbb]));
+    write_client_frame(&mut stream, 0x8, &1000u16.to_be_bytes()).await;
+    assert_eq!(read_frame(&mut stream).await.0, 0x8);
+    let sniff_add = actor.await.unwrap();
+    assert_eq!(sniff_add.device_config.pose.position, Position::default());
+    assert!(matches!(
+        sniff_add.chip.variant.as_ref(),
+        Some(ChipVariant::Bluetooth(bt)) if matches!(bt.mode, BluetoothMode::Sniffer(_))
+    ));
+}
+
+// Scenario: Invalid BLE scan/sniff query parameters or missing upgrade headers return 400
+#[tokio::test]
+async fn test_ble_stream_errors() {
+    let world = World::new().await;
+    for target in [
+        "/v1/ble/scan?x=abc",
+        "/v1/ble/scan?active=maybe",
+        "/v1/ble/scan?unknown=1",
+        "/v1/ble/sniff?active=true",
+        "/v1/ble/sniff?z=NaN",
+    ] {
+        let (_, head) = world.request(target, true).await;
+        assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request", "target: {target}");
+    }
+    let (_, head) = world.request("/v1/ble/scan", false).await;
+    assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request");
+    let (_, head) = world.request("/v1/ble/sniff", false).await;
     assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request");
 }

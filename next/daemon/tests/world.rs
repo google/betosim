@@ -40,6 +40,7 @@ use netsim_proto::{
     protobuf::{EnumOrUnknown, MessageField},
     startup::{Chip as StartupChip, ChipInfo, DeviceInfo},
 };
+use netsim_rest_api::NetsimRestClient;
 use tokio::time::timeout;
 use websocket_server::ManualWebSocketClient;
 
@@ -959,10 +960,24 @@ impl World {
 
     pub async fn when_connect_websocket(&mut self, path: &str) {
         let ws_port = self.ws_port.expect("NetsimDaemon has no WebSocket port");
-        let client = ManualWebSocketClient::connect("127.0.0.1", ws_port, path)
+        self.connect_websocket(ws_port, path).await;
+    }
+
+    pub async fn when_connect_http_websocket(&mut self, path: &str) {
+        self.connect_websocket(self.http_port, path).await;
+    }
+
+    async fn connect_websocket(&mut self, port: u16, path: &str) {
+        let client = ManualWebSocketClient::connect("127.0.0.1", port, path)
             .await
             .expect("Failed to connect WebSocket");
         self.ws_client = Some(client);
+    }
+
+    pub async fn when_close_websocket(&mut self) {
+        if let Some(mut client) = self.ws_client.take() {
+            client.close().await;
+        }
     }
 
     fn ws_client(&mut self) -> &mut ManualWebSocketClient {
@@ -996,5 +1011,56 @@ impl World {
         assert_eq!(feat_resp[6], 0x00, "status should be SUCCESS");
         // Byte 3 of features (packet index 10) bits 4-5 correspond to CIS.
         assert_eq!(feat_resp[10] & 0x30, 0x00, "CIS feature bits should be cleared");
+    }
+
+    pub async fn then_websocket_receives_ble_scan_report(&mut self, expected_mac: [u8; 6]) {
+        let client = self.ws_client();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = client.read_binary().await;
+                if common::util::scanner_util::parse_hci_scan_report(&frame)
+                    .is_ok_and(|reports| reports.iter().any(|r| r.mac == expected_mac))
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("Timed out waiting for BLE scan report from expected MAC");
+    }
+
+    pub async fn then_websocket_receives_ble_sniff_pdu(&mut self) {
+        let client = self.ws_client();
+        let pdu = timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = client.read_binary().await;
+                if frame.first() == Some(&0x0b) {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .expect("Timed out waiting for BLE sniff PDU");
+        assert!(pdu.len() >= 16, "Expected LE advertising PDU >= 16 bytes, got {}", pdu.len());
+    }
+
+    pub async fn then_transient_ble_devices_removed(&mut self, beacon_id: u32) {
+        let rest_client = NetsimRestClient::new("localhost", self.http_port);
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let devices =
+                    rest_client.get_devices().send().await.expect("Failed to get devices");
+                if devices.devices.iter().any(|d| d.id == beacon_id)
+                    && !devices.devices.iter().any(|d| {
+                        d.name.starts_with("BleScanner-") || d.name.starts_with("BleSniffer-")
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Transient BleScanner/BleSniffer devices were not cleaned up on disconnect");
     }
 }

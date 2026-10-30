@@ -72,6 +72,7 @@ netsim_rust_library(
     test_deps = [
         "//next/actor-framework",
         "//next/capture-api",
+        "//next/device-api",
         "@serde_yaml",
     ],
     deps = [
@@ -83,6 +84,7 @@ netsim_rust_library(
         "@base64",
         "@bytes",
         "@form_urlencoded",
+        "@futures",
         "@http-body-util",
         "@hyper",
         "@hyper-util",

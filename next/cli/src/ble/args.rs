@@ -69,3 +69,31 @@ pub(crate) enum LinkTypeOption {
     /// Low Energy Link Layer (LINKTYPE_BLUETOOTH_LE_LL)
     Le,
 }
+
+impl BleScan {
+    pub(super) fn query_path(&self) -> String {
+        format!(
+            "{}?x={}&y={}&z={}&active={}",
+            netsim_rest_api::path::BLE_SCAN,
+            self.x,
+            self.y,
+            self.z,
+            self.active
+        )
+    }
+}
+
+impl BleSniff {
+    pub(super) fn query_path(&self) -> String {
+        format!("{}?x={}&y={}&z={}", netsim_rest_api::path::BLE_SNIFF, self.x, self.y, self.z)
+    }
+}
+
+impl LinkTypeOption {
+    pub(super) const fn link_type_id(self) -> u32 {
+        match self {
+            Self::Bredr => 255,
+            Self::Le => 251,
+        }
+    }
+}

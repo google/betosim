@@ -74,6 +74,32 @@ async fn test_grpc_and_rest_share_actor_state() {
     );
 }
 
+// Scenario: Stream BLE Scan and Sniff Packets over REST WebSocket
+//   Given a running Netsim Daemon with an advertising BLE beacon
+//   When I connect to GET /v1/ble/scan over WebSocket
+//   Then I receive an HCI LE Advertising Report from the beacon
+//   When I close the WebSocket stream
+//   And I connect to GET /v1/ble/sniff over WebSocket
+//   Then I receive a raw LE Legacy Advertising PDU
+//   When I close the WebSocket stream
+//   Then the transient scanner and sniffer devices are removed
+#[tokio::test]
+async fn test_rest_ble_scan_and_sniff_streams() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    let beacon_id = world.when_create_device("rest-ble-beacon", "beacon-chip").await;
+
+    world.when_connect_http_websocket("/v1/ble/scan?x=0&y=0&z=0&active=false").await;
+    world.then_websocket_receives_ble_scan_report([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]).await;
+    world.when_close_websocket().await;
+
+    world.when_connect_http_websocket("/v1/ble/sniff?x=0&y=0&z=0").await;
+    world.then_websocket_receives_ble_sniff_pdu().await;
+    world.when_close_websocket().await;
+
+    world.then_transient_ble_devices_removed(beacon_id).await;
+}
+
 // Scenario: The REST Client Reaches the HTTP Listener and Not Some Other Port
 //   Given a running Netsim Daemon
 //   When I send a REST request to the gRPC port
