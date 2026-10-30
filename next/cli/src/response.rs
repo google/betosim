@@ -19,10 +19,48 @@ use netsim_proto::{common::ChipKind, frontend, model};
 use protobuf::MessageField;
 
 use crate::{
-    args::{self, Beacon, BeaconCreate, BeaconPatch, Capture, Command, Link, OnOffState},
+    args::{self, Beacon, BeaconCreate, Capture, Command, Link, OnOffState},
     display::LinkChipIdDisplay,
     grpc_client::{GrpcRequest, GrpcResponse},
 };
+
+pub(crate) fn print_beacon_patch_ble_verbose(args: &args::BeaconPatchBle) {
+    if let Some(advertise_mode) = &args.settings.advertise_mode {
+        match advertise_mode {
+            args::Interval::Mode(mode) => {
+                println!("Set advertise mode to {mode:#?}")
+            }
+            args::Interval::Milliseconds(ms) => {
+                println!("Set advertise interval to {ms} ms")
+            }
+        }
+    }
+    if let Some(tx_power_level) = &args.settings.tx_power_level {
+        match tx_power_level {
+            args::TxPower::Level(level) => {
+                println!("Set transmit power level to {level:#?}")
+            }
+            args::TxPower::Dbm(dbm) => {
+                println!("Set transmit power level to {dbm} dBm")
+            }
+        }
+    }
+    if args.settings.scannable {
+        println!("Set scannable to true");
+    }
+    if let Some(timeout) = args.settings.timeout {
+        println!("Set timeout to {timeout} ms");
+    }
+    if args.advertise_data.include_device_name {
+        println!("Added the device's name to the advertise packet")
+    }
+    if args.advertise_data.include_tx_power_level {
+        println!("Added the beacon's transmit power level to the advertise packet")
+    }
+    if args.advertise_data.manufacturer_data.is_some() {
+        println!("Added manufacturer data to the advertise packet")
+    }
+}
 
 impl args::Command {
     pub(crate) fn print_response(
@@ -65,93 +103,29 @@ impl args::Command {
                 );
             }
 
-            Command::Beacon(action) => match action {
-                Beacon::Create(kind) => match kind {
-                    BeaconCreate::Ble(_) | BeaconCreate::Uwb(_) => {
-                        if !verbose {
-                            return Ok(());
-                        }
-                        let GrpcResponse::CreateDevice(res) = response else {
-                            return Err(format!(
-                                "Expected to print CreateDeviceResponse. Got: {response:?}"
-                            )
-                            .into());
-                        };
-                        let device = &res.device;
-                        match device.chips.as_slice() {
-                            [chip] => {
-                                let kind_str = match kind {
-                                    BeaconCreate::Ble(_) => "ble beacon",
-                                    BeaconCreate::Uwb(_) => "uwb anchor",
-                                };
-                                println!(
-                                    "Created device '{}' with {kind_str} chip '{}'",
-                                    device.name, chip.name
-                                );
-                            }
-                            _ => {
-                                return Err("the gRPC request completed successfully but the response contained an unexpected number of chips".into());
-                            }
-                        }
-                    }
-                },
-                Beacon::Patch(kind) => match kind {
-                    BeaconPatch::Ble(args) => {
-                        if !verbose {
-                            return Ok(());
-                        }
-                        if let Some(advertise_mode) = &args.settings.advertise_mode {
-                            match advertise_mode {
-                                args::Interval::Mode(mode) => {
-                                    println!("Set advertise mode to {mode:#?}")
-                                }
-                                args::Interval::Milliseconds(ms) => {
-                                    println!("Set advertise interval to {ms} ms")
-                                }
-                            }
-                        }
-                        if let Some(tx_power_level) = &args.settings.tx_power_level {
-                            match tx_power_level {
-                                args::TxPower::Level(level) => {
-                                    println!("Set transmit power level to {level:#?}")
-                                }
-                                args::TxPower::Dbm(dbm) => {
-                                    println!("Set transmit power level to {dbm} dBm")
-                                }
-                            }
-                        }
-                        if args.settings.scannable {
-                            println!("Set scannable to true");
-                        }
-                        if let Some(timeout) = args.settings.timeout {
-                            println!("Set timeout to {timeout} ms");
-                        }
-                        if args.advertise_data.include_device_name {
-                            println!("Added the device's name to the advertise packet")
-                        }
-                        if args.advertise_data.include_tx_power_level {
-                            println!(
-                                "Added the beacon's transmit power level to the advertise packet"
-                            )
-                        }
-                        if args.advertise_data.manufacturer_data.is_some() {
-                            println!("Added manufacturer data to the advertise packet")
-                        }
-                        if args.settings.scannable {
-                            println!("Set scannable to true");
-                        }
-                        if let Some(timeout) = args.settings.timeout {
-                            println!("Set timeout to {timeout} ms");
-                        }
-                    }
-                },
-                Beacon::Remove(args) => {
-                    if !verbose {
-                        return Ok(());
-                    }
-                    println!("Removed device '{}'", args.device_name)
+            Command::Beacon(Beacon::Create(BeaconCreate::Uwb(_))) => {
+                if !verbose {
+                    return Ok(());
                 }
-            },
+                let GrpcResponse::CreateDevice(res) = response else {
+                    return Err(format!(
+                        "Expected to print CreateDeviceResponse. Got: {response:?}"
+                    )
+                    .into());
+                };
+                let device = &res.device;
+                match device.chips.as_slice() {
+                    [chip] => {
+                        println!(
+                            "Created device '{}' with uwb anchor chip '{}'",
+                            device.name, chip.name
+                        );
+                    }
+                    _ => {
+                        return Err("the gRPC request completed successfully but the response contained an unexpected number of chips".into());
+                    }
+                }
+            }
 
             Command::Link(link_cmd) => match link_cmd {
                 Link::Create(_) => {

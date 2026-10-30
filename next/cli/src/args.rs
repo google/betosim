@@ -19,13 +19,6 @@ use clap::{
     builder::{PossibleValue, TypedValueParser},
 };
 use hex::{FromHexError, decode as hex_to_bytes};
-use netsim_proto::model::chip::ble_beacon::{
-    AdvertiseData as AdvertiseDataProto, AdvertiseSettings as AdvertiseSettingsProto,
-    advertise_settings::{
-        AdvertiseMode as AdvertiseModeProto, AdvertiseTxPower as AdvertiseTxPowerProto,
-        Interval as IntervalProto, Tx_power as TxPowerProto,
-    },
-};
 
 #[derive(Debug, Parser)]
 pub(crate) struct NetsimArgs {
@@ -589,60 +582,52 @@ pub(crate) struct StreamCapture {
     pub(crate) output: Option<PathBuf>,
 }
 
-impl From<&BeaconBleSettings> for AdvertiseSettingsProto {
+impl From<&BeaconBleSettings> for netsim_model::AdvertiseSettings {
     fn from(value: &BeaconBleSettings) -> Self {
-        AdvertiseSettingsProto {
-            interval: value.advertise_mode.as_ref().map(IntervalProto::from),
-            tx_power: value.tx_power_level.as_ref().map(TxPowerProto::from),
+        Self {
+            interval: value.advertise_mode.as_ref().map(netsim_model::Interval::from),
+            tx_power: value.tx_power_level.as_ref().map(netsim_model::TxPower::from),
             scannable: value.scannable,
             timeout: value.timeout.unwrap_or_default(),
-            ..Default::default()
         }
     }
 }
 
-impl From<&Interval> for IntervalProto {
+impl From<&Interval> for netsim_model::Interval {
     fn from(value: &Interval) -> Self {
         match value {
-            Interval::Mode(mode) => IntervalProto::AdvertiseMode(
-                match mode {
-                    AdvertiseMode::LowPower => AdvertiseModeProto::LOW_POWER,
-                    AdvertiseMode::Balanced => AdvertiseModeProto::BALANCED,
-                    AdvertiseMode::LowLatency => AdvertiseModeProto::LOW_LATENCY,
-                }
-                .into(),
-            ),
-            Interval::Milliseconds(ms) => IntervalProto::Milliseconds(*ms),
+            Interval::Mode(mode) => netsim_model::Interval::AdvertiseMode(match mode {
+                AdvertiseMode::LowPower => netsim_model::AdvertiseMode::LowPower,
+                AdvertiseMode::Balanced => netsim_model::AdvertiseMode::Balanced,
+                AdvertiseMode::LowLatency => netsim_model::AdvertiseMode::LowLatency,
+            }),
+            Interval::Milliseconds(ms) => netsim_model::Interval::Milliseconds(*ms),
         }
     }
 }
 
-impl From<&TxPower> for TxPowerProto {
+impl From<&TxPower> for netsim_model::TxPower {
     fn from(value: &TxPower) -> Self {
         match value {
-            TxPower::Level(level) => TxPowerProto::TxPowerLevel(
-                match level {
-                    TxPowerLevel::UltraLow => AdvertiseTxPowerProto::ULTRA_LOW,
-                    TxPowerLevel::Low => AdvertiseTxPowerProto::LOW,
-                    TxPowerLevel::Medium => AdvertiseTxPowerProto::MEDIUM,
-                    TxPowerLevel::High => AdvertiseTxPowerProto::HIGH,
-                }
-                .into(),
-            ),
-            TxPower::Dbm(dbm) => TxPowerProto::Dbm((*dbm).into()),
+            TxPower::Level(level) => netsim_model::TxPower::TxPowerLevel(match level {
+                TxPowerLevel::UltraLow => netsim_model::AdvertiseTxPower::UltraLow,
+                TxPowerLevel::Low => netsim_model::AdvertiseTxPower::Low,
+                TxPowerLevel::Medium => netsim_model::AdvertiseTxPower::Medium,
+                TxPowerLevel::High => netsim_model::AdvertiseTxPower::High,
+            }),
+            TxPower::Dbm(dbm) => netsim_model::TxPower::Dbm(i32::from(*dbm)),
         }
     }
 }
 
-impl From<&BeaconBleAdvertiseData> for AdvertiseDataProto {
+impl From<&BeaconBleAdvertiseData> for netsim_model::AdvertiseData {
     fn from(value: &BeaconBleAdvertiseData) -> Self {
-        let mut services = vec![];
-        for uuid in &value.uuids {
-            let mut service = netsim_proto::model::chip::ble_beacon::advertise_data::Service::new();
-            service.uuid = uuid.clone();
-            services.push(service);
-        }
-        AdvertiseDataProto {
+        let services = value
+            .uuids
+            .iter()
+            .map(|uuid| netsim_model::Service { uuid: uuid.clone(), data: Vec::new() })
+            .collect();
+        Self {
             include_device_name: value.include_device_name,
             include_tx_power_level: value.include_tx_power_level,
             manufacturer_data: value
@@ -651,20 +636,18 @@ impl From<&BeaconBleAdvertiseData> for AdvertiseDataProto {
                 .map(ParsableBytes::unwrap)
                 .unwrap_or_default(),
             services,
-            ..Default::default()
         }
     }
 }
 
-impl From<&BeaconBleScanResponseData> for AdvertiseDataProto {
+impl From<&BeaconBleScanResponseData> for netsim_model::AdvertiseData {
     fn from(value: &BeaconBleScanResponseData) -> Self {
-        let mut services = vec![];
-        for uuid in &value.scan_response_uuids {
-            let mut service = netsim_proto::model::chip::ble_beacon::advertise_data::Service::new();
-            service.uuid = uuid.clone();
-            services.push(service);
-        }
-        AdvertiseDataProto {
+        let services = value
+            .scan_response_uuids
+            .iter()
+            .map(|uuid| netsim_model::Service { uuid: uuid.clone(), data: Vec::new() })
+            .collect();
+        Self {
             include_device_name: value.scan_response_include_device_name,
             include_tx_power_level: value.scan_response_include_tx_power_level,
             manufacturer_data: value
@@ -673,7 +656,56 @@ impl From<&BeaconBleScanResponseData> for AdvertiseDataProto {
                 .map(ParsableBytes::unwrap)
                 .unwrap_or_default(),
             services,
-            ..Default::default()
+        }
+    }
+}
+
+impl From<&BeaconBleSettings> for netsim_model::AdvertiseSettingsUpdate {
+    fn from(value: &BeaconBleSettings) -> Self {
+        Self {
+            interval: value.advertise_mode.as_ref().map(netsim_model::Interval::from),
+            tx_power: value.tx_power_level.as_ref().map(netsim_model::TxPower::from),
+            scannable: value.scannable.then_some(true),
+            timeout: value.timeout,
+        }
+    }
+}
+
+impl From<&BeaconBleAdvertiseData> for netsim_model::AdvertiseDataUpdate {
+    fn from(value: &BeaconBleAdvertiseData) -> Self {
+        let services = (!value.uuids.is_empty()).then(|| {
+            value
+                .uuids
+                .iter()
+                .map(|uuid| netsim_model::Service { uuid: uuid.clone(), data: Vec::new() })
+                .collect()
+        });
+        Self {
+            include_device_name: value.include_device_name.then_some(true),
+            include_tx_power_level: value.include_tx_power_level.then_some(true),
+            manufacturer_data: value.manufacturer_data.clone().map(ParsableBytes::unwrap),
+            services,
+        }
+    }
+}
+
+impl From<&BeaconBleScanResponseData> for netsim_model::AdvertiseDataUpdate {
+    fn from(value: &BeaconBleScanResponseData) -> Self {
+        let services = (!value.scan_response_uuids.is_empty()).then(|| {
+            value
+                .scan_response_uuids
+                .iter()
+                .map(|uuid| netsim_model::Service { uuid: uuid.clone(), data: Vec::new() })
+                .collect()
+        });
+        Self {
+            include_device_name: value.scan_response_include_device_name.then_some(true),
+            include_tx_power_level: value.scan_response_include_tx_power_level.then_some(true),
+            manufacturer_data: value
+                .scan_response_manufacturer_data
+                .clone()
+                .map(ParsableBytes::unwrap),
+            services,
         }
     }
 }

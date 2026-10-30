@@ -28,6 +28,10 @@ pub enum DeviceError {
     NotFound(String),
     #[error("Device not found (explicit): {0}")]
     DeviceNotFound(String),
+    #[error("Device already exists: {0}")]
+    AlreadyExists(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
     #[error("Actor communication error: {0}")]
     ActorCommunicationError(#[from] ClientError),
     #[error("Chip kind not supported: {0}")]

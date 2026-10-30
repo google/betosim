@@ -18,9 +18,10 @@ use device_api::{
 };
 use link_api::Link as ApiLink;
 use netsim_model::{
-    AdvertiseData, AdvertiseMode, AdvertiseSettings, AdvertiseTxPower, BleBeacon, BluetoothCreate,
-    BluetoothMode, BluetoothUpdate, BtControllerProperties, ChipId, ChipKind as ApiChipKind,
-    ChipUpdate, ChipVariantUpdate, Interval, RadioUpdate, TxPower, UwbCreate,
+    AdvertiseData, AdvertiseDataUpdate, AdvertiseMode, AdvertiseSettings, AdvertiseSettingsUpdate,
+    AdvertiseTxPower, BleBeacon, BleBeaconUpdate, BluetoothCreate, BluetoothMode, BluetoothUpdate,
+    BtControllerProperties, ChipId, ChipKind as ApiChipKind, ChipUpdate, ChipVariantUpdate,
+    Interval, RadioUpdate, TxPower, UwbCreate,
 };
 use netsim_proto::{
     common::ChipKind as ProtoChipKind,
@@ -327,6 +328,30 @@ fn from_proto_advertise_data(
     }
 }
 
+fn from_proto_advertise_settings_update(
+    s: &netsim_proto::model::chip::ble_beacon::AdvertiseSettings,
+) -> AdvertiseSettingsUpdate {
+    let base = from_proto_advertise_settings(s, false);
+    AdvertiseSettingsUpdate {
+        interval: base.interval,
+        tx_power: base.tx_power,
+        scannable: s.scannable.then_some(true),
+        timeout: (s.timeout != 0).then_some(s.timeout),
+    }
+}
+
+fn from_proto_advertise_data_update(
+    d: &netsim_proto::model::chip::ble_beacon::AdvertiseData,
+) -> AdvertiseDataUpdate {
+    let base = from_proto_advertise_data(d);
+    AdvertiseDataUpdate {
+        include_device_name: base.include_device_name.then_some(true),
+        include_tx_power_level: base.include_tx_power_level.then_some(true),
+        manufacturer_data: (!base.manufacturer_data.is_empty()).then_some(base.manufacturer_data),
+        services: (!base.services.is_empty()).then_some(base.services),
+    }
+}
+
 pub(crate) fn from_proto_position(p: ProtoPosition) -> ApiPosition {
     ApiPosition { x: p.x, y: p.y, z: p.z }
 }
@@ -388,11 +413,11 @@ pub(crate) fn from_proto_chip_update(c: ProtoChip) -> ChipUpdate {
                     )
                 });
                 let (classic, low_energy) = bt_update.unwrap_or_default();
-                let ble_beacon = BleBeacon {
+                let ble_beacon = BleBeaconUpdate {
                     address: b.address,
-                    settings: b.settings.as_ref().map(|s| from_proto_advertise_settings(s, false)),
-                    adv_data: b.adv_data.as_ref().map(from_proto_advertise_data),
-                    scan_response: b.scan_response.as_ref().map(from_proto_advertise_data),
+                    settings: b.settings.as_ref().map(from_proto_advertise_settings_update),
+                    adv_data: b.adv_data.as_ref().map(from_proto_advertise_data_update),
+                    scan_response: b.scan_response.as_ref().map(from_proto_advertise_data_update),
                 };
                 Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
                     classic,
@@ -676,13 +701,38 @@ mod tests {
             let proto_chip = to_proto_chip(chip);
             assert!(matches!(proto_chip.chip, Some(netsim_proto::model::chip::Chip::BleBeacon(_))));
 
+            let expected_beacon_update = BleBeaconUpdate {
+                address: "11:22:33:44:55:66".to_string(),
+                settings: Some(AdvertiseSettingsUpdate {
+                    interval: Some(interval),
+                    tx_power: Some(tx_power),
+                    scannable: Some(true),
+                    timeout: Some(1200),
+                }),
+                adv_data: Some(AdvertiseDataUpdate {
+                    include_device_name: Some(true),
+                    include_tx_power_level: Some(true),
+                    manufacturer_data: Some(vec![0x01, 0x02]),
+                    services: Some(vec![netsim_model::Service {
+                        uuid: "180D".to_string(),
+                        data: vec![0xAA],
+                    }]),
+                }),
+                scan_response: Some(AdvertiseDataUpdate {
+                    include_device_name: None,
+                    include_tx_power_level: None,
+                    manufacturer_data: Some(vec![0x03, 0x04]),
+                    services: None,
+                }),
+            };
+
             let update = from_proto_chip_update(proto_chip);
             assert_eq!(
                 update.variant,
                 Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
                     classic: RadioUpdate { state: Some(true) },
                     low_energy: RadioUpdate { state: Some(true) },
-                    ble_beacon: Some(ble_beacon),
+                    ble_beacon: Some(expected_beacon_update),
                     ..Default::default()
                 }))
             );

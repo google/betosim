@@ -40,18 +40,14 @@ impl Deref for BluetoothClient {
 #[async_trait::async_trait]
 impl ChipClient for BluetoothClient {
     async fn create(&self, id: ChipId, params: ChipCreate) -> Result<(), ClientError> {
-        self.0
-            .create_with_id(id, params)
-            .await
-            .map(|_| ())
-            .map_err(|e| ClientError::Send(e.to_string()))
+        self.0.create_with_id(id, params).await.map(|_| ()).map_err(ClientError::from)
     }
 
     async fn read(&self, id: ChipId) -> Result<netsim_model::Chip, ClientError> {
         self.0
             .get(id)
             .await
-            .map_err(|e| ClientError::Send(e.to_string()))?
+            .map_err(ClientError::from)?
             .ok_or(ClientError::Chip(netsim_model::ChipError::ChipNotFound(id)))
     }
 
@@ -60,11 +56,11 @@ impl ChipClient for BluetoothClient {
         id: ChipId,
         patch: netsim_model::ChipUpdate,
     ) -> Result<netsim_model::Chip, ClientError> {
-        self.0.update(id, patch).await.map_err(|e| ClientError::Send(e.to_string()))
+        self.0.update(id, patch).await.map_err(ClientError::from)
     }
 
     async fn delete(&self, id: ChipId) -> Result<(), ClientError> {
-        self.0.delete(id).await.map_err(|e| ClientError::Send(e.to_string()))
+        self.0.delete(id).await.map_err(ClientError::from)
     }
 
     async fn read_statistics(&self) -> Result<Box<[netsim_model::NetsimRadioStats]>, ClientError> {

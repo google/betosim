@@ -271,7 +271,10 @@ fn io_error_status(err: &std::io::Error) -> StatusCode {
 fn device_error_status(err: &DeviceError) -> StatusCode {
     match err {
         DeviceError::NotFound(_) | DeviceError::DeviceNotFound(_) => StatusCode::NOT_FOUND,
-        DeviceError::ChipKindNotSupported(_) => StatusCode::BAD_REQUEST,
+        DeviceError::AlreadyExists(_) => StatusCode::CONFLICT,
+        DeviceError::InvalidInput(_) | DeviceError::ChipKindNotSupported(_) => {
+            StatusCode::BAD_REQUEST
+        }
         DeviceError::ActorCommunicationError(inner) => client_error_status(inner),
         DeviceError::ResetErrors { .. } => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -575,7 +578,9 @@ impl RestServer {
             Some((route, params)) => match route.op {
                 crate::Op::GetVersion => self.get_version().into(),
                 crate::Op::ListDevices => self.list_devices().await.into(),
+                crate::Op::CreateDevice => self.create_device(body).await.into(),
                 crate::Op::PatchDevice => self.patch_device(&params, body).await.into(),
+                crate::Op::DeleteDevice => self.delete_device(&params).await.into(),
                 crate::Op::ResetDevices => self.reset_devices().await.into(),
                 crate::Op::ListLinks => self.link_client.list().await.into(),
                 crate::Op::ListAps => self.ap_client.list_aps().await.into(),
@@ -590,5 +595,35 @@ impl RestServer {
             }
         };
         resp.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_device_and_chip_error_status_mapping() {
+        assert_eq!(
+            device_error_status(&DeviceError::AlreadyExists("dup".into())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            device_error_status(&DeviceError::InvalidInput("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            device_error_status(&DeviceError::NotFound("missing".into())),
+            StatusCode::NOT_FOUND
+        );
+
+        let addr_in_use = ClientError::Chip(ChipError::Io(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "address already in use",
+        )));
+        assert_eq!(client_error_status(&addr_in_use), StatusCode::CONFLICT);
+
+        let bad_addr = ClientError::Chip(ChipError::InvalidAddress("malformed".into()));
+        assert_eq!(client_error_status(&bad_addr), StatusCode::BAD_REQUEST);
     }
 }

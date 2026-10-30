@@ -93,14 +93,19 @@ impl ActorService for BluetoothActor {
                 params.chip.name.clone()
             };
 
-        let raw_address = if bluetooth.address.is_empty() {
-            crate::beacon_utils::generate_legacy_address(chip_id.into())
-        } else {
+        let raw_address = if !bluetooth.address.is_empty() {
             bluetooth.address.clone()
+        } else if let BluetoothMode::Beacon(ref beacon_params) = bluetooth.mode
+            && !beacon_params.ble_beacon.address.is_empty()
+        {
+            beacon_params.ble_beacon.address.clone()
+        } else {
+            crate::beacon_utils::generate_legacy_address(chip_id.into())
         };
 
-        let address: rootcanal::Address =
-            raw_address.parse().map_err(BluetoothError::AddressParse)?;
+        let address: rootcanal::Address = raw_address.parse().map_err(|e| {
+            BluetoothError::Chip(netsim_model::ChipError::InvalidAddress(Box::new(e)))
+        })?;
 
         let mut mode = bluetooth.mode.clone();
         if let BluetoothMode::Beacon(ref mut beacon_params) = mode
@@ -123,6 +128,7 @@ impl ActorService for BluetoothActor {
 
         // Ensure radio states are enabled by default for initial state
         if let Some(netsim_model::ChipVariant::Bluetooth(ref mut bluetooth)) = chip.variant {
+            bluetooth.address = address.to_string();
             if bluetooth.low_energy.state.is_none() {
                 bluetooth.low_energy.state = Some(true);
             }
@@ -423,8 +429,9 @@ mod tests {
     use actor_framework::ResourceClient;
     use device_actor::client::DeviceClient;
     use netsim_model::{
-        AdvertiseData, AdvertiseSettings, BeaconParams, BleBeacon, BluetoothUpdate, ChipClient,
-        ChipCreate, ChipUpdate, ChipVariantUpdate, DeviceId, TxPower,
+        AdvertiseData, AdvertiseSettings, AdvertiseSettingsUpdate, BeaconParams, BleBeacon,
+        BleBeaconUpdate, BluetoothUpdate, ChipClient, ChipCreate, ChipUpdate, ChipVariantUpdate,
+        DeviceId, TxPower,
     };
     use tokio::sync::mpsc;
 
@@ -475,11 +482,11 @@ mod tests {
 
         let update = ChipUpdate {
             variant: Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
-                ble_beacon: Some(BleBeacon {
+                ble_beacon: Some(BleBeaconUpdate {
                     address: "11:22:33:44:55:77".to_string(),
-                    settings: Some(AdvertiseSettings {
+                    settings: Some(AdvertiseSettingsUpdate {
                         tx_power: Some(TxPower::Dbm(1)),
-                        timeout: 50,
+                        timeout: Some(50),
                         ..Default::default()
                     }),
                     ..Default::default()

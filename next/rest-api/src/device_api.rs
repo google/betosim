@@ -23,7 +23,8 @@ pub use crate::ListDeviceResponse;
 use crate::{
     client::{NetsimRestClient, RestRequest},
     server::{
-        HttpError, JsonResponse, NoContent, RestServer, json_response, parse_json_body, path_id,
+        Created, HttpError, JsonResponse, NoContent, RestServer, json_response, parse_json_body,
+        path_id,
     },
 };
 
@@ -53,6 +54,31 @@ impl RestServer {
         Ok(self.device_client.list().await?)
     }
 
+    pub(crate) async fn create_device(&self, body: &[u8]) -> Result<Created<Device>, HttpError> {
+        let mut req: DeviceCreate = parse_json_body(body)?;
+        match &mut req.chip.chip {
+            netsim_model::ChipCreateVariant::Beacon(ble_beacon) => {
+                ble_beacon.apply_create_defaults();
+            }
+            other => {
+                return Err(HttpError::bad_request(format!(
+                    "Unsupported chip create variant for REST POST /v1/devices: {:?}",
+                    other.kind()
+                )));
+            }
+        }
+        req.device_config.builtin = false;
+        req.device_config.device_info = None;
+        let id = self.device_client.create_device(req).await?;
+        let device = self.device_client.get(id).await?.ok_or_else(|| {
+            HttpError::new(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Device {id} missing after creation"),
+            )
+        })?;
+        Ok(Created(device))
+    }
+
     pub(crate) async fn patch_device(
         &self,
         params: &[(&str, &str)],
@@ -60,8 +86,20 @@ impl RestServer {
     ) -> Result<Device, HttpError> {
         let id: DeviceId = path_id(params)?;
         let mut req: DeviceUpdate = parse_json_body(body)?;
+        if req.chips.as_ref().is_some_and(Vec::is_empty) {
+            return Err(HttpError::bad_request("chips list cannot be empty"));
+        }
         req.id = id.0;
         Ok(self.device_client.update(id, req).await?)
+    }
+
+    pub(crate) async fn delete_device(
+        &self,
+        params: &[(&str, &str)],
+    ) -> Result<NoContent, HttpError> {
+        let id: DeviceId = path_id(params)?;
+        self.device_client.delete_device(id).await?;
+        Ok(NoContent)
     }
 
     pub(crate) async fn reset_devices(&self) -> Result<NoContent, HttpError> {
@@ -77,9 +115,19 @@ impl NetsimRestClient {
         self.get(crate::path::DEVICES)
     }
 
+    /// `POST /v1/devices`
+    pub fn create_device(&self, create: &DeviceCreate) -> RestRequest<'_, Device> {
+        self.post(crate::path::DEVICES).json(create)
+    }
+
     /// `PATCH /v1/devices/{id}`
     pub fn patch_device(&self, id: u32, patch: &DeviceUpdate) -> RestRequest<'_, Device> {
         self.patch(format!("{}/{id}", crate::path::DEVICES)).json(patch)
+    }
+
+    /// `DELETE /v1/devices/{id}`
+    pub fn delete_device(&self, id: u32) -> RestRequest<'_, ()> {
+        self.delete(format!("{}/{id}", crate::path::DEVICES))
     }
 
     /// `POST /v1/devices:reset`

@@ -84,18 +84,42 @@ components:
       required: []
       properties:
         state: *bool
+    AdvertiseSettings: &AdvertiseSettings
+      x-rust-type: netsim_model::AdvertiseSettings
+      required: []
+      properties:
+        scannable: *bool
+        timeout: *int
+    AdvertiseData: &AdvertiseData
+      x-rust-type: netsim_model::AdvertiseData
+      required: []
+      properties:
+        include_device_name: *bool
+        include_tx_power_level: *bool
+        manufacturer_data: [*int]
+    BleBeacon: &BleBeacon
+      x-rust-type: netsim_model::BleBeacon
+      required: []
+      properties:
+        address: *str
+        settings: *AdvertiseSettings
+        adv_data: *AdvertiseData
+        scan_response: *AdvertiseData
     BluetoothUpdate: &BluetoothUpdate
+      x-rust-type: netsim_model::BluetoothUpdate
       required: []
       properties:
         low_energy: *RadioUpdate
         classic: *RadioUpdate
         preset: *str
+        ble_beacon: *BleBeacon
     CellUpdate: &CellUpdate
       required: []
       properties:
         radio: *RadioUpdate
         state: *str
     ChipVariantUpdate: &ChipVariantUpdate
+      x-rust-type: netsim_model::ChipVariantUpdate
       required: []
       properties:
         Bluetooth: *BluetoothUpdate
@@ -122,6 +146,32 @@ components:
         builtin: *bool
         chips: [*Chip]
         device_info: *DeviceInfo
+    ChipCreateVariant: &ChipCreateVariant
+      x-rust-type: netsim_model::ChipCreateVariant
+      required: []
+      properties:
+        Beacon: *BleBeacon
+    DeviceConfig: &DeviceConfig
+      x-rust-type: netsim_model::DeviceConfig
+      required: []
+      properties:
+        name: *str
+        visible: *bool
+        pose: *Pose
+    DeviceChipCreate: &DeviceChipCreate
+      x-rust-type: netsim_model::DeviceChipCreate
+      required: []
+      properties:
+        name: *str
+        manufacturer: *str
+        product_name: *str
+        chip: *ChipCreateVariant
+    DeviceCreate: &DeviceCreate
+      x-rust-type: netsim_model::DeviceCreate
+      required: []
+      properties:
+        device_config: *DeviceConfig
+        chip: *DeviceChipCreate
     DeviceUpdate: &DeviceUpdate
       x-rust-type: netsim_model::DeviceUpdate
       required: []
@@ -201,6 +251,26 @@ paths:
       responses:
         <<: *err_resp
         '200': *ListDeviceResponse
+    post:
+      operationId: CreateDevice
+      tags: [DeviceService]
+      summary: Creates a simulated device (such as a BLE beacon).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCreate'
+            example:
+              device_config:
+                name: beacon-1
+              chip:
+                name: beacon-chip-1
+                chip:
+                  Beacon:
+                    address: '00:11:22:33:44:55'
+      responses:
+        <<: *err_resp
+        '200': *Device
   /v1/devices/{id}:
     parameters: [*Id]
     patch:
@@ -221,6 +291,13 @@ paths:
       responses:
         <<: *err_resp
         '200': *Device
+    delete:
+      operationId: DeleteDevice
+      tags: [DeviceService]
+      summary: Deletes a simulated device.
+      responses:
+        <<: *err_resp
+        '200': *Empty
   /v1/devices:reset:
     post:
       operationId: ResetDevices

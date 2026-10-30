@@ -25,10 +25,6 @@ pub enum BluetoothError {
     /// Errors originating from the Rootcanal simulation.
     #[error("Rootcanal error: {0}")]
     Rootcanal(Box<dyn std::error::Error + Send + Sync>),
-
-    /// Error parsing Bluetooth address.
-    #[error("Address parse error: {0}")]
-    AddressParse(#[source] ::rootcanal::error::Error),
 }
 
 impl BluetoothError {

@@ -106,7 +106,8 @@ pub use crate::{
         BeaconParams, Bluetooth, BluetoothCreate, BluetoothMode, BluetoothUpdate, Controller,
         DeviceParams, PacketType, ScannerParams, SnifferParams,
         beacon::{
-            AdvertiseData, AdvertiseMode, AdvertiseSettings, AdvertiseTxPower, BleBeacon, Interval,
+            AdvertiseData, AdvertiseDataUpdate, AdvertiseMode, AdvertiseSettings,
+            AdvertiseSettingsUpdate, AdvertiseTxPower, BleBeacon, BleBeaconUpdate, Interval,
             Service, TxPower,
         },
     },

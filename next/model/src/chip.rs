@@ -391,6 +391,7 @@ impl TryFrom<ChipKind> for ChipVariant {
 /// This struct represents the partial, optional set of changes to a
 /// Chip provided by the client.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChipUpdate {
     pub id: Option<ChipId>,
     pub name: Option<String>,
@@ -451,6 +452,7 @@ impl RadioUpdate {
 
 /// The technology variant specific fields
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ChipVariantUpdate {
     Bluetooth(crate::bluetooth::BluetoothUpdate),
     Wifi(crate::wifi::WifiUpdate),

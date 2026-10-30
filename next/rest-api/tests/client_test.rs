@@ -247,3 +247,30 @@ fn test_patch_device_wire_format_and_response() {
     assert!(request.starts_with("PATCH /v1/devices/1 HTTP/1.1\r\n"), "{request}");
     assert!(request.contains(r#""position":{"x":1.5,"y":2.5,"z":3.5}"#), "{request}");
 }
+
+#[test]
+fn test_create_device_wire_format_and_response() {
+    let canned_created_device = "HTTP/1.1 201 Created\r\n\r\n{\"id\":1,\"name\":\"beacon-1\",\"visible\":true,\"pose\":{\"position\":{\"x\":0.0,\"y\":0.0,\"z\":0.0},\"orientation\":{\"yaw\":0.0,\"pitch\":0.0,\"roll\":0.0}},\"builtin\":false,\"chips\":[]}";
+    let (client, server) = serve_once(canned_created_device);
+    let create_req = netsim_model::DeviceCreate {
+        device_config: netsim_model::DeviceConfig {
+            name: "beacon-1".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dev = client.create_device(&create_req).send_blocking().expect("create_device");
+    assert_eq!(dev.id, 1);
+    assert_eq!(dev.name, "beacon-1");
+    let request = server.join().expect("server");
+    assert!(request.starts_with("POST /v1/devices HTTP/1.1\r\n"), "{request}");
+    assert!(request.contains(r#""name":"beacon-1""#), "{request}");
+}
+
+#[test]
+fn test_delete_device_wire_format_and_response() {
+    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    client.delete_device(42).send_blocking().expect("delete_device");
+    let request = server.join().expect("server");
+    assert!(request.starts_with("DELETE /v1/devices/42 HTTP/1.1\r\n"), "{request}");
+}

@@ -39,7 +39,7 @@ async fn test_update_device_propagates_to_chips() {
         .expect_update()
         .withf(|_, patch| patch.pose.position.is_some() && patch.pose.orientation.is_some())
         .times(1)
-        .returning(|_, _| Ok(Chip::default()));
+        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -119,7 +119,8 @@ async fn test_notify_chip_removed_preserves_remaining_chips() {
     let (device_id_2, wifi_chip_id) = world.client.add_chip_with_id(wifi_params).await.unwrap();
     assert_eq!(device_id, device_id_2);
 
-    // Removing the Bluetooth chip preserves the device and Wi-Fi chip, and deletes the BT chip from mock_chips
+    // Removing the Bluetooth chip preserves the device and Wi-Fi chip, and deletes the BT chip
+    // from mock_chips
     world.when_notify_chip_removed(device_id, bt_chip_id).await;
     assert!(!world.mock_chips.lock().unwrap().contains_key(&bt_chip_id));
     assert!(world.mock_chips.lock().unwrap().contains_key(&wifi_chip_id));
@@ -145,7 +146,7 @@ async fn test_update_device_propagates_by_variant() {
         // Verify that update is called despite NO ID being provided in the patch
         .withf(|_, patch| patch.variant.is_some())
         .times(1)
-        .returning(|_, _| Ok(Chip::default()));
+        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -189,7 +190,7 @@ async fn test_update_chip_ble_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _| Ok(Chip::default()));
+        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
 
     mock_chip_client
         .expect_update()
@@ -202,7 +203,7 @@ async fn test_update_chip_ble_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _| Ok(Chip::default()));
+        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -252,7 +253,7 @@ async fn test_update_chip_classic_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _| Ok(Chip::default()));
+        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
 
     mock_chip_client
         .expect_update()
@@ -265,7 +266,7 @@ async fn test_update_chip_classic_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_, _| Ok(Chip::default()));
+        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);

@@ -44,6 +44,7 @@ impl Default for Bluetooth {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BluetoothUpdate {
     #[serde(default)]
     pub classic: RadioUpdate,
@@ -53,7 +54,7 @@ pub struct BluetoothUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bt_properties: Option<BtControllerProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ble_beacon: Option<beacon::BleBeacon>,
+    pub ble_beacon: Option<beacon::BleBeaconUpdate>,
 }
 
 impl BluetoothUpdate {
@@ -72,52 +73,8 @@ impl BluetoothUpdate {
         {
             if !patch.address.is_empty() {
                 bluetooth.address = patch.address.clone();
-                beacon_params.ble_beacon.address = patch.address.clone();
             }
-            if let Some(patch_settings) = &patch.settings {
-                let settings = beacon_params
-                    .ble_beacon
-                    .settings
-                    .get_or_insert_with(beacon::AdvertiseSettings::default);
-                if let Some(interval) = &patch_settings.interval {
-                    settings.interval = Some(interval.clone());
-                }
-                if let Some(tx_power) = &patch_settings.tx_power {
-                    settings.tx_power = Some(tx_power.clone());
-                }
-                settings.scannable |= patch_settings.scannable;
-                if patch_settings.timeout != 0 {
-                    settings.timeout = patch_settings.timeout;
-                }
-            }
-            if let Some(patch_adv) = &patch.adv_data {
-                let adv = beacon_params
-                    .ble_beacon
-                    .adv_data
-                    .get_or_insert_with(beacon::AdvertiseData::default);
-                adv.include_device_name |= patch_adv.include_device_name;
-                adv.include_tx_power_level |= patch_adv.include_tx_power_level;
-                if !patch_adv.manufacturer_data.is_empty() {
-                    adv.manufacturer_data = patch_adv.manufacturer_data.clone();
-                }
-                if !patch_adv.services.is_empty() {
-                    adv.services = patch_adv.services.clone();
-                }
-            }
-            if let Some(patch_scan) = &patch.scan_response {
-                let scan = beacon_params
-                    .ble_beacon
-                    .scan_response
-                    .get_or_insert_with(beacon::AdvertiseData::default);
-                scan.include_device_name |= patch_scan.include_device_name;
-                scan.include_tx_power_level |= patch_scan.include_tx_power_level;
-                if !patch_scan.manufacturer_data.is_empty() {
-                    scan.manufacturer_data = patch_scan.manufacturer_data.clone();
-                }
-                if !patch_scan.services.is_empty() {
-                    scan.services = patch_scan.services.clone();
-                }
-            }
+            patch.apply(&mut beacon_params.ble_beacon);
         }
     }
 }
@@ -217,6 +174,7 @@ pub(crate) mod beacon {
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
     pub struct BleBeacon {
         pub address: String,
         // Settings on how beacon functions
@@ -227,12 +185,100 @@ pub(crate) mod beacon {
         pub scan_response: Option<AdvertiseData>,
     }
 
+    impl BleBeacon {
+        /// Populates create-time default advertise interval (`LowPower`) and TX power
+        /// (`Low`, `-15 dBm`), preserving legacy gRPC `CreateDevice`
+        /// (`from_proto_advertise_settings(_, true)`) defaults rather than
+        /// `BluetoothActor`'s `+20 dBm` fallback when `tx_power` is `None`.
+        pub fn apply_create_defaults(&mut self) {
+            let settings = self.settings.get_or_insert_with(AdvertiseSettings::default);
+            settings.interval.get_or_insert(Interval::AdvertiseMode(AdvertiseMode::LowPower));
+            settings.tx_power.get_or_insert(TxPower::TxPowerLevel(AdvertiseTxPower::Low));
+        }
+    }
+
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct BleBeaconUpdate {
+        #[serde(skip_serializing_if = "String::is_empty")]
+        pub address: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub settings: Option<AdvertiseSettingsUpdate>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub adv_data: Option<AdvertiseDataUpdate>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub scan_response: Option<AdvertiseDataUpdate>,
+    }
+
+    impl BleBeaconUpdate {
+        pub fn apply(&self, beacon: &mut BleBeacon) {
+            let Self { address, settings, adv_data, scan_response } = self;
+            if !address.is_empty() {
+                beacon.address = address.clone();
+            }
+            if let Some(patch_settings) = settings
+                && !patch_settings.is_empty()
+            {
+                patch_settings.apply(beacon.settings.get_or_insert_with(Default::default));
+            }
+            if let Some(patch_adv) = adv_data
+                && !patch_adv.is_empty()
+            {
+                patch_adv.apply(beacon.adv_data.get_or_insert_with(Default::default));
+            }
+            if let Some(patch_scan) = scan_response
+                && !patch_scan.is_empty()
+            {
+                patch_scan.apply(beacon.scan_response.get_or_insert_with(Default::default));
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
     pub struct AdvertiseSettings {
         pub interval: Option<Interval>,
         pub tx_power: Option<TxPower>,
         pub scannable: bool,
         pub timeout: u64,
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct AdvertiseSettingsUpdate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub interval: Option<Interval>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub tx_power: Option<TxPower>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub scannable: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub timeout: Option<u64>,
+    }
+
+    impl AdvertiseSettingsUpdate {
+        /// Returns true if all update fields are None (used by callers such as
+        /// netsim-cli to omit empty sub-structs).
+        pub fn is_empty(&self) -> bool {
+            let Self { interval, tx_power, scannable, timeout } = self;
+            interval.is_none() && tx_power.is_none() && scannable.is_none() && timeout.is_none()
+        }
+
+        pub fn apply(&self, settings: &mut AdvertiseSettings) {
+            let Self { interval, tx_power, scannable, timeout } = self;
+            if let Some(interval) = interval {
+                settings.interval = Some(interval.clone());
+            }
+            if let Some(tx_power) = tx_power {
+                settings.tx_power = Some(tx_power.clone());
+            }
+            if let Some(scannable) = *scannable {
+                settings.scannable = scannable;
+            }
+            if let Some(timeout) = *timeout {
+                settings.timeout = timeout;
+            }
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -277,6 +323,7 @@ pub(crate) mod beacon {
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
     pub struct AdvertiseData {
         pub include_device_name: bool,
         pub include_tx_power_level: bool,
@@ -285,6 +332,50 @@ pub(crate) mod beacon {
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct AdvertiseDataUpdate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub include_device_name: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub include_tx_power_level: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub manufacturer_data: Option<Vec<u8>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub services: Option<Vec<Service>>,
+    }
+
+    impl AdvertiseDataUpdate {
+        /// Returns true if all update fields are None (used by callers such as
+        /// netsim-cli to omit empty sub-structs).
+        pub fn is_empty(&self) -> bool {
+            let Self { include_device_name, include_tx_power_level, manufacturer_data, services } =
+                self;
+            include_device_name.is_none()
+                && include_tx_power_level.is_none()
+                && manufacturer_data.is_none()
+                && services.is_none()
+        }
+
+        pub fn apply(&self, data: &mut AdvertiseData) {
+            let Self { include_device_name, include_tx_power_level, manufacturer_data, services } =
+                self;
+            if let Some(include_device_name) = *include_device_name {
+                data.include_device_name = include_device_name;
+            }
+            if let Some(include_tx_power_level) = *include_tx_power_level {
+                data.include_tx_power_level = include_tx_power_level;
+            }
+            if let Some(manufacturer_data) = manufacturer_data {
+                data.manufacturer_data = manufacturer_data.clone();
+            }
+            if let Some(services) = services {
+                data.services = services.clone();
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
     pub struct Service {
         pub uuid: String,
         pub data: Vec<u8>,
@@ -416,25 +507,31 @@ mod tests {
         };
 
         let update = BluetoothUpdate {
-            ble_beacon: Some(beacon::BleBeacon {
+            ble_beacon: Some(beacon::BleBeaconUpdate {
                 address: "AA:BB:CC:DD:EE:FF".to_string(),
-                settings: Some(beacon::AdvertiseSettings {
+                settings: Some(beacon::AdvertiseSettingsUpdate {
                     interval: Some(beacon::Interval::Milliseconds(250)),
                     tx_power: Some(beacon::TxPower::Dbm(-5)),
-                    scannable: true,
-                    timeout: 500,
+                    scannable: Some(true),
+                    timeout: Some(500),
                 }),
-                adv_data: Some(beacon::AdvertiseData {
-                    include_device_name: true,
-                    include_tx_power_level: true,
-                    manufacturer_data: vec![1, 2, 3],
-                    services: vec![beacon::Service { uuid: "180D".to_string(), data: vec![4] }],
+                adv_data: Some(beacon::AdvertiseDataUpdate {
+                    include_device_name: Some(true),
+                    include_tx_power_level: Some(true),
+                    manufacturer_data: Some(vec![1, 2, 3]),
+                    services: Some(vec![beacon::Service {
+                        uuid: "180D".to_string(),
+                        data: vec![4],
+                    }]),
                 }),
-                scan_response: Some(beacon::AdvertiseData {
-                    include_device_name: true,
-                    include_tx_power_level: false,
-                    manufacturer_data: vec![5, 6],
-                    services: vec![beacon::Service { uuid: "180F".to_string(), data: vec![7] }],
+                scan_response: Some(beacon::AdvertiseDataUpdate {
+                    include_device_name: Some(true),
+                    include_tx_power_level: Some(false),
+                    manufacturer_data: Some(vec![5, 6]),
+                    services: Some(vec![beacon::Service {
+                        uuid: "180F".to_string(),
+                        data: vec![7],
+                    }]),
                 }),
             }),
             ..Default::default()

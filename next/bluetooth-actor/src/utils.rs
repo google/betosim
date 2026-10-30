@@ -48,6 +48,37 @@ pub(crate) trait ToChipError<T> {
 
 impl<T> ToChipError<T> for Result<T, RadioError> {
     fn to_chip_error(self) -> Result<T, ChipError> {
-        self.map_err(|e| ChipError::Backend(Box::new(e)))
+        self.map_err(|e| match e {
+            RadioError::DuplicateControllerId(id) => ChipError::ChipExists(id),
+            RadioError::AddressInUse(addr) => ChipError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("address already in use: {addr}"),
+            )),
+            RadioError::MalformedAddress(msg) => ChipError::InvalidAddress(msg.into()),
+            other => ChipError::Backend(Box::new(other)),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_chip_error_mappings() {
+        let dup: Result<(), RadioError> = Err(RadioError::DuplicateControllerId(42));
+        assert!(matches!(dup.to_chip_error(), Err(ChipError::ChipExists(42))));
+
+        let addr: rootcanal::Address = "00:11:22:33:44:55".parse().unwrap();
+        let in_use: Result<(), RadioError> = Err(RadioError::AddressInUse(addr));
+        match in_use.to_chip_error() {
+            Err(ChipError::Io(io_err)) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::AlreadyExists);
+            }
+            other => panic!("Expected ChipError::Io(AlreadyExists), got {other:?}"),
+        }
+
+        let bad_addr: Result<(), RadioError> = Err(RadioError::MalformedAddress("bad".into()));
+        assert!(matches!(bad_addr.to_chip_error(), Err(ChipError::InvalidAddress(_))));
     }
 }

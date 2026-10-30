@@ -150,16 +150,16 @@ async fn test_beacon_advertises_configured_tx_power() {
     let id = *world.chips.get("Beacon").unwrap();
     let update = netsim_model::ChipUpdate {
         variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
-            ble_beacon: Some(netsim_model::BleBeacon {
-                settings: Some(netsim_model::AdvertiseSettings {
+            ble_beacon: Some(netsim_model::BleBeaconUpdate {
+                settings: Some(netsim_model::AdvertiseSettingsUpdate {
                     tx_power: Some(netsim_model::TxPower::TxPowerLevel(
                         netsim_model::AdvertiseTxPower::Low,
                     )),
-                    scannable: true,
+                    scannable: Some(true),
                     ..Default::default()
                 }),
-                adv_data: Some(netsim_model::AdvertiseData {
-                    include_tx_power_level: true,
+                adv_data: Some(netsim_model::AdvertiseDataUpdate {
+                    include_tx_power_level: Some(true),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -193,16 +193,16 @@ async fn test_beacon_patch_updates_advertising_data() {
     let id = *world.chips.get("Beacon").unwrap();
     let update = netsim_model::ChipUpdate {
         variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
-            ble_beacon: Some(netsim_model::BleBeacon {
-                settings: Some(netsim_model::AdvertiseSettings {
+            ble_beacon: Some(netsim_model::BleBeaconUpdate {
+                settings: Some(netsim_model::AdvertiseSettingsUpdate {
                     interval: Some(netsim_model::Interval::Milliseconds(50)),
                     tx_power: Some(netsim_model::TxPower::Dbm(-8)),
-                    scannable: true,
+                    scannable: Some(true),
                     ..Default::default()
                 }),
-                adv_data: Some(netsim_model::AdvertiseData {
-                    include_tx_power_level: true,
-                    manufacturer_data: vec![0xDE, 0xAD],
+                adv_data: Some(netsim_model::AdvertiseDataUpdate {
+                    include_tx_power_level: Some(true),
+                    manufacturer_data: Some(vec![0xDE, 0xAD]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -236,11 +236,11 @@ async fn test_beacon_timeout_disables_advertising() {
     let id = *world.chips.get("Beacon").unwrap();
     let update = netsim_model::ChipUpdate {
         variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
-            ble_beacon: Some(netsim_model::BleBeacon {
-                settings: Some(netsim_model::AdvertiseSettings {
+            ble_beacon: Some(netsim_model::BleBeaconUpdate {
+                settings: Some(netsim_model::AdvertiseSettingsUpdate {
                     interval: Some(netsim_model::Interval::Milliseconds(30)),
-                    scannable: true,
-                    timeout: 120,
+                    scannable: Some(true),
+                    timeout: Some(120),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -276,11 +276,11 @@ async fn test_beacon_repatch_cancels_previous_timeout() {
     // First patch with a short timeout (150ms)
     let first_update = netsim_model::ChipUpdate {
         variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
-            ble_beacon: Some(netsim_model::BleBeacon {
-                settings: Some(netsim_model::AdvertiseSettings {
+            ble_beacon: Some(netsim_model::BleBeaconUpdate {
+                settings: Some(netsim_model::AdvertiseSettingsUpdate {
                     interval: Some(netsim_model::Interval::Milliseconds(30)),
-                    scannable: true,
-                    timeout: 150,
+                    scannable: Some(true),
+                    timeout: Some(150),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -294,11 +294,11 @@ async fn test_beacon_repatch_cancels_previous_timeout() {
     // Re-patch immediately with a much longer timeout (2000ms)
     let second_update = netsim_model::ChipUpdate {
         variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(netsim_model::BluetoothUpdate {
-            ble_beacon: Some(netsim_model::BleBeacon {
-                settings: Some(netsim_model::AdvertiseSettings {
+            ble_beacon: Some(netsim_model::BleBeaconUpdate {
+                settings: Some(netsim_model::AdvertiseSettingsUpdate {
                     interval: Some(netsim_model::Interval::Milliseconds(30)),
-                    scannable: true,
-                    timeout: 2000,
+                    scannable: Some(true),
+                    timeout: Some(2000),
                     ..Default::default()
                 }),
                 ..Default::default()

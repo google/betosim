@@ -41,6 +41,38 @@ use crate::{
 
 const CHIP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Validates the 6-octet `XX:XX:XX:XX:XX:XX` format expected by
+/// `rootcanal::Address::from_str` without coupling the radio-agnostic
+/// `device-actor` crate to `rootcanal`.
+fn is_valid_ble_address(addr: &str) -> bool {
+    let mut parts = addr.split(':');
+    for _ in 0..6 {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != 2 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
+fn is_ble_address_in_use(
+    addr: &str,
+    existing_bt_addresses: &[String],
+    device_chips: &[Chip],
+) -> bool {
+    addr != "00:00:00:00:00:00"
+        && (existing_bt_addresses.iter().any(|a| a.eq_ignore_ascii_case(addr))
+            || device_chips.iter().any(|c| {
+                matches!(
+                    &c.variant,
+                    Some(netsim_model::ChipVariant::Bluetooth(existing_bt))
+                        if existing_bt.address.eq_ignore_ascii_case(addr)
+                )
+            }))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct InternalDevice {
     device: device_api::Device,
@@ -579,6 +611,19 @@ impl DeviceActor {
         }
     }
 
+    fn collect_bluetooth_addresses(&self) -> Vec<String> {
+        self.devices
+            .values()
+            .flat_map(|d| &d.device.chips)
+            .filter_map(|c| match &c.variant {
+                Some(netsim_model::ChipVariant::Bluetooth(bt)) if !bt.address.is_empty() => {
+                    Some(bt.address.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Adds a chip to a device.
     #[allow(clippy::too_many_arguments)]
     async fn perform_add_chip(
@@ -586,13 +631,63 @@ impl DeviceActor {
         chip_clients: &HashMap<ChipKind, Box<dyn ChipClient>>,
         link_client: &dyn LinkClient,
         capture_client: &Option<Arc<dyn CaptureSender>>,
+        existing_bt_addresses: &[String],
         entity: &mut InternalDevice,
         mut chip: netsim_model::Chip,
         packet_stream: Option<PacketStream>,
         packet_sink: Option<PacketSink>,
     ) -> Result<ChipId, DeviceError> {
-        let chip_name =
+        if let Some(netsim_model::ChipVariant::Bluetooth(ref bt)) = chip.variant
+            && let netsim_model::BluetoothMode::Beacon(ref beacon_params) = bt.mode
+        {
+            let explicit_addr = Some(bt.address.as_str()).filter(|s| !s.is_empty()).or_else(|| {
+                Some(beacon_params.ble_beacon.address.as_str()).filter(|s| !s.is_empty())
+            });
+            if let Some(addr) = explicit_addr {
+                if !is_valid_ble_address(addr) {
+                    return Err(DeviceError::InvalidInput(format!("Invalid BLE address: {addr}")));
+                }
+                if is_ble_address_in_use(addr, existing_bt_addresses, &entity.device.chips) {
+                    return Err(DeviceError::AlreadyExists(format!(
+                        "BLE address already in use: {addr}"
+                    )));
+                }
+            }
+        }
+
+        let chip_id = ChipId(next_chip_id.fetch_add(1, Ordering::SeqCst));
+        let chip_kind = chip.kind;
+        let mut chip_name =
             if chip.name.is_empty() { entity.device.name.clone() } else { chip.name.clone() };
+        if let Some(netsim_model::ChipVariant::Bluetooth(ref mut bt)) = chip.variant
+            && let netsim_model::BluetoothMode::Beacon(ref mut beacon_params) = bt.mode
+        {
+            if chip_name.is_empty() {
+                chip_name = format!("Beacon-{}", chip_id.0);
+            }
+            if entity.device.name.is_empty() {
+                entity.device.name = chip_name.clone();
+            }
+            let addr = if let Some(existing) =
+                Some(bt.address.as_str()).filter(|s| !s.is_empty()).or_else(|| {
+                    Some(beacon_params.ble_beacon.address.as_str()).filter(|s| !s.is_empty())
+                }) {
+                existing.to_owned()
+            } else {
+                let generated =
+                    format!("00:00:00:00:{:02x}:{:02x}", (chip_id.0 >> 8) as u8, chip_id.0 as u8);
+                if is_ble_address_in_use(&generated, existing_bt_addresses, &entity.device.chips) {
+                    return Err(DeviceError::AlreadyExists(format!(
+                        "BLE address already in use: {generated}"
+                    )));
+                }
+                generated
+            };
+            bt.address = addr.clone();
+            beacon_params.ble_beacon.address = addr;
+            bt.low_energy.state.get_or_insert(true);
+            bt.classic.state.get_or_insert(false);
+        }
         let manufacturer = if chip.manufacturer.is_empty() {
             entity
                 .device
@@ -608,8 +703,6 @@ impl DeviceActor {
         } else {
             chip.product_name.clone()
         };
-        let chip_id = ChipId(next_chip_id.fetch_add(1, Ordering::SeqCst));
-        let chip_kind = chip.kind;
 
         if !chip.name.is_empty() && chip.name != entity.device.name {
             info!(
@@ -670,12 +763,10 @@ impl DeviceActor {
     ) -> Result<DeviceId, DeviceError> {
         info!("DeviceActor: Create device {}", params.device_config.name);
 
-        let id = id.unwrap_or_else(|| {
-            let id = DeviceId(self.next_device_id);
-            self.next_device_id += 1;
-            id
-        });
+        let is_auto_id = id.is_none();
+        let id = id.unwrap_or(DeviceId(self.next_device_id));
 
+        let existing_bt_addresses = self.collect_bluetooth_addresses();
         let mut entity = InternalDevice::from_create_params(id, params.clone())?;
         let chip: netsim_model::Chip = params.chip.into();
         Self::perform_add_chip(
@@ -683,6 +774,7 @@ impl DeviceActor {
             &self.chip_clients,
             self.link_client.as_ref(),
             &self.capture_client,
+            &existing_bt_addresses,
             &mut entity,
             chip,
             packet_stream,
@@ -690,6 +782,9 @@ impl DeviceActor {
         )
         .await?;
 
+        if is_auto_id {
+            self.next_device_id += 1;
+        }
         self.devices.insert(id, entity);
         self.stats.update_device_count(self.devices.len(), true);
 
@@ -712,6 +807,7 @@ impl DeviceActor {
         if let Some(id) = self.guid_to_id.get(&params.device_guid) {
             // Add Chip to Existing Device
             let id = *id;
+            let existing_bt_addresses = self.collect_bluetooth_addresses();
             let entity = self
                 .devices
                 .get_mut(&id)
@@ -722,6 +818,7 @@ impl DeviceActor {
                 &self.chip_clients,
                 self.link_client.as_ref(),
                 &self.capture_client,
+                &existing_bt_addresses,
                 entity,
                 params.chip,
                 params.packet_stream,
@@ -912,6 +1009,72 @@ impl DeviceActor {
     }
 }
 
+fn validate_update_chips(
+    id: DeviceId,
+    existing_device: &InternalDevice,
+    devices: &HashMap<DeviceId, InternalDevice>,
+    chips: &[ChipUpdate],
+) -> Result<(), DeviceError> {
+    if chips.is_empty() {
+        return Err(DeviceError::InvalidInput("chips list cannot be empty".to_string()));
+    }
+    for u in chips {
+        let matched_chip = if let Some(target_id) = u.id {
+            let Some(c) = existing_device.device.chips.iter().find(|c| c.id == target_id.0) else {
+                return Err(DeviceError::NotFound(format!(
+                    "Chip id {target_id} not found on device {id}"
+                )));
+            };
+            Some(c)
+        } else if let Some(name) = u.name.as_deref().filter(|n| !n.is_empty()) {
+            let Some(c) = existing_device.device.chips.iter().find(|c| c.name == name) else {
+                return Err(DeviceError::NotFound(format!(
+                    "Chip '{name}' not found on device {id}"
+                )));
+            };
+            Some(c)
+        } else if let Some(v) = &u.variant {
+            let Some(c) = existing_device.device.chips.iter().find(|c| v.kind() == c.kind) else {
+                return Err(DeviceError::NotFound(format!(
+                    "Chip of kind {:?} not found on device {id}",
+                    v.kind()
+                )));
+            };
+            Some(c)
+        } else {
+            None
+        };
+
+        if let Some(netsim_model::ChipVariantUpdate::Bluetooth(bt_upd)) = &u.variant
+            && let Some(ble_beacon) = &bt_upd.ble_beacon
+            && !ble_beacon.address.is_empty()
+        {
+            let addr = &ble_beacon.address;
+            if !is_valid_ble_address(addr) {
+                return Err(DeviceError::InvalidInput(format!("Invalid BLE address: {addr}")));
+            }
+            let target_chip_id = matched_chip.map(|c| c.id);
+            if addr != "00:00:00:00:00:00"
+                && devices.values().any(|d| {
+                    d.device.chips.iter().any(|c| {
+                        !(d.device.id == id.0 && Some(c.id) == target_chip_id)
+                            && matches!(
+                                &c.variant,
+                                Some(netsim_model::ChipVariant::Bluetooth(existing_bt))
+                                    if existing_bt.address.eq_ignore_ascii_case(addr)
+                            )
+                    })
+                })
+            {
+                return Err(DeviceError::AlreadyExists(format!(
+                    "BLE address already in use: {addr}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ActorService for DeviceActor {
     type Id = DeviceId;
     type Create = DeviceCreate;
@@ -928,6 +1091,16 @@ impl ActorService for DeviceActor {
         params: Self::Create,
         ctx: &mut DynContext<Self>,
     ) -> Result<Self::Id, Self::Error> {
+        let effective_name = if !params.device_config.name.is_empty() {
+            &params.device_config.name
+        } else {
+            &params.chip.name
+        };
+        if !effective_name.is_empty()
+            && self.devices.values().any(|d| d.device.name == *effective_name)
+        {
+            return Err(DeviceError::AlreadyExists(effective_name.clone()));
+        }
         self.perform_create_device(id, params, None, None, ctx).await
     }
 
@@ -945,6 +1118,14 @@ impl ActorService for DeviceActor {
         update: Self::Update,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
+        // Validate target device, chip selectors, and BLE beacon addresses before mutating state.
+        let Some(existing_device) = self.devices.get(&id) else {
+            return Err(DeviceError::DeviceNotFound(id.to_string()));
+        };
+        if let Some(chips) = &update.chips {
+            validate_update_chips(id, existing_device, &self.devices, chips)?;
+        }
+
         // Update does not affect device count, so no timeout logic change needed.
         let Some(entity) = self.devices.get_mut(&id) else {
             return Err(DeviceError::DeviceNotFound(id.to_string()));
@@ -971,10 +1152,20 @@ impl ActorService for DeviceActor {
                 // Priority 1: Exact ID match
                 specific_update = chips.iter().find(|u| u.id == Some(ChipId(chip.id)));
 
-                // Priority 2: Variant match (if no ID match found)
+                // Priority 2: Exact non-empty name match (if no ID specified)
                 if specific_update.is_none() {
                     specific_update = chips.iter().find(|u| {
-                        u.id.is_none() && u.variant.as_ref().is_some_and(|v| v.kind() == chip.kind)
+                        u.id.is_none()
+                            && u.name.as_deref().is_some_and(|n| !n.is_empty() && n == chip.name)
+                    });
+                }
+
+                // Priority 3: Variant match (if neither ID nor non-empty name was specified)
+                if specific_update.is_none() {
+                    specific_update = chips.iter().find(|u| {
+                        u.id.is_none()
+                            && u.name.as_deref().is_none_or(str::is_empty)
+                            && u.variant.as_ref().is_some_and(|v| v.kind() == chip.kind)
                     });
                 }
             }
@@ -1063,6 +1254,7 @@ impl ActorService for DeviceActor {
                 let Some(id) = id else {
                     return Err(DeviceError::NotFound("AddChip requires a device ID".into()));
                 };
+                let existing_bt_addresses = self.collect_bluetooth_addresses();
                 let Some(entity) = self.devices.get_mut(&id) else {
                     return Err(DeviceError::DeviceNotFound(id.to_string()));
                 };
@@ -1074,6 +1266,7 @@ impl ActorService for DeviceActor {
                     &self.chip_clients,
                     self.link_client.as_ref(),
                     &self.capture_client,
+                    &existing_bt_addresses,
                     entity,
                     chip,
                     packet_stream,
@@ -1096,5 +1289,89 @@ impl ActorService for DeviceActor {
         _ctx: &mut DynContext<Self>,
     ) -> Result<Vec<Self::Entity>, Self::Error> {
         Ok(self.devices.values().map(|e| e.device.clone()).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_ble_address() {
+        assert!(is_valid_ble_address("00:11:22:33:44:55"));
+        assert!(is_valid_ble_address("aa:bb:cc:dd:ee:ff"));
+        assert!(is_valid_ble_address("AA:BB:CC:DD:EE:FF"));
+        assert!(!is_valid_ble_address(""));
+        assert!(!is_valid_ble_address("00:11:22:33:44"));
+        assert!(!is_valid_ble_address("00:11:22:33:44:55:66"));
+        assert!(!is_valid_ble_address("0:11:22:33:44:55"));
+        assert!(!is_valid_ble_address("gg:11:22:33:44:55"));
+        assert!(!is_valid_ble_address("not-an-address"));
+    }
+
+    #[test]
+    fn test_is_ble_address_in_use() {
+        let existing = vec!["11:22:33:44:55:66".to_string()];
+        let chip = Chip {
+            kind: ChipKind::BLUETOOTH,
+            variant: Some(netsim_model::ChipVariant::Bluetooth(Box::new(
+                netsim_model::Bluetooth {
+                    address: "aa:bb:cc:dd:ee:ff".to_string(),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        let chips = vec![chip];
+
+        assert!(!is_ble_address_in_use("00:00:00:00:00:00", &existing, &chips));
+        assert!(is_ble_address_in_use("11:22:33:44:55:66", &existing, &chips));
+        assert!(is_ble_address_in_use("AA:BB:CC:DD:EE:FF", &existing, &chips));
+        assert!(!is_ble_address_in_use("00:11:22:33:44:55", &existing, &chips));
+    }
+
+    #[test]
+    fn test_validate_update_chips_missing_variant_kind_returns_not_found() {
+        let id = DeviceId(1);
+        let internal_device = InternalDevice {
+            device: device_api::Device {
+                id: 1,
+                name: "dev-1".to_string(),
+                chips: vec![Chip {
+                    id: 10,
+                    name: "bt-0".to_string(),
+                    kind: ChipKind::BLUETOOTH,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            create_params: None,
+            guid: None,
+            chip_stats: HashMap::new(),
+            last_known_stats: HashMap::new(),
+        };
+        let mut devices = HashMap::new();
+        devices.insert(id, internal_device.clone());
+
+        let missing_wifi_update = vec![ChipUpdate {
+            variant: Some(netsim_model::ChipVariantUpdate::Wifi(
+                netsim_model::WifiUpdate::default(),
+            )),
+            ..Default::default()
+        }];
+        let err = validate_update_chips(id, &internal_device, &devices, &missing_wifi_update)
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            DeviceError::NotFound(msg) if msg == "Chip of kind WIFI not found on device 1"
+        ));
+
+        let matching_bt_update = vec![ChipUpdate {
+            variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(
+                netsim_model::BluetoothUpdate::default(),
+            )),
+            ..Default::default()
+        }];
+        assert!(validate_update_chips(id, &internal_device, &devices, &matching_bt_update).is_ok());
     }
 }
