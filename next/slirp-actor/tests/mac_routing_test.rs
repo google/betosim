@@ -20,60 +20,39 @@
 
 use std::{net::Ipv4Addr, time::Duration};
 
-use netsim_packets::EthernetFrame;
+use netsim_packets::{EthernetFrame, Ipv4Header};
 use slirp_actor::SlirpBackend;
 use tokio::time::timeout;
 
 use super::{
-    packet_helpers::create_udp_packet_with_mac as create_udp_packet, test_driver::SlirpTestDriver,
+    packet_helpers::{build_dns_query_packet_with_dst, build_udp_packet_with_dst_mac},
+    test_driver::SlirpTestDriver,
 };
+
+static TFTP_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 const NON_DEFAULT_MAC: [u8; 6] = [0x02, 0x99, 0x88, 0x77, 0x66, 0x55];
 
-/// Helper to create a DNS query UDP packet with a specified source MAC address.
-fn create_dns_query_packet(
-    src_mac: [u8; 6],
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
-    src_port: u16,
-    query_name: &str,
-    qtype: u16,
-) -> bytes::Bytes {
-    let mut dns_payload = vec![
-        0x12, 0x34, // TXID
-        0x01, 0x00, // Flags (RD=1)
-        0x00, 0x01, // Questions = 1
-        0x00, 0x00, // Answers = 0
-        0x00, 0x00, // Authority = 0
-        0x00, 0x00, // Additional = 0
-    ];
-    for label in query_name.split('.') {
-        dns_payload.push(label.len() as u8);
-        dns_payload.extend_from_slice(label.as_bytes());
-    }
-    dns_payload.push(0); // Null terminator
-    dns_payload.extend_from_slice(&qtype.to_be_bytes()); // Type (1 = A, 28 = AAAA)
-    dns_payload.extend_from_slice(&1u16.to_be_bytes()); // Class IN
-
-    create_udp_packet(src_mac, src_ip, dst_ip, src_port, 53, &dns_payload)
-}
-
-/// Helper to create a TFTP RRQ packet with a specified source MAC address.
-fn create_tftp_rrq_packet(src_mac: [u8; 6], filename: &str) -> bytes::Bytes {
-    let mut tftp_payload = vec![0u8, 1]; // Opcode 1 (RRQ)
-    tftp_payload.extend_from_slice(filename.as_bytes());
-    tftp_payload.push(0);
-    tftp_payload.extend_from_slice(b"octet");
-    tftp_payload.push(0);
-
-    create_udp_packet(
-        src_mac,
-        Ipv4Addr::new(10, 0, 2, 15),
-        Ipv4Addr::new(10, 0, 2, 2),
-        54321,
-        69,
-        &tftp_payload,
-    )
+/// Helper to await the next IPv4 UDP downlink frame within 2 seconds.
+async fn await_udp_reply(driver: &mut SlirpTestDriver) -> bytes::Bytes {
+    let is_udp = |frame: &bytes::Bytes| {
+        EthernetFrame::parse(frame)
+            .filter(|(eth, _)| eth.ethertype.get() == netsim_packets::ether_type::IPV4)
+            .and_then(|(_, payload)| Ipv4Header::parse(payload))
+            .is_some_and(|(ip, _)| ip.protocol == netsim_packets::IP_P_UDP)
+    };
+    timeout(Duration::from_secs(2), driver.recv_matching(is_udp))
+        .await
+        .expect("Timeout waiting for UDP reply")
+        .expect("Stream closed")
 }
 
 // -----------------------------------------------------------------------------
@@ -81,51 +60,51 @@ fn create_tftp_rrq_packet(src_mac: [u8; 6], filename: &str) -> bytes::Bytes {
 // -----------------------------------------------------------------------------
 
 async fn run_udp_non_default_mac_reply_test(backend: SlirpBackend) {
-    // Given a Slirp test driver and a non-default guest MAC address
-    let mut driver = SlirpTestDriver::new(backend, Some("8.8.8.8".to_string())).await;
+    // Given a Slirp test driver running the specified backend and an echo socket
+    let mut driver = SlirpTestDriver::new(backend, None).await;
 
-    // When sending a UDP datagram from non-default guest MAC address [0x02, 0x99,
-    // 0x88, 0x77, 0x66, 0x55]
-    let udp_packet = create_udp_packet(
-        NON_DEFAULT_MAC,
-        Ipv4Addr::new(10, 0, 2, 15),
-        Ipv4Addr::new(10, 0, 2, 3),
+    let echo_socket =
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("Failed to bind UDP socket");
+    let echo_port = echo_socket.local_addr().expect("Failed to get local addr").port();
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let (len, peer) = echo_socket.recv_from(&mut buf).await.expect("Failed to recv_from");
+        echo_socket.send_to(&buf[..len], peer).await.expect("Failed to send_to");
+    });
+
+    // And the guest has resolved the gateway MAC via ARP
+    let gw_mac = driver.resolve_gateway_mac(NON_DEFAULT_MAC, Ipv4Addr::new(10, 0, 2, 15)).await;
+
+    // When the guest sends a UDP packet from a non-default MAC to the echo server
+    let payload = [0x12, 0x34, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let udp_packet = build_udp_packet_with_dst_mac(
+        &NON_DEFAULT_MAC,
+        &gw_mac,
+        &[10, 0, 2, 15],
+        &[127, 0, 0, 1],
         54321,
-        53,
-        &[0x12, 0x34, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        echo_port,
+        &payload,
     );
-    let send_result = driver.send_packet(udp_packet).await;
+    driver.send_packet(bytes::Bytes::from(udp_packet)).await.expect("Failed to send packet");
 
-    // Then the packet is sent successfully
-    assert!(send_result.is_ok(), "Failed to send UDP packet");
+    // Then Slirp delivers the UDP downlink reply with destination MAC matching
+    // the non-default guest MAC
+    let reply_bytes = await_udp_reply(&mut driver).await;
+    let (eth_frame, eth_payload) =
+        EthernetFrame::parse(&reply_bytes).expect("Failed to parse Ethernet frame");
+    assert_eq!(eth_frame.dst_addr.bytes, NON_DEFAULT_MAC);
+    assert_eq!(eth_frame.src_addr.bytes, gw_mac);
 
-    // Then, if a downlink reply arrives, it must be addressed to the non-default
-    // guest MAC. Accepting the default MAC here would let the misrouting bug this
-    // test guards (b/560171262) pass.
-    //
-    // NOTE: the reply comes from the host resolver via slirp's DNS proxy, which
-    // the hermetic test sandbox denies, so no IPv4 frame arrives under
-    // `bazel test` and the assertion is skipped.
-    // Slirp broadcasts an ARP request for the guest before it can deliver a
-    // reply, so skip ahead to the IPv4 frame rather than asserting on whatever
-    // arrives first.
-    let is_ipv4 = |frame: &bytes::Bytes| {
-        EthernetFrame::parse(frame).is_some_and(|(eth, _)| eth.ethertype.get() == 0x0800)
-    };
-    if let Ok(Some(reply_bytes)) =
-        timeout(Duration::from_millis(200), driver.recv_matching(is_ipv4)).await
-    {
-        let (eth_frame, _) =
-            EthernetFrame::parse(&reply_bytes).expect("Failed to parse reply Ethernet frame");
-        let dst_mac = eth_frame.dst_addr.bytes;
-        assert_eq!(
-            dst_mac, NON_DEFAULT_MAC,
-            "UDP reply was routed to {:?}, expected the non-default guest MAC {:?}",
-            dst_mac, NON_DEFAULT_MAC
-        );
-    }
+    let (_, ipv4_payload) = Ipv4Header::parse(eth_payload).expect("Failed to parse IPv4 header");
+    let (udp, udp_payload) =
+        netsim_packets::UdpHeader::parse(ipv4_payload).expect("Failed to parse UDP header");
+    assert_eq!(udp.source_port.get(), echo_port);
+    assert_eq!(udp_payload, &payload);
 }
 
+// Scenario: Route UDP downlink reply to non-default guest MAC address
 #[tokio::test]
 async fn test_udp_non_default_mac_reply() {
     for backend in [SlirpBackend::CFfi, SlirpBackend::Native] {
@@ -134,56 +113,57 @@ async fn test_udp_non_default_mac_reply() {
 }
 
 // -----------------------------------------------------------------------------
-// 2. DNS Query Non-Default MAC Reply Test
+// 2. DNS-Formatted UDP Non-Default MAC Reply Test
+//    (via loopback NAT; port-53 DNS proxy is hardcoded)
 // -----------------------------------------------------------------------------
 
 async fn run_dns_non_default_mac_reply_test(backend: SlirpBackend) {
-    // Given a Slirp test driver configured with host DNS and a non-default guest
-    // MAC address
-    let mut driver = SlirpTestDriver::new(backend, Some("8.8.8.8".to_string())).await;
+    // Given a Slirp test driver running the specified backend and a mock DNS socket
+    let mut driver = SlirpTestDriver::new(backend, None).await;
 
-    // When sending a DNS query to 10.0.2.3:53 from non-default guest MAC address
-    // [0x02, 0x99, 0x88, 0x77, 0x66, 0x55]
-    let dns_packet = create_dns_query_packet(
-        NON_DEFAULT_MAC,
-        Ipv4Addr::new(10, 0, 2, 15),
-        Ipv4Addr::new(10, 0, 2, 3),
-        53535,
-        "google.com",
-        1,
+    let dns_socket =
+        tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("Failed to bind UDP socket");
+    let dns_port = dns_socket.local_addr().expect("Failed to get local addr").port();
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let (len, peer) = dns_socket.recv_from(&mut buf).await.expect("Failed to recv_from");
+        buf[2] = 0x81;
+        buf[3] = 0x80;
+        dns_socket.send_to(&buf[..len], peer).await.expect("Failed to send_to");
+    });
+
+    // And the guest has resolved the gateway MAC via ARP
+    let gw_mac = driver.resolve_gateway_mac(NON_DEFAULT_MAC, Ipv4Addr::new(10, 0, 2, 15)).await;
+
+    // When the guest sends a DNS-formatted UDP packet from a non-default MAC to the DNS socket
+    let dns_packet = build_dns_query_packet_with_dst(
+        &NON_DEFAULT_MAC,
+        &gw_mac,
+        &[10, 0, 2, 15],
+        &[127, 0, 0, 1],
+        54321,
+        dns_port,
+        "example.com",
     );
-    let send_result = driver.send_packet(dns_packet).await;
+    driver.send_packet(bytes::Bytes::from(dns_packet)).await.expect("Failed to send packet");
 
-    // Then the DNS query packet is sent successfully
-    assert!(send_result.is_ok(), "Failed to send DNS query packet");
+    // Then Slirp delivers the DNS-formatted UDP downlink reply with destination MAC
+    // matching the non-default guest MAC
+    let reply_bytes = await_udp_reply(&mut driver).await;
+    let (eth_frame, eth_payload) =
+        EthernetFrame::parse(&reply_bytes).expect("Failed to parse Ethernet frame");
+    assert_eq!(eth_frame.dst_addr.bytes, NON_DEFAULT_MAC);
+    assert_eq!(eth_frame.src_addr.bytes, gw_mac);
 
-    // Then, if a downlink reply arrives, it must be addressed to the non-default
-    // guest MAC. Accepting the default MAC here would let the misrouting bug this
-    // test guards (b/560171262) pass.
-    //
-    // NOTE: the reply comes from the host resolver via slirp's DNS proxy, which
-    // the hermetic test sandbox denies, so no IPv4 frame arrives under
-    // `bazel test` and the assertion is skipped.
-    // Slirp broadcasts an ARP request for the guest before it can deliver a
-    // reply, so skip ahead to the IPv4 frame rather than asserting on whatever
-    // arrives first.
-    let is_ipv4 = |frame: &bytes::Bytes| {
-        EthernetFrame::parse(frame).is_some_and(|(eth, _)| eth.ethertype.get() == 0x0800)
-    };
-    if let Ok(Some(reply_bytes)) =
-        timeout(Duration::from_millis(200), driver.recv_matching(is_ipv4)).await
-    {
-        let (eth_frame, _) =
-            EthernetFrame::parse(&reply_bytes).expect("Failed to parse reply Ethernet frame");
-        let dst_mac = eth_frame.dst_addr.bytes;
-        assert_eq!(
-            dst_mac, NON_DEFAULT_MAC,
-            "DNS reply was routed to {:?}, expected the non-default guest MAC {:?}",
-            dst_mac, NON_DEFAULT_MAC
-        );
-    }
+    let (_, ipv4_payload) = Ipv4Header::parse(eth_payload).expect("Failed to parse IPv4 header");
+    let (udp, udp_payload) =
+        netsim_packets::UdpHeader::parse(ipv4_payload).expect("Failed to parse UDP header");
+    assert_eq!(udp.source_port.get(), dns_port);
+    assert_eq!(&udp_payload[..4], &[0x12, 0x34, 0x81, 0x80]);
 }
 
+// Scenario: Route DNS-formatted UDP downlink reply to non-default guest MAC address
 #[tokio::test]
 async fn test_dns_non_default_mac_reply() {
     for backend in [SlirpBackend::CFfi, SlirpBackend::Native] {
@@ -196,41 +176,58 @@ async fn test_dns_non_default_mac_reply() {
 // -----------------------------------------------------------------------------
 
 async fn run_tftp_non_default_mac_reply_test(backend: SlirpBackend) {
-    // Given a Slirp test driver and a non-default guest MAC address
-    let mut driver = SlirpTestDriver::new(backend, None).await;
+    // Given a Slirp test driver running with a local TFTP root directory
+    let count = TFTP_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_dir_path = std::env::temp_dir().join(format!(
+        "netsim_tftp_{}_{:?}_{}",
+        std::process::id(),
+        backend,
+        count
+    ));
+    std::fs::create_dir_all(&temp_dir_path).expect("Failed to create temp dir");
+    let temp_dir = TempDirGuard(temp_dir_path);
+    std::fs::write(temp_dir.0.join("pxelinux.0"), b"fake_pxelinux")
+        .expect("Failed to write TFTP payload");
 
-    // When sending a TFTP RRQ to 10.0.2.2:69 from non-default guest MAC address
-    // [0x02, 0x99, 0x88, 0x77, 0x66, 0x55]
-    let rrq_packet = create_tftp_rrq_packet(NON_DEFAULT_MAC, "pxelinux.0");
-    let send_result = driver.send_packet(rrq_packet).await;
+    let mut driver = SlirpTestDriver::new_with_tftp_dir(backend, temp_dir.0.clone()).await;
+    // And the guest has resolved the gateway MAC via ARP
+    let gw_mac = driver.resolve_gateway_mac(NON_DEFAULT_MAC, Ipv4Addr::new(10, 0, 2, 15)).await;
 
-    // Then the TFTP RRQ packet is sent successfully
-    assert!(send_result.is_ok(), "Failed to send TFTP RRQ packet");
+    // When the guest sends a TFTP RRQ packet from a non-default MAC
+    let mut tftp_rrq = vec![0u8, 1];
+    tftp_rrq.extend_from_slice(b"pxelinux.0\0octet\0");
 
-    // Then, if a downlink reply arrives, it must be addressed to the non-default
-    // guest MAC (b/560171262). TFTP requires slirp's TFTP server to be configured
-    // with a root directory, which the harness does not do, so no reply is
-    // expected under `bazel test`.
-    // Slirp broadcasts an ARP request for the guest before it can deliver a
-    // reply, so skip ahead to the IPv4 frame rather than asserting on whatever
-    // arrives first.
-    let is_ipv4 = |frame: &bytes::Bytes| {
-        EthernetFrame::parse(frame).is_some_and(|(eth, _)| eth.ethertype.get() == 0x0800)
-    };
-    if let Ok(Some(reply_bytes)) =
-        timeout(Duration::from_millis(200), driver.recv_matching(is_ipv4)).await
-    {
-        let (eth_frame, _) =
-            EthernetFrame::parse(&reply_bytes).expect("Failed to parse reply Ethernet frame");
-        let dst_mac = eth_frame.dst_addr.bytes;
-        assert_eq!(
-            dst_mac, NON_DEFAULT_MAC,
-            "TFTP reply was routed to {:?}, expected the non-default guest MAC {:?}",
-            dst_mac, NON_DEFAULT_MAC
-        );
-    }
+    let rrq_packet = build_udp_packet_with_dst_mac(
+        &NON_DEFAULT_MAC,
+        &gw_mac,
+        &[10, 0, 2, 15],
+        &[10, 0, 2, 2],
+        55555,
+        69,
+        &tftp_rrq,
+    );
+    driver.send_packet(bytes::Bytes::from(rrq_packet)).await.expect("Failed to send TFTP RRQ");
+
+    // Then Slirp delivers TFTP DATA block 1 with destination MAC matching the non-default guest MAC
+    let reply_bytes = await_udp_reply(&mut driver).await;
+    let (eth_frame, eth_payload) =
+        EthernetFrame::parse(&reply_bytes).expect("Failed to parse Ethernet frame");
+    assert_eq!(eth_frame.dst_addr.bytes, NON_DEFAULT_MAC);
+    assert_eq!(eth_frame.src_addr.bytes, gw_mac);
+
+    let (_, ipv4_payload) = Ipv4Header::parse(eth_payload).expect("Failed to parse IPv4 header");
+    let (_, udp_payload) =
+        netsim_packets::UdpHeader::parse(ipv4_payload).expect("Failed to parse UDP header");
+
+    assert_eq!(
+        &udp_payload[..4],
+        &[0x00, 0x03, 0x00, 0x01],
+        "Expected TFTP DATA (opcode=3) block 1"
+    );
+    assert_eq!(&udp_payload[4..], b"fake_pxelinux", "Expected TFTP payload to match");
 }
 
+// Scenario: Route TFTP DATA reply to non-default guest MAC address
 #[tokio::test]
 async fn test_tftp_non_default_mac_reply() {
     for backend in [SlirpBackend::CFfi, SlirpBackend::Native] {

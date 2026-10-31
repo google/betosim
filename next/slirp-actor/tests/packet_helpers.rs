@@ -166,11 +166,64 @@ pub fn create_udp_packet_with_mac(
     dst_port: u16,
     payload: &[u8],
 ) -> bytes::Bytes {
-    bytes::Bytes::from(
-        PacketBuilder::new(DEFAULT_DST_MAC, src_mac, ether_type::IPV4)
-            .ipv4(src_ip.octets(), dst_ip.octets(), IP_P_UDP)
-            .udp(src_port, dst_port)
-            .payload(payload),
+    bytes::Bytes::from(build_udp_packet_with_dst_mac(
+        &src_mac,
+        &DEFAULT_DST_MAC,
+        &src_ip.octets(),
+        &dst_ip.octets(),
+        src_port,
+        dst_port,
+        payload,
+    ))
+}
+
+pub fn build_udp_packet_with_dst_mac(
+    src_mac: &[u8; 6],
+    dst_mac: &[u8; 6],
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    PacketBuilder::new(*dst_mac, *src_mac, ether_type::IPV4)
+        .ipv4(*src_ip, *dst_ip, IP_P_UDP)
+        .udp(src_port, dst_port)
+        .payload(payload)
+}
+
+pub fn build_dns_query_packet_with_dst(
+    src_mac: &[u8; 6],
+    dst_mac: &[u8; 6],
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    domain: &str,
+) -> Vec<u8> {
+    let mut dns_payload = vec![
+        0x12, 0x34, // TXID
+        0x01, 0x00, // Flags (RD=1)
+        0x00, 0x01, // Questions = 1
+        0x00, 0x00, // Answers = 0
+        0x00, 0x00, // Authority = 0
+        0x00, 0x00, // Additional = 0
+    ];
+    for label in domain.split('.') {
+        dns_payload.push(label.len() as u8);
+        dns_payload.extend_from_slice(label.as_bytes());
+    }
+    dns_payload.push(0); // Null terminator
+    dns_payload.extend_from_slice(&1u16.to_be_bytes()); // Type A
+    dns_payload.extend_from_slice(&1u16.to_be_bytes()); // Class IN
+    build_udp_packet_with_dst_mac(
+        src_mac,
+        dst_mac,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        &dns_payload,
     )
 }
 

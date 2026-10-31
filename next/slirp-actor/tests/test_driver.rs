@@ -74,10 +74,12 @@ pub struct SlirpTestDriver {
 
 #[allow(dead_code)]
 impl SlirpTestDriver {
-    /// Creates a new SlirpTestDriver for the given backend.
-    pub async fn new(backend: SlirpBackend, host_dns: Option<String>) -> Self {
+    async fn new_with_config(
+        backend: SlirpBackend,
+        config: slirp_actor::SlirpConfig,
+        host_dns: Option<String>,
+    ) -> Self {
         let (tx_out, rx_out) = mpsc::unbounded_channel::<bytes::Bytes>();
-        let config = slirp_actor::SlirpConfig::default();
         let mut actor = SlirpActor::new_with_backend(config, None, host_dns, backend).await;
         let mut ctx = MockContext::default();
 
@@ -96,10 +98,67 @@ impl SlirpTestDriver {
                 &mut ctx,
             )
             .await
-            .unwrap();
+            .expect("Failed to register client");
 
         actor.on_start(&mut ctx).await;
         Self { actor, ctx, rx_out }
+    }
+
+    /// Creates a new SlirpTestDriver for the given backend.
+    pub async fn new(backend: SlirpBackend, host_dns: Option<String>) -> Self {
+        Self::new_with_config(backend, slirp_actor::SlirpConfig::default(), host_dns).await
+    }
+
+    /// Creates a new SlirpTestDriver with a TFTP root directory.
+    pub async fn new_with_tftp_dir(backend: SlirpBackend, tftp_dir: std::path::PathBuf) -> Self {
+        let mut config = slirp_actor::SlirpConfig::default();
+        #[cfg(not(feature = "cuttlefish"))]
+        {
+            config.tftp_path = Some(tftp_dir);
+        }
+        #[cfg(feature = "cuttlefish")]
+        {
+            config.tftp_root = Some(tftp_dir);
+        }
+        Self::new_with_config(backend, config, None).await
+    }
+
+    /// Resolves the active backend's gateway MAC via ARP and populates C `libslirp`'s
+    /// ARP cache for `guest_mac`.
+    pub async fn resolve_gateway_mac(
+        &mut self,
+        guest_mac: [u8; 6],
+        guest_ip: std::net::Ipv4Addr,
+    ) -> [u8; 6] {
+        let arp_req = netsim_packets::build_arp_frame(
+            guest_mac,
+            guest_ip,
+            std::net::Ipv4Addr::new(10, 0, 2, 2),
+        );
+        self.send_packet(arp_req).await.expect("Failed to send ARP request");
+        let is_arp_reply = |p: &bytes::Bytes| {
+            netsim_packets::EthernetFrame::parse(p)
+                .filter(|(eth, _)| eth.ethertype.get() == netsim_packets::ether_type::ARP)
+                .and_then(|(_, payload)| netsim_packets::ArpPacket::parse(payload))
+                .is_some_and(|arp| arp.opcode.get() == netsim_packets::arp_op::REPLY)
+        };
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.recv_matching(is_arp_reply),
+        )
+        .await
+        .expect("Timeout waiting for ARP reply")
+        .expect("Stream closed");
+        let (_, eth_payload) =
+            netsim_packets::EthernetFrame::parse(&reply).expect("Failed to parse Ethernet frame");
+        let arp =
+            netsim_packets::ArpPacket::parse(eth_payload).expect("Failed to parse ARP packet");
+        arp.sender_hardware_addr.bytes
+    }
+
+    /// Returns the active SLiRP backend after any feature fallback.
+    pub fn backend(&self) -> SlirpBackend {
+        self.actor.backend()
     }
 
     /// Sends a packet into the Slirp stack.
