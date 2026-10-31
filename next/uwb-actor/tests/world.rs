@@ -126,14 +126,17 @@ impl World {
         self.packet_rxs.remove(&chip_id);
     }
 
-    pub async fn and_tick_occurs(&mut self) {
-        tokio::time::sleep(2 * UwbActor::TICK_INTERVAL).await;
-    }
-
     pub async fn then_chip_does_not_exist(&self, chip_id: u32) {
-        // Yield to allow the actor to process the stream/sink closure.
-        tokio::task::yield_now().await;
-        let err = self.when_get_chip(chip_id).await.unwrap_err();
+        let err = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Err(err) = self.when_get_chip(chip_id).await {
+                    break err;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for chip deletion");
         let Some(ChipError::ChipNotFound(ChipId(actual_chip_id))) = err.as_chip_error() else {
             panic!("Unexpected error: {err}");
         };
@@ -263,10 +266,12 @@ impl World {
                 cfg_id: uci::AppConfigTlvType::ScheduleMode,
                 v: vec![uci::ScheduleMode::TimeScheduled as u8],
             },
-            // Prevents additional measurements from being triggered
+            // Disable independent ranging ticks on the controlee.
             uci::AppConfigTlv {
                 cfg_id: uci::AppConfigTlvType::RangingDuration,
-                v: u32::MAX.to_le_bytes().to_vec(),
+                v: if device_type == uci::DeviceType::Controller { 200u32 } else { u32::MAX }
+                    .to_le_bytes()
+                    .to_vec(),
             },
         ];
         let config_cmd = uci::SessionSetAppConfigCmd { session_token: session_id, tlvs };
@@ -283,10 +288,7 @@ impl World {
         assert_eq!(status_ntf2.session_state, uci::SessionState::SessionStateIdle);
     }
 
-    pub async fn when_ranging_is_started(&mut self, chip_id: u32, session_id: u32) {
-        let start_cmd = uci::SessionStartCmd { session_id };
-        self.when_packet_is_sent(chip_id, &start_cmd.encode_to_vec().unwrap()).await;
-
+    async fn then_session_started_is_received(&mut self, chip_id: u32) {
         let p1 = self.then_packet_is_received(chip_id).await;
         let (start_rsp, _) = uci::SessionStartRsp::decode(&p1).expect("session start response");
         assert_eq!(start_rsp.status, uci::Status::Ok);
@@ -302,18 +304,50 @@ impl World {
         assert_eq!(device_status_ntf.device_state, uci::DeviceState::DeviceStateActive);
     }
 
+    pub async fn when_ranging_is_started(&mut self, chip_id: u32, session_id: u32) {
+        let start_cmd = uci::SessionStartCmd { session_id };
+        self.when_packet_is_sent(chip_id, &start_cmd.encode_to_vec().unwrap()).await;
+        self.then_session_started_is_received(chip_id).await;
+    }
+
     pub async fn when_ranging_is_triggered(&mut self, chip_id: u32, session_id: u32) {
         self.client
             .start_ranging(ChipId(chip_id), session_id)
             .await
-            .expect("WHEN: Failed to trigger ranging round");
+            .expect("WHEN: Failed to start ranging via client");
+        self.then_session_started_is_received(chip_id).await;
     }
 
-    pub async fn when_ranging_is_stopped(&mut self, chip_id: u32, session_id: u32) {
+    pub async fn when_ranging_is_stopped(&mut self, chip_id: u32, session_id: u32) -> u64 {
         self.client
             .stop_ranging(ChipId(chip_id), session_id)
             .await
             .expect("WHEN: Failed to stop ranging session");
+
+        let mut extra_measurements = 0;
+        loop {
+            let p = self.then_packet_is_received(chip_id).await;
+            if let Ok((stop_rsp, _)) = uci::SessionStopRsp::decode(&p) {
+                assert_eq!(stop_rsp.status, uci::Status::Ok);
+                break;
+            } else if let Ok((ntf, _)) = uci::ShortMacTwoWaySessionInfoNtf::decode(&p) {
+                extra_measurements += ntf.two_way_ranging_measurements.len() as u64;
+            } else {
+                panic!("Unexpected packet received while stopping ranging: {p:?}");
+            }
+        }
+
+        let p2 = self.then_packet_is_received(chip_id).await;
+        let (status_ntf, _) =
+            uci::SessionStatusNtf::decode(&p2).expect("session status notification (stop)");
+        assert_eq!(status_ntf.session_state, uci::SessionState::SessionStateIdle);
+
+        let p3 = self.then_packet_is_received(chip_id).await;
+        let (device_status_ntf, _) =
+            uci::CoreDeviceStatusNtf::decode(&p3).expect("device status notification (ready)");
+        assert_eq!(device_status_ntf.device_state, uci::DeviceState::DeviceStateReady);
+
+        extra_measurements
     }
 
     pub async fn then_ranging_measurement_is_received(

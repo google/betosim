@@ -79,22 +79,20 @@ async fn test_ranging_between_two_chips() {
         )
         .await;
 
-    world.when_ranging_is_started(chip_a, 1).await;
     world.when_ranging_is_started(chip_b, 1).await;
-
-    // Trigger one ranging round manually
-    world.when_ranging_is_triggered(chip_a, 1).await;
+    world.when_ranging_is_started(chip_a, 1).await;
 
     // Then
-    // distance = 1m = 1000cm
+    // distance = 10m = 1000cm
     world.then_ranging_measurement_is_received(chip_a, 1000).await;
+    let extra = world.when_ranging_is_stopped(chip_a, 1).await;
 
     // Verify telemetry
     let stats = world.client.read_statistics().await.expect("Failed to read statistics");
     let stats_a = stats.iter().find(|s| s.id == chip_a).unwrap();
     let stats_b = stats.iter().find(|s| s.id == chip_b).unwrap();
-    assert_eq!(stats_a.p2p_tx_count, 1);
-    assert_eq!(stats_a.p2p_rx_count, 1);
+    assert_eq!(stats_a.p2p_tx_count, 1 + extra);
+    assert_eq!(stats_a.p2p_rx_count, 1 + extra);
     assert_eq!(stats_b.p2p_tx_count, 0);
     assert_eq!(stats_b.p2p_rx_count, 0);
 }
@@ -139,7 +137,6 @@ async fn test_ranging_between_chip_and_anchor() {
         .await;
 
     world.when_ranging_is_started(chip_a, 1).await;
-    world.when_ranging_is_triggered(chip_a, 1).await;
 
     let m = world.then_single_ranging_measurement_is_received(chip_a).await;
     assert!((480..=520).contains(&m.distance));
@@ -147,6 +144,8 @@ async fn test_ranging_between_chip_and_anchor() {
     assert!((50..=56).contains(&((m.aoa_elevation as i16) >> 7)));
     assert!((-93..=-87).contains(&((m.aoa_destination_azimuth as i16) >> 7)));
     assert!((-56..=-50).contains(&((m.aoa_destination_elevation as i16) >> 7)));
+
+    world.when_ranging_is_stopped(chip_a, 1).await;
 
     world
         .client
@@ -173,12 +172,16 @@ async fn test_ranging_between_chip_and_anchor() {
     assert!(dest_az >= 177 || dest_az <= -177);
     assert!((-3..=3).contains(&((m2.aoa_destination_elevation as i16) >> 7)));
 
+    world.when_ranging_is_stopped(chip_a, 1).await;
+
     world.client.delete(ChipId(anchor_id)).await.unwrap();
     assert_eq!(world.client.read_count_for_testing().await.unwrap(), 1);
 
     world.when_ranging_is_triggered(chip_a, 1).await;
     let m3 = world.then_single_ranging_measurement_is_received(chip_a).await;
     assert_eq!(m3.status, uci::Status::RangingRxTimeout);
+
+    world.when_ranging_is_stopped(chip_a, 1).await;
 }
 
 #[tokio::test]

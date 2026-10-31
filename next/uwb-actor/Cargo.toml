@@ -41,7 +41,7 @@ netsim-model = { path = "../model" }
 netsim-proto = { path = "../../proto/proto-cf" }
 parking_lot = "0.12"
 pdl-runtime = "0.5"
-pica = { version = "0.1", default-features = false }
+pica = { version = "0.2", default-features = false }
 rand = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"

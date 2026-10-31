@@ -22,7 +22,7 @@
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::{
     ActorLifecycle, ActorService, DynContext, client::ResourceClient, context::FrameworkContext,
@@ -239,6 +239,7 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                 Some(res) = self.ctx.tasks.join_next(), if !self.ctx.tasks.is_empty() => {
                     match res {
                         Ok(id) => Self::handle_task_closed(&mut actor, id, &mut self.ctx).await,
+                        Err(error) if error.is_cancelled() => debug!(%error, "Monitored task cancelled"),
                         Err(error) => error!(%error, "Monitored task failed"),
                     }
                 }

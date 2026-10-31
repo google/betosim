@@ -36,6 +36,7 @@ async fn test_chip_reset() {
     let mut world = World::new().await;
     let chip_id = 1;
     world.given_a_chip(chip_id).await;
+    world.then_status_notification_is_received(chip_id, uci::DeviceState::DeviceStateReady).await;
 
     // When
     world.when_chip_is_reset(chip_id).await;

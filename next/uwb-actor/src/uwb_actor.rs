@@ -15,24 +15,25 @@
 use std::{
     collections::HashMap,
     sync::{Arc, atomic::AtomicU64},
-    time::Duration,
 };
 
+use actor_framework::TimerKey;
+use bytes::Bytes;
 use device_actor::DeviceClient;
 use netsim_model::{Chip, ChipId, ChipVariant, Uwb, UwbMode};
 use parking_lot::RwLock;
-use pica::{Handle, MacAddress, Pica, PicaCommand, PicaEvent};
-use tokio::sync::{broadcast, mpsc};
+use pica::{Handle, Pica};
+use tokio::sync::mpsc;
 
 /// State associated with a single UWB chip.
 pub(crate) struct UwbChipState {
     /// The chip model.
     pub(crate) chip: Chip,
-    pub(crate) tx_count: Arc<AtomicU64>,
-    pub(crate) rx_count: Arc<AtomicU64>,
-    pub(crate) p2p_tx_count: Arc<AtomicU64>,
-    pub(crate) p2p_rx_count: Arc<AtomicU64>,
-    pub(crate) mac_address: MacAddress,
+    pub(crate) tx_count: AtomicU64,
+    pub(crate) rx_count: AtomicU64,
+    pub(crate) p2p_tx_count: AtomicU64,
+    pub(crate) p2p_rx_count: AtomicU64,
+    pub(crate) packet_tx: Option<mpsc::UnboundedSender<Bytes>>,
 }
 
 impl UwbChipState {
@@ -52,41 +53,30 @@ pub struct UwbActor {
     pub(super) initial_chips: HashMap<ChipId, Chip>,
     /// Client for interacting with the device actor.
     pub(super) device_client: DeviceClient,
-    /// Pica simulator, present only prior to actor lifecycle `on_start`.
-    pub(super) pica: Option<Pica>,
-    /// Pica command queue
-    pub(super) pica_commands: mpsc::Sender<PicaCommand>,
-    /// Used to detect when a chip disconnects due to a stream closure.
-    pub(super) pica_on_tick_events: broadcast::Receiver<PicaEvent>,
-    /// Used to detect when a chip is connected after [`PicaCommand::Connect`].
-    pub(super) pica_connect_events: broadcast::Receiver<PicaEvent>,
+    /// Synchronous UWB state machine managing virtual devices, anchors, and UCI sessions.
+    pub(super) pica: Pica,
+    /// Active actor timer scheduled for the next Pica ranging tick.
+    pub(super) ranging_timer: Option<TimerKey>,
     pub(crate) uwb_stats: crate::stats::UwbStats,
     pub(super) next_anchor_mac: u16,
 }
 
-// Allocated downwards from 0xFFFE to avoid collision with Pica's 0-based device handles.
 pub(super) const MAX_UNICAST_SHORT_MAC: u16 = 0xFFFE;
 
 impl UwbActor {
-    /// Used to periodically check for stream closures.
-    pub const TICK_INTERVAL: Duration = Duration::from_millis(100);
-
     pub fn new(device_client: DeviceClient) -> Self {
         let chip_states = Arc::new(RwLock::new(HashMap::new()));
-        let pica = Pica::new(
-            Box::new(crate::ranging_estimator::UwbRangingEstimator::new(chip_states.clone())),
-            None,
-        );
+        let pica = Pica::new(Box::new(crate::ranging_estimator::UwbRangingEstimator::new(
+            chip_states.clone(),
+        )));
 
         UwbActor {
             chip_states,
             chip_to_handle: HashMap::new(),
             initial_chips: HashMap::new(),
             device_client,
-            pica_commands: pica.commands(),
-            pica_on_tick_events: pica.events(),
-            pica_connect_events: pica.events(),
-            pica: Some(pica),
+            pica,
+            ranging_timer: None,
             uwb_stats: crate::stats::UwbStats::new(),
             next_anchor_mac: MAX_UNICAST_SHORT_MAC,
         }

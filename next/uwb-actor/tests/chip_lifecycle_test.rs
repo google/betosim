@@ -30,7 +30,7 @@ use crate::world::World;
 #[tokio::test]
 async fn test_get_chip_not_found() {
     // Given
-    let mut world = World::new().await;
+    let world = World::new().await;
     let chip_id = 99;
 
     // When
@@ -79,8 +79,20 @@ async fn test_chip_deleted_on_stream_close() {
 
     // When
     world.and_packet_stream_is_closed(chip_id);
-    world.and_tick_occurs().await;
 
     // Then
+    world.then_chip_does_not_exist(chip_id).await;
+}
+
+#[tokio::test]
+async fn test_chip_deleted_on_sink_close() {
+    let mut world = World::new().await;
+    let chip_id = 5;
+    world.given_a_chip(chip_id).await;
+    world.then_chip_exists(chip_id).await;
+
+    world.and_packet_sink_is_closed(chip_id);
+    world.when_chip_is_reset(chip_id).await;
+
     world.then_chip_does_not_exist(chip_id).await;
 }

@@ -37,6 +37,7 @@ async fn test_uci_reset_exchange() {
     let mut world = World::new().await;
     let chip_id = 100;
     world.given_a_chip(chip_id).await;
+    world.then_status_notification_is_received(chip_id, uci::DeviceState::DeviceStateReady).await;
 
     // When: Send CORE_DEVICE_RESET_CMD (reset_config=UWBS_RESET)
     // Use strongly typed packet from pica crate

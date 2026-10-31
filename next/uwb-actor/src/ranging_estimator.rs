@@ -76,11 +76,11 @@ mod tests {
 
     use netsim_model::{Chip, ChipVariant, Pose as ModelPose, Position, Uwb, UwbMode};
     use parking_lot::RwLock;
-    use pica::{Handle, MacAddress, RangingEstimator};
+    use pica::{Handle, RangingEstimator};
 
     use super::*;
 
-    fn create_chip_state(x: f32, y: f32, z: f32, mode: UwbMode, mac: [u8; 2]) -> UwbChipState {
+    fn create_chip_state(x: f32, y: f32, z: f32, mode: UwbMode) -> UwbChipState {
         let chip = Chip {
             variant: Some(ChipVariant::Uwb(Uwb { mode, ..Default::default() })),
             pose: ModelPose { position: Position { x, y, z }, ..Default::default() },
@@ -88,11 +88,11 @@ mod tests {
         };
         UwbChipState {
             chip,
-            tx_count: Arc::new(AtomicU64::new(0)),
-            rx_count: Arc::new(AtomicU64::new(0)),
-            p2p_tx_count: Arc::new(AtomicU64::new(0)),
-            p2p_rx_count: Arc::new(AtomicU64::new(0)),
-            mac_address: MacAddress::Short(mac),
+            tx_count: AtomicU64::new(0),
+            rx_count: AtomicU64::new(0),
+            p2p_tx_count: AtomicU64::new(0),
+            p2p_rx_count: AtomicU64::new(0),
+            packet_tx: None,
         }
     }
 
@@ -108,16 +108,12 @@ mod tests {
         assert!(estimator.estimate(&handle_a, &handle_b).is_none());
 
         // Only handle_a exists
-        shared_chips
-            .write()
-            .insert(handle_a, create_chip_state(0.0, 0.0, 0.0, UwbMode::Device, [0, 1]));
+        shared_chips.write().insert(handle_a, create_chip_state(0.0, 0.0, 0.0, UwbMode::Device));
         assert!(estimator.estimate(&handle_a, &handle_b).is_none());
 
         // Only handle_b exists
         shared_chips.write().clear();
-        shared_chips
-            .write()
-            .insert(handle_b, create_chip_state(10.0, 0.0, 0.0, UwbMode::Device, [0, 2]));
+        shared_chips.write().insert(handle_b, create_chip_state(10.0, 0.0, 0.0, UwbMode::Device));
         assert!(estimator.estimate(&handle_a, &handle_b).is_none());
     }
 
@@ -130,18 +126,18 @@ mod tests {
         let handle_b: Handle = 2;
 
         // Chip A disabled (empty variant)
-        let mut disabled_chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device, [0, 1]);
+        let mut disabled_chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device);
         disabled_chip_a.chip.variant = None;
 
-        let active_chip_b = create_chip_state(10.0, 0.0, 0.0, UwbMode::Device, [0, 2]);
+        let active_chip_b = create_chip_state(10.0, 0.0, 0.0, UwbMode::Device);
 
         shared_chips.write().insert(handle_a, disabled_chip_a);
         shared_chips.write().insert(handle_b, active_chip_b);
         assert!(estimator.estimate(&handle_a, &handle_b).is_none());
 
         // Chip B disabled (radio state disabled)
-        let active_chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device, [0, 1]);
-        let mut disabled_chip_b = create_chip_state(10.0, 0.0, 0.0, UwbMode::Device, [0, 2]);
+        let active_chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device);
+        let mut disabled_chip_b = create_chip_state(10.0, 0.0, 0.0, UwbMode::Device);
         if let Some(ChipVariant::Uwb(ref mut uwb)) = disabled_chip_b.chip.variant {
             uwb.radio.state = Some(false);
         }
@@ -160,8 +156,8 @@ mod tests {
         let handle_b: Handle = 2;
 
         // Chip A at origin, Chip B at (10m, 0m, 0m) -> 1000 cm range
-        let chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device, [0, 1]);
-        let chip_b = create_chip_state(10.0, 0.0, 0.0, UwbMode::Device, [0, 2]);
+        let chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device);
+        let chip_b = create_chip_state(10.0, 0.0, 0.0, UwbMode::Device);
 
         shared_chips.write().insert(handle_a, chip_a);
         shared_chips.write().insert(handle_b, chip_b);
@@ -181,8 +177,8 @@ mod tests {
         let handle_device: Handle = 20;
 
         // Anchor at (0m, 5m, 0m), Device at (0m, 0m, 0m) -> 500 cm range
-        let chip_anchor = create_chip_state(0.0, 5.0, 0.0, UwbMode::Anchor, [0, 3]);
-        let chip_device = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device, [0, 4]);
+        let chip_anchor = create_chip_state(0.0, 5.0, 0.0, UwbMode::Anchor);
+        let chip_device = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device);
 
         shared_chips.write().insert(handle_anchor, chip_anchor);
         shared_chips.write().insert(handle_device, chip_device);
@@ -202,8 +198,8 @@ mod tests {
         let handle_a: Handle = 1;
         let handle_b: Handle = 2;
 
-        let chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device, [0, 1]);
-        let chip_b = create_chip_state(0.0, 0.0, 10.0, UwbMode::Device, [0, 2]);
+        let chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device);
+        let chip_b = create_chip_state(0.0, 0.0, 10.0, UwbMode::Device);
 
         shared_chips.write().insert(handle_a, chip_a);
         shared_chips.write().insert(handle_b, chip_b);
