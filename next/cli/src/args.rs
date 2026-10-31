@@ -567,10 +567,6 @@ pub(crate) struct GetCapture {
     /// Directory to store downloaded capture file(s)
     #[arg(short = 'o', long)]
     pub location: Option<String>,
-    #[arg(skip)]
-    pub filenames: Vec<String>,
-    #[arg(skip)]
-    pub current_file: String,
 }
 
 #[derive(Debug, Args, PartialEq, Default)]

@@ -140,6 +140,10 @@ fn test_validate_rejects_unfriendly_documents() {
         ("must be exactly application/json", |d| {
             d["paths"]["/v1/widgets"]["post"]["requestBody"]["content"]["text/plain"] = json!({});
         }),
+        ("must be exactly application/json", |d| {
+            d["paths"]["/v1/widgets"]["get"]["responses"]["200"]["content"] =
+                json!({ "application/octet-stream": { "schema": { "type": "string" } } });
+        }),
         ("not unique", |d| {
             d["paths"]["/v1/widgets"]["get"]["operationId"] = json!("CreateWidget");
         }),
@@ -312,6 +316,9 @@ fn test_netsim_openapi_spec() {
             "PatchAp",
             "DeleteAp",
             "DisconnectAp",
+            "ListCaptures",
+            "GetCapture",
+            "PatchCapture",
             "ListDevices",
             "CreateDevice",
             "PatchDevice",
@@ -327,6 +334,8 @@ fn test_netsim_openapi_spec() {
     assert!(cpp.contains("struct ListDeviceResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListLinkResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListApResponse {"), "{cpp}");
+    assert!(cpp.contains("struct ListCaptureResponse {"), "{cpp}");
+    assert!(cpp.contains("struct CaptureUpdate {"), "{cpp}");
     assert!(cpp.contains("struct ApCreate {"), "{cpp}");
     assert!(cpp.contains("std::optional<std::string> ssid;"), "{cpp}");
     assert!(cpp.contains("struct RadioUpdate {"), "{cpp}");
@@ -337,6 +346,8 @@ fn test_netsim_openapi_spec() {
     let py = generate_python(&doc);
     assert!(py.contains("class WifiMode(StrEnum):\n    A = \"a\""), "{py}");
     assert!(py.contains("class ListDeviceResponse:\n    devices: list[Device]"), "{py}");
+    assert!(py.contains("class ListCaptureResponse:\n    captures: list[CaptureInfo]"), "{py}");
+    assert!(py.contains("class CaptureUpdate:\n    state: bool"), "{py}");
     assert!(py.contains("class ApCreate:\n"), "{py}");
     assert!(py.contains("ssid: str | None = None"), "{py}");
 }

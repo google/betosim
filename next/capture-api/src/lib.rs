@@ -196,6 +196,7 @@ pub struct CaptureInfo {
     pub seconds: i64,
     /// Subsecond nanoseconds when capture was started.
     pub nanos: i32,
-    /// Path to the capture file on disk.
+    /// Path to the capture file on the daemon host. Kept off the wire.
+    #[serde(skip)]
     pub filepath: Option<std::path::PathBuf>,
 }

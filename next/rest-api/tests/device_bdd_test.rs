@@ -305,3 +305,115 @@ async fn test_bdd_patch_device_http_body_parsing_and_path_errors() {
     oversized.assert_json_headers();
     assert_eq!(oversized.parse_error().error, "413 Payload Too Large");
 }
+
+// Scenario: GET /v1/captures, PATCH /v1/captures/{id}, and GET /v1/captures/{id} over HTTP
+//   Given a running REST server with a Wi-Fi device (chip_id = 1000)
+//   When a client requests GET /v1/captures
+//   Then the server responds with 200 OK and lists capture 1000 with enabled = false
+//   When a client sends PATCH /v1/captures/1000 with {"state": true}
+//   Then the server responds with 200 OK, enables capture 1000, and creates the PCAP file on disk
+//   When a client requests GET /v1/captures/1000
+//   Then the server responds with 200 OK, Content-Type: application/vnd.tcpdump.pcap, and valid PCAP global header bytes
+#[tokio::test]
+async fn test_bdd_captures_list_patch_and_get_pcap_and_errors() {
+    let world = World::new().await;
+    let dev_id = world.given_wifi_device("pixel-wifi", Position::default()).await;
+    assert_eq!(dev_id, DeviceId(1));
+
+    // 1. GET /v1/captures returns the device's Wi-Fi chip capture (chip_id = 1000, enabled = false)
+    let list_resp = world.when_http_request("GET", "/v1/captures", None, &[]).await;
+    assert_eq!(list_resp.status_code, 200);
+    list_resp.assert_json_headers();
+    let list_parsed: netsim_rest_api::ListCaptureResponse = list_resp.parse_json();
+    assert_eq!(list_parsed.captures.len(), 1);
+    assert_eq!(list_parsed.captures[0].chip_id.0, 1000);
+    assert_eq!(list_parsed.captures[0].device_name, "pixel-wifi");
+    assert!(!list_parsed.captures[0].enabled);
+
+    // 2. GET /v1/captures/1000 before enabling -> 404 Not Found with JSON ErrorResponse
+    let get_before = world.when_http_request("GET", "/v1/captures/1000", None, &[]).await;
+    assert_eq!(get_before.status_code, 404);
+    get_before.assert_json_headers();
+    assert_eq!(get_before.parse_error().error, "Capture 1000 has no PCAP yet");
+
+    // 3. PATCH /v1/captures/1000 {"state":true} -> 200 OK and enables capture
+    let patch_resp = world
+        .when_http_request(
+            "PATCH",
+            "/v1/captures/1000",
+            Some("application/json"),
+            br#"{"state":true}"#,
+        )
+        .await;
+    assert_eq!(patch_resp.status_code, 200);
+    patch_resp.assert_json_headers();
+    let patched_info: netsim_rest_api::CaptureInfo = patch_resp.parse_json();
+    assert_eq!(patched_info.chip_id.0, 1000);
+    assert!(patched_info.enabled);
+    assert!(patched_info.seconds > 0);
+
+    // 4. GET /v1/captures/1000 -> 200 OK with PCAP binary bytes
+    let get_pcap = world.when_http_request("GET", "/v1/captures/1000", None, &[]).await;
+    assert_eq!(get_pcap.status_code, 200);
+    get_pcap.assert_pcap_headers();
+    assert_eq!(get_pcap.body_bytes.len(), 24);
+    assert_eq!(u32::from_le_bytes(get_pcap.body_bytes[0..4].try_into().unwrap()), 0xa1b2c3d4);
+
+    // NetsimRestClient downloads the same bytes to a file.
+    let client = world.rest_client.clone();
+    let path = std::env::temp_dir().join(format!("netsim-bdd-{}-capture.pcap", std::process::id()));
+    let download = path.clone();
+    tokio::task::spawn_blocking(move || client.get_capture(1000).send_to_file_blocking(&download))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), get_pcap.body_bytes);
+    std::fs::remove_file(&path).unwrap();
+
+    // 5. Validation errors: malformed JSON, wrong type, invalid ID, non-existent ID
+    let bad_json = world
+        .when_http_request("PATCH", "/v1/captures/1000", Some("application/json"), b"{bad")
+        .await;
+    assert_eq!(bad_json.status_code, 400);
+    bad_json.assert_json_headers();
+    assert!(bad_json.parse_error().error.starts_with("Invalid JSON body:"));
+
+    let wrong_type = world
+        .when_http_request(
+            "PATCH",
+            "/v1/captures/1000",
+            Some("application/json"),
+            br#"{"state":"not-a-bool"}"#,
+        )
+        .await;
+    assert_eq!(wrong_type.status_code, 400);
+    wrong_type.assert_json_headers();
+    assert!(wrong_type.parse_error().error.starts_with("Invalid JSON body:"));
+
+    let bad_id = world
+        .when_http_request(
+            "PATCH",
+            "/v1/captures/not-a-u32",
+            Some("application/json"),
+            br#"{"state":true}"#,
+        )
+        .await;
+    assert_eq!(bad_id.status_code, 400);
+    bad_id.assert_json_headers();
+    assert!(bad_id.parse_error().error.starts_with("Invalid path parameter id:"));
+
+    let missing_patch = world
+        .when_http_request(
+            "PATCH",
+            "/v1/captures/9999",
+            Some("application/json"),
+            br#"{"state":true}"#,
+        )
+        .await;
+    assert_eq!(missing_patch.status_code, 404);
+    missing_patch.assert_json_headers();
+
+    let missing_get = world.when_http_request("GET", "/v1/captures/9999", None, &[]).await;
+    assert_eq!(missing_get.status_code, 404);
+    missing_get.assert_json_headers();
+}

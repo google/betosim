@@ -252,6 +252,9 @@ pub fn validate(doc: &Value) -> Vec<String> {
             );
             for (status, resp) in obj(&op["responses"]) {
                 let resolved = deref(resp, RESPONSE_REF_PREFIX, responses);
+                if is_binary_body(&resolved["content"]) {
+                    continue;
+                }
                 if let Err(e) = body_schema(&resolved["content"], schemas) {
                     errs.push(format!("{at}: response {status} {e}"));
                 }
@@ -340,6 +343,18 @@ fn check_no_default_noise(ctx: &str, val: &Value, errs: &mut Vec<String>) {
     ] {
         check!(errs, ok, "{ctx}: {msg}");
     }
+}
+
+/// A raw file download: a single non-JSON media type with a binary string schema.
+fn is_binary_body(content: &Value) -> bool {
+    content.as_object().is_some_and(|map| {
+        map.len() == 1
+            && map.iter().all(|(media, body)| {
+                media != JSON
+                    && body["schema"]["type"] == "string"
+                    && body["schema"]["format"] == "binary"
+            })
+    })
 }
 
 fn body_schema<'a>(content: &Value, schemas: &'a Value) -> Result<&'a Value, String> {

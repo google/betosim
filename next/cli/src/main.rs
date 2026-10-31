@@ -24,7 +24,6 @@ mod capture_stream;
 mod cell_helper;
 mod display;
 mod error;
-mod file_handler;
 mod grpc_client;
 mod gsm;
 mod nfc;
@@ -32,97 +31,45 @@ mod requests;
 mod response;
 mod sms;
 
-use std::{env, fs::File, path::PathBuf, process::ExitCode};
+use std::{env, path::PathBuf, process::ExitCode};
 
-use args::{GetCapture, NetsimArgs};
+use args::NetsimArgs;
 use clap::Parser;
 use common::util::{
     ini_file::{get_http_server_address, get_server_address},
     netsim_logger,
     os_utils::get_instance,
 };
-use file_handler::FileHandler;
 use grpcio::{ChannelBuilder, EnvBuilder};
 use netsim_proto::{
-    cell_grpc::CellServiceClient, frontend, frontend_grpc::FrontendServiceClient,
+    cell_grpc::CellServiceClient, frontend_grpc::FrontendServiceClient,
     nfc_service_grpc::NfcServiceClient,
 };
-use netsim_rest_api::{ListDeviceResponse, NetsimRestClient};
+use netsim_rest_api::{CaptureInfo, CaptureUpdate, ListDeviceResponse, NetsimRestClient};
 use tracing::error;
 
 use crate::{
     display::DisplayExt,
     error::{Error, Result},
-    grpc_client::{ClientResponseReader, GrpcRequest, GrpcResponse},
+    grpc_client::{GrpcRequest, GrpcResponse},
 };
-// helper function to process streaming Grpc request
-fn perform_streaming_request(
-    client: &FrontendServiceClient,
-    cmd: &mut GetCapture,
-    req: &frontend::GetCaptureRequest,
-    filename: &str,
-) -> Result<()> {
-    let dir = if let Some(location) = cmd.location.as_ref() {
-        PathBuf::from(location)
-    } else {
-        env::current_dir()?
-    };
-    let output_file = dir.join(filename);
-    cmd.current_file = output_file.display().to_string();
-    grpc_client::get_capture(
-        client,
-        req,
-        &mut ClientResponseReader {
-            handler: Box::new(FileHandler {
-                file: File::create(&output_file).map_err(|e| {
-                    Error::from(format!("Failed to create file {}: {}", output_file.display(), e))
-                })?,
-                path: output_file,
-            }),
-        },
-    )
-}
 
 /// helper function to send the Grpc request(s) and handle the response(s) per
 /// the given command
 fn perform_command(
-    command: &mut args::Command,
+    command: &args::Command,
     client: FrontendServiceClient,
     verbose: bool,
 ) -> Result<()> {
     // Get command's gRPC request(s)
     let requests = match command {
-        args::Command::Capture(args::Capture::Patch(_) | args::Capture::Get(_))
-        | args::Command::Link(_) => command.get_requests(&client),
+        args::Command::Link(_) => command.get_requests(&client),
         _ => Ok(vec![command.get_request()?]),
     }?;
     let mut process_error = false;
     // Process each request
-    for (i, req) in requests.iter().enumerate() {
-        let result = match command {
-            // Continuous option sends the gRPC call every second
-            &mut args::Command::Capture(args::Capture::List(ref cmd)) if cmd.continuous => {
-                continuous_perform_command(command, &client, req, verbose)?;
-                error!("Continuous command unexpectedly terminated without error");
-                return Ok(());
-            }
-            // Get Capture use streaming gRPC reader request
-            args::Command::Capture(args::Capture::Get(cmd)) => {
-                let GrpcRequest::GetCapture(request) = req else {
-                    return Err(format!("Expected GetCaptureRequest. Got: {req:?}").into());
-                };
-                let filename = cmd.filenames.get(i).cloned().ok_or_else(|| {
-                    Error::from(format!("Missing filename for request index {i}"))
-                })?;
-                perform_streaming_request(&client, cmd, request, &filename)?;
-                Ok(None)
-            }
-            // All other commands use a single gRPC call
-            _ => {
-                let response = grpc_client::send_grpc(&client, req)?;
-                Ok(Some(response))
-            }
-        };
+    for req in &requests {
+        let result = grpc_client::send_grpc(&client, req);
         if let Err(error) = process_result(command, result, Some(req), verbose) {
             error!(%error);
             process_error = true;
@@ -212,18 +159,6 @@ fn run_beacon_remove(
     Ok(())
 }
 
-/// Continuously execute the command every second
-fn continuous_perform_command(
-    command: &args::Command,
-    client: &FrontendServiceClient,
-    grpc_request: &GrpcRequest,
-    verbose: bool,
-) -> Result<()> {
-    repeat(true, || {
-        let response = grpc_client::send_grpc(client, grpc_request)?;
-        process_result(command, Ok(Some(response)), Some(grpc_request), verbose)
-    })
-}
 fn patch_device_by_name(
     rest: &NetsimRestClient,
     device_name: &str,
@@ -238,15 +173,12 @@ fn patch_device_by_name(
 /// Check and handle the gRPC call result
 fn process_result(
     command: &args::Command,
-    result: Result<Option<GrpcResponse>>,
+    result: Result<GrpcResponse>,
     request: Option<&GrpcRequest>,
     verbose: bool,
 ) -> Result<()> {
     match result {
-        Ok(grpc_response) => {
-            let response = grpc_response.unwrap_or(GrpcResponse::Unknown);
-            command.print_response(&response, request, verbose)
-        }
+        Ok(response) => command.print_response(&response, request, verbose),
         Err(e) => Err(format!("Grpc call error: {e}").into()),
     }
 }
@@ -321,6 +253,19 @@ fn run_rest(
         args::Command::Link(args::Link::List) => {
             rest.get_links().send_blocking().map(|resp| println!("{}", resp.display(verbose)))
         }
+        args::Command::Capture(args::Capture::List(cmd)) => {
+            return Some(repeat(cmd.continuous, || {
+                let captures = filtered_captures(rest, &cmd.patterns)?;
+                response::print_capture_list(&captures, &cmd.patterns, verbose);
+                Ok(())
+            }));
+        }
+        args::Command::Capture(args::Capture::Patch(cmd)) => {
+            return Some(patch_captures(rest, cmd, verbose));
+        }
+        args::Command::Capture(args::Capture::Get(cmd)) => {
+            return Some(download_captures(rest, cmd, verbose));
+        }
         args::Command::Capture(args::Capture::Stream(cmd)) => {
             return Some(capture_stream::stream_capture(http_server, cmd));
         }
@@ -333,6 +278,65 @@ fn run_rest(
         _ => return None,
     };
     Some(result.map_err(Error::from))
+}
+
+fn patch_captures(rest: &NetsimRestClient, cmd: &args::PatchCapture, verbose: bool) -> Result<()> {
+    let patch = CaptureUpdate { state: matches!(cmd.state, args::OnOffState::On) };
+    for_each_capture(rest, &cmd.patterns, |capture| {
+        rest.patch_capture(capture.chip_id.0, &patch).send_blocking()?;
+        if verbose {
+            println!(
+                "Patched Capture state to {}",
+                args::Command::on_off_state_to_string(cmd.state)
+            );
+        }
+        Ok(())
+    })
+}
+
+fn download_captures(rest: &NetsimRestClient, cmd: &args::GetCapture, verbose: bool) -> Result<()> {
+    let dir = match &cmd.location {
+        Some(location) => PathBuf::from(location),
+        None => env::current_dir()?,
+    };
+    for_each_capture(rest, &cmd.patterns, |capture| {
+        let output_file = dir.join(requests::capture_filename(capture));
+        rest.get_capture(capture.chip_id.0).send_to_file_blocking(&output_file).map_err(|e| {
+            Error::from(format!("Failed to download {}: {e}", output_file.display()))
+        })?;
+        if verbose {
+            println!("Successfully downloaded file: {}", output_file.display());
+        }
+        Ok(())
+    })
+}
+
+/// Lists captures matching all `patterns` (all captures if empty).
+fn filtered_captures(rest: &NetsimRestClient, patterns: &[String]) -> Result<Vec<CaptureInfo>> {
+    let mut captures = rest.get_captures().send_blocking()?.captures;
+    if !patterns.is_empty() {
+        response::filter_captures(&mut captures, patterns);
+    }
+    Ok(captures)
+}
+
+/// Runs `f` on every capture matching `patterns`, logging each failure.
+fn for_each_capture(
+    rest: &NetsimRestClient,
+    patterns: &[String],
+    mut f: impl FnMut(&CaptureInfo) -> Result<()>,
+) -> Result<()> {
+    let mut failed = false;
+    for capture in filtered_captures(rest, patterns)? {
+        if let Err(error) = f(&capture) {
+            error!(%error);
+            failed = true;
+        }
+    }
+    if failed {
+        return Err("Not all requests were processed successfully.".into());
+    }
+    Ok(())
 }
 
 /// Standard Netsim CLI entry point
@@ -414,7 +418,7 @@ fn run(args: NetsimArgs) -> Result<()> {
         args::Command::Nfc(cmd) => {
             crate::nfc::client::execute(&cmd, &NfcServiceClient::new(channel), verbose)
         }
-        mut command => perform_command(&mut command, FrontendServiceClient::new(channel), verbose),
+        command => perform_command(&command, FrontendServiceClient::new(channel), verbose),
     }
 }
 

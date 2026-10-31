@@ -23,9 +23,11 @@
 
 use std::{
     fmt,
-    io::{Read, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, Read, Write},
     marker::PhantomData,
     net::{TcpStream, ToSocketAddrs},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -174,17 +176,16 @@ impl<T> fmt::Display for RestRequest<'_, T> {
     }
 }
 
-impl<'a, T: DeserializeOwned> RestRequest<'a, T> {
+impl<'a, T> RestRequest<'a, T> {
     /// Sets a JSON request body.
     pub fn json<B: Serialize + ?Sized>(mut self, body: &B) -> Self {
         self.body = serde_json::to_vec(body).map(Some);
         self
     }
 
-    /// Sends the request asynchronously.
-    pub async fn send(self) -> Result<T, RestError> {
+    /// Sends the request asynchronously and returns the raw response body bytes.
+    async fn send_bytes(self) -> Result<Vec<u8>, RestError> {
         let (addr, req) = self.encode()?;
-        // One deadline covers connect, write, and read, matching send_blocking().
         let buf = tokio::time::timeout(REQUEST_TIMEOUT, async {
             let mut stream = tokio::net::TcpStream::connect(addr)
                 .await
@@ -195,31 +196,24 @@ impl<'a, T: DeserializeOwned> RestRequest<'a, T> {
             Ok::<_, RestError>(buf)
         })
         .await??;
-        decode(&buf)
+        let mut body = Vec::new();
+        read_response(buf.as_slice())?.copy_to(&mut body)?;
+        Ok(body)
     }
 
-    /// Sends the request synchronously.
-    pub fn send_blocking(self) -> Result<T, RestError> {
+    /// Sends the request synchronously and returns the raw response body bytes.
+    fn send_bytes_blocking(self) -> Result<Vec<u8>, RestError> {
+        let mut body = Vec::new();
+        self.send_streaming_blocking()?.copy_to(&mut body)?;
+        Ok(body)
+    }
+
+    /// Sends the request and reads the response head, leaving the body unread.
+    fn send_streaming_blocking(self) -> Result<StreamingBody<BufReader<TcpStream>>, RestError> {
         let (addr, req) = self.encode()?;
-        // Try every resolved address (e.g. `[::1]` then `127.0.0.1` for
-        // `localhost`), like `tokio::net::TcpStream::connect` in `send()`.
-        let connect = || {
-            let mut last_err = None;
-            for socket_addr in addr.to_socket_addrs()? {
-                match TcpStream::connect_timeout(&socket_addr, REQUEST_TIMEOUT) {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            Err(last_err.unwrap_or_else(|| std::io::ErrorKind::NotFound.into()))
-        };
-        let mut stream = connect().map_err(|e| RestError::Connect(addr.to_string(), e))?;
-        stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-        stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+        let mut stream = connect_blocking(addr)?;
         stream.write_all(&req)?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf)?;
-        decode(&buf)
+        read_response(BufReader::new(stream))
     }
 
     /// Returns the target address and the serialized request (head + body).
@@ -231,27 +225,156 @@ impl<'a, T: DeserializeOwned> RestRequest<'a, T> {
     }
 }
 
-/// Parses a raw HTTP/1.1 response. Non-2xx statuses become
-/// [`RestError::Status`] carrying the server's [`ErrorResponse`] message when
-/// present; an empty 2xx body decodes as JSON `null` so `T = ()` works.
-fn decode<T: DeserializeOwned>(buf: &[u8]) -> Result<T, RestError> {
-    let resp = String::from_utf8_lossy(buf);
-    let (head, body) = resp
-        .split_once("\r\n\r\n")
-        .ok_or(RestError::InvalidResponse("missing header/body separator"))?;
-    let status = head
+impl RestRequest<'_, crate::Pcap> {
+    /// Sends the request synchronously and streams the raw response body into
+    /// a file at `path`. The body is written to `<path>.part` and renamed to
+    /// `path` only once it is complete, so a non-2xx status or a short body
+    /// leaves any existing file at `path` untouched.
+    pub fn send_to_file_blocking(self, path: &Path) -> Result<u64, RestError> {
+        let body = self.send_streaming_blocking()?;
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".part");
+        let partial = PathBuf::from(partial);
+        File::create(&partial)
+            .map_err(RestError::from)
+            .and_then(|mut file| body.copy_to(&mut file))
+            .and_then(|copied| {
+                std::fs::rename(&partial, path).map(|()| copied).map_err(RestError::from)
+            })
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&partial);
+            })
+    }
+}
+
+impl<'a, T: DeserializeOwned> RestRequest<'a, T> {
+    /// Sends the request asynchronously.
+    pub async fn send(self) -> Result<T, RestError> {
+        let body = self.send_bytes().await?;
+        decode_json(&body)
+    }
+
+    /// Sends the request synchronously.
+    pub fn send_blocking(self) -> Result<T, RestError> {
+        let body = self.send_bytes_blocking()?;
+        decode_json(&body)
+    }
+}
+
+/// The unread body of a response.
+struct StreamingBody<R> {
+    reader: R,
+    content_length: Option<u64>,
+}
+
+impl<R: BufRead> StreamingBody<R> {
+    /// Copies the body into `writer`, failing if it is shorter than the
+    /// response's `Content-Length`.
+    fn copy_to<W: Write>(mut self, writer: &mut W) -> Result<u64, RestError> {
+        let copied = match self.content_length {
+            Some(len) => {
+                let copied = io::copy(&mut Read::take(self.reader, len), writer)?;
+                if copied < len {
+                    return Err(RestError::InvalidResponse(
+                        "response body shorter than Content-Length",
+                    ));
+                }
+                copied
+            }
+            None => io::copy(&mut self.reader, writer)?,
+        };
+        writer.flush()?;
+        Ok(copied)
+    }
+}
+
+/// Reads the response head. Returns the unread body for a 2xx status, or the
+/// decoded [`RestError::Status`] otherwise.
+fn read_response<R: BufRead>(mut reader: R) -> Result<StreamingBody<R>, RestError> {
+    let (status, content_length) = read_head(&mut reader)?;
+    let body = StreamingBody { reader, content_length };
+    if !status.is_success() {
+        let mut message = Vec::new();
+        body.copy_to(&mut message)?;
+        return Err(decode_error(status, &message));
+    }
+    Ok(body)
+}
+
+/// Reads the status line and headers up to the blank line, returning the
+/// status and `Content-Length` (if present).
+fn read_head(reader: &mut impl BufRead) -> Result<(StatusCode, Option<u64>), RestError> {
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let status = parse_status(&line)?;
+    let mut content_length = None;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(RestError::InvalidResponse("missing header/body separator"));
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            return Ok((status, content_length));
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(RestError::InvalidResponse("Transfer-Encoding is not supported"));
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let len = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_err| RestError::InvalidResponse("malformed Content-Length header"))?;
+            content_length = Some(len);
+        }
+    }
+}
+
+fn connect_blocking(addr: &str) -> Result<TcpStream, RestError> {
+    // Try every resolved address (e.g. `[::1]` then `127.0.0.1` for
+    // `localhost`), like `tokio::net::TcpStream::connect` in `send_bytes()`.
+    let connect = || {
+        let mut last_err = None;
+        for socket_addr in addr.to_socket_addrs()? {
+            match TcpStream::connect_timeout(&socket_addr, REQUEST_TIMEOUT) {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| std::io::ErrorKind::NotFound.into()))
+    };
+    let stream = connect().map_err(|e| RestError::Connect(addr.to_string(), e))?;
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+    Ok(stream)
+}
+
+fn parse_status(head_str: &str) -> Result<StatusCode, RestError> {
+    head_str
         .split_whitespace()
         .nth(1)
         .and_then(|s| StatusCode::from_bytes(s.as_bytes()).ok())
-        .ok_or(RestError::InvalidResponse("malformed status line"))?;
-    if !status.is_success() {
-        let message = serde_json::from_str::<ErrorResponse>(body)
-            .ok()
-            .map(|e| e.error)
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| body.to_string());
-        return Err(RestError::Status { status, message });
-    }
+        .ok_or(RestError::InvalidResponse("malformed status line"))
+}
+
+fn decode_error(status: StatusCode, body: &[u8]) -> RestError {
+    let body_str = String::from_utf8_lossy(body);
+    let message = serde_json::from_str::<ErrorResponse>(&body_str)
+        .ok()
+        .map(|e| e.error)
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| body_str.into_owned());
+    RestError::Status { status, message }
+}
+
+/// Parses a JSON response body. An empty 2xx body decodes as JSON `null` so
+/// `T = ()` works.
+fn decode_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, RestError> {
+    let body = String::from_utf8_lossy(body);
     let body = body.trim();
     Ok(serde_json::from_str(if body.is_empty() { "null" } else { body })?)
 }

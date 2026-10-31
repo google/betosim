@@ -93,6 +93,8 @@ netsim_rust_library(
         "@serde_json",
         "@thiserror",
         "@tokio",
+        "@tokio-stream",
+        "@tokio-util",
         "@tracing",
     ],
 )

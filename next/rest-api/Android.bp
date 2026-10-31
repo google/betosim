@@ -73,6 +73,8 @@ rust_library_host {
         "libserde_json",
         "libthiserror",
         "libtokio",
+        "libtokio_stream",
+        "libtokio_util",
         "libtracing",
     ],
 }
@@ -112,6 +114,8 @@ rust_library_host {
         "libserde_json",
         "libthiserror",
         "libtokio",
+        "libtokio_stream",
+        "libtokio_util",
         "libtracing",
     ],
 }
@@ -161,6 +165,8 @@ rust_test_host {
         "libserde_yaml",
         "libthiserror",
         "libtokio",
+        "libtokio_stream",
+        "libtokio_util",
         "libtracing",
     ],
     proc_macros: [
@@ -220,6 +226,8 @@ rust_test_host {
         "libserde_yaml",
         "libthiserror",
         "libtokio",
+        "libtokio_stream",
+        "libtokio_util",
         "libtracing",
     ],
     proc_macros: [

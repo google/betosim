@@ -234,6 +234,23 @@ components:
     DisconnectApRequest: &DisconnectApRequest
       properties:
         mac_address: *str
+    CaptureInfo: &CaptureInfo
+      x-rust-type: capture_actor::CaptureInfo
+      properties:
+        chip_id: *int
+        chip_kind: *ChipKind
+        device_name: *str
+        enabled: *bool
+        records_written: *int
+        bytes_written: *int
+        seconds: *int
+        nanos: *int
+    ListCaptureResponse: &ListCaptureResponse
+      properties:
+        captures: [*CaptureInfo]
+    CaptureUpdate: &CaptureUpdate
+      properties:
+        state: *bool
 paths:
   /v1/version:
     get:
@@ -388,3 +405,40 @@ paths:
       responses:
         <<: *err_resp
         '200': *Empty
+  /v1/captures:
+    get:
+      operationId: ListCaptures
+      tags: [CaptureService]
+      summary: Lists packet captures across simulated chips.
+      responses:
+        <<: *err_resp
+        '200': *ListCaptureResponse
+  /v1/captures/{id}:
+    parameters: [*Id]
+    get:
+      operationId: GetCapture
+      tags: [CaptureService]
+      summary: Downloads the packet capture PCAP file for a chip.
+      responses:
+        <<: *err_resp
+        '200':
+          description: A successful response with the PCAP file.
+          content:
+            application/vnd.tcpdump.pcap:
+              schema:
+                type: string
+                format: binary
+    patch:
+      operationId: PatchCapture
+      tags: [CaptureService]
+      summary: Enables or disables packet capture for a chip.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaptureUpdate'
+            example:
+              state: true
+      responses:
+        <<: *err_resp
+        '200': *CaptureInfo

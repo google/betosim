@@ -13,39 +13,16 @@
 // limitations under the License.
 
 //! gRPC frontend client library for netsim.
-use futures_util::StreamExt;
 use netsim_proto::{frontend, frontend_grpc::FrontendServiceClient};
 use protobuf::well_known_types::empty;
 
 use crate::error::Result;
 
-/// Wrapper struct for application defined ClientResponseReader
-pub(crate) struct ClientResponseReader {
-    /// Delegated handler for reading responses
-    pub handler: Box<dyn ClientResponseReadable>,
-}
-
-/// Delegating functions to handler
-impl ClientResponseReader {
-    fn handle_chunk(&mut self, chunk: &[u8]) -> Result<()> {
-        self.handler.handle_chunk(chunk)
-    }
-}
-
-/// Trait for ClientResponseReader handler functions
-pub(crate) trait ClientResponseReadable {
-    /// Process each chunk of streaming response
-    fn handle_chunk(&mut self, chunk: &[u8]) -> Result<()>;
-}
-
 // Enum of Grpc Requests holding the request proto as applicable
 #[derive(Debug, PartialEq)]
 pub(crate) enum GrpcRequest {
     ListDevice,
-    ListCapture,
     CreateDevice(frontend::CreateDeviceRequest),
-    PatchCapture(frontend::PatchCaptureRequest),
-    GetCapture(frontend::GetCaptureRequest),
     ListLink,
     CreateLink(frontend::CreateLinkRequest),
     PatchLink(frontend::PatchLinkRequest),
@@ -56,31 +33,11 @@ pub(crate) enum GrpcRequest {
 #[derive(Debug, PartialEq)]
 pub(crate) enum GrpcResponse {
     ListDevice(frontend::ListDeviceResponse),
-    ListCapture(frontend::ListCaptureResponse),
     CreateDevice(frontend::CreateDeviceResponse),
-    PatchCapture,
     ListLink(frontend::ListLinkResponse),
     CreateLink(frontend::CreateLinkResponse),
     PatchLink,
     DeleteLink,
-    Unknown,
-}
-
-pub(crate) fn get_capture(
-    client: &FrontendServiceClient,
-    req: &frontend::GetCaptureRequest,
-    client_reader: &mut ClientResponseReader,
-) -> Result<()> {
-    let mut stream = client.get_capture(req)?;
-    // Use block_on to run the async block handling all chunks
-    futures::executor::block_on(async {
-        while let Some(chunk_res) = stream.next().await {
-            let chunk = chunk_res?;
-            let bytes = chunk.capture_stream;
-            client_reader.handle_chunk(&bytes)?;
-        }
-        Ok(())
-    })
 }
 
 pub(crate) trait GrpcMethodExecutor {
@@ -93,15 +50,8 @@ impl GrpcMethodExecutor for FrontendServiceClient {
             GrpcRequest::ListDevice => {
                 Ok(GrpcResponse::ListDevice(self.list_device(&empty::Empty::new())?))
             }
-            GrpcRequest::ListCapture => {
-                Ok(GrpcResponse::ListCapture(self.list_capture(&empty::Empty::new())?))
-            }
             GrpcRequest::CreateDevice(req) => {
                 Ok(GrpcResponse::CreateDevice(self.create_device(req)?))
-            }
-            GrpcRequest::PatchCapture(req) => {
-                self.patch_capture(req)?;
-                Ok(GrpcResponse::PatchCapture)
             }
             GrpcRequest::ListLink => {
                 Ok(GrpcResponse::ListLink(self.list_link(&empty::Empty::new())?))
@@ -115,10 +65,6 @@ impl GrpcMethodExecutor for FrontendServiceClient {
                 self.delete_link(req)?;
                 Ok(GrpcResponse::DeleteLink)
             }
-            _ => Err(grpcio::Error::RpcFailure(grpcio::RpcStatus::new(
-                grpcio::RpcStatusCode::INVALID_ARGUMENT,
-            ))
-            .into()),
         }
     }
 }

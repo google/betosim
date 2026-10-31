@@ -345,3 +345,57 @@ async fn test_rest_patch_device_pose_and_radio() {
         .expect_err("Patching non-existent device must return 404");
     assert_eq!(err.status().map(|s| s.as_u16()), Some(404));
 }
+
+// Scenario: List, Patch, and Download Packet Captures over REST
+//   Given a running Netsim Daemon with a created device
+//   When I call GET /v1/captures over REST
+//   Then the device's chip capture is listed
+//   When I call PATCH /v1/captures/{id} to enable capture and GET /v1/captures/{id}
+//   Then the PCAP file bytes are returned with a valid 24-byte PCAP global header
+#[tokio::test]
+async fn test_rest_captures_lifecycle() {
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+    let rest_client = NetsimRestClient::new("localhost", world.http_port);
+
+    let device_name = "capture-test-device";
+    let device_id = world.when_create_device(device_name, "beacon-chip").await;
+    assert!(device_id > 0);
+
+    let captures = rest_client.get_captures().send().await.expect("Failed to list captures");
+    let cap = captures
+        .captures
+        .iter()
+        .find(|c| c.device_name == device_name)
+        .expect("Created device capture must be in GET /v1/captures");
+    let chip_id = cap.chip_id.0;
+
+    let patched = rest_client
+        .patch_capture(chip_id, &netsim_rest_api::CaptureUpdate { state: true })
+        .send()
+        .await
+        .expect("Failed to patch capture state to true");
+    assert!(patched.enabled);
+
+    let path =
+        std::env::temp_dir().join(format!("netsim-daemon-{}-capture.pcap", std::process::id()));
+    let client = rest_client.clone();
+    let download = path.clone();
+    tokio::task::spawn_blocking(move || {
+        client.get_capture(chip_id).send_to_file_blocking(&download)
+    })
+    .await
+    .unwrap()
+    .expect("Failed to download capture PCAP over REST");
+    let pcap_bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(pcap_bytes.len() >= 24, "PCAP must contain 24-byte global header");
+    assert_eq!(u32::from_le_bytes(pcap_bytes[0..4].try_into().unwrap()), 0xa1b2c3d4);
+
+    let disabled = rest_client
+        .patch_capture(chip_id, &netsim_rest_api::CaptureUpdate { state: false })
+        .send()
+        .await
+        .expect("Failed to patch capture state to false");
+    assert!(!disabled.enabled);
+}

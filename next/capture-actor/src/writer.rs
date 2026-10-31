@@ -107,6 +107,7 @@ impl PcapWriter {
         let file = File::create(path).await?;
         let mut writer = BufWriter::new(file);
         writer.write_all(Self::header(network).as_bytes()).await?;
+        writer.flush().await?;
         Ok(Self { sink: PcapSink::File(writer), records_written: 0, bytes_written: 0 })
     }
 
@@ -268,5 +269,17 @@ mod tests {
             received += 1;
         }
         assert_eq!(received, STREAM_SUBSCRIBER_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn file_writer_flushes_global_header_on_creation() {
+        let path = std::env::temp_dir()
+            .join(format!("netsim_pcap_writer_test_{}.pcap", std::process::id()));
+        let _writer = PcapWriter::new(&path, DataLinkType::BluetoothH4).await.unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes.len(), size_of::<PcapHeader>());
+        assert_eq!(&bytes[0..4], &PCAP_MAGIC_NUMBER.to_le_bytes());
+        assert_eq!(&bytes[20..24], &DataLinkType::BluetoothH4.as_u32().to_le_bytes());
     }
 }

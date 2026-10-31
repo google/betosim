@@ -15,11 +15,12 @@
 use std::cmp::max;
 
 use common::util::time_display::TimeDisplay;
-use netsim_proto::{common::ChipKind, frontend, model};
+use netsim_proto::frontend;
+use netsim_rest_api::CaptureInfo;
 use protobuf::MessageField;
 
 use crate::{
-    args::{self, Beacon, BeaconCreate, Capture, Command, Link, OnOffState},
+    args::{self, Beacon, BeaconCreate, Command, Link, OnOffState},
     display::LinkChipIdDisplay,
     grpc_client::{GrpcRequest, GrpcResponse},
 };
@@ -70,39 +71,6 @@ impl args::Command {
         verbose: bool,
     ) -> crate::error::Result<()> {
         match self {
-            Command::Capture(Capture::List(cmd)) => {
-                let GrpcResponse::ListCapture(res) = response else {
-                    return Err(format!(
-                        "Expected to print ListCaptureResponse. Got: {response:?}"
-                    )
-                    .into());
-                };
-                Self::print_list_capture_response(
-                    &mut res.clone(),
-                    verbose,
-                    cmd.patterns.to_owned(),
-                )
-            }
-            Command::Capture(Capture::Patch(cmd)) => {
-                if verbose {
-                    println!(
-                        "Patched Capture state to {}",
-                        Self::on_off_state_to_string(cmd.state),
-                    );
-                }
-            }
-            Command::Capture(Capture::Get(cmd)) => {
-                if verbose {
-                    println!("Successfully downloaded file: {}", cmd.current_file);
-                }
-            }
-            Command::Capture(Capture::Stream(_)) => {
-                return Err(
-                    "Capture::Stream uses WebSocket over the HTTP server and is handled in main.rs."
-                        .into(),
-                );
-            }
-
             Command::Beacon(Beacon::Create(BeaconCreate::Uwb(_))) => {
                 if !verbose {
                     return Ok(());
@@ -202,207 +170,137 @@ impl args::Command {
         Ok(())
     }
 
-    fn capture_state_to_string(state: Option<bool>) -> String {
-        state.map(|value| if value { "on" } else { "off" }).unwrap_or("unknown").to_string()
-    }
-
-    fn on_off_state_to_string(state: OnOffState) -> String {
+    pub(crate) fn on_off_state_to_string(state: OnOffState) -> String {
         match state {
             OnOffState::On => "on".to_string(),
             OnOffState::Off => "off".to_string(),
         }
     }
+}
 
-    fn print_list_capture_response(
-        response: &mut frontend::ListCaptureResponse,
-        verbose: bool,
-        patterns: Vec<String>,
-    ) {
-        if response.captures.is_empty() {
-            if verbose {
-                println!("No available Capture found.");
-            }
-            return;
+pub(crate) fn print_capture_list(captures: &[CaptureInfo], patterns: &[String], verbose: bool) {
+    if captures.is_empty() {
+        if verbose {
+            println!("No available Capture found.");
         }
-        if patterns.is_empty() {
-            println!("List of Captures:");
+        return;
+    }
+    if patterns.is_empty() {
+        println!("List of Captures:");
+    } else {
+        println!("List of Captures matching pattern(s) `{patterns:?}`:");
+    }
+    // Create the header row and determine column widths
+    let id_hdr = "ID";
+    let name_hdr = "Device Name";
+    let chipkind_hdr = "Chip Kind";
+    let state_hdr = "State";
+    let time_hdr = "Timestamp";
+    let records_hdr = "Records";
+    let size_hdr = "Size (bytes)";
+    let id_width = 4; // ID width of 4 since capture id (=chip_id) starts at 1000
+    let state_width = state_hdr.len();
+    let chipkind_width = 11; // ChipKind width 11 for 'UNSPECIFIED'
+    let time_width = 9; // Timestamp width 9 for header (value format set to HH:MM:SS)
+    let column_width = |hdr: &str, len: fn(&CaptureInfo) -> usize| {
+        max(captures.iter().map(len).max().unwrap_or_default(), hdr.len())
+    };
+    let name_width = column_width(name_hdr, |c| c.device_name.len());
+    let records_width = column_width(records_hdr, |c| c.records_written.to_string().len());
+    let size_width = column_width(size_hdr, |c| c.bytes_written.to_string().len());
+    // Print header for capture list
+    println!(
+        "{}",
+        if verbose {
+            format!(
+                "{id_hdr:id_width$} | {name_hdr:name_width$} | {chipkind_hdr:chipkind_width$} | {state_hdr:state_width$} | {time_hdr:time_width$} | {records_hdr:records_width$} | {size_hdr:size_width$} |",
+            )
         } else {
-            // Filter out list of captures with matching patterns
-            Self::filter_captures(&mut response.captures, &patterns);
-            if response.captures.is_empty() {
-                if verbose {
-                    println!("No available Capture found matching pattern(s) `{patterns:?}`:");
-                }
-                return;
-            }
-            println!("List of Captures matching pattern(s) `{patterns:?}`:");
+            format!(
+                "{name_hdr:name_width$} | {chipkind_hdr:chipkind_width$} | {state_hdr:state_width$} | {records_hdr:records_width$} |"
+            )
         }
-        // Create the header row and determine column widths
-        let id_hdr = "ID";
-        let name_hdr = "Device Name";
-        let chipkind_hdr = "Chip Kind";
-        let state_hdr = "State";
-        let time_hdr = "Timestamp";
-        let records_hdr = "Records";
-        let size_hdr = "Size (bytes)";
-        let id_width = 4; // ID width of 4 since capture id (=chip_id) starts at 1000
-        let state_width = 8; // State width of 8 for 'detached' if device is disconnected
-        let chipkind_width = 11; // ChipKind width 11 for 'UNSPECIFIED'
-        let time_width = 9; // Timestamp width 9 for header (value format set to HH:MM:SS)
-        let name_width = max(
-            (response.captures.iter().max_by_key(|x| x.device_name.len()))
-                .unwrap_or_default()
-                .device_name
-                .len(),
-            name_hdr.len(),
-        );
-        let records_width = max(
-            (response.captures.iter().max_by_key(|x| x.records))
-                .unwrap_or_default()
-                .records
-                .to_string()
-                .len(),
-            records_hdr.len(),
-        );
-        let size_width = max(
-            (response.captures.iter().max_by_key(|x| x.size))
-                .unwrap_or_default()
-                .size
-                .to_string()
-                .len(),
-            size_hdr.len(),
-        );
-        // Print header for capture list
+    );
+    // Print information of each Capture
+    for capture in captures {
+        let chip_kind_str = capture.chip_kind.as_str();
+        let state_str = if capture.enabled { "on" } else { "off" };
         println!(
             "{}",
             if verbose {
                 format!(
-                    "{id_hdr:id_width$} | {name_hdr:name_width$} | {chipkind_hdr:chipkind_width$} | {state_hdr:state_width$} | {time_hdr:time_width$} | {records_hdr:records_width$} | {size_hdr:size_width$} |",
+                    "{:id_width$} | {:name_width$} | {:chipkind_width$} | {:state_width$} | {:time_width$} | {:records_width$} | {:size_width$} |",
+                    capture.chip_id.0.to_string(),
+                    capture.device_name,
+                    chip_kind_str,
+                    state_str,
+                    TimeDisplay::new(capture.seconds, capture.nanos as u32).utc_display_hms(),
+                    capture.records_written,
+                    capture.bytes_written,
                 )
             } else {
                 format!(
-                    "{name_hdr:name_width$} | {chipkind_hdr:chipkind_width$} | {state_hdr:state_width$} | {records_hdr:records_width$} |"
+                    "{:name_width$} | {:chipkind_width$} | {:state_width$} | {:records_width$} |",
+                    capture.device_name, chip_kind_str, state_str, capture.records_written,
                 )
             }
         );
-        // Print information of each Capture
-        for capture in &response.captures {
-            println!(
-                "{}",
-                if verbose {
-                    format!(
-                        "{:id_width$} | {:name_width$} | {:chipkind_width$} | {:state_width$} | {:time_width$} | {:records_width$} | {:size_width$} |",
-                        capture.id.to_string(),
-                        capture.device_name,
-                        Self::chip_kind_to_string(capture.chip_kind.enum_value_or_default()),
-                        if capture.valid {
-                            Self::capture_state_to_string(capture.state)
-                        } else {
-                            "detached".to_string()
-                        },
-                        TimeDisplay::new(
-                            capture.timestamp.get_or_default().seconds,
-                            capture.timestamp.get_or_default().nanos as u32,
-                        )
-                        .utc_display_hms(),
-                        capture.records,
-                        capture.size,
-                    )
-                } else {
-                    format!(
-                        "{:name_width$} | {:chipkind_width$} | {:state_width$} | {:records_width$} |",
-                        capture.device_name,
-                        Self::chip_kind_to_string(capture.chip_kind.enum_value_or_default()),
-                        if capture.valid {
-                            Self::capture_state_to_string(capture.state)
-                        } else {
-                            "detached".to_string()
-                        },
-                        capture.records,
-                    )
-                }
-            );
-        }
     }
+}
 
-    pub(crate) fn chip_kind_to_string(chip_kind: ChipKind) -> String {
-        match chip_kind {
-            ChipKind::UNSPECIFIED => "UNSPECIFIED",
-            ChipKind::BLUETOOTH => "BLUETOOTH",
-            ChipKind::WIFI => "WIFI",
-            ChipKind::UWB => "UWB",
-            ChipKind::BLUETOOTH_BEACON => "BLUETOOTH_BEACON",
-            ChipKind::NFC => "NFC",
-            ChipKind::CELLULAR => "CELLULAR",
-            ChipKind::CELLULAR_DATA => "CELLULAR_DATA",
-            ChipKind::ETHERNET => "ETHERNET",
-        }
-        .into()
-    }
-
-    pub(crate) fn filter_captures(captures: &mut Vec<model::Capture>, keys: &[String]) {
-        // Filter out list of captures with matching pattern
-        captures.retain(|capture| {
-            keys.iter().map(|key| key.to_uppercase()).all(|key| {
-                capture.id.to_string().contains(&key)
-                    || capture.device_name.to_uppercase().contains(&key)
-                    || Self::chip_kind_to_string(capture.chip_kind.enum_value_or_default())
-                        .contains(&key)
-            })
-        });
-    }
+pub(crate) fn filter_captures(captures: &mut Vec<CaptureInfo>, keys: &[String]) {
+    let upper_keys: Vec<String> = keys.iter().map(|k| k.to_uppercase()).collect();
+    captures.retain(|capture| {
+        let chip_id_str = capture.chip_id.0.to_string();
+        let device_upper = capture.device_name.to_uppercase();
+        let chip_kind_str = capture.chip_kind.as_str();
+        upper_keys.iter().all(|key| {
+            chip_id_str.contains(key) || device_upper.contains(key) || chip_kind_str.contains(key)
+        })
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    use netsim_model::{ChipId, ChipKind};
+
     use super::*;
-    fn test_filter_captures_helper(patterns: Vec<String>, expected_captures: Vec<model::Capture>) {
+    fn test_filter_captures_helper(patterns: Vec<String>, expected_captures: Vec<CaptureInfo>) {
         let mut captures = all_test_captures();
-        Command::filter_captures(&mut captures, &patterns);
+        filter_captures(&mut captures, &patterns);
         assert_eq!(captures, expected_captures);
     }
 
-    fn capture_1() -> model::Capture {
-        model::Capture {
-            id: 4001,
-            chip_kind: ChipKind::BLUETOOTH.into(),
-            device_name: "device 1".to_string(),
-            ..Default::default()
+    fn make_capture(id: u32, chip_kind: ChipKind, device_name: &str) -> CaptureInfo {
+        CaptureInfo {
+            chip_id: ChipId(id),
+            chip_kind,
+            device_name: device_name.to_string(),
+            enabled: false,
+            records_written: 0,
+            bytes_written: 0,
+            seconds: 0,
+            nanos: 0,
+            filepath: None,
         }
     }
-    fn capture_1_wifi() -> model::Capture {
-        model::Capture {
-            id: 4002,
-            chip_kind: ChipKind::WIFI.into(),
-            device_name: "device 1".to_string(),
-            ..Default::default()
-        }
+
+    fn capture_1() -> CaptureInfo {
+        make_capture(4001, ChipKind::BLUETOOTH, "device 1")
     }
-    fn capture_2() -> model::Capture {
-        model::Capture {
-            id: 4003,
-            chip_kind: ChipKind::BLUETOOTH.into(),
-            device_name: "device 2".to_string(),
-            ..Default::default()
-        }
+    fn capture_1_wifi() -> CaptureInfo {
+        make_capture(4002, ChipKind::WIFI, "device 1")
     }
-    fn capture_3() -> model::Capture {
-        model::Capture {
-            id: 4004,
-            chip_kind: ChipKind::WIFI.into(),
-            device_name: "device 3".to_string(),
-            ..Default::default()
-        }
+    fn capture_2() -> CaptureInfo {
+        make_capture(4003, ChipKind::BLUETOOTH, "device 2")
     }
-    fn capture_4_uwb() -> model::Capture {
-        model::Capture {
-            id: 4005,
-            chip_kind: ChipKind::UWB.into(),
-            device_name: "device 4".to_string(),
-            ..Default::default()
-        }
+    fn capture_3() -> CaptureInfo {
+        make_capture(4004, ChipKind::WIFI, "device 3")
     }
-    fn all_test_captures() -> Vec<model::Capture> {
+    fn capture_4_uwb() -> CaptureInfo {
+        make_capture(4005, ChipKind::UWB, "device 4")
+    }
+    fn all_test_captures() -> Vec<CaptureInfo> {
         vec![capture_1(), capture_1_wifi(), capture_2(), capture_3(), capture_4_uwb()]
     }
 

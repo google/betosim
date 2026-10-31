@@ -19,7 +19,7 @@ use std::{convert::Infallible, fmt::Display, io::ErrorKind, str::FromStr, sync::
 use ap_actor::{ApClient, ApError};
 use capture_actor::CaptureClient;
 use device_actor::{DeviceClient, DeviceError};
-use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use http_body_util::{BodyExt, Either, Full, LengthLimitError, Limited, combinators::BoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::{Body, Bytes, Incoming},
@@ -443,6 +443,10 @@ impl<T: Into<JsonResponse>, E: Into<JsonResponse>> From<Result<T, E>> for JsonRe
     }
 }
 
+/// HTTP response body produced by [`RestServer`]: either an in-memory
+/// [`Full<Bytes>`] payload or a streamed [`BoxBody<Bytes, std::io::Error>`].
+pub type ResponseBody = Either<Full<Bytes>, BoxBody<Bytes, std::io::Error>>;
+
 impl RestServer {
     pub fn new(
         device_client: DeviceClient,
@@ -506,11 +510,16 @@ impl RestServer {
     ///
     /// The error type is [`Infallible`] because every failure is reported as an
     /// HTTP status rather than by dropping the connection.
-    pub async fn serve(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+    pub async fn serve(
+        &self,
+        req: Request<Incoming>,
+    ) -> Result<Response<ResponseBody>, Infallible> {
         if req.method() == Method::GET {
             match req.uri().path().trim_end_matches('/') {
                 crate::path::CAPTURE => {
-                    return Ok(crate::capture_stream::upgrade(&self.capture_client, req).await);
+                    return Ok(crate::capture_stream::upgrade(&self.capture_client, req)
+                        .await
+                        .map(Either::Left));
                 }
                 crate::path::BLE_SCAN => {
                     return Ok(crate::ble_stream::upgrade(
@@ -518,7 +527,8 @@ impl RestServer {
                         req,
                         crate::ble_stream::BleStreamKind::Scan,
                     )
-                    .await);
+                    .await
+                    .map(Either::Left));
                 }
                 crate::path::BLE_SNIFF => {
                     return Ok(crate::ble_stream::upgrade(
@@ -526,7 +536,8 @@ impl RestServer {
                         req,
                         crate::ble_stream::BleStreamKind::Sniff,
                     )
-                    .await);
+                    .await
+                    .map(Either::Left));
                 }
                 _ => {}
             }
@@ -542,7 +553,8 @@ impl RestServer {
         // Reject an oversized body from the declared length before reading it,
         // so a large upload is not buffered just to be rejected.
         if body.size_hint().lower() > MAX_BODY_BYTES as u64 {
-            return Ok(error_response(StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large"));
+            return Ok(error_response(StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large")
+                .map(Either::Left));
         }
         // `Limited` stops reading once the cap is hit, which also covers a
         // chunked body whose length is not declared up front and so slips past
@@ -550,13 +562,15 @@ impl RestServer {
         let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(e) if e.is::<LengthLimitError>() => {
-                return Ok(error_response(StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large"));
+                return Ok(error_response(StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large")
+                    .map(Either::Left));
             }
             Err(e) => {
                 return Ok(error_response(
                     StatusCode::BAD_REQUEST,
                     &format!("400 Bad Request: {e}"),
-                ));
+                )
+                .map(Either::Left));
             }
         };
 
@@ -570,9 +584,9 @@ impl RestServer {
         method: &Method,
         path: &str,
         body: &[u8],
-    ) -> Response<Full<Bytes>> {
+    ) -> Response<ResponseBody> {
         if *method == Method::GET && path == crate::path::OPENAPI {
-            return build_response(StatusCode::OK, crate::OPENAPI_JSON);
+            return build_response(StatusCode::OK, crate::OPENAPI_JSON).map(Either::Left);
         }
         let resp: JsonResponse = match crate::openapi::find_route(crate::ROUTES, method, path) {
             Some((route, params)) => match route.op {
@@ -588,13 +602,21 @@ impl RestServer {
                 crate::Op::PatchAp => self.patch_ap(&params, body).await.into(),
                 crate::Op::DeleteAp => self.delete_ap(&params).await.into(),
                 crate::Op::DisconnectAp => self.disconnect_ap(&params, body).await.into(),
+                crate::Op::ListCaptures => self.list_captures().await.into(),
+                crate::Op::GetCapture => {
+                    return match self.get_capture(&params).await {
+                        Ok(resp) => resp.map(Either::Right),
+                        Err(err) => JsonResponse::from(err).0.map(Either::Left),
+                    };
+                }
+                crate::Op::PatchCapture => self.patch_capture(&params, body).await.into(),
             },
             None => {
                 error_response(StatusCode::NOT_FOUND, &format!("Not Found: {} {}", method, path))
                     .into()
             }
         };
-        resp.0
+        resp.0.map(Either::Left)
     }
 }
 

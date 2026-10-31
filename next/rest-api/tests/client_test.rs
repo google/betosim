@@ -274,3 +274,155 @@ fn test_delete_device_wire_format_and_response() {
     let request = server.join().expect("server");
     assert!(request.starts_with("DELETE /v1/devices/42 HTTP/1.1\r\n"), "{request}");
 }
+
+#[test]
+fn test_send_to_file_blocking_error_and_content_length() {
+    let tmp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let not_found_path = tmp_dir.join(format!("netsim-rest-test-{pid}-missing.pcap"));
+    let _ = std::fs::remove_file(&not_found_path);
+    let (client, _server) = serve_once("HTTP/1.1 404 Not Found\r\n\r\nCapture not found");
+    let err = client
+        .get_capture(9999)
+        .send_to_file_blocking(&not_found_path)
+        .expect_err("404 must error");
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    assert!(!not_found_path.exists(), "404 must not create 0-byte file");
+
+    // Verify truncated response (body shorter than Content-Length) returns an
+    // error and removes the incomplete file
+    let truncated_path = tmp_dir.join(format!("netsim-rest-test-{pid}-truncated.pcap"));
+    let _ = std::fs::remove_file(&truncated_path);
+    let (client, _server) = serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.tcpdump.pcap\r\nContent-Length: 24\r\n\r\nshort",
+    );
+    let err = client
+        .get_capture(1000)
+        .send_to_file_blocking(&truncated_path)
+        .expect_err("truncated response must error");
+    assert!(
+        matches!(err, RestError::InvalidResponse("response body shorter than Content-Length")),
+        "{err:?}"
+    );
+    assert!(!truncated_path.exists(), "truncated download must clean up partial file");
+    assert!(!truncated_path.with_extension("pcap.part").exists());
+}
+
+#[test]
+fn test_send_to_file_blocking_keeps_existing_file_on_error() {
+    let path =
+        std::env::temp_dir().join(format!("netsim-rest-test-{}-existing.pcap", std::process::id()));
+    std::fs::write(&path, b"previous capture").unwrap();
+
+    let (client, _server) = serve_once("HTTP/1.1 404 Not Found\r\n\r\nCapture not found");
+    let err = client.get_capture(9999).send_to_file_blocking(&path).expect_err("404 must error");
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    assert_eq!(std::fs::read(&path).unwrap(), b"previous capture");
+
+    let (client, _server) = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\nshort");
+    let err = client.get_capture(1000).send_to_file_blocking(&path).expect_err("short body");
+    assert!(
+        matches!(err, RestError::InvalidResponse("response body shorter than Content-Length")),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"previous capture");
+    assert!(!path.with_extension("pcap.part").exists());
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn test_chunked_response_is_rejected() {
+    let (client, _server) =
+        serve_once("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+    let err = client.get_version().send_blocking().expect_err("chunked must error");
+    assert!(
+        matches!(err, RestError::InvalidResponse("Transfer-Encoding is not supported")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn test_send_to_file_blocking_streams_body_larger_than_buffer() {
+    let body: Vec<u8> = (0u8..=250).cycle().take(20_000).collect();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+    let sent = body.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        read_request(&mut stream);
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", sent.len());
+        stream.write_all(head.as_bytes()).expect("write head");
+        for chunk in sent.chunks(3_000) {
+            stream.write_all(chunk).expect("write chunk");
+            stream.flush().expect("flush");
+        }
+    });
+    let path =
+        std::env::temp_dir().join(format!("netsim-rest-test-{}-large.pcap", std::process::id()));
+    let client = NetsimRestClient::new("127.0.0.1", port);
+    let written = client.get_capture(1000).send_to_file_blocking(&path).expect("download");
+    server.join().expect("server");
+    assert_eq!(written, body.len() as u64);
+    assert_eq!(std::fs::read(&path).unwrap(), body);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn test_captures_wire_format_and_streaming_bytes() {
+    let canned_list = "HTTP/1.1 200 OK\r\n\r\n{\"captures\":[{\"chip_id\":1000,\"chip_kind\":\"WIFI\",\"device_name\":\"pixel-wifi\",\"enabled\":false,\"records_written\":0,\"bytes_written\":0,\"seconds\":0,\"nanos\":0}]}";
+    let (client, server) = serve_once(canned_list);
+    let list_resp = client.get_captures().send_blocking().expect("get_captures");
+    assert_eq!(list_resp.captures.len(), 1);
+    assert_eq!(list_resp.captures[0].chip_id, netsim_model::ChipId(1000));
+    assert!(!list_resp.captures[0].enabled);
+    assert!(server.join().expect("server").starts_with("GET /v1/captures HTTP/1.1\r\n"));
+
+    let canned_patch = "HTTP/1.1 200 OK\r\n\r\n{\"chip_id\":1000,\"chip_kind\":\"WIFI\",\"device_name\":\"pixel-wifi\",\"enabled\":true,\"records_written\":0,\"bytes_written\":0,\"seconds\":1700000000,\"nanos\":0}";
+    let (client, server) = serve_once(canned_patch);
+    let patched = client
+        .patch_capture(1000, &netsim_rest_api::CaptureUpdate { state: true })
+        .send_blocking()
+        .expect("patch_capture");
+    assert!(patched.enabled);
+    let req = server.join().expect("server");
+    assert!(req.starts_with("PATCH /v1/captures/1000 HTTP/1.1\r\n"), "{req}");
+    assert!(req.ends_with("\r\n\r\n{\"state\":true}"), "{req}");
+
+    // Test binary PCAP streaming with non-UTF-8 bytes (0xa1b2c3d4 magic header)
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+    let expected_pcap: Vec<u8> = vec![0xd4, 0xc3, 0xb2, 0xa1, 0x02, 0x00, 0x04, 0x00, 0xff, 0xfe];
+    let expected_clone = expected_pcap.clone();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let request = read_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.tcpdump.pcap\r\n\r\n")
+            .expect("write head");
+        stream.write_all(&expected_clone).expect("write pcap");
+        request
+    });
+    let client = NetsimRestClient::new("127.0.0.1", port);
+    let tmp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let out_file = tmp_dir.join(format!("netsim-rest-test-{pid}-happy.pcap"));
+    let _ = std::fs::remove_file(&out_file);
+    let written =
+        client.get_capture(1000).send_to_file_blocking(&out_file).expect("send_to_file_blocking");
+    assert_eq!(written, expected_pcap.len() as u64);
+    assert_eq!(std::fs::read(&out_file).unwrap(), expected_pcap);
+    assert!(handle.join().expect("server").starts_with("GET /v1/captures/1000 HTTP/1.1\r\n"));
+    std::fs::remove_file(&out_file).unwrap();
+
+    // Bytes after Content-Length are not part of the body.
+    let (client, _server) = serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.tcpdump.pcap\r\nContent-Length: 10\r\n\r\n1234567890extra",
+    );
+    let extra_file = tmp_dir.join(format!("netsim-rest-test-{pid}-extra.pcap"));
+    let _ = std::fs::remove_file(&extra_file);
+    let written =
+        client.get_capture(1001).send_to_file_blocking(&extra_file).expect("send_to_file_blocking");
+    assert_eq!(written, 10);
+    assert_eq!(std::fs::read(&extra_file).unwrap(), b"1234567890");
+    std::fs::remove_file(&extra_file).unwrap();
+}

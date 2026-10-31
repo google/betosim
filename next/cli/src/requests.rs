@@ -14,19 +14,17 @@
 use common::util::time_display::TimeDisplay;
 use netsim_proto::{
     common::ChipKind,
-    frontend::{self, patch_capture_request::PatchCapture as PatchCaptureProto},
+    frontend,
     model::{
         self, ChipCreate as ChipCreateProto, DeviceCreate as DeviceCreateProto, Orientation,
         Position,
     },
 };
 use protobuf::MessageField;
-use tracing::error;
 
 use crate::{
     args::{
-        Beacon, BeaconCreate, Capture, ChipKind as ArgsChipKind, Command, Link, OnOffState,
-        RadioType, UpDownStatus,
+        Beacon, BeaconCreate, ChipKind as ArgsChipKind, Command, Link, RadioType, UpDownStatus,
     },
     error::{Error, Result},
     grpc_client::{GrpcMethodExecutor, GrpcRequest, GrpcResponse},
@@ -170,32 +168,21 @@ impl crate::args::BeaconPatchBle {
     }
 }
 
+pub(crate) fn capture_filename(capture: &netsim_rest_api::CaptureInfo) -> String {
+    let time_display = TimeDisplay::new(capture.seconds, capture.nanos as u32);
+    format!(
+        "netsim-{}-{}-{}-{}.pcap",
+        capture.chip_id.0,
+        capture.device_name.replace(' ', "_"),
+        capture.chip_kind,
+        time_display.utc_display(),
+    )
+}
+
 impl Command {
     /// Return the generated request protobuf message
     pub(crate) fn get_request(&self) -> Result<GrpcRequest> {
         Ok(match self {
-            Command::Capture(cmd) => match cmd {
-                Capture::List(_) => GrpcRequest::ListCapture,
-                Capture::Get(_) => {
-                    return Err(
-                        "get_request not implemented for Capture Get command. Use get_requests instead."
-                            .into(),
-                    );
-                }
-                Capture::Patch(_) => {
-                    return Err(
-                        "get_request not implemented for Capture Patch command. Use get_requests instead."
-                            .into(),
-                    );
-                }
-                Capture::Stream(_) => {
-                    return Err(
-                        "Capture::Stream uses WebSocket over the HTTP server and is handled in main.rs."
-                            .into(),
-                    );
-                }
-            },
-
             Command::Beacon(Beacon::Create(BeaconCreate::Uwb(args))) => {
                 let position = Position {
                     x: args.x.unwrap_or_default(),
@@ -234,52 +221,10 @@ impl Command {
 
     /// Create and return the request protobuf(s) for the command.
     pub(crate) fn get_requests<T: GrpcMethodExecutor>(
-        &mut self,
+        &self,
         client: &T,
     ) -> Result<Vec<GrpcRequest>> {
         match self {
-            Command::Capture(Capture::Patch(cmd)) => {
-                let mut reqs = Vec::new();
-                let filtered_captures = Self::get_filtered_captures(client, &cmd.patterns);
-                // Create a request for each capture
-                for capture in &filtered_captures {
-                    let mut result = frontend::PatchCaptureRequest::new();
-                    result.id = capture.id;
-                    let capture_state = match cmd.state {
-                        OnOffState::On => true,
-                        OnOffState::Off => false,
-                    };
-                    let mut patch_capture = PatchCaptureProto::new();
-                    patch_capture.state = capture_state.into();
-                    result.patch = Some(patch_capture).into();
-                    reqs.push(GrpcRequest::PatchCapture(result))
-                }
-                Ok(reqs)
-            }
-            Command::Capture(Capture::Get(cmd)) => {
-                let mut reqs = Vec::new();
-                let filtered_captures = Self::get_filtered_captures(client, &cmd.patterns);
-                // Create a request for each capture
-                for capture in &filtered_captures {
-                    let mut result = frontend::GetCaptureRequest::new();
-                    result.id = capture.id;
-                    reqs.push(GrpcRequest::GetCapture(result));
-                    let time_display = TimeDisplay::new(
-                        capture.timestamp.get_or_default().seconds,
-                        capture.timestamp.get_or_default().nanos as u32,
-                    );
-                    let file_extension = "pcap";
-                    cmd.filenames.push(format!(
-                        "netsim-{:?}-{}-{}-{}.{}",
-                        capture.id,
-                        capture.device_name.to_owned().replace(' ', "_"),
-                        Self::chip_kind_to_string(capture.chip_kind.enum_value_or_default()),
-                        time_display.utc_display(),
-                        file_extension
-                    ));
-                }
-                Ok(reqs)
-            }
             Command::Link(link_cmd) => Self::handle_link_command(client, link_cmd),
             _ => {
                 Err("get_requests not implemented for this command. Use get_request instead."
@@ -416,31 +361,6 @@ impl Command {
         }
     }
 
-    fn get_filtered_captures<T: GrpcMethodExecutor>(
-        client: &T,
-        patterns: &[String],
-    ) -> Vec<model::Capture> {
-        // Get list of captures, with explicit type annotation for send_grpc
-        let mut result = match client.send_grpc(&GrpcRequest::ListCapture) {
-            Ok(GrpcResponse::ListCapture(response)) => response.captures,
-            Ok(grpc_response) => {
-                error!(response = ?grpc_response, "Unexpected GrpcResponse");
-                return Vec::new();
-            }
-            Err(error) => {
-                error!(%error, "ListCapture Grpc call error");
-                return Vec::new();
-            }
-        };
-
-        // Filter captures if patterns are provided
-        if !patterns.is_empty() {
-            Self::filter_captures(&mut result, patterns);
-        }
-
-        result
-    }
-
     /// Resolves chip IDs based on optional ID, name, or returns ALL chips of
     /// kind if both are missing (Wildcard).
     fn resolve_chip_ids<T: GrpcMethodExecutor>(
@@ -523,9 +443,10 @@ mod tests {
     use crate::{
         args::{
             AdvertiseMode, BeaconBleAdvertiseData, BeaconBleScanResponseData, BeaconBleSettings,
-            BeaconCreateBle, BeaconCreateUwb, BeaconPatch, BeaconPatchBle, Command, Devices,
-            Interval, Link, LinkCreate, LinkPatch, ListCapture, Move, NetsimArgs, ParsableBytes,
-            Radio, RadioType, StreamCapture, TxPower, TxPowerLevel,
+            BeaconCreateBle, BeaconCreateUwb, BeaconPatch, BeaconPatchBle, Capture, Command,
+            Devices, GetCapture, Interval, Link, LinkCreate, LinkPatch, ListCapture, Move,
+            NetsimArgs, OnOffState, ParsableBytes, PatchCapture, Radio, RadioType, StreamCapture,
+            TxPower, TxPowerLevel,
         },
         error::Error,
     };
@@ -955,20 +876,55 @@ mod tests {
 
     #[test]
     fn test_capture_list() {
-        test_command(
-            "netsim-cli capture list",
-            Command::Capture(Capture::List(ListCapture { ..Default::default() })),
-            GrpcRequest::ListCapture,
-        )
+        let cmd = NetsimArgs::parse_from("netsim-cli capture list".split_whitespace()).command;
+        assert_eq!(cmd, Command::Capture(Capture::List(ListCapture { ..Default::default() })));
+        assert!(cmd.get_request().is_err());
     }
 
     #[test]
     fn test_capture_list_alias() {
-        test_command(
-            "netsim-cli pcap list",
-            Command::Capture(Capture::List(ListCapture { ..Default::default() })),
-            GrpcRequest::ListCapture,
-        )
+        let cmd = NetsimArgs::parse_from("netsim-cli pcap list".split_whitespace()).command;
+        assert_eq!(cmd, Command::Capture(Capture::List(ListCapture { ..Default::default() })));
+        assert!(cmd.get_request().is_err());
+    }
+
+    #[test]
+    fn test_capture_patch_and_get() {
+        let patch_cmd =
+            NetsimArgs::parse_from("netsim-cli capture patch on wifi".split_whitespace()).command;
+        assert_eq!(
+            patch_cmd,
+            Command::Capture(Capture::Patch(PatchCapture {
+                state: OnOffState::On,
+                patterns: vec!["wifi".to_string()],
+            }))
+        );
+        assert!(patch_cmd.get_request().is_err());
+
+        let get_cmd =
+            NetsimArgs::parse_from("netsim-cli pcap get -o /tmp/pcaps 1000".split_whitespace())
+                .command;
+        assert_eq!(
+            get_cmd,
+            Command::Capture(Capture::Get(GetCapture {
+                patterns: vec!["1000".to_string()],
+                location: Some("/tmp/pcaps".to_string()),
+            }))
+        );
+        assert!(get_cmd.get_request().is_err());
+
+        let info = netsim_rest_api::CaptureInfo {
+            chip_id: netsim_model::ChipId(1000),
+            chip_kind: netsim_model::ChipKind::WIFI,
+            device_name: "Pixel 8".to_string(),
+            enabled: true,
+            records_written: 2,
+            bytes_written: 64,
+            seconds: 0,
+            nanos: 0,
+            filepath: None,
+        };
+        assert_eq!(capture_filename(&info), "netsim-1000-Pixel_8-WIFI-1970-01-01-00-00-00.pcap");
     }
 
     #[test]
@@ -1006,8 +962,6 @@ mod tests {
             }))
         );
     }
-
-    //TODO: Add capture patch and get tests
 
     fn get_create_device_req(
         device_name: &str,

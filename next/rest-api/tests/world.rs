@@ -54,6 +54,7 @@ pub struct RawHttpResponse {
     pub status_code: u16,
     pub headers: HashMap<String, String>,
     pub body: String,
+    pub body_bytes: Vec<u8>,
 }
 
 impl RawHttpResponse {
@@ -64,6 +65,23 @@ impl RawHttpResponse {
             self.headers.get("content-type").map(String::as_str),
             Some("application/json"),
             "Expected Content-Type: application/json in headers: {:?}",
+            self.headers
+        );
+        assert_eq!(
+            self.headers.get("x-content-type-options").map(String::as_str),
+            Some("nosniff"),
+            "Expected X-Content-Type-Options: nosniff in headers: {:?}",
+            self.headers
+        );
+    }
+
+    /// Asserts that `Content-Type: application/vnd.tcpdump.pcap` and
+    /// `X-Content-Type-Options: nosniff` headers are present.
+    pub fn assert_pcap_headers(&self) {
+        assert_eq!(
+            self.headers.get("content-type").map(String::as_str),
+            Some("application/vnd.tcpdump.pcap"),
+            "Expected Content-Type: application/vnd.tcpdump.pcap in headers: {:?}",
             self.headers
         );
         assert_eq!(
@@ -187,6 +205,7 @@ pub struct World {
     pub rest_client: NetsimRestClient,
     pub device_client: DeviceClient,
     stats_path: PathBuf,
+    pcap_dir: PathBuf,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -203,6 +222,7 @@ impl Drop for World {
             tmp.set_file_name(s);
             let _ = std::fs::remove_file(tmp);
         }
+        let _ = std::fs::remove_dir_all(&self.pcap_dir);
     }
 }
 
@@ -219,11 +239,17 @@ impl World {
         }
 
         let stats_path = temp_stats_path();
+        let pcap_dir = stats_path.with_extension("pcaps");
+        let (capture_runner, capture_client) = capture_actor::new();
+        tasks.push(tokio::spawn(
+            capture_runner.run(CaptureActor::new(false, Some(pcap_dir.clone()))),
+        ));
+
         let (device_runner, device_client) = device_actor::new();
         let mut device_actor_inst = DeviceActor::new(
             chip_clients,
             Arc::new(AtomicU32::new(1000)),
-            None,
+            Some(Arc::new(capture_client.clone())),
             Box::new(MockLinkClient),
             None,
             None,
@@ -246,9 +272,6 @@ impl World {
             .await
             .expect("Failed to seed default AP 0");
 
-        let (capture_runner, capture_client) = capture_actor::new();
-        tasks.push(tokio::spawn(capture_runner.run(CaptureActor::new(false, None))));
-
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tasks.push(tokio::spawn(netsim_rest_api::server::run(
@@ -261,7 +284,7 @@ impl World {
         )));
 
         let rest_client = NetsimRestClient::from_addr(addr.to_string());
-        Self { addr, rest_client, device_client, stats_path, _tasks: tasks }
+        Self { addr, rest_client, device_client, stats_path, pcap_dir, _tasks: tasks }
     }
 
     /// BDD Step: Given a dynamic Wi-Fi device at `position`.
@@ -390,9 +413,13 @@ impl World {
         .await
         .expect("HTTP request timed out");
 
-        let raw_str = String::from_utf8(raw_bytes).expect("Non-UTF8 HTTP response");
-        let (head_part, body_part) =
-            raw_str.split_once("\r\n\r\n").expect("Missing HTTP header/body separator");
+        let sep = raw_bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("Missing HTTP header/body separator");
+        let head_part = std::str::from_utf8(&raw_bytes[..sep]).expect("Non-UTF8 HTTP headers");
+        let body_bytes = raw_bytes[sep + 4..].to_vec();
+        let body = String::from_utf8_lossy(&body_bytes).into_owned();
         let mut lines = head_part.lines();
         let status_line = lines.next().unwrap_or_default();
         let status_code = status_line
@@ -406,6 +433,6 @@ impl World {
                 headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
             }
         }
-        RawHttpResponse { status_code, headers, body: body_part.to_string() }
+        RawHttpResponse { status_code, headers, body, body_bytes }
     }
 }

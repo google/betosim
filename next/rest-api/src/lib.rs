@@ -26,6 +26,7 @@ use crate::openapi::Route;
 
 pub mod ap_api;
 mod ble_stream;
+pub mod capture_api;
 mod capture_stream;
 pub mod client;
 pub mod device_api;
@@ -34,6 +35,7 @@ pub mod openapi;
 pub mod server;
 
 pub use ap_api::*;
+pub use capture_api::Pcap;
 pub use client::*;
 pub use device_api::*;
 pub use link_api::*;
@@ -47,6 +49,7 @@ pub mod path {
     pub const DEVICES: &str = "/v1/devices";
     pub const LINKS: &str = "/v1/links";
     pub const APS: &str = "/v1/aps";
+    pub const CAPTURES: &str = "/v1/captures";
     /// WebSocket streaming a chip's live capture as PCAP:
     /// `GET /v1/capture?chip_id=N`. Kept at top-level alongside `/v1/captures`
     /// since captures are a top-level collection and can span multiple chips.
