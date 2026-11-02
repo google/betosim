@@ -108,13 +108,13 @@ def get_netsim_binaries():
   """Returns a dictionary mapping netsim binary names to their Bazel output paths."""
   if platform.system().lower() in ["linux", "darwin"]:
     return {
-        "netsim": "next/cli/_stripped/netsim",
-        "netsimd": "next/daemon/_stripped/netsimd",
+        "netsim": "src/cli/_stripped/netsim",
+        "netsimd": "src/daemon/_stripped/netsimd",
     }
   else:
     return {
-        "netsim": "next/cli/netsim",
-        "netsimd": "next/daemon/netsimd",
+        "netsim": "src/cli/netsim",
+        "netsimd": "src/daemon/netsimd",
     }
 
 
@@ -518,14 +518,14 @@ def _resolve_crate_target(crate_name: str) -> str:
   clean_name = crate_name.replace("netsim-", "").replace("netsim_", "")
   if clean_name == "netsim":
     clean_name = "cli"
-  for base_dir in ["next", ""]:
+  for base_dir in ["src", ""]:
     for candidate in [clean_name, crate_name]:
       rel_path = f"{base_dir}/{candidate}" if base_dir else candidate
       pkg_dir = NETSIM_ROOT / rel_path
       if pkg_dir.is_dir():
         suffix = ":test" if _has_test_target(pkg_dir) else ":all"
         return f"//{rel_path}{suffix}"
-  return f"//next/{clean_name}:all"
+  return f"//src/{clean_name}:all"
 
 
 def get_bazel_targets(args):
@@ -538,5 +538,5 @@ def get_bazel_targets(args):
 
   return [
       "//:all",
-      "//next/...",
+      "//src/...",
   ]

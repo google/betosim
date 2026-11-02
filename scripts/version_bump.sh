@@ -27,7 +27,7 @@ fi
 
 # Absolute path to this script
 SCRIPT=$(dirname $(readlink -f "$0"))
-export VERSION_FILE=$SCRIPT/../next/daemon/src/version.rs
+export VERSION_FILE=$SCRIPT/../src/daemon/src/version.rs
 
 NEW_VERSION=$(python3 - <<EOF
 import re

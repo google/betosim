@@ -1,4 +1,4 @@
 objs
 target
-next/target
+src/target
 rust/target

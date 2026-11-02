@@ -200,15 +200,15 @@ class VerifyManager:
 
     self.runner_bin = (
         AOSP_ROOT
-        / "bazel-bin/external/netsim+/next/verify/runner"
+        / "bazel-bin/external/netsim+/src/verify/runner"
         / binary_extension("runner")
     )
     self.apk_path = (
         AOSP_ROOT
-        / "bazel-bin/external/netsim+/next/verify/instrumentation/vbs/vbs.apk"
+        / "bazel-bin/external/netsim+/src/verify/instrumentation/vbs/vbs.apk"
     )
     self.spec_dir = (
-        AOSP_ROOT / "tools/netsim/next/verify/examples/01-basic/features"
+        AOSP_ROOT / "tools/netsim/src/verify/examples/01-basic/features"
     )
     if not self.avdmanager_bin.exists():
       logging.error(f"avdmanager not found at {self.avdmanager_bin}")
@@ -298,7 +298,7 @@ class VerifyManager:
     """Start netsimd process."""
     netsimd_bin = (
         AOSP_ROOT
-        / "bazel-bin/external/netsim+/next/daemon"
+        / "bazel-bin/external/netsim+/src/daemon"
         / binary_extension("netsimd")
     )
     if not netsimd_bin.exists():
@@ -536,7 +536,7 @@ class VerifyManager:
 
     netsim_cli_bin = (
         AOSP_ROOT
-        / "bazel-bin/external/netsim+/next/cli"
+        / "bazel-bin/external/netsim+/src/cli"
         / binary_extension("netsim")
     )
     if not netsim_cli_bin.exists():

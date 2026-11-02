@@ -530,6 +530,50 @@ class CompileInstallTaskTest(unittest.TestCase):
         for proto in expected_protos:
           self.assertIn(f"proto/netsim/{proto.name}", names)
 
+  def test_utils_get_netsim_binaries_and_bazel_targets(self):
+    with mock.patch("platform.system", return_value="Linux"):
+      self.assertEqual(
+          utils.get_netsim_binaries(),
+          {
+              "netsim": "src/cli/_stripped/netsim",
+              "netsimd": "src/daemon/_stripped/netsimd",
+          },
+      )
+    with mock.patch("platform.system", return_value="Windows"):
+      self.assertEqual(
+          utils.get_netsim_binaries(),
+          {
+              "netsim": "src/cli/netsim",
+              "netsimd": "src/daemon/netsimd",
+          },
+      )
+
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+      sandbox_netsim = Path(tmp_dir_str) / "netsim"
+      common_dir = sandbox_netsim / "src" / "common"
+      common_dir.mkdir(parents=True, exist_ok=True)
+      (common_dir / "BUILD").write_text(
+          'netsim_rust_library(name = "common")\n'
+      )
+
+      cli_dir = sandbox_netsim / "src" / "cli"
+      cli_dir.mkdir(parents=True, exist_ok=True)
+      (cli_dir / "BUILD").write_text('netsim_rust_binary(name = "netsim")\n')
+
+      args = _TestArgs(Path("/tmp/out"), Path("/tmp/dist"))
+      self.assertEqual(utils.get_bazel_targets(args), ["//:all", "//src/..."])
+
+      args.crate = ["netsim-common", "netsim", "nonexistent-crate"]
+      with mock.patch.object(utils, "NETSIM_ROOT", sandbox_netsim):
+        self.assertEqual(
+            utils.get_bazel_targets(args),
+            [
+                "//src/common:test",
+                "//src/cli:all",
+                "//src/nonexistent-crate:all",
+            ],
+        )
+
 
 class ZipArtifactTaskTest(unittest.TestCase):
 

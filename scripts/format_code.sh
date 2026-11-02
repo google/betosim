@@ -65,7 +65,7 @@ if [[ -z "$RUSTFMT" ]]; then
   RUSTFMT="rustfmt"
 fi
 BPFMT="$REPO/prebuilts/build-tools/$OS-x86/bin/bpfmt"
-TAPLO_CONFIG="$REPO/tools/netsim/next/taplo.toml"
+TAPLO_CONFIG="$REPO/tools/netsim/src/taplo.toml"
 
 KTFMT="ktfmt"
 if ! command -v ktfmt &> /dev/null; then
@@ -86,13 +86,13 @@ EXCLUDES=(
 
 # Clang
 Clang_CMD="clang-format -i"
-Clang_DIRS="next proto"
+Clang_DIRS="src proto"
 Clang_EXTS="-name *.cc -o -name *.h -o -name *.proto"
 Clang_REGEX="\.(cc|h|proto)$"
 
 # Rust
 Rust_CMD="$RUSTFMT --files-with-diff"
-Rust_DIRS="next proto"
+Rust_DIRS="src proto"
 Rust_EXTS="-name *.rs"
 Rust_REGEX="\.rs$"
 
@@ -123,7 +123,7 @@ Bazel_REGEX="BUILD$|MODULE\.bazel$|BUILD\.bazel$|\.bzl$"
 
 # Toml
 Toml_CMD="env RUST_LOG=warn taplo fmt --config $TAPLO_CONFIG"
-Toml_DIRS="next proto"
+Toml_DIRS="src proto"
 Toml_EXTS="-name Cargo.toml"
 Toml_FLAGS="-not -path */bazel-bin/* -not -path */bazel-netsim/*"
 Toml_REGEX="Cargo\.toml$"
@@ -204,12 +204,12 @@ regenerate_touched_bps() {
     diff_flags+=("HEAD")
   fi
 
-  # Gather all touched files under next/ (including deleted and untracked ones) via a single pipeline
+  # Gather all touched files under src/ (including deleted and untracked ones) via a single pipeline
   local touched_files=()
   mapfile -d '' touched_files < <(
-    git diff "${diff_flags[@]}" -z --name-only next/ 2>/dev/null
+    git diff "${diff_flags[@]}" -z --name-only src/ 2>/dev/null
     if [[ "$mode" == "DIFF" ]]; then
-      git ls-files -z --others --exclude-standard next/ 2>/dev/null
+      git ls-files -z --others --exclude-standard src/ 2>/dev/null
     fi
   )
 
@@ -217,9 +217,9 @@ regenerate_touched_bps() {
   local pkgs=()
   local f
   for f in "${touched_files[@]}"; do
-    local pkg="${f#next/}"
+    local pkg="${f#src/}"
     if [[ "$pkg" != */* ]]; then
-      pkg="." # Top-level file modified under next/, fallback to scanning the whole tree
+      pkg="." # Top-level file modified under src/, fallback to scanning the whole tree
     else
       pkg="${pkg%%/*}"
     fi
@@ -229,7 +229,7 @@ regenerate_touched_bps() {
   done
 
   if [[ ${#pkgs[@]} -eq 0 ]]; then
-    echo "No touched packages under next/."
+    echo "No touched packages under src/."
     return 0
   fi
 
@@ -265,7 +265,7 @@ regenerate_touched_bps() {
         seen_candidates["$bp_file"]=1
         candidates_ref+=("$bp_file")
       fi
-    done < <(find "next/$pkg" -name "Android.bp" -print0 2>/dev/null)
+    done < <(find "src/$pkg" -name "Android.bp" -print0 2>/dev/null)
   done
 }
 

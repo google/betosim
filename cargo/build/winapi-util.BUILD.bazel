@@ -15,7 +15,7 @@
 """winapi_util bazel build rule
 
 Only reachable on Windows, where termcolor uses winapi_util::console for the
-legacy console colour API and //next/daemon uses winapi_util::file to query
+legacy console colour API and //src/daemon uses winapi_util::file to query
 lock file identities. The crate itself compiles to an empty library on other
 platforms, but nothing depends on it there.
 """

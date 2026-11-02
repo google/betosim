@@ -21,7 +21,7 @@ soong_targets = []
 CURRENT_REL_PATH = ""
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-NEXT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "next")
+NEXT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "src")
 
 SKIPPED_TEST_PACKAGES = {
     "libslirp-rs",
@@ -49,11 +49,11 @@ EXACT_DEP_MAPPING = {
     "@rootcanal//:rootcanal_rs": "librootcanal_rs",
     "@cxx.rs//:cxx": "libcxx",
     "@casimir//:casimir_lib": "libcasimir",
-    "//next/testing": "libnetsim_next_netsim_testing_testing",
-    "//next/daemon": "netsim_next_daemon",
-    "//next/daemon:testing": "libnetsim_next_daemon_lib_testing",
-    "//next/testing:netsim-testing": "libnetsim_next_netsim_testing",
-    "//next/testing:testing": "libnetsim_next_netsim_testing_testing",
+    "//src/testing": "libnetsim_next_netsim_testing_testing",
+    "//src/daemon": "netsim_next_daemon",
+    "//src/daemon:testing": "libnetsim_next_daemon_lib_testing",
+    "//src/testing:netsim-testing": "libnetsim_next_netsim_testing",
+    "//src/testing:testing": "libnetsim_next_netsim_testing_testing",
     "//:netsim_link_layer_packets_rust_gen": (
         "rootcanal_link_layer_packets_rust_gen"
     ),
@@ -84,7 +84,7 @@ def translate_dep(dep):
   # Resolve relative labels starting with ":" to absolute
   if dep.startswith(":"):
     rel = CURRENT_REL_PATH.strip("/")
-    dep = f"//next/{rel}{dep}" if rel else f"//next{dep}"
+    dep = f"//src/{rel}{dep}" if rel else f"//src{dep}"
 
   if dep in EXACT_DEP_MAPPING:
     return EXACT_DEP_MAPPING[dep]
@@ -232,7 +232,7 @@ def stripped_binaries(*args, **kwargs):
 
 
 def redirect_dep_to_testing(d):
-  if d.startswith("//next"):
+  if d.startswith("//src"):
     if d.endswith(":testing"):
       return d
     elif ":" in d:
@@ -318,7 +318,7 @@ def rust_test(*args, **kwargs):
 
   crate_root = kwargs.get("crate_root")
   if not crate_root:
-    # Keep in sync with crate_root_opts in next/defs.bzl.
+    # Keep in sync with crate_root_opts in src/defs.bzl.
     for opt in [
         "tests/mod.rs",
         "tests/integration_test.rs",
