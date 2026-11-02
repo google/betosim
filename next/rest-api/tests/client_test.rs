@@ -23,7 +23,7 @@ use std::{
 
 use hyper::StatusCode;
 use netsim_model::{ApCreate, ApUpdate};
-use netsim_rest_api::{DisconnectApRequest, NetsimRestClient, RestError, VersionResponse};
+use netsim_rest_api::{DisconnectApRequest, Empty, NetsimRestClient, RestError, VersionResponse};
 
 /// Accepts one connection, replies with `response`, and closes. The handle
 /// yields the raw request the client sent.
@@ -116,11 +116,56 @@ fn test_send_blocking_posts_json_body() {
 
 #[test]
 fn test_delete_empty_body_decodes_to_unit() {
-    for response in ["HTTP/1.1 204 No Content\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n\r\n"] {
+    for response in [
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{ }",
+        "HTTP/1.1 204 No Content\r\n\r\n",
+        "HTTP/1.1 200 OK\r\n\r\n\r\n",
+    ] {
         let (client, server) = serve_once(response);
         client.delete("/v1/devices/1").send_blocking().expect(response);
         assert!(server.join().expect("server").starts_with("DELETE /v1/devices/1 HTTP/1.1\r\n"));
     }
+}
+
+#[test]
+fn test_empty_object_keeps_parse_error_for_non_unit_types() {
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}";
+    let (client, _server) = serve_once(response);
+    assert_eq!(client.get::<Empty>("/v1/version").send_blocking().expect("{} is Empty"), Empty {});
+
+    let (client, _server) = serve_once(response);
+    let err = client.get_version().send_blocking().expect_err("{} is not a VersionResponse");
+    assert!(err.to_string().contains("missing field `version`"), "{err}");
+
+    let (client, _server) = serve_once(response);
+    let err = client
+        .get::<Option<VersionResponse>>("/v1/version")
+        .send_blocking()
+        .expect_err("{} is not Some(VersionResponse)");
+    assert!(err.to_string().contains("missing field `version`"), "{err}");
+
+    let (client, _server) = serve_once("HTTP/1.1 200 OK\r\n\r\n");
+    let err = client
+        .get::<Option<VersionResponse>>("/v1/version")
+        .send_blocking()
+        .expect_err("empty body is not valid JSON for Option<VersionResponse>");
+    assert!(err.to_string().contains("EOF"), "{err}");
+
+    let (client, _server) = serve_once("HTTP/1.1 200 OK\r\n\r\n");
+    let err = client
+        .get::<Empty>("/v1/version")
+        .send_blocking()
+        .expect_err("empty body is not valid JSON for Empty");
+    assert!(err.to_string().contains("EOF"), "{err}");
+
+    let (client, _server) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"unexpected\":1}");
+    let err = client
+        .get::<()>("/v1/version")
+        .send_blocking()
+        .expect_err("non-empty object is not valid for unit");
+    assert!(err.to_string().contains("invalid type: map"), "{err}");
 }
 
 #[test]
@@ -137,7 +182,7 @@ fn test_send_blocking_tries_all_resolved_addresses() {
 fn test_error_status_messages() {
     let cases = [
         (
-            "HTTP/1.1 404 Not Found\r\n\r\n{\"error\":\"Not Found: GET /v1/x\"}",
+            "HTTP/1.1 404 Not Found\r\n\r\n{\"error\":{\"code\":404,\"message\":\"Not Found: GET /v1/x\",\"status\":\"NOT_FOUND\"}}",
             StatusCode::NOT_FOUND,
             "HTTP Error 404: Not Found: GET /v1/x",
         ),
@@ -205,7 +250,8 @@ fn test_patch_ap_wire_format_and_response() {
 
 #[test]
 fn test_delete_ap_wire_format() {
-    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    let (client, server) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}");
     client.delete_ap(42).send_blocking().expect("delete_ap");
     let request = server.join().expect("server");
     assert!(request.starts_with("DELETE /v1/aps/42 HTTP/1.1\r\n"), "{request}");
@@ -213,7 +259,8 @@ fn test_delete_ap_wire_format() {
 
 #[test]
 fn test_disconnect_ap_wire_format() {
-    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    let (client, server) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}");
     let disconnect_req = DisconnectApRequest { mac_address: "02:15:b2:00:01:00".to_string() };
     client.disconnect_ap(7, &disconnect_req).send_blocking().expect("disconnect_ap");
     let request = server.join().expect("server");
@@ -223,7 +270,8 @@ fn test_disconnect_ap_wire_format() {
 
 #[test]
 fn test_reset_wire_format() {
-    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    let (client, server) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}");
     client.reset().send_blocking().expect("reset");
     let request = server.join().expect("server");
     assert!(request.starts_with("POST /v1/devices:reset HTTP/1.1\r\n"), "{request}");
@@ -269,7 +317,8 @@ fn test_create_device_wire_format_and_response() {
 
 #[test]
 fn test_delete_device_wire_format_and_response() {
-    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n");
+    let (client, server) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}");
     client.delete_device(42).send_blocking().expect("delete_device");
     let request = server.join().expect("server");
     assert!(request.starts_with("DELETE /v1/devices/42 HTTP/1.1\r\n"), "{request}");
@@ -425,4 +474,12 @@ fn test_captures_wire_format_and_streaming_bytes() {
     assert_eq!(written, 10);
     assert_eq!(std::fs::read(&extra_file).unwrap(), b"1234567890");
     std::fs::remove_file(&extra_file).unwrap();
+
+    // A non-2xx AIP-193 error body decodes to its message.
+    let (client, _server) = serve_once(
+        "HTTP/1.1 404 Not Found\r\n\r\n{\"error\":{\"code\":404,\"message\":\"Capture not found\",\"status\":\"NOT_FOUND\"}}",
+    );
+    let err = client.get_captures().send_blocking().expect_err("404 must error");
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    assert_eq!(err.to_string(), "HTTP Error 404: Capture not found");
 }

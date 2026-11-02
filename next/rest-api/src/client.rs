@@ -365,16 +365,28 @@ fn decode_error(status: StatusCode, body: &[u8]) -> RestError {
     let body_str = String::from_utf8_lossy(body);
     let message = serde_json::from_str::<ErrorResponse>(&body_str)
         .ok()
-        .map(|e| e.error)
+        .map(|e| e.error.message)
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| body_str.into_owned());
     RestError::Status { status, message }
 }
 
-/// Parses a JSON response body. An empty 2xx body decodes as JSON `null` so
-/// `T = ()` works.
+/// Parses a JSON response body. Void endpoints reply with an empty body or
+/// `{}`; both decode as `()`. `{}` maps to `()` only when normal JSON decoding
+/// fails for a zero-sized `T`, so `Empty` on `{}` succeeds directly and any
+/// other type (including `Option<U>`) keeps its parse error on `{}` or `""`.
 fn decode_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, RestError> {
-    let body = String::from_utf8_lossy(body);
-    let body = body.trim();
-    Ok(serde_json::from_str(if body.is_empty() { "null" } else { body })?)
+    serde_json::from_slice(body).or_else(|orig_err| {
+        let is_void = std::mem::size_of::<T>() == 0
+            && (body.trim_ascii().is_empty()
+                || matches!(
+                    serde_json::from_slice(body),
+                    Ok(serde_json::Value::Object(m)) if m.is_empty()
+                ));
+        if is_void {
+            serde_json::from_str("null").map_err(|_err| RestError::Json(orig_err))
+        } else {
+            Err(RestError::Json(orig_err))
+        }
+    })
 }

@@ -330,6 +330,9 @@ fn test_netsim_openapi_spec() {
     );
 
     let cpp = generate_cpp(&doc);
+    assert!(cpp.contains("enum class RpcStatus {"), "{cpp}");
+    assert!(cpp.contains("struct ErrorStatus {"), "{cpp}");
+    assert!(cpp.contains("struct ErrorResponse {"), "{cpp}");
     assert!(cpp.contains("struct VersionResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListDeviceResponse {"), "{cpp}");
     assert!(cpp.contains("struct ListLinkResponse {"), "{cpp}");
@@ -344,6 +347,15 @@ fn test_netsim_openapi_spec() {
     assert!(cpp.contains("std::optional<ChipVariantUpdate> variant;"), "{cpp}");
 
     let py = generate_python(&doc);
+    assert!(
+        py.contains("class RpcStatus(StrEnum):\n    INVALID_ARGUMENT = \"INVALID_ARGUMENT\""),
+        "{py}"
+    );
+    assert!(
+        py.contains("class ErrorStatus:\n    code: int\n    message: str\n    status: RpcStatus"),
+        "{py}"
+    );
+    assert!(py.contains("class ErrorResponse:\n    error: ErrorStatus"), "{py}");
     assert!(py.contains("class WifiMode(StrEnum):\n    A = \"a\""), "{py}");
     assert!(py.contains("class ListDeviceResponse:\n    devices: list[Device]"), "{py}");
     assert!(py.contains("class ListCaptureResponse:\n    captures: list[CaptureInfo]"), "{py}");

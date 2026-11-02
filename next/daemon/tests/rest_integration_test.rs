@@ -222,7 +222,7 @@ async fn test_rest_access_point_lifecycle() {
     assert_eq!(list_after_delete.aps.len(), initial_count);
     assert!(!list_after_delete.aps.iter().any(|ap| ap.id == ap_id));
 
-    // Deleting again is idempotent and returns 204 No Content (Ok)
+    // Deleting again is idempotent and returns 200 OK `{}`
     rest_client.delete_ap(ap_id).send().await.expect("Second delete must succeed idempotently");
 
     // Patching the deleted AP returns 404

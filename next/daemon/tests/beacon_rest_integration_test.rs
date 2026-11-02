@@ -111,7 +111,7 @@ fn make_beacon_create_request(device_name: &str, chip_name: &str, address: &str)
 //   When I update the beacon via PATCH /v1/devices/{id}
 //   Then the server responds with 200 OK and GET /v1/devices reflects the updated BleBeacon settings
 //   When I delete the beacon via DELETE /v1/devices/{id}
-//   Then the server responds with 204 No Content and an empty body
+//   Then the server responds with 200 OK and an empty JSON object `{}`
 //   And both GET /v1/devices and gRPC ListDevice omit the deleted beacon
 //   And subsequent PATCH /v1/devices/{id} and DELETE /v1/devices/{id} return 404 Not Found
 #[tokio::test]
@@ -233,9 +233,15 @@ async fn test_daemon_beacon_rest_full_lifecycle() {
     )
     .await;
 
-    // Then the server responds with 204 No Content and an empty body
-    assert_eq!(delete_status, 204, "DELETE /v1/devices/{{id}} must return 204 No Content");
-    assert!(delete_body.is_empty(), "204 No Content response body must be empty");
+    // Then the server responds with 200 OK and an empty JSON object `{}`
+    assert_eq!(delete_status, 200, "DELETE /v1/devices/{{id}} must return 200 OK");
+    let delete_json: serde_json::Value =
+        serde_json::from_slice(&delete_body).expect("200 OK response body must be valid JSON");
+    assert_eq!(
+        delete_json,
+        serde_json::json!({}),
+        "200 OK response body must be empty JSON object"
+    );
 
     // And both GET /v1/devices and gRPC ListDevice omit the deleted beacon
     let listed_after_delete =

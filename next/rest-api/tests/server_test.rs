@@ -23,7 +23,7 @@ use link_api::{Link, LinkAction, LinkCreate, LinkError, LinkId, LinkUpdate};
 use netsim_model::{Ap, ChipError, ChipId, ChipKind, ClientError, DeviceId};
 use netsim_rest_api::{
     ApUpdate, CreateLinkRequest, Created, ErrorResponse, JsonResponse, NoContent, Op, RestServer,
-    VersionResponse, client_error_status, created_response, no_content_response,
+    RpcStatus, VersionResponse, client_error_status, created_response, no_content_response,
     openapi::{Route, find_route},
     parse_json_body, parse_path_param, path_id, path_param,
 };
@@ -244,20 +244,26 @@ async fn test_parse_json_body_malformed_and_wrong_shape() {
     assert!(http_err.to_string().starts_with("400 Bad Request: Invalid JSON body"));
     let (status, err) = collect_error_response(http_err).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err.error.contains("Invalid JSON body"));
+    assert_eq!(err.error.code, 400);
+    assert_eq!(err.error.status, RpcStatus::InvalidArgument);
+    assert!(err.error.message.contains("Invalid JSON body"));
 
     // Empty body -> 400 Bad Request
     let (status, err) =
         collect_error_response(parse_json_body::<CreateLinkRequest>(b"").unwrap_err()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err.error.contains("Invalid JSON body"));
+    assert_eq!(err.error.code, 400);
+    assert_eq!(err.error.status, RpcStatus::InvalidArgument);
+    assert!(err.error.message.contains("Invalid JSON body"));
 
     // Wrong field type -> 400 Bad Request
     let wrong_type = br#"{"sender":"not-a-u32","receiver":2,"rssi":-50}"#;
     let (status, err) =
         collect_error_response(parse_json_body::<CreateLinkRequest>(wrong_type).unwrap_err()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err.error.contains("Invalid JSON body"));
+    assert_eq!(err.error.code, 400);
+    assert_eq!(err.error.status, RpcStatus::InvalidArgument);
+    assert!(err.error.message.contains("Invalid JSON body"));
 
     // Missing required fields -> 400 Bad Request
     let missing_fields = br#"{"sender":1}"#;
@@ -265,7 +271,9 @@ async fn test_parse_json_body_malformed_and_wrong_shape() {
         collect_error_response(parse_json_body::<CreateLinkRequest>(missing_fields).unwrap_err())
             .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err.error.contains("Invalid JSON body"));
+    assert_eq!(err.error.code, 400);
+    assert_eq!(err.error.status, RpcStatus::InvalidArgument);
+    assert!(err.error.message.contains("Invalid JSON body"));
 }
 
 #[tokio::test]
@@ -295,7 +303,9 @@ async fn test_path_param_and_path_id_extraction() {
     let (_, bad_params) = find_route(WRITE_ROUTES, &Method::DELETE, "/v1/aps/not-a-u32").unwrap();
     let (status, err) = collect_error_response(path_id::<u32>(&bad_params).unwrap_err()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(err.error.contains("Invalid path parameter id"));
+    assert_eq!(err.error.code, 400);
+    assert_eq!(err.error.status, RpcStatus::InvalidArgument);
+    assert!(err.error.message.contains("Invalid path parameter id"));
 
     // Integer overflow {id} -> 400 Bad Request
     let (_, overflow_params) =
@@ -306,7 +316,9 @@ async fn test_path_param_and_path_id_extraction() {
     // Missing path parameter -> 400 Bad Request
     let (status, err) = collect_error_response(path_param(&params, "missing").unwrap_err()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(err.error, "Missing path parameter: missing");
+    assert_eq!(err.error.code, 400);
+    assert_eq!(err.error.status, RpcStatus::InvalidArgument);
+    assert_eq!(err.error.message, "Missing path parameter: missing");
 }
 
 #[tokio::test]
@@ -324,7 +336,9 @@ async fn test_client_error_mapping_not_found() {
         assert_eq!(client_error_status(&err), StatusCode::NOT_FOUND, "for error: {err}");
         let (status, body) = collect_error_response(err).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(!body.error.is_empty());
+        assert_eq!(body.error.code, 404);
+        assert_eq!(body.error.status, RpcStatus::NotFound);
+        assert!(!body.error.message.is_empty());
     }
 }
 
@@ -347,7 +361,9 @@ async fn test_client_error_mapping_bad_request() {
         assert_eq!(client_error_status(&err), StatusCode::BAD_REQUEST, "for error: {err}");
         let (status, body) = collect_error_response(err).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(!body.error.is_empty());
+        assert_eq!(body.error.code, 400);
+        assert_eq!(body.error.status, RpcStatus::InvalidArgument);
+        assert!(!body.error.message.is_empty());
     }
 }
 
@@ -363,7 +379,9 @@ async fn test_client_error_mapping_conflict() {
         assert_eq!(client_error_status(&err), StatusCode::CONFLICT, "for error: {err}");
         let (status, body) = collect_error_response(err).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert!(!body.error.is_empty());
+        assert_eq!(body.error.code, 409);
+        assert_eq!(body.error.status, RpcStatus::AlreadyExists);
+        assert!(!body.error.message.is_empty());
     }
 }
 
@@ -385,12 +403,44 @@ async fn test_client_error_mapping_internal_server_error() {
         );
         let (status, body) = collect_error_response(err).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(!body.error.is_empty());
+        assert_eq!(body.error.code, 500);
+        assert_eq!(body.error.status, RpcStatus::Internal);
+        assert!(!body.error.message.is_empty());
+    }
+}
+
+#[test]
+fn test_rpc_status_from_status_code() {
+    let expected = [
+        (StatusCode::BAD_REQUEST, RpcStatus::InvalidArgument),
+        (StatusCode::UNAUTHORIZED, RpcStatus::Unauthenticated),
+        (StatusCode::FORBIDDEN, RpcStatus::PermissionDenied),
+        (StatusCode::NOT_FOUND, RpcStatus::NotFound),
+        (StatusCode::CONFLICT, RpcStatus::AlreadyExists),
+        (StatusCode::PAYLOAD_TOO_LARGE, RpcStatus::OutOfRange),
+        (StatusCode::TOO_MANY_REQUESTS, RpcStatus::ResourceExhausted),
+        (StatusCode::NOT_IMPLEMENTED, RpcStatus::Unimplemented),
+        (StatusCode::SERVICE_UNAVAILABLE, RpcStatus::Unavailable),
+        (StatusCode::GATEWAY_TIMEOUT, RpcStatus::DeadlineExceeded),
+        (StatusCode::UPGRADE_REQUIRED, RpcStatus::FailedPrecondition),
+        (StatusCode::INTERNAL_SERVER_ERROR, RpcStatus::Internal),
+    ];
+    for (http, rpc) in expected {
+        assert_eq!(RpcStatus::from(http), rpc);
     }
 }
 
 #[tokio::test]
-async fn test_write_status_responses_201_and_204() {
+async fn test_unmapped_client_error_is_failed_precondition() {
+    let err = netsim_rest_api::HttpError::new(StatusCode::UPGRADE_REQUIRED, "upgrade required");
+    let (status, body) = collect_error_response(err).await;
+    assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(body.error.code, 426);
+    assert_eq!(body.error.status, RpcStatus::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn test_write_status_responses_201_and_200_empty() {
     // 201 Created via Created<T> and created_response
     let created: JsonResponse =
         Ok::<_, ClientError>(Created(VersionResponse { version: "0.3.92".to_string() })).into();
@@ -403,24 +453,27 @@ async fn test_write_status_responses_201_and_204() {
     let direct_created = created_response(&VersionResponse { version: "1.0.0".to_string() });
     assert_eq!(direct_created.status(), StatusCode::CREATED);
 
-    // 204 No Content via NoContent, (), and no_content_response
+    // 200 OK with `{}` via NoContent, (), and no_content_response
     let no_content_marker: JsonResponse = NoContent.into();
-    assert_eq!(no_content_marker.0.status(), StatusCode::NO_CONTENT);
-    assert!(no_content_marker.0.headers().get(hyper::header::CONTENT_TYPE).is_none());
+    assert_eq!(no_content_marker.0.status(), StatusCode::OK);
+    assert_eq!(
+        no_content_marker.0.headers().get(hyper::header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
     assert_eq!(
         no_content_marker.0.headers().get(hyper::header::X_CONTENT_TYPE_OPTIONS).unwrap(),
         "nosniff"
     );
     let empty_bytes = no_content_marker.0.into_body().collect().await.unwrap().to_bytes();
-    assert!(empty_bytes.is_empty());
+    assert_eq!(std::str::from_utf8(&empty_bytes).unwrap(), "{}");
 
     let unit_ok: JsonResponse = Ok::<(), ClientError>(()).into();
-    assert_eq!(unit_ok.0.status(), StatusCode::NO_CONTENT);
+    assert_eq!(unit_ok.0.status(), StatusCode::OK);
 
     let direct_no_content = no_content_response();
-    assert_eq!(direct_no_content.status(), StatusCode::NO_CONTENT);
+    assert_eq!(direct_no_content.status(), StatusCode::OK);
 
-    // End-to-end actor client write flow: DELETE /v1/aps/{id} -> 204 on Ok, 404 on ApNotFound
+    // End-to-end actor client write flow: DELETE /v1/aps/{id} -> 200 `{}` on Ok, 404 on ApNotFound
     let (ap_tx, mut ap_rx) = tokio::sync::mpsc::channel(2);
     let ap_client = ApClient::new(actor_framework::ResourceClient::new(ap_tx));
 
@@ -439,12 +492,14 @@ async fn test_write_status_responses_201_and_204() {
     });
 
     let delete_ok: JsonResponse = ap_client.destroy_ap(1).await.into();
-    assert_eq!(delete_ok.0.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_ok.0.status(), StatusCode::OK);
 
     let delete_missing: JsonResponse = ap_client.destroy_ap(99).await.into();
     let (status, err) = collect_error_response(delete_missing).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(err.error.contains("99"));
+    assert_eq!(err.error.code, 404);
+    assert_eq!(err.error.status, RpcStatus::NotFound);
+    assert!(err.error.message.contains("99"));
 }
 
 #[tokio::test]
@@ -527,10 +582,12 @@ async fn test_ap_rest_endpoints_lifecycle_and_error_cases() {
     let bad_id_patch = server.handle_request(&Method::PATCH, "/v1/aps/not-an-id", patch_body).await;
     assert_eq!(bad_id_patch.status(), StatusCode::BAD_REQUEST);
 
-    // 3. POST /v1/aps/1:disconnect - 204 No Content
+    // 3. POST /v1/aps/1:disconnect - 200 OK `{}`
     let disconnect_body = br#"{"mac_address":"02:15:b2:00:01:00"}"#;
     let resp = server.handle_request(&Method::POST, "/v1/aps/1:disconnect", disconnect_body).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disconnect_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(std::str::from_utf8(&disconnect_bytes).unwrap(), "{}");
 
     // POST /v1/aps/99:disconnect - 404 Not Found
     let not_found_disconnect =
@@ -543,17 +600,19 @@ async fn test_ap_rest_endpoints_lifecycle_and_error_cases() {
         .await;
     assert_eq!(bad_mac_disconnect.status(), StatusCode::BAD_REQUEST);
 
-    // 4. DELETE /v1/aps/1 - 204 No Content
+    // 4. DELETE /v1/aps/1 - 200 OK `{}`
     let resp = server.handle_request(&Method::DELETE, "/v1/aps/1", &[]).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let delete_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(std::str::from_utf8(&delete_bytes).unwrap(), "{}");
 
-    // DELETE /v1/aps/1 again - 204 No Content (idempotent)
+    // DELETE /v1/aps/1 again - 200 OK `{}` (idempotent)
     let delete_again = server.handle_request(&Method::DELETE, "/v1/aps/1", &[]).await;
-    assert_eq!(delete_again.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_again.status(), StatusCode::OK);
 
-    // DELETE /v1/aps/99 - 204 No Content (idempotent)
+    // DELETE /v1/aps/99 - 200 OK `{}` (idempotent)
     let delete_missing = server.handle_request(&Method::DELETE, "/v1/aps/99", &[]).await;
-    assert_eq!(delete_missing.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_missing.status(), StatusCode::OK);
 
     // DELETE /v1/aps/invalid - 400 Bad Request
     let bad_id_delete = server.handle_request(&Method::DELETE, "/v1/aps/invalid-id", &[]).await;
@@ -677,9 +736,11 @@ async fn test_handle_request_devices_patch_and_reset() {
     let bad_json_resp = server.handle_request(&Method::PATCH, "/v1/devices/1", b"{bad json").await;
     assert_eq!(bad_json_resp.status(), StatusCode::BAD_REQUEST);
 
-    // 7. POST /v1/devices:reset - 204 No Content and removes dynamic device
+    // 7. POST /v1/devices:reset - 200 OK `{}` and removes dynamic device
     let reset_resp = server.handle_request(&Method::POST, "/v1/devices:reset", &[]).await;
-    assert_eq!(reset_resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(reset_resp.status(), StatusCode::OK);
+    let reset_bytes = reset_resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(std::str::from_utf8(&reset_bytes).unwrap(), "{}");
 
     let after_reset = server.handle_request(&Method::GET, "/v1/devices", &[]).await;
     assert_eq!(after_reset.status(), StatusCode::OK);

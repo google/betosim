@@ -27,10 +27,30 @@ components:
   schemas:
     Empty: &Empty
       type: object
+    RpcStatus: &RpcStatus
+      enum:
+        - INVALID_ARGUMENT
+        - UNAUTHENTICATED
+        - PERMISSION_DENIED
+        - NOT_FOUND
+        - ALREADY_EXISTS
+        - OUT_OF_RANGE
+        - RESOURCE_EXHAUSTED
+        - UNIMPLEMENTED
+        - UNAVAILABLE
+        - DEADLINE_EXCEEDED
+        - FAILED_PRECONDITION
+        - INTERNAL
+    ErrorStatus: &ErrorStatus
+      properties:
+        code: &int
+          type: integer
+        message: &str
+          type: string
+        status: *RpcStatus
     ErrorResponse: &ErrorResponse
       properties:
-        error: &str
-          type: string
+        error: *ErrorStatus
     VersionResponse: &VersionResponse
       properties:
         version: *str
@@ -70,8 +90,7 @@ components:
         avd_path: *str
     Chip: &Chip
       properties:
-        id: &int
-          type: integer
+        id: *int
         kind: *ChipKind
         name: *str
         manufacturer: *str

@@ -358,12 +358,10 @@ impl BeaconRestWorld {
         assert_eq!(actual, expected, "unexpected HTTP status (body: {body_text})");
     }
 
-    fn then_body_is_empty(&self) {
-        assert!(
-            self.last_body.is_empty(),
-            "expected empty response body, got: {:?}",
-            String::from_utf8_lossy(&self.last_body)
-        );
+    fn then_body_is_empty_json_object(&self) {
+        let value: serde_json::Value =
+            serde_json::from_slice(&self.last_body).expect("deserialize response as JSON");
+        assert_eq!(value, serde_json::json!({}));
     }
 
     fn then_response_device_matches_beacon(
@@ -889,7 +887,7 @@ async fn test_beacon_rest_patch_error_cases() {
 // Scenario: Delete a BLE beacon device over REST and verify post-delete invariants
 //   Given a created BLE beacon device
 //   When I send DELETE /v1/devices/{id}
-//   Then the server responds with 204 No Content and an empty body
+//   Then the server responds with 200 OK and an empty JSON object `{}`
 //   And a subsequent GET /v1/devices omits the deleted device
 //   And a subsequent PATCH /v1/devices/{id} responds with 404 Not Found
 //   And a subsequent DELETE /v1/devices/{id} responds with 404 Not Found
@@ -904,9 +902,9 @@ async fn test_beacon_rest_delete_and_post_delete_invariants() {
     // When I send DELETE /v1/devices/{id}
     world.when_delete_device(&id_str).await;
 
-    // Then the server responds with 204 No Content and an empty body
-    world.then_status_is(StatusCode::NO_CONTENT);
-    world.then_body_is_empty();
+    // Then the server responds with 200 OK and an empty JSON object `{}`
+    world.then_status_is(StatusCode::OK);
+    world.then_body_is_empty_json_object();
 
     // And a subsequent GET /v1/devices omits the deleted device
     world.when_get_devices().await;
@@ -1060,8 +1058,9 @@ async fn test_beacon_rest_client_wire_format() {
     assert!(raw_patch.starts_with("PATCH /v1/devices/7 HTTP/1.1\r\n"), "{raw_patch}");
     assert!(raw_patch.contains(r#""ble_beacon""#), "{raw_patch}");
 
-    // When NetsimRestClient sends DELETE /v1/devices/7 -> 204 No Content
-    let (client, server) = serve_once("HTTP/1.1 204 No Content\r\n\r\n".to_string());
+    // When NetsimRestClient sends DELETE /v1/devices/7 -> 200 OK {}
+    let (client, server) =
+        serve_once("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}".to_string());
     client.delete("/v1/devices/7").send().await.expect("DELETE /v1/devices/7");
     let raw_delete = server.join().expect("join server");
     assert!(raw_delete.starts_with("DELETE /v1/devices/7 HTTP/1.1\r\n"), "{raw_delete}");

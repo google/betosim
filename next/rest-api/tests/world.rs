@@ -32,11 +32,14 @@ use capture_actor::CaptureActor;
 use device_actor::{DeviceActor, DeviceClient};
 use netsim_model::{
     ApCreate, BluetoothCreate, BluetoothMode, CellCreate, Chip, ChipClient, ChipCreateVariant,
-    ChipError, ChipId, ChipKind, ChipRequest, ChipVariant, Controller, DeviceChipCreate,
+    ChipError, ChipId, ChipKind, ChipRequest, ChipVariant, Controller, Device, DeviceChipCreate,
     DeviceConfig, DeviceCreate, DeviceId, DeviceParams, FrontendStats, MODEM_STATE_IDLE,
     Orientation, Pose, Position, RadioChipClient, WifiCreate,
 };
-use netsim_rest_api::{ErrorResponse, NetsimRestClient};
+use netsim_rest_api::{
+    CaptureInfo, ErrorResponse, ListCaptureResponse, ListDeviceResponse, NetsimRestClient,
+    RpcStatus,
+};
 use serde::de::DeserializeOwned;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -92,21 +95,11 @@ impl RawHttpResponse {
         );
     }
 
-    /// Asserts `204 No Content` headers (`X-Content-Type-Options: nosniff`, no
-    /// `Content-Type`, and an empty body).
-    pub fn assert_no_content_headers(&self) {
-        assert!(
-            !self.headers.contains_key("content-type"),
-            "204 No Content must not include Content-Type: {:?}",
-            self.headers
-        );
-        assert_eq!(
-            self.headers.get("x-content-type-options").map(String::as_str),
-            Some("nosniff"),
-            "Expected X-Content-Type-Options: nosniff in headers: {:?}",
-            self.headers
-        );
-        assert!(self.body.is_empty(), "204 No Content body must be empty, got: {:?}", self.body);
+    /// Asserts void/delete `200 OK` headers (`Content-Type: application/json`,
+    /// `X-Content-Type-Options: nosniff`, and an empty JSON object `{}` body).
+    pub fn assert_empty_json_headers(&self) {
+        self.assert_json_headers();
+        assert_eq!(self.body, "{}", "Void response body must be {{}}, got: {:?}", self.body);
     }
 
     /// Deserializes the response body into `T`.
@@ -204,6 +197,7 @@ pub struct World {
     pub addr: SocketAddr,
     pub rest_client: NetsimRestClient,
     pub device_client: DeviceClient,
+    last_response: Option<RawHttpResponse>,
     stats_path: PathBuf,
     pcap_dir: PathBuf,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -284,12 +278,25 @@ impl World {
         )));
 
         let rest_client = NetsimRestClient::from_addr(addr.to_string());
-        Self { addr, rest_client, device_client, stats_path, pcap_dir, _tasks: tasks }
+        Self {
+            addr,
+            rest_client,
+            device_client,
+            last_response: None,
+            stats_path,
+            pcap_dir,
+            _tasks: tasks,
+        }
     }
 
-    /// BDD Step: Given a dynamic Wi-Fi device at `position`.
-    pub async fn given_wifi_device(&self, name: &str, position: Position) -> DeviceId {
-        self.device_client
+    fn last_response(&self) -> &RawHttpResponse {
+        self.last_response.as_ref().expect("when_http_request must be called before then_*")
+    }
+
+    /// BDD Step: Given a dynamic Wi-Fi device at `position` with `expected_id`.
+    pub async fn given_wifi_device(&self, expected_id: DeviceId, name: &str, position: Position) {
+        let id = self
+            .device_client
             .create_device(DeviceCreate {
                 device_config: DeviceConfig::new(
                     name,
@@ -305,12 +312,19 @@ impl World {
                 ),
             })
             .await
-            .expect("Failed to create Wi-Fi device")
+            .expect("Failed to create Wi-Fi device");
+        assert_eq!(id, expected_id);
     }
 
-    /// BDD Step: Given a dynamic Bluetooth device at `position`.
-    pub async fn given_bluetooth_device(&self, name: &str, position: Position) -> DeviceId {
-        self.device_client
+    /// BDD Step: Given a dynamic Bluetooth device at `position` with `expected_id`.
+    pub async fn given_bluetooth_device(
+        &self,
+        expected_id: DeviceId,
+        name: &str,
+        position: Position,
+    ) {
+        let id = self
+            .device_client
             .create_device(DeviceCreate {
                 device_config: DeviceConfig::new(
                     name,
@@ -330,12 +344,19 @@ impl World {
                 ),
             })
             .await
-            .expect("Failed to create Bluetooth device")
+            .expect("Failed to create Bluetooth device");
+        assert_eq!(id, expected_id);
     }
 
-    /// BDD Step: Given a dynamic Cellular device at `position`.
-    pub async fn given_cellular_device(&self, name: &str, position: Position) -> DeviceId {
-        self.device_client
+    /// BDD Step: Given a dynamic Cellular device at `position` with `expected_id`.
+    pub async fn given_cellular_device(
+        &self,
+        expected_id: DeviceId,
+        name: &str,
+        position: Position,
+    ) {
+        let id = self
+            .device_client
             .create_device(DeviceCreate {
                 device_config: DeviceConfig::new(
                     name,
@@ -351,43 +372,47 @@ impl World {
                 ),
             })
             .await
-            .expect("Failed to create Cellular device")
+            .expect("Failed to create Cellular device");
+        assert_eq!(id, expected_id);
     }
 
     /// BDD Step: Given a dynamic Access Point created via REST.
     pub async fn given_dynamic_ap(&self, ssid: &str) -> u32 {
-        self.rest_client
+        let id = self
+            .rest_client
             .create_ap(&ApCreate { ssid: ssid.to_string(), ..Default::default() })
             .send()
             .await
             .expect("Failed to create dynamic AP")
-            .id
+            .id;
+        assert!(id > 0);
+        id
     }
 
     /// BDD Step: When a client sends an HTTP/1.1 request with optional
     /// `Content-Type` and `body` over the TCP socket.
     pub async fn when_http_request(
-        &self,
+        &mut self,
         method: &str,
         path: &str,
         content_type: Option<&str>,
         body: &[u8],
-    ) -> RawHttpResponse {
+    ) {
         self.when_http_request_with_content_length(method, path, content_type, body.len(), body)
-            .await
+            .await;
     }
 
     /// BDD Step: When a client sends an HTTP/1.1 request with an explicit
     /// `declared_content_length` (useful for testing `413 Payload Too Large`
     /// without transmitting a full multi-megabyte buffer).
     pub async fn when_http_request_with_content_length(
-        &self,
+        &mut self,
         method: &str,
         path: &str,
         content_type: Option<&str>,
         declared_content_length: usize,
         body: &[u8],
-    ) -> RawHttpResponse {
+    ) {
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\n", self.addr);
         if let Some(ct) = content_type {
             let _ = write!(head, "Content-Type: {ct}\r\n");
@@ -433,6 +458,184 @@ impl World {
                 headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
             }
         }
-        RawHttpResponse { status_code, headers, body, body_bytes }
+        self.last_response = Some(RawHttpResponse { status_code, headers, body, body_bytes });
+    }
+
+    /// BDD Step: When `NetsimRestClient::reset()` is invoked.
+    pub async fn when_client_resets(&self) {
+        self.rest_client.reset().send().await.expect("NetsimRestClient::reset() must succeed");
+    }
+
+    /// BDD Step: Then the response is `200 OK` with cellular device list JSON
+    /// matching `expected_id`, `expected_name`, and `expected_pos`.
+    pub async fn then_response_is_cellular_device_list(
+        &self,
+        expected_id: i64,
+        expected_name: &str,
+        expected_pos: Position,
+    ) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, 200);
+        resp.assert_json_headers();
+
+        let json = resp.parse_json_value();
+        let dev_json = &json["devices"][0];
+        assert_eq!(dev_json["id"], expected_id);
+        assert_eq!(dev_json["name"], expected_name);
+        assert_eq!(dev_json["pose"]["position"]["x"], f64::from(expected_pos.x));
+        assert_eq!(dev_json["pose"]["position"]["y"], f64::from(expected_pos.y));
+        assert_eq!(dev_json["pose"]["position"]["z"], f64::from(expected_pos.z));
+
+        let cell_json = &dev_json["chips"][0]["variant"]["Cell"];
+        assert_eq!(cell_json["radio"]["state"], serde_json::Value::Bool(true));
+        assert_eq!(cell_json["state"], serde_json::Value::String(MODEM_STATE_IDLE.to_string()));
+
+        let parsed: ListDeviceResponse = resp.parse_json();
+        assert_eq!(parsed.devices.len(), 1);
+        assert_eq!(parsed.devices[0].pose.position, expected_pos);
+        match &parsed.devices[0].chips[0].variant {
+            Some(ChipVariant::Cell(cell)) => {
+                assert_eq!(cell.radio.state, Some(true));
+                assert_eq!(cell.state, MODEM_STATE_IDLE);
+            }
+            other => panic!("Expected ChipVariant::Cell, got {other:?}"),
+        }
+
+        let client_resp = self.rest_client.get_devices().send().await.unwrap();
+        assert_eq!(client_resp, parsed);
+    }
+
+    /// BDD Step: Then the response is `200 OK` with empty JSON object `{}` body.
+    pub fn then_response_is_empty_json_200(&self) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, 200);
+        resp.assert_empty_json_headers();
+    }
+
+    /// BDD Step: Then `GET /v1/devices` returns `expected_count` devices.
+    pub async fn then_device_count_is(&self, expected_count: usize) {
+        let devices = self.rest_client.get_devices().send().await.unwrap().devices;
+        assert_eq!(devices.len(), expected_count);
+    }
+
+    /// BDD Step: Then `GET /v1/aps` contains (or does not contain) `ap_id`.
+    pub async fn then_ap_exists(&self, ap_id: u32, expected: bool) {
+        let aps = self.rest_client.get_aps().send().await.unwrap().aps;
+        assert_eq!(
+            aps.iter().any(|a| a.id == ap_id),
+            expected,
+            "Expected AP {ap_id} existence to be {expected} in {aps:?}"
+        );
+    }
+
+    /// BDD Step: Then the response is an AIP-193 [`ErrorResponse`] with
+    /// `expected_code`, `expected_status`, and message starting with
+    /// `expected_msg_prefix`.
+    pub fn then_response_is_error(
+        &self,
+        expected_code: u16,
+        expected_status: RpcStatus,
+        expected_msg_prefix: &str,
+    ) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, expected_code, "Unexpected status for body: {:?}", resp.body);
+        resp.assert_json_headers();
+        let err = resp.parse_error().error;
+        assert_eq!(err.code, i64::from(expected_code));
+        assert_eq!(err.status, expected_status);
+        assert!(
+            err.message.starts_with(expected_msg_prefix),
+            "Expected error message starting with {expected_msg_prefix:?}, got: {:?}",
+            err.message
+        );
+    }
+
+    /// BDD Step: Then the response is `200 OK` with a [`Device`] whose pose and
+    /// Bluetooth radio states match the expected values.
+    pub fn then_response_is_bluetooth_device(
+        &self,
+        expected_id: u32,
+        expected_pos: Position,
+        le_enabled: bool,
+        classic_enabled: bool,
+    ) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, 200);
+        resp.assert_json_headers();
+        let dev: Device = resp.parse_json();
+        assert_eq!(dev.id, expected_id);
+        assert_eq!(dev.pose.position, expected_pos);
+        assert_eq!(dev.chips[0].is_le_enabled(), le_enabled);
+        assert_eq!(dev.chips[0].is_classic_enabled(), classic_enabled);
+    }
+
+    /// BDD Step: Then `GET /v1/devices` via `NetsimRestClient` returns a single
+    /// Bluetooth device matching `expected_pos`, `le_enabled`, and `classic_enabled`.
+    pub async fn then_listed_bluetooth_device_is(
+        &self,
+        expected_pos: Position,
+        le_enabled: bool,
+        classic_enabled: bool,
+    ) {
+        let listed = self.rest_client.get_devices().send().await.unwrap();
+        assert_eq!(listed.devices.len(), 1);
+        assert_eq!(listed.devices[0].pose.position, expected_pos);
+        assert_eq!(listed.devices[0].chips[0].is_le_enabled(), le_enabled);
+        assert_eq!(listed.devices[0].chips[0].is_classic_enabled(), classic_enabled);
+    }
+
+    /// BDD Step: Then the response is `200 OK` with a single [`CaptureInfo`]
+    /// matching `chip_id`, `device_name`, and `enabled`.
+    pub fn then_response_is_capture_list_single(
+        &self,
+        chip_id: u32,
+        device_name: &str,
+        enabled: bool,
+    ) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, 200);
+        resp.assert_json_headers();
+        let parsed: ListCaptureResponse = resp.parse_json();
+        assert_eq!(parsed.captures.len(), 1);
+        assert_eq!(parsed.captures[0].chip_id.0, chip_id);
+        assert_eq!(parsed.captures[0].device_name, device_name);
+        assert_eq!(parsed.captures[0].enabled, enabled);
+    }
+
+    /// BDD Step: Then the response is `200 OK` with a [`CaptureInfo`] matching
+    /// `chip_id` and `enabled`.
+    pub fn then_response_is_patched_capture(&self, chip_id: u32, enabled: bool) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, 200);
+        resp.assert_json_headers();
+        let info: CaptureInfo = resp.parse_json();
+        assert_eq!(info.chip_id.0, chip_id);
+        assert_eq!(info.enabled, enabled);
+        if enabled {
+            assert!(info.seconds > 0);
+        }
+    }
+
+    /// BDD Step: Then the response is `200 OK` with `application/vnd.tcpdump.pcap`
+    /// headers, a valid 24-byte PCAP global header, and matches
+    /// `NetsimRestClient::get_capture(chip_id)`.
+    pub async fn then_response_is_valid_pcap_and_matches_client(&self, chip_id: u32) {
+        let resp = self.last_response();
+        assert_eq!(resp.status_code, 200);
+        resp.assert_pcap_headers();
+        assert_eq!(resp.body_bytes.len(), 24);
+        assert_eq!(u32::from_le_bytes(resp.body_bytes[0..4].try_into().unwrap()), 0xa1b2c3d4);
+
+        let client = self.rest_client.clone();
+        std::fs::create_dir_all(&self.pcap_dir).unwrap();
+        let path = self.pcap_dir.join(format!("client-{chip_id}.pcap"));
+        let download = path.clone();
+        tokio::task::spawn_blocking(move || {
+            client.get_capture(chip_id).send_to_file_blocking(&download)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), resp.body_bytes);
     }
 }

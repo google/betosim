@@ -283,7 +283,7 @@ async fn connect_and_handshake(addr: &str, path_and_query: &str) -> Result<(TcpS
             let body = read_error_body(&mut stream, rest, content_length).await?;
             let message = serde_json::from_slice::<ErrorResponse>(&body)
                 .ok()
-                .map(|e| e.error)
+                .map(|e| e.error.message)
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
             return Err(format!("HTTP Error {code}: {message}").into());
@@ -518,7 +518,7 @@ pub(crate) mod tests {
         let server = thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
             let _ = read_request(&mut sock);
-            let body = r#"{"error":"No capture for chip 999"}"#;
+            let body = r#"{"error":{"code":404,"message":"No capture for chip 999","status":"NOT_FOUND"}}"#;
             let resp = format!(
                 "HTTP/1.1 404 Not Found\r\n\
                  Content-Type: application/json\r\n\
@@ -535,10 +535,7 @@ pub(crate) mod tests {
             .err()
             .unwrap();
         server.join().unwrap();
-        assert!(
-            err.to_string().contains("404") && err.to_string().contains("No capture for chip 999"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(err.to_string(), "HTTP Error 404: No capture for chip 999");
     }
 
     #[tokio::test]
