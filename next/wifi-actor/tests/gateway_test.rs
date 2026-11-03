@@ -69,3 +69,79 @@ async fn test_gateway_routing_blocked_when_disabled() {
 
     assert_eq!(outgoing_packets.lock().unwrap().len(), 1);
 }
+
+#[cfg(target_os = "linux")]
+mod tap_downlink_tests {
+    use super::*;
+
+    const ETHERNET_HEADER_LEN: usize = 14;
+    const STANDARD_ETHERNET_MTU: usize = 1500;
+    const FULL_ETHERNET_FRAME_LEN: usize = ETHERNET_HEADER_LEN + STANDARD_ETHERNET_MTU;
+    const GATEWAY_MAC: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    const IPV6_ALL_NODES_MULTICAST_MAC: [u8; 6] = [0x33, 0x33, 0x00, 0x00, 0x00, 0x01];
+    const ETHERTYPE_IPV4: [u8; 2] = [0x08, 0x00];
+    const ETHERTYPE_IPV6: [u8; 2] = [0x86, 0xdd];
+
+    fn build_1514_byte_ethernet_frame(
+        dst_mac: [u8; 6],
+        src_mac: [u8; 6],
+        ethertype: [u8; 2],
+    ) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(FULL_ETHERNET_FRAME_LEN);
+        frame.extend_from_slice(&dst_mac);
+        frame.extend_from_slice(&src_mac);
+        frame.extend_from_slice(&ethertype);
+        let payload: Vec<u8> = (0..STANDARD_ETHERNET_MTU).map(|i| (i % 251) as u8).collect();
+        frame.extend_from_slice(&payload);
+        assert_eq!(frame.len(), FULL_ETHERNET_FRAME_LEN);
+        frame
+    }
+
+    // Scenario: TapGateway delivers full-MTU 1514-byte unicast frame intact and records download throughput
+    // Given a World with TapGateway, an active AP, and an associated Chip 1 at t=1000ms
+    // When a 1514-byte unicast Ethernet II frame arrives on the TAP downlink
+    // Then Chip 1 receives all 1514 bytes intact and WifiStats records the 1500-byte L3 payload
+    #[tokio::test]
+    async fn test_tap_gateway_downlink_delivers_1514_byte_unicast_frame_intact() {
+        let mut world = World::new_with_tap_gateway().await;
+        world.given_an_ap().await;
+        world.given_an_associated_chip(1).await;
+        world.given_mock_clock_millis(1000);
+
+        let sta_mac = world.chips[0].mac;
+        let expected_eth_frame =
+            build_1514_byte_ethernet_frame(sta_mac, GATEWAY_MAC, ETHERTYPE_IPV4);
+
+        world.when_gateway_sends_downlink_frame(&expected_eth_frame);
+        world.then_chip_receives_ethernet_frame(0, &expected_eth_frame).await;
+
+        // Flush the 5-second download throughput window to verify 1500 L3 payload bytes were recorded
+        world.given_mock_clock_millis(6000);
+        world.when_gateway_sends_downlink_frame(&expected_eth_frame);
+        world.then_chip_receives_ethernet_frame(0, &expected_eth_frame).await;
+
+        // 1500 payload bytes over 5.0s = 300 B/s = 0.0024 Mbps
+        let expected_mbps = ((STANDARD_ETHERNET_MTU as f64 / 5.0) * 8.0 / 1_000_000.0) as f32;
+        world.then_max_download_throughput_is(expected_mbps).await;
+    }
+
+    // Scenario: TapGateway delivers full-MTU 1514-byte IPv6 multicast frame intact
+    // Given a World with TapGateway, an active AP, and an associated Chip 1
+    // When a 1514-byte IPv6 multicast frame arrives on the TAP downlink
+    // Then TapGateway fans out the frame across active BSSIDs and Chip 1 receives all 1514 bytes intact
+    #[tokio::test]
+    async fn test_tap_gateway_downlink_delivers_1514_byte_ipv6_multicast_frame_intact() {
+        let mut world = World::new_with_tap_gateway().await;
+        world.given_an_ap().await;
+        world.given_an_associated_chip(1).await;
+
+        let expected_eth_frame = build_1514_byte_ethernet_frame(
+            IPV6_ALL_NODES_MULTICAST_MAC,
+            GATEWAY_MAC,
+            ETHERTYPE_IPV6,
+        );
+
+        world.when_gateway_sends_downlink_frame(&expected_eth_frame);
+        world.then_chip_receives_ethernet_frame(0, &expected_eth_frame).await;
+    }
+}

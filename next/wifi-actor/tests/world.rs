@@ -50,6 +50,8 @@ pub struct World {
     pub baseline_stats: Option<netsim_proto::stats::WifiStats>,
     pub mock_clock: std::sync::Arc<wifi_actor::MockClock>,
     pub shared_keys: std::sync::Arc<ap_actor::SharedKeyStore>,
+    #[cfg(target_os = "linux")]
+    pub gateway_downlink_tx: Option<mpsc::UnboundedSender<Bytes>>,
 }
 
 impl World {
@@ -59,6 +61,14 @@ impl World {
 
     pub async fn new_with_gateway(gateway: Box<dyn wifi_actor::GatewayTrait>) -> Self {
         Self::new_internal(Some(gateway)).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn new_with_tap_gateway() -> Self {
+        let (harness, downlink_tx) = TapDownlinkHarness::new();
+        let mut world = Self::new_with_gateway(Box::new(harness)).await;
+        world.gateway_downlink_tx = Some(downlink_tx);
+        world
     }
 
     async fn new_internal(gateway: Option<Box<dyn wifi_actor::GatewayTrait>>) -> Self {
@@ -173,6 +183,8 @@ impl World {
             baseline_stats: None,
             mock_clock,
             shared_keys,
+            #[cfg(target_os = "linux")]
+            gateway_downlink_tx: None,
         }
     }
 
@@ -254,6 +266,14 @@ impl World {
 
         self.chips.push(chip);
         created_id
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn given_an_associated_chip(&mut self, id_val: u32) -> u32 {
+        let chip_id = self.given_a_chip(id_val).await;
+        self.when_chip_transmits_data_to_slirp(self.chips.len() - 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        chip_id
     }
 
     pub async fn when_chip_transmits_unicast(
@@ -696,6 +716,61 @@ impl World {
         let chip_stats = stats.iter().find(|s| s.id == chip_id).unwrap();
         assert_eq!(chip_stats.p2p_rx_count, expected);
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn given_mock_clock_millis(&self, millis: u64) {
+        self.mock_clock.store(millis);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn when_gateway_sends_downlink_frame(&self, frame: &[u8]) {
+        let tx = self
+            .gateway_downlink_tx
+            .as_ref()
+            .expect("gateway_downlink_tx must be configured; call new_with_tap_gateway()");
+        tx.send(Bytes::copy_from_slice(frame))
+            .expect("sending downlink frame into gateway should succeed");
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn then_chip_receives_ethernet_frame(
+        &mut self,
+        receiver_idx: usize,
+        expected_frame: &[u8],
+    ) {
+        let chip = &mut self.chips[receiver_idx];
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                maybe_pkt = chip.stream_rx.recv() => {
+                    let bytes = maybe_pkt.expect("chip stream_rx closed unexpectedly");
+                    if let Ok(eth) = crate::hwsim_helper::unwrap_hwsim_to_ethernet(&bytes) {
+                        assert_eq!(eth, expected_frame);
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!(
+                        "Timed out waiting for downlink Ethernet frame on chip {}",
+                        chip.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn then_max_download_throughput_is(&self, expected_mbps: f32) {
+        let stats = self.wifi_client.get_global_stats_proto().await.unwrap();
+        assert!(
+            (stats.max_download_throughput() - expected_mbps).abs() < 1e-6,
+            "expected max_download_throughput {} Mbps, got {}",
+            expected_mbps,
+            stats.max_download_throughput()
+        );
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -745,6 +820,92 @@ impl wifi_actor::GatewayTrait for MockGateway {
         _chip_id: netsim_model::ChipId,
         _ctx: &mut actor_framework::DynContext<WifiActor>,
     ) {
+    }
+
+    async fn on_chip_remove(
+        &mut self,
+        _chip_id: netsim_model::ChipId,
+        _ctx: &mut actor_framework::DynContext<WifiActor>,
+    ) {
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct TapDownlinkHarness {
+    inner: wifi_actor::TapGateway,
+    downlink_rx: Option<mpsc::UnboundedReceiver<Bytes>>,
+}
+
+#[cfg(target_os = "linux")]
+impl TapDownlinkHarness {
+    fn new() -> (Self, mpsc::UnboundedSender<Bytes>) {
+        let (downlink_tx, downlink_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                inner: wifi_actor::TapGateway::new("test-tap0".to_string()),
+                downlink_rx: Some(downlink_rx),
+            },
+            downlink_tx,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+const TAP_FLAG: u32 = 0x8000_0000;
+#[cfg(target_os = "linux")]
+const ETHERNET_HEADER_LEN: usize = 14;
+
+#[cfg(target_os = "linux")]
+#[async_trait::async_trait]
+impl wifi_actor::GatewayTrait for TapDownlinkHarness {
+    async fn send_80211(
+        &self,
+        _chip_id: netsim_model::ChipId,
+        ieee80211: &netsim_packets::Ieee80211,
+    ) -> Result<usize, wifi_actor::WifiError> {
+        if ieee80211.is_qos_nodata() {
+            return Ok(0);
+        }
+        let payload_len = ieee80211
+            .to_ieee8023()
+            .map(|eth| eth.len().saturating_sub(ETHERNET_HEADER_LEN))
+            .unwrap_or_else(|_| ieee80211.get_payload().len());
+        Ok(payload_len)
+    }
+
+    fn should_handle(&self, chip_id: netsim_model::ChipId) -> bool {
+        self.inner.should_handle(chip_id)
+    }
+
+    fn handle_incoming(
+        &self,
+        chip_id: netsim_model::ChipId,
+        packet: Bytes,
+        medium: &mut wifi_actor::Medium,
+        shared_keys: &ap_actor::SharedKeyStore,
+        out_queue: &mut Vec<(u32, Bytes)>,
+    ) {
+        self.inner.handle_incoming(chip_id, packet, medium, shared_keys, out_queue);
+    }
+
+    async fn on_start(&mut self, _ctx: &mut actor_framework::DynContext<WifiActor>) {}
+
+    async fn on_chip_create(
+        &mut self,
+        chip_id: netsim_model::ChipId,
+        ctx: &mut actor_framework::DynContext<WifiActor>,
+    ) {
+        if let Some(rx) = self.downlink_rx.take() {
+            ctx.add_stream(
+                netsim_model::ChipId(chip_id.0 | TAP_FLAG),
+                Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)),
+            );
+        }
     }
 
     async fn on_chip_remove(
