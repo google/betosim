@@ -20,8 +20,8 @@ use std::iter::once;
 
 use modem_rs_derive::CommandParser;
 use netsim_model::{Quirks, RegistrationStatus};
-use physical_channel::CellConnectionStatus;
-pub use physical_channel::PhysicalChannelConfig;
+use physical_channel::{CellConnectionStatus, PhysicalChannelTimer};
+pub use physical_channel::{PhysicalChannelConfig, PhysicalChannelToken};
 use tracing::{info, warn};
 
 use crate::{
@@ -314,6 +314,7 @@ pub struct NetworkService {
     is_attached: bool,
     act: AccessTechnology,
     pub(crate) quirks: Quirks,
+    phys_chan_timer: PhysicalChannelTimer,
 }
 
 impl NetworkService {
@@ -342,6 +343,7 @@ impl NetworkService {
             is_attached: false,
             act: AccessTechnology::Lte,
             quirks,
+            phys_chan_timer: PhysicalChannelTimer::default(),
         }
     }
 }
@@ -365,6 +367,7 @@ impl NetworkService {
 
     pub fn detach_network(&mut self) {
         self.is_attached = false;
+        self.phys_chan_timer.cancel();
     }
 
     pub fn set_home_plmn(&mut self, plmn: Option<Plmn>) {
@@ -418,6 +421,7 @@ impl NetworkService {
         } else {
             self.voice_registration = RegistrationStatus::Emergency;
             self.data_registration = RegistrationStatus::NotRegistered;
+            self.phys_chan_timer.cancel();
         }
 
         self.tech_change_urcs(data)
@@ -445,12 +449,45 @@ impl NetworkService {
         })
     }
 
+    #[must_use]
+    fn can_report_physical_channels(&self, data: &impl DataBearerState) -> bool {
+        self.is_radio_on() && self.is_normal_registered() && data.has_active_contexts()
+    }
+
+    pub(crate) fn sync_physical_channel_timer(&mut self, data: &impl DataBearerState) {
+        if self.phys_chan_timer.is_pending() && !self.can_report_physical_channels(data) {
+            self.phys_chan_timer.cancel();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn schedule_physical_channel_update(
+        &mut self,
+        data: &impl DataBearerState,
+    ) -> Option<PhysicalChannelToken> {
+        if !self.can_report_physical_channels(data) {
+            self.phys_chan_timer.cancel();
+            return None;
+        }
+        self.phys_chan_timer.schedule()
+    }
+
+    pub(crate) fn handle_physical_channel_timeout(
+        &mut self,
+        token: PhysicalChannelToken,
+        data: &impl DataBearerState,
+    ) -> impl Iterator<Item = NetworkUrc> {
+        let matched = self.phys_chan_timer.take_if_matching(token);
+        let this: &Self = self;
+        matched.then(|| this.physical_channel_config_urcs(data)).into_iter().flatten()
+    }
+
     pub fn set_registration(
         &mut self,
         reg_type: RegistrationType,
         status: RegistrationStatus,
     ) -> Option<String> {
-        match reg_type {
+        let urcs = match reg_type {
             RegistrationType::Voice => {
                 let old_status = self.voice_registration;
                 self.voice_registration = status;
@@ -484,7 +521,11 @@ impl NetworkService {
                     None
                 }
             }
+        };
+        if !self.is_normal_registered() {
+            self.phys_chan_timer.cancel();
         }
+        urcs
     }
 
     pub(crate) fn set_network_technology(
@@ -638,6 +679,7 @@ impl NetworkService {
                     self.is_attached = false;
                     self.voice_registration = RegistrationStatus::Denied;
                     self.data_registration = RegistrationStatus::Denied;
+                    self.phys_chan_timer.cancel();
                     urcs = self.all_registration_urcs();
 
                     // Legacy Goldfish RIL treats CME 30 as an invalid argument
@@ -655,6 +697,7 @@ impl NetworkService {
                 }
             }
             CopsMode::Deregister => {
+                self.phys_chan_timer.cancel();
                 self.cops_mode = CopsMode::Deregister;
                 if let Some(fmt) = format {
                     self.cops_format = fmt;
@@ -857,6 +900,10 @@ impl NetworkService {
         let was_on = old_power == RadioPowerLevel::Full;
         let is_on = self.radio_power == RadioPowerLevel::Full;
         let should_reset = reset == Some(true);
+
+        if !is_on || should_reset {
+            self.phys_chan_timer.cancel();
+        }
 
         if (was_on && !is_on) || should_reset {
             self.is_attached = false;

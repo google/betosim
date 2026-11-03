@@ -42,6 +42,10 @@ pub(crate) trait RadioAdmission {
 pub(crate) trait DataBearerState {
     /// Active PDP context identifiers (`<cid>`) in ascending order.
     fn active_context_ids(&self) -> impl Iterator<Item = u8>;
+
+    fn has_active_contexts(&self) -> bool {
+        self.active_context_ids().next().is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

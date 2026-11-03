@@ -386,3 +386,77 @@ fn test_handle_set_ctec_nr_unclamped_with_physical_channel_configs() {
         .collect();
     assert_eq!(formatted, &["%CGFPCCFG: 1,50000,6,4,1\r\n", "%CGFPCCFG: 2,50000,6,4,1\r\n"]);
 }
+
+fn registered_network_service() -> NetworkService {
+    let mut service = NetworkService::new(
+        Quirks::default(),
+        Some(Plmn::parse("310260").expect("valid test PLMN")),
+    );
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+    service.is_attached = true;
+    service
+}
+
+#[test]
+fn test_physical_channel_timer_coalesces_while_pending() {
+    let mut service = registered_network_service();
+    let data = MockDataBearerState(&[1]);
+
+    let token1 = service
+        .schedule_physical_channel_update(&data)
+        .expect("scheduling should succeed when registered with active CIDs");
+    assert_eq!(service.schedule_physical_channel_update(&data), None);
+
+    let formatted: Vec<String> =
+        service.handle_physical_channel_timeout(token1, &data).map(|u| u.to_string()).collect();
+    assert_eq!(formatted, &["%CGFPCCFG: 1,5000,5,0,1\r\n", "%CGFPCCFG: 2,5000,5,0,1\r\n"]);
+}
+
+#[test]
+fn test_physical_channel_timer_canceled_on_detach_and_ignores_stale_token() {
+    let mut service = registered_network_service();
+    let data = MockDataBearerState(&[1]);
+
+    let token1 = service
+        .schedule_physical_channel_update(&data)
+        .expect("scheduling should succeed when registered with active CIDs");
+    service.detach_network();
+    assert_eq!(service.handle_physical_channel_timeout(token1, &data).next(), None);
+
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+    service.is_attached = true;
+    let token2 = service
+        .schedule_physical_channel_update(&data)
+        .expect("scheduling should succeed after re-registration");
+    assert_ne!(token1, token2);
+
+    assert_eq!(service.handle_physical_channel_timeout(token1, &data).next(), None);
+
+    let formatted: Vec<String> =
+        service.handle_physical_channel_timeout(token2, &data).map(|u| u.to_string()).collect();
+    assert_eq!(formatted, &["%CGFPCCFG: 1,5000,5,0,1\r\n", "%CGFPCCFG: 2,5000,5,0,1\r\n"]);
+}
+
+#[test]
+fn test_physical_channel_timer_canceled_on_operator_denial() {
+    use crate::tests::test_utils::MockCardState;
+
+    let mut service = registered_network_service();
+    let sim = MockCardState::default();
+    let data = MockDataBearerState(&[1]);
+
+    let token = service
+        .schedule_physical_channel_update(&data)
+        .expect("scheduling should succeed when registered with active CIDs");
+    let res =
+        service.handle_set_operator(CopsMode::Manual, None, Some("InvalidOp"), None, &sim, &data);
+    assert!(res.is_err());
+    assert_eq!(service.voice_registration, RegistrationStatus::Denied);
+
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+    service.is_attached = true;
+    assert_eq!(service.handle_physical_channel_timeout(token, &data).next(), None);
+}

@@ -774,3 +774,127 @@ fn test_packet_data_gating_matrix() {
     world.send_and_expect_ok("A", "AT+CGACT=1,1");
     world.send_and_expect("A", "AT+CGDATA=\"PPP\",1", &["CONNECT"]);
 }
+
+fn query_dynamic_param(world: &mut World, modem: &str, cid: &str, apn: &str) {
+    let addrs = format!("\"{TEST_IP_ADDR}\",\"{TEST_GATEWAY}\",\"{TEST_DNS}\"");
+    let expected = format!("+CGCONTRDP: {cid},{DEFAULT_BEARER_ID},\"{apn}\",{addrs}");
+    world.send_and_expect(modem, &format!("AT+CGCONTRDP={cid}"), &[&expected, "OK"]);
+}
+
+#[test]
+fn test_read_dynamic_param_schedules_phys_chan_configs_coalesced() {
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+
+    world.send_and_expect("A", "AT+CTEC=64,\"21\"", &["+CTEC: DONE", "OK"]);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN1}\""),
+    );
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID_ALT},\"{TEST_PDP_TYPE}\",\"{TEST_APN2}\""),
+    );
+
+    query_dynamic_param(&mut world, "A", TEST_PDP_CID, TEST_APN1);
+    query_dynamic_param(&mut world, "A", TEST_PDP_CID_ALT, TEST_APN2);
+
+    when_time_advances_ms(&mut world, 100);
+    then_no_response(&mut world, "A");
+
+    when_time_advances_ms(&mut world, 100);
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,50000,6,4,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,50000,6,4,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,50000,6,4,{TEST_PDP_CID_ALT}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,50000,6,4,{TEST_PDP_CID_ALT}"));
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_read_dynamic_param_timer_canceled_on_power_down() {
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+
+    world.send_and_expect("A", "AT+CTEC=64,\"21\"", &["+CTEC: DONE", "OK"]);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN1}\""),
+    );
+
+    query_dynamic_param(&mut world, "A", TEST_PDP_CID, TEST_APN1);
+
+    when_time_advances_ms(&mut world, 50);
+    world.send_and_expect_ok("A", "AT+CFUN=4");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    when_time_advances_ms(&mut world, 10);
+    then_response_is(&mut world, "A", RESP_CSQ_NR_DEFAULT);
+    world.send_and_expect_ok("A", &format!("AT+CGACT=1,{TEST_PDP_CID}"));
+    when_time_advances_ms(&mut world, 140);
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_read_dynamic_param_timer_canceled_on_deregister() {
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    when_time_advances_ms(&mut world, 10);
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN1}\""),
+    );
+
+    query_dynamic_param(&mut world, "A", TEST_PDP_CID, TEST_APN1);
+
+    when_time_advances_ms(&mut world, 50);
+    world.send_and_expect_ok("A", "AT+COPS=2");
+
+    when_time_advances_ms(&mut world, 50);
+    when_at_command_sent(&mut world, "A", "AT+COPS=0");
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", "OK");
+
+    when_time_advances_ms(&mut world, 100);
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_read_dynamic_param_timer_canceled_when_all_contexts_deactivated() {
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+
+    world.send_and_expect("A", "AT+CTEC=64,\"21\"", &["+CTEC: DONE", "OK"]);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN1}\""),
+    );
+
+    query_dynamic_param(&mut world, "A", TEST_PDP_CID, TEST_APN1);
+
+    when_time_advances_ms(&mut world, 100);
+    world.send_and_expect_ok("A", &format!("AT+CGACT=0,{TEST_PDP_CID}"));
+
+    when_time_advances_ms(&mut world, 50);
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID_ALT},\"{TEST_PDP_TYPE}\",\"{TEST_APN2}\""),
+    );
+
+    query_dynamic_param(&mut world, "A", TEST_PDP_CID_ALT, TEST_APN2);
+
+    when_time_advances_ms(&mut world, 50);
+    then_no_response(&mut world, "A");
+
+    when_time_advances_ms(&mut world, 150);
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,50000,6,4,{TEST_PDP_CID_ALT}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,50000,6,4,{TEST_PDP_CID_ALT}"));
+    then_no_response(&mut world, "A");
+}

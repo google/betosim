@@ -126,6 +126,55 @@ impl fmt::Display for PhysicalChannelConfig {
     }
 }
 
+/// Monotonic token identifying a scheduled `%CGFPCCFG` timer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PhysicalChannelToken(u64);
+
+impl PhysicalChannelToken {
+    fn next(&mut self) -> Self {
+        self.0 = self.0.wrapping_add(1);
+        *self
+    }
+}
+
+/// State for the coalesced post-`AT+CGCONTRDP` `%CGFPCCFG` timer.
+#[derive(Debug, Default)]
+pub(super) struct PhysicalChannelTimer {
+    pending: Option<PhysicalChannelToken>,
+    next: PhysicalChannelToken,
+}
+
+impl PhysicalChannelTimer {
+    #[must_use]
+    pub(super) const fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    #[must_use]
+    pub(super) fn schedule(&mut self) -> Option<PhysicalChannelToken> {
+        if self.is_pending() {
+            return None;
+        }
+        let token = self.next.next();
+        self.pending = Some(token);
+        Some(token)
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.pending = None;
+    }
+
+    #[must_use]
+    pub(super) fn take_if_matching(&mut self, token: PhysicalChannelToken) -> bool {
+        if self.pending == Some(token) {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +232,28 @@ mod tests {
             2,
         );
         assert_eq!(secondary_nr.to_string(), "%CGFPCCFG: 2,50000,6,4,2\r\n");
+    }
+
+    #[test]
+    fn test_physical_channel_timer_lifecycle() {
+        let mut timer = PhysicalChannelTimer::default();
+        assert!(!timer.is_pending());
+
+        let token1 = timer.schedule().expect("first schedule should return token");
+        assert!(timer.is_pending());
+        assert_eq!(timer.schedule(), None);
+
+        let wrong_token = PhysicalChannelToken::default();
+        assert!(!timer.take_if_matching(wrong_token));
+        assert!(timer.is_pending());
+
+        assert!(timer.take_if_matching(token1));
+        assert!(!timer.is_pending());
+
+        let token2 = timer.schedule().expect("schedule after take should return token");
+        assert_ne!(token1, token2);
+        assert!(timer.is_pending());
+        timer.cancel();
+        assert!(!timer.is_pending());
     }
 }

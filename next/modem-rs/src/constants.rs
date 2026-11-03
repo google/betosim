@@ -19,6 +19,9 @@ use std::{fmt, time::Duration};
 use crate::types::CtecTechnology;
 
 pub const CALL_RING_TIMEOUT: Duration = Duration::from_secs(30);
+/// Delay after `AT+CGCONTRDP` before emitting `%CGFPCCFG` so Goldfish RIL
+/// finishes data call setup before physical channel updates arrive.
+pub(crate) const PHYSICAL_CHANNEL_CONFIG_DELAY: Duration = Duration::from_millis(200);
 pub const DEFAULT_PLMN: &str = "310260";
 pub const DEFAULT_OPERATOR_NAME_LONG: &str = "Android Virtual Operator";
 pub const DEFAULT_OPERATOR_NAME_SHORT: &str = "Android";

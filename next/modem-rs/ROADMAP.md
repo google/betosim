@@ -209,8 +209,8 @@ contexts, data call activation, and physical channel configurations.
 - [x] **Implement `AT+CGCONTRDP` (Read Dynamic Parameters):**
   - [x] Modify the `handle_read_dynamic_param` function to return the correct
         values for the specified PDP context.
-- [ ] **Add Physical Channel Configuration:**
-  - [ ] Implement the logic for updating and sending physical channel
+- [x] **Add Physical Channel Configuration:**
+  - [x] Implement the logic for updating and sending physical channel
         configuration updates (`%CGFPCCFG`).
 
 ### Misc Service (`src/misc_service.rs`)

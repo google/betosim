@@ -21,10 +21,12 @@ use crate::{
     CardState, RadioAdmission,
     call_service::{CallCommand, CallResponse, CallService, RingToken},
     config::{ProfileMetadata, SimProfile},
-    constants::CALL_RING_TIMEOUT,
-    data_service::DataService,
+    constants::{CALL_RING_TIMEOUT, PHYSICAL_CHANNEL_CONFIG_DELAY},
+    data_service::{DataCommand, DataService},
     misc_service::MiscService,
-    network_service::{NetworkCommand, NetworkService, NetworkUrc, RegistrationType},
+    network_service::{
+        NetworkCommand, NetworkService, NetworkUrc, PhysicalChannelToken, RegistrationType,
+    },
     parser::Command,
     sim_service::SimService,
     sms_service::SmsService,
@@ -63,6 +65,7 @@ pub enum State {
 pub enum ModemEvent {
     CallRingTimeout { ring_token: RingToken },
     AttachNetwork,
+    UpdatePhysicalChannelConfigs { token: PhysicalChannelToken },
     TestEvent,
 }
 
@@ -622,6 +625,13 @@ impl ModemImpl {
                     }
                 }
             }
+            ModemEvent::UpdatePhysicalChannelConfigs { token } => {
+                let urcs =
+                    self.network_service.handle_physical_channel_timeout(token, &self.data_service);
+                if self.enable_unsolicited_urcs {
+                    effects.extend(Self::network_urcs_to_effects(urcs));
+                }
+            }
         }
         effects
     }
@@ -660,6 +670,7 @@ impl ModemImpl {
     ) -> ExecutionResult {
         let was_sim_ready = self.sim_service.is_ready();
         let mut result = self.execute(command);
+        self.network_service.sync_physical_channel_timer(&self.data_service);
         if let ExecutionResult::Success(ref mut handled) = result {
             // Any transition into readiness (PIN, PUK, profile switch,
             // AT+CLCK disable) upgrades an emergency-only attach.
@@ -668,6 +679,16 @@ impl ModemImpl {
                 effects.push(ModemEffect::Schedule {
                     delay: Duration::from_millis(10),
                     event: ModemEvent::AttachNetwork,
+                });
+            }
+            if let Command::Data(DataCommand::ReadDynamicParam(_)) = command
+                && self.enable_unsolicited_urcs
+                && let Some(token) =
+                    self.network_service.schedule_physical_channel_update(&self.data_service)
+            {
+                effects.push(ModemEffect::Schedule {
+                    delay: PHYSICAL_CHANNEL_CONFIG_DELAY,
+                    event: ModemEvent::UpdatePhysicalChannelConfigs { token },
                 });
             }
             if let Command::Network(NetworkCommand::SetRadioPower(power, reset)) = command {
