@@ -22,7 +22,7 @@
 //! - Octet 5: Page Parameter (bits 7..4 = current page 1..=15, bits 3..0 = total pages 1..=15)
 //! - Octets 6..=87: 82 octets of message content (`CBS_CONTENT_LEN`)
 
-use super::{EncodeError, ParseError, is_7bit_dcs};
+use super::{EncodeError, ParseError};
 
 /// Total length in octets of a single 3GPP TS 23.041 CBS PDU page.
 pub const CBS_PDU_LEN: usize = 88;
@@ -249,7 +249,9 @@ fn is_7bit_cbs_dcs(dcs: u8) -> bool {
         0x1 => dcs == 0x10,
         // Group 01xx: General Data Coding indication — bits 3..2 == 00 indicates GSM 7-bit alphabet
         0x4..=0x7 => (dcs & 0x0C) == 0x00,
-        _ => is_7bit_dcs(dcs),
+        // Group 1111: Data coding / message handling — bit 2 == 0 indicates GSM 7-bit
+        0xF => (dcs & 0x04) == 0,
+        _ => false,
     }
 }
 
@@ -679,5 +681,14 @@ mod tests {
         assert_eq!(pages.len(), 2);
         assert_eq!(pages.first().unwrap().decode_content().unwrap(), "A".repeat(40));
         assert_eq!(pages.get(1).unwrap().decode_content().unwrap(), "🚨");
+    }
+
+    #[test]
+    fn test_is_7bit_cbs_dcs_groups_c_to_f() {
+        assert!(!is_7bit_cbs_dcs(0xC0));
+        assert!(!is_7bit_cbs_dcs(0xD0));
+        assert!(!is_7bit_cbs_dcs(0xE0));
+        assert!(is_7bit_cbs_dcs(0xF0));
+        assert!(!is_7bit_cbs_dcs(0xF4));
     }
 }

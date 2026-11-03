@@ -116,6 +116,8 @@ impl SubmitPdu {
 
     /// Extracts and decodes the phone number from the address field.
     ///
+    /// Returns `None` for a zero-length address (self-loopback).
+    ///
     /// # Behavior
     /// To maintain compatibility with C++ simulator expectations, if the raw
     /// address field is exactly 9 bytes (representing a 13-14 digit number
@@ -124,6 +126,9 @@ impl SubmitPdu {
     pub fn phone_number(&self) -> Option<String> {
         let start = if self.address.len() == 9 { 3 } else { 2 };
         let bcd_bytes = self.address.get(start..)?;
+        if bcd_bytes.is_empty() {
+            return None;
+        }
         Some(bcd::bcd_to_string(bcd_bytes))
     }
 
@@ -203,8 +208,7 @@ fn parse_pdu_nom(input: &[u8]) -> IResult<&[u8], SubmitPdu> {
 
     // 4. Destination/Originator Address (DA/OA)
     let (input, address_len_digits) = nom_u8(input)?;
-    let address_len_bytes =
-        if address_len_digits == 0 { 0 } else { 1 + (address_len_digits as usize).div_ceil(2) };
+    let address_len_bytes = 1 + (address_len_digits as usize).div_ceil(2);
     let (input, address_bytes) = take(address_len_bytes)(input)?;
 
     // The address vector must prepend the length digit to match the expected format
@@ -244,7 +248,9 @@ fn parse_pdu_nom(input: &[u8]) -> IResult<&[u8], SubmitPdu> {
     // 7. User Data Length (UDL) and User Data (UD)
     let (input, ud_length) = nom_u8(input)?;
     let expected_ud_bytes = match data_code_scheme {
-        dcs if is_7bit_dcs(dcs) => (ud_length as usize * 7).div_ceil(8),
+        dcs if DataCodingScheme::from_raw(dcs).uses_gsm_7bit() => {
+            (ud_length as usize * 7).div_ceil(8)
+        }
         _ => ud_length as usize,
     };
 
@@ -277,20 +283,42 @@ fn parse_pdu_nom(input: &[u8]) -> IResult<&[u8], SubmitPdu> {
     ))
 }
 
-/// Identifies if the Data Coding Scheme (DCS) represents GSM 7-bit packed data
-/// according to 3GPP TS 23.038.
-fn is_7bit_dcs(dcs: u8) -> bool {
-    match dcs & 0xC0 {
-        0x00 => (dcs & 0x0C) == 0x00, // General Data Coding: bits 3-2 == 00 (7-bit)
-        0x40 | 0x80 => false,         // Reserved / 8-bit / UCS2
-        0xC0 => {
-            if (dcs & 0x30) == 0x30 {
-                (dcs & 0x04) == 0x00 // Data coding/message class: bit 2 == 0 (7-bit)
-            } else {
-                (dcs & 0x10) == 0x00 // MWI: 1100xxxx and 1110xxxx are 7-bit
+/// 3GPP TS 23.038 § 4: SMS Data Coding Scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DataCodingScheme(u8);
+
+impl DataCodingScheme {
+    const CODING_GROUP_MASK: u8 = 0xC0;
+    const GENERAL_CODING_GROUP: u8 = 0x00;
+    const AUTO_DELETION_GROUP: u8 = 0x40;
+    const RESERVED_CODING_GROUP: u8 = 0x80;
+    const MWI_GROUP_MASK: u8 = 0xF0;
+    const MWI_DISCARD_7BIT: u8 = 0xC0;
+    const MWI_STORE_7BIT: u8 = 0xD0;
+    const MWI_STORE_UCS2: u8 = 0xE0;
+    const DATA_CODING_MESSAGE_CLASS: u8 = 0xF0;
+    const ALPHABET_MASK: u8 = 0x0C;
+    const ALPHABET_7BIT: u8 = 0x00;
+    const MESSAGE_CLASS_8BIT_MASK: u8 = 0x04;
+
+    pub const fn from_raw(dcs: u8) -> Self {
+        Self(dcs)
+    }
+
+    pub const fn uses_gsm_7bit(self) -> bool {
+        let dcs = self.0;
+        match dcs & Self::CODING_GROUP_MASK {
+            Self::GENERAL_CODING_GROUP | Self::AUTO_DELETION_GROUP => {
+                (dcs & Self::ALPHABET_MASK) == Self::ALPHABET_7BIT
             }
+            Self::RESERVED_CODING_GROUP => false,
+            _ => match dcs & Self::MWI_GROUP_MASK {
+                Self::MWI_DISCARD_7BIT | Self::MWI_STORE_7BIT => true,
+                Self::MWI_STORE_UCS2 => false,
+                Self::DATA_CODING_MESSAGE_CLASS => (dcs & Self::MESSAGE_CLASS_8BIT_MASK) == 0,
+                _ => false,
+            },
         }
-        _ => false,
     }
 }
 
@@ -448,6 +476,10 @@ pub fn calculate_tpdu_len(pdu: &[u8]) -> usize {
 mod tests {
     use super::*;
 
+    fn is_7bit_dcs(dcs: u8) -> bool {
+        DataCodingScheme::from_raw(dcs).uses_gsm_7bit()
+    }
+
     #[test]
     fn test_is_valid_pdu_true() {
         let pdu_hex = "0001000D91688118109844F0000017AFD7903AB55A9BBA69D639D4ADCBF99E3DCCAE9701";
@@ -555,12 +587,16 @@ mod tests {
         assert!(!is_7bit_dcs(0x0C)); // Reserved
         assert!(is_7bit_dcs(0x10)); // Flash SMS (General Data Coding, Class 0, 7-bit)
 
+        // Auto-deletion group (3GPP TS 23.038 § 4)
+        assert!(is_7bit_dcs(0x40));
+        assert!(!is_7bit_dcs(0x48));
+
         // Message Waiting Info (Discard)
         assert!(is_7bit_dcs(0xC0)); // 1100 0000 (7-bit Voicemail)
-        assert!(!is_7bit_dcs(0xD0)); // 1101 0000 (UCS2 Voicemail)
 
         // Message Waiting Info (Store)
-        assert!(is_7bit_dcs(0xE0)); // 1110 0000 (7-bit Voicemail)
+        assert!(is_7bit_dcs(0xD0)); // 1101 0000 (7-bit Voicemail)
+        assert!(!is_7bit_dcs(0xE0)); // 1110 0000 (UCS-2 Voicemail)
 
         // Data Coding / Message Class
         assert!(is_7bit_dcs(0xF0)); // 1111 0000 (7-bit Class 0)
@@ -642,11 +678,21 @@ mod tests {
 
     #[test]
     fn test_parse_pdu_empty_address() {
-        // PDU with 0-length Destination Address (omits TOA and Value)
-        // SCA: 00, PDU-Type: 01, MR: 00, DA Len: 00, PID: 00, DCS: 00, UDL: 00
-        let pdu_hex = "00010000000000";
+        // PDU with 0-length Destination Address (omits Value, retains TOA 0x81 per 3GPP TS 23.040 § 9.1.2.5)
+        // SCA: 00, PDU-Type: 01, MR: 00, DA Len: 00, DA TOA: 81, PID: 00, DCS: 00, UDL: 00
+        let pdu_hex = "0001000081000000";
         let pdu = SubmitPdu::parse_str(pdu_hex).unwrap();
-        assert_eq!(pdu.address, vec![0]);
+        assert_eq!(pdu.address, vec![0x00, 0x81]);
         assert_eq!(pdu.phone_number(), None);
+    }
+
+    #[test]
+    fn test_process_outgoing_sms_empty_address_loopback() {
+        let scts = jiff::Timestamp::from_second(1_781_551_845)
+            .expect("valid timestamp")
+            .to_zoned(TimeZone::UTC);
+        let processed = super::process_outgoing_sms(b"0001000081000000", None, 0, &scts);
+        assert!(processed.to.is_none());
+        assert!(processed.pdu.starts_with(b"00240081"));
     }
 }
