@@ -16,6 +16,8 @@ rust_library_host {
     features: ["cuttlefish"],
     lints: "none",
     rustlibs: [
+        "libbytes",
+        "libfutures",
         "libnetsim_next_actor_framework",
         "libnetsim_next_device_actor",
         "libnetsim_next_model",
@@ -44,6 +46,8 @@ rust_library_host {
     ],
     lints: "none",
     rustlibs: [
+        "libbytes",
+        "libfutures",
         "libnetsim_next_actor_framework_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_model_testing",

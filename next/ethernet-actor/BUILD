@@ -26,14 +26,14 @@ netsim_rust_library(
     ],
     test_deps = [
         "//next/device-api",
-        "@bytes",
-        "@futures",
     ],
     deps = [
         "//next/actor-framework",
         "//next/device-actor",
         "//next/model",
         "//next/slirp-actor",
+        "@bytes",
+        "@futures",
         "@tokio",
         "@tokio-stream",
         "@tracing",

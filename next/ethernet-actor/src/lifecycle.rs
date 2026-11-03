@@ -30,6 +30,7 @@ impl ActorLifecycle for EthernetActor {
         _ctx: &mut DynContext<Self>,
     ) {
         info!("EthernetActor notified of disconnection for chip {disconnected_chip_id}");
+        self.chip_enabled.remove(&disconnected_chip_id);
         if let Some(chip) = self.active_chips.remove(&disconnected_chip_id) {
             let dc = self.device_client.clone();
             let device_id = chip.device_id;

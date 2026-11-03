@@ -20,8 +20,9 @@ use device_actor::{DeviceActor, DeviceClient};
 use device_api::{DeviceAction, DeviceActionResult};
 use ethernet_actor::{EthernetActor, EthernetClient};
 use netsim_model::{
-    Chip, ChipClient, ChipCreate, ChipError, ChipId, ChipKind, ChipUpdate, ChipVariant,
-    ChipVariantUpdate, ClientError, DeviceId, EthernetUpdate, NetsimRadioStats, RadioUpdate,
+    CellularDataUpdate, Chip, ChipClient, ChipCreate, ChipError, ChipId, ChipKind, ChipUpdate,
+    ChipVariant, ChipVariantUpdate, ClientError, DeviceId, EthernetUpdate, NetsimRadioStats,
+    RadioUpdate,
 };
 use slirp_actor::{SlirpActor, SlirpBackend, SlirpClient};
 use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
@@ -91,6 +92,7 @@ pub(crate) struct World {
     actor_handles: Vec<JoinHandle<()>>,
     last_error: Option<ClientError>,
     last_reset_chip: Option<Chip>,
+    last_listed_chips: Option<Vec<Chip>>,
     last_stats: Option<Box<[NetsimRadioStats]>>,
     last_global_stats: Option<Option<Vec<u8>>>,
 }
@@ -128,6 +130,7 @@ impl World {
             actor_handles: vec![slirp_handle, eth_handle],
             last_error: None,
             last_reset_chip: None,
+            last_listed_chips: None,
             last_stats: None,
             last_global_stats: None,
         }
@@ -181,17 +184,35 @@ impl World {
         enabled: Option<bool>,
         radio_state: Option<bool>,
     ) -> &mut Self {
+        let kind = self.client.read(ChipId(id)).await.map(|c| c.kind).unwrap_or(ChipKind::ETHERNET);
         let patch = ChipUpdate {
             name: name.map(ToString::to_string),
             enabled,
-            variant: radio_state.map(|state| {
-                ChipVariantUpdate::Ethernet(EthernetUpdate {
+            variant: radio_state.map(|state| match kind {
+                ChipKind::CELLULAR_DATA => ChipVariantUpdate::CellularData(CellularDataUpdate {
                     radio: RadioUpdate { state: Some(state) },
-                })
+                }),
+                _ => ChipVariantUpdate::Ethernet(EthernetUpdate {
+                    radio: RadioUpdate { state: Some(state) },
+                }),
             }),
             ..Default::default()
         };
         self.last_error = self.client.update(ChipId(id), patch).await.err();
+        self
+    }
+
+    pub(crate) async fn when_list_chips(&mut self) -> &mut Self {
+        match self.client.list().await {
+            Ok(chips) => {
+                self.last_listed_chips = Some(chips);
+                self.last_error = None;
+            }
+            Err(err) => {
+                self.last_listed_chips = None;
+                self.last_error = Some(err);
+            }
+        }
         self
     }
 
@@ -262,6 +283,15 @@ impl World {
         self
     }
 
+    pub(crate) async fn when_slirp_receives_arp_from_mac(
+        &mut self,
+        sender_mac: [u8; 6],
+        sender_ip: [u8; 4],
+    ) -> &mut Self {
+        self.slirp_client.send_packet(arp_request(sender_mac, sender_ip, GATEWAY_IP)).await;
+        self
+    }
+
     pub(crate) async fn when_guest_disconnects(&mut self, id: u32) -> &mut Self {
         self.guests.remove(&ChipId(id));
         self
@@ -270,6 +300,16 @@ impl World {
     pub(crate) async fn then_chip_count_is(&self, expected: usize) -> &Self {
         let count = self.client.read_count_for_testing().await.expect("read chip count");
         assert_eq!(count, expected);
+        self
+    }
+
+    pub(crate) fn then_listed_chip_ids_match(&self, expected_ids: &[u32]) -> &Self {
+        let chips = self.last_listed_chips.as_ref().expect("expected last_listed_chips to be set");
+        let mut actual_ids: Vec<u32> = chips.iter().map(|c| c.id).collect();
+        actual_ids.sort_unstable();
+        let mut expected_sorted = expected_ids.to_vec();
+        expected_sorted.sort_unstable();
+        assert_eq!(actual_ids, expected_sorted);
         self
     }
 
@@ -396,6 +436,17 @@ impl World {
     ) -> &mut Self {
         let guest = self.guests.get_mut(&ChipId(id)).expect("guest not found");
         guest.expect_arp_reply_to(UNLEARNED_MAC, sender_ip).await;
+        self
+    }
+
+    pub(crate) async fn then_guest_receives_arp_reply_for_mac(
+        &mut self,
+        id: u32,
+        dst_mac: [u8; 6],
+        sender_ip: [u8; 4],
+    ) -> &mut Self {
+        let guest = self.guests.get_mut(&ChipId(id)).expect("guest not found");
+        guest.expect_arp_reply_to(dst_mac, sender_ip).await;
         self
     }
 

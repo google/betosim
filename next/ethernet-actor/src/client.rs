@@ -34,6 +34,10 @@ impl EthernetClient {
     pub(crate) fn new(client: ResourceClient<EthernetActor>) -> Self {
         Self { inner: Box::new(client) }
     }
+
+    pub async fn list(&self) -> Result<Vec<Chip>, ClientError> {
+        self.inner.list().await.map_err(|e| ClientError::Send(e.to_string()))
+    }
 }
 
 #[async_trait::async_trait]

@@ -29,7 +29,9 @@ path = "tests/mod.rs"
 [dependencies]
 actor-framework = { path = "../actor-framework" }
 async-trait = "0.1"
+bytes = "1.0"
 device-actor = { path = "../device-actor" }
+futures = "0.3"
 netsim-model = { path = "../model" }
 slirp-actor = { path = "../slirp-actor" }
 tokio = { version = "1.0", features = ["full"] }
@@ -38,10 +40,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 actor-framework = { path = "../actor-framework", features = ["testing"] }
-bytes = "1.0"
 device-api = { path = "../device-api", features = ["testing"] }
 ethernet_actor = { path = ".", features = ["testing"] }
-futures = "0.3"
 
 [features]
 cuttlefish = []

@@ -12,13 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use actor_framework::{ActorService, DynContext};
-use netsim_model::{Chip, ChipId, ChipKind};
+use futures::sink::SinkExt;
+use netsim_model::{Chip, ChipId, ChipKind, ChipVariant};
 use slirp_actor::SlirpClient;
+use tokio_stream::StreamExt;
 
 use crate::error::EthernetError;
+
+fn is_chip_radio_enabled(chip: &Chip) -> bool {
+    if !chip.enabled {
+        return false;
+    }
+    match &chip.variant {
+        Some(ChipVariant::Ethernet(ethernet)) => ethernet.radio.state != Some(false),
+        Some(ChipVariant::CellularData(cellular)) => cellular.radio.state != Some(false),
+        _ => true,
+    }
+}
 
 #[derive(Debug)]
 pub enum EthernetReq {
@@ -35,12 +54,18 @@ pub enum EthernetResponse {
 pub struct EthernetActor {
     slirp_client: SlirpClient,
     pub(crate) active_chips: HashMap<ChipId, Chip>,
+    pub(crate) chip_enabled: HashMap<ChipId, Arc<AtomicBool>>,
     pub(crate) device_client: device_actor::DeviceClient,
 }
 
 impl EthernetActor {
     pub fn new(slirp_client: SlirpClient, device_client: device_actor::DeviceClient) -> Self {
-        Self { slirp_client, active_chips: HashMap::new(), device_client }
+        Self {
+            slirp_client,
+            active_chips: HashMap::new(),
+            chip_enabled: HashMap::new(),
+            device_client,
+        }
     }
 }
 
@@ -77,16 +102,30 @@ impl ActorService for EthernetActor {
         let packet_sink = params.packet_sink;
         let mut chip = params.chip;
         chip.id = id.0;
+        let enabled_flag = Arc::new(AtomicBool::new(is_chip_radio_enabled(&chip)));
+        self.chip_enabled.insert(id, Arc::clone(&enabled_flag));
         self.active_chips.insert(id, chip);
 
         if let (Some(stream), Some(sink)) = (packet_stream, packet_sink) {
             let (notifier_tx, notifier_rx) =
                 tokio::sync::mpsc::unbounded_channel::<netsim_model::ChipId>();
 
+            let uplink_enabled = Arc::clone(&enabled_flag);
+            let gated_stream = stream.filter(move |_| uplink_enabled.load(Ordering::Relaxed));
+            let gated_sink: netsim_model::PacketSink = Box::pin(futures::sink::unfold(
+                (sink, enabled_flag),
+                |(mut sink, downlink_enabled), frame: bytes::Bytes| async move {
+                    if downlink_enabled.load(Ordering::Relaxed) {
+                        sink.send(frame).await?;
+                    }
+                    Ok::<_, std::io::Error>((sink, downlink_enabled))
+                },
+            ));
+
             let isolated = chip_kind == ChipKind::CELLULAR_DATA;
             if let Err(error) = self
                 .slirp_client
-                .register(id.0, Box::pin(stream), sink, Some(notifier_tx), isolated)
+                .register(id.0, Box::pin(gated_stream), gated_sink, Some(notifier_tx), isolated)
                 .await
             {
                 tracing::warn!(%error, "EthernetActor: Failed to register with SlirpActor");
@@ -120,6 +159,9 @@ impl ActorService for EthernetActor {
             .get_mut(&id)
             .ok_or_else(|| EthernetError::Internal(format!("Chip {id} not found")))?;
         update.apply(chip);
+        if let Some(flag) = self.chip_enabled.get(&id) {
+            flag.store(is_chip_radio_enabled(chip), Ordering::Relaxed);
+        }
         Ok(chip.clone())
     }
 
@@ -128,6 +170,7 @@ impl ActorService for EthernetActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<(), Self::Error> {
+        self.chip_enabled.remove(&id);
         if let Some(chip) = self.active_chips.remove(&id) {
             let _ = self.slirp_client.unregister(id.0).await;
             let dc = self.device_client.clone();
@@ -153,8 +196,21 @@ impl ActorService for EthernetActor {
             EthernetReq::Reset { id } => {
                 let chip = self
                     .active_chips
-                    .get(&id)
+                    .get_mut(&id)
                     .ok_or_else(|| EthernetError::Internal(format!("Chip {id} not found")))?;
+                chip.enabled = true;
+                match &mut chip.variant {
+                    Some(ChipVariant::Ethernet(ethernet)) => {
+                        ethernet.radio = Default::default();
+                    }
+                    Some(ChipVariant::CellularData(cellular)) => {
+                        cellular.radio = Default::default();
+                    }
+                    _ => {}
+                }
+                if let Some(flag) = self.chip_enabled.get(&id) {
+                    flag.store(true, Ordering::Relaxed);
+                }
                 Ok(EthernetResponse::Chip(Box::new(chip.clone())))
             }
         }
