@@ -20,7 +20,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use log::{info, warn};
+use log::{debug, info, warn};
 use netsim_packets::{EthernetFrame, Ipv4Builder, MacAddr, UdpPacketBuilder};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Ref, Unaligned};
@@ -33,7 +33,7 @@ const MAX_LEASES: usize = 16;
 
 #[derive(FromBytes, KnownLayout, Unaligned, Immutable, IntoBytes)]
 #[repr(C)]
-pub(crate) struct DhcpPacket {
+pub(crate) struct DhcpPacket<O: ?Sized = [u8; 308]> {
     pub op: u8,
     pub htype: u8,
     pub hlen: u8,
@@ -49,10 +49,10 @@ pub(crate) struct DhcpPacket {
     pub sname: [u8; 64],
     pub file: [u8; 128],
     pub magic_cookie: [u8; 4],
-    pub options: [u8; 308],
+    pub options: O,
 }
 
-pub(crate) type DhcpPacketRef<'a> = Ref<&'a [u8], DhcpPacket>;
+pub(crate) type DhcpPacketRef<'a> = Ref<&'a [u8], DhcpPacket<[u8]>>;
 
 impl DhcpPacket {
     pub(crate) fn parse(bytes: &[u8]) -> Option<(DhcpPacketRef<'_>, &[u8])> {
@@ -243,6 +243,10 @@ impl DhcpManager {
     ) {
         if let Some((dhcp_packet, _)) = DhcpPacket::parse(packet) {
             if dhcp_packet.magic_cookie != DHCP_MAGIC_COOKIE {
+                debug!(
+                    "DHCP: Dropping packet with invalid magic cookie: {:?}",
+                    dhcp_packet.magic_cookie
+                );
                 return;
             }
             if let Some(message_type) = Self::get_message_type(&dhcp_packet.options) {
@@ -266,10 +270,12 @@ impl DhcpManager {
                 // Message Type option!)
                 self.handle_bootp_request(responses, config, clock, &dhcp_packet);
             }
+        } else {
+            debug!("DHCP: Dropping packet shorter than minimum header (len: {})", packet.len());
         }
     }
 
-    fn get_mac_addr(packet: &DhcpPacket) -> MacAddr {
+    fn get_mac_addr(packet: &DhcpPacket<[u8]>) -> MacAddr {
         let [a, b, c, d, e, f, ..] = packet.chaddr;
         MacAddr::from([a, b, c, d, e, f])
     }
@@ -300,7 +306,7 @@ impl DhcpManager {
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
         clock: &dyn Clock,
-        discover_packet: &DhcpPacket,
+        discover_packet: &DhcpPacket<[u8]>,
     ) {
         let mac_addr = Self::get_mac_addr(discover_packet);
         let ip_to_offer = match self.find_lease_by_mac(&mac_addr, clock) {
@@ -318,7 +324,7 @@ impl DhcpManager {
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
         clock: &dyn Clock,
-        request_packet: &DhcpPacket,
+        request_packet: &DhcpPacket<[u8]>,
     ) {
         let mac_addr = Self::get_mac_addr(request_packet);
         let requested_ip =
@@ -354,7 +360,7 @@ impl DhcpManager {
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
-        request_packet: &DhcpPacket,
+        request_packet: &DhcpPacket<[u8]>,
     ) {
         let mut ack_packet = DhcpPacket::new_reply(
             request_packet.xid,
@@ -374,7 +380,7 @@ impl DhcpManager {
         self.send_packet(responses, config, &ack_packet);
     }
 
-    fn handle_release(&mut self, request_packet: &DhcpPacket) {
+    fn handle_release(&mut self, request_packet: &DhcpPacket<[u8]>) {
         let mac_addr = Self::get_mac_addr(request_packet);
         let client_ip = Ipv4Addr::from(u32::from_be_bytes(request_packet.ciaddr));
 
@@ -395,7 +401,7 @@ impl DhcpManager {
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
         clock: &dyn Clock,
-        bootp_packet: &DhcpPacket,
+        bootp_packet: &DhcpPacket<[u8]>,
     ) {
         let mac_addr = Self::get_mac_addr(bootp_packet);
         let ip_to_assign = match self.find_lease_by_mac(&mac_addr, clock) {
@@ -519,7 +525,7 @@ impl DhcpManager {
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
-        discover_packet: &DhcpPacket,
+        discover_packet: &DhcpPacket<[u8]>,
         offer_ip: Ipv4Addr,
     ) {
         self.send_reply_packet(
@@ -536,7 +542,7 @@ impl DhcpManager {
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
-        request_packet: &DhcpPacket,
+        request_packet: &DhcpPacket<[u8]>,
         ack_ip: Ipv4Addr,
     ) {
         self.send_reply_packet(
@@ -553,7 +559,7 @@ impl DhcpManager {
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
-        request_packet: &DhcpPacket,
+        request_packet: &DhcpPacket<[u8]>,
     ) {
         let mut nak_packet = DhcpPacket::new_reply(
             request_packet.xid,

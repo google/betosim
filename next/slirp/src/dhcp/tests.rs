@@ -886,3 +886,112 @@ fn test_dhcp_option_builder_network_config() {
     assert_eq!(parsed_opts.get(&3).unwrap(), &[10, 0, 2, 2]);
     assert_eq!(parsed_opts.get(&6).unwrap(), &[10, 0, 2, 2]);
 }
+
+/// Builds a minimal BOOTREQUEST with a 236-byte header, DHCP magic cookie,
+/// and trailing options.
+fn create_compact_dhcp_packet(xid: [u8; 4], chaddr: [u8; 6], options: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0u8; 236];
+    packet[0] = 1;
+    packet[1] = 1;
+    packet[2] = 6;
+    packet[4..8].copy_from_slice(&xid);
+    packet[28..34].copy_from_slice(&chaddr);
+    packet.extend_from_slice(&DHCP_MAGIC_COOKIE);
+    packet.extend_from_slice(options);
+    packet
+}
+
+#[test]
+fn test_dhcp_compact_packet_flow() {
+    let mut dhcp_manager = DhcpManager::new();
+    let config = Config::default();
+    let clock = MockClock::new();
+    let mut responses = Vec::new();
+
+    let client_mac = [0xde, 0xad, 0xbe, 0xef, 0x12, 0x34];
+    let discover_xid = [1, 2, 3, 4];
+    let discover_bytes = create_compact_dhcp_packet(
+        discover_xid,
+        client_mac,
+        &[53, 1, DhcpMessageType::Discover as u8, 255],
+    );
+    assert_eq!(discover_bytes.len(), 244);
+
+    dhcp_manager.handle_packet(&mut responses, &config, &clock, &discover_bytes);
+    assert_eq!(responses.len(), 1);
+    let offer_packet = match responses.pop().unwrap() {
+        SlirpResponse::Packet(packet) => packet,
+        _ => panic!("Expected a packet response"),
+    };
+    let offer_dhcp = parse_dhcp_reply_payload(&offer_packet);
+    assert_eq!(offer_dhcp.op, 2);
+    assert_eq!(offer_dhcp.xid, discover_xid);
+    let offered_ip = Ipv4Addr::from(offer_dhcp.yiaddr);
+    assert_eq!(offered_ip, config.guest_ipv4);
+    let offer_opts = parse_dhcp_options(&offer_dhcp.options);
+    assert_eq!(offer_opts.get(&53).unwrap(), &[DhcpMessageType::Offer as u8]);
+
+    let request_xid = [1, 2, 3, 5];
+    let mut request_opts = vec![53, 1, DhcpMessageType::Request as u8, 50, 4];
+    request_opts.extend_from_slice(&offered_ip.octets());
+    request_opts.push(255);
+    let request_bytes = create_compact_dhcp_packet(request_xid, client_mac, &request_opts);
+    assert_eq!(request_bytes.len(), 250);
+
+    dhcp_manager.handle_packet(&mut responses, &config, &clock, &request_bytes);
+    assert_eq!(responses.len(), 1);
+    let ack_packet = match responses.pop().unwrap() {
+        SlirpResponse::Packet(packet) => packet,
+        _ => panic!("Expected a packet response"),
+    };
+    let ack_dhcp = parse_dhcp_reply_payload(&ack_packet);
+    assert_eq!(ack_dhcp.op, 2);
+    assert_eq!(ack_dhcp.xid, request_xid);
+    assert_eq!(ack_dhcp.yiaddr, offered_ip.octets());
+    let ack_opts = parse_dhcp_options(&ack_dhcp.options);
+    assert_eq!(ack_opts.get(&53).unwrap(), &[DhcpMessageType::Ack as u8]);
+
+    let mac = MacAddr { bytes: client_mac };
+    let lease = dhcp_manager.find_lease_by_mac(&mac, &clock).unwrap();
+    assert_eq!(lease.ip_addr, offered_ip);
+}
+
+#[test]
+fn test_dhcp_packet_shorter_than_header_is_dropped() {
+    let mut dhcp_manager = DhcpManager::new();
+    let config = Config::default();
+    let clock = MockClock::new();
+    let mut responses = Vec::new();
+
+    let mut packet = create_compact_dhcp_packet([1, 2, 3, 4], [0x12; 6], &[]);
+    assert_eq!(packet.len(), 240);
+    packet.truncate(239);
+
+    dhcp_manager.handle_packet(&mut responses, &config, &clock, &packet);
+    assert!(responses.is_empty());
+    assert!(dhcp_manager.leases.is_empty());
+}
+
+#[test]
+fn test_dhcp_header_only_240_byte_bootp_request_is_answered() {
+    let mut dhcp_manager = DhcpManager::new();
+    let config = Config::default();
+    let clock = MockClock::new();
+    let mut responses = Vec::new();
+
+    let client_mac = [0xde, 0xad, 0xbe, 0xef, 0x12, 0x34];
+    let xid = [1, 2, 3, 4];
+    let packet = create_compact_dhcp_packet(xid, client_mac, &[]);
+    assert_eq!(packet.len(), 240);
+
+    dhcp_manager.handle_packet(&mut responses, &config, &clock, &packet);
+    assert_eq!(responses.len(), 1);
+    let reply_packet = match responses.pop().unwrap() {
+        SlirpResponse::Packet(packet) => packet,
+        _ => panic!("Expected a packet response"),
+    };
+    let reply_dhcp = parse_dhcp_reply_payload(&reply_packet);
+    assert_eq!(reply_dhcp.op, 2);
+    assert_eq!(reply_dhcp.xid, xid);
+    assert_eq!(reply_dhcp.yiaddr, config.guest_ipv4.octets());
+}

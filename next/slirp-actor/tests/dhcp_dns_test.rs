@@ -137,11 +137,6 @@ fn create_dhcp_discover_packet(client_mac: [u8; 6], xid: u32) -> bytes::Bytes {
     dhcp.extend_from_slice(&DHCP_MAGIC_COOKIE);
     dhcp.extend_from_slice(&[53, 1, 1]); // Option 53: DHCPDISCOVER
     dhcp.push(255); // End
-    // Pad out the full fixed-size options field (236 + 4 cookie + 308 options).
-    // RFC 2131 permits a shorter message and the C backend accepts one, but the
-    // native backend parses a fixed 548-byte struct and silently drops anything
-    // smaller (b/565477868). Drop this padding once that is fixed.
-    dhcp.resize(548, 0);
 
     let mut udp_data = vec![0u8; 8 + dhcp.len()];
     let mut udp_builder = UdpPacketBuilder::new(&mut udp_data, 68, 67).unwrap();
