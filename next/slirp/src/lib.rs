@@ -287,7 +287,7 @@ impl Slirp {
                 self.icmp_manager.send_host_unreachable(responses, &self.config, &offending_packet);
             }
         }
-        self.tcp_manager.remove_connection(conn_id);
+        self.tcp_manager.abort_connection(responses, &mut self.timer_manager, conn_id);
     }
 
     fn handle_packet(&mut self, packet_buf: &[u8], responses: &mut Vec<SlirpResponse>) {

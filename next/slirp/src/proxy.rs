@@ -12,12 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::net::SocketAddr;
+use std::{
+    io,
+    net::{SocketAddr, TcpStream},
+};
 
 /// Trait for handling proxy connection results.
 pub trait ProxyConnect: Send {
     /// Notifies slirp about the result of a proxy connection attempt.
     fn proxy_connect(&self, fd: i32, addr: SocketAddr);
+
+    /// Returns `true` if this handler accepts an owned [`TcpStream`] via
+    /// [`Self::proxy_connect_stream`] instead of a raw descriptor via
+    /// [`Self::proxy_connect`].
+    fn accepts_stream(&self) -> bool {
+        false
+    }
+
+    /// Notifies slirp about the result of a proxy connection attempt with an
+    /// owned [`TcpStream`].
+    ///
+    /// On success, the handed-off [`TcpStream`] is in blocking mode (matching
+    /// the raw-descriptor path). Callers requiring an asynchronous stream
+    /// (such as `tokio::net::TcpStream::from_std`) must explicitly call
+    /// [`TcpStream::set_nonblocking`] with `true`.
+    fn proxy_connect_stream(&self, _stream: io::Result<TcpStream>, _addr: SocketAddr) {}
 }
 
 /// HTTP Proxy callback trait
@@ -31,4 +50,22 @@ pub trait ProxyManager: Send + Sync {
     ) -> bool;
     /// Removes a proxy connection.
     fn remove(&self, connect_id: usize);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefaultProxyConnect;
+    impl ProxyConnect for DefaultProxyConnect {
+        fn proxy_connect(&self, _fd: i32, _addr: SocketAddr) {}
+    }
+
+    #[test]
+    fn test_proxy_connect_default_methods() {
+        let connect = DefaultProxyConnect;
+        assert!(!connect.accepts_stream());
+        let addr: SocketAddr = "127.0.0.1:80".parse().expect("parse addr");
+        connect.proxy_connect_stream(Err(io::Error::other("test")), addr);
+    }
 }

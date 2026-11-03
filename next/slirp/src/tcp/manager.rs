@@ -280,6 +280,41 @@ impl TcpManager {
         self.incoming_connections.remove(&conn_id);
     }
 
+    /// Aborts a connection whose host-side socket failed or was torn down.
+    ///
+    /// The guest has already completed the handshake (and may have had data
+    /// ACKed) for any connection past `SynSent`, so it is told with a TCP RST
+    /// (RFC 9293 section 3.10.5, ABORT call) instead of being left on a dead
+    /// socket. `SynSent` flows are reported via ICMP by the caller, and
+    /// `TimeWait` flows are already closed on the guest side, so neither gets a
+    /// RST.
+    pub(crate) fn abort_connection(
+        &mut self,
+        responses: &mut Vec<SlirpResponse>,
+        timers: &mut TimerManager,
+        conn_id: u64,
+    ) {
+        let rst = self
+            .connections
+            .get(&conn_id)
+            .filter(|conn| !matches!(conn.state, State::SynSent | State::TimeWait))
+            .map(|conn| {
+                (
+                    conn.guest_mac,
+                    conn.gateway_mac,
+                    SendTcpPacketArgs {
+                        conn_id: None,
+                        rst: true,
+                        ..SendTcpPacketArgs::ack(conn_id, conn)
+                    },
+                )
+            });
+        if let Some((guest_mac, gateway_mac, args)) = rst {
+            self.send_tcp_packet(responses, timers, guest_mac, gateway_mac, &args);
+        }
+        self.remove_connection(conn_id);
+    }
+
     pub fn handle_remote_closed(
         &mut self,
         responses: &mut Vec<SlirpResponse>,

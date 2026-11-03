@@ -61,6 +61,29 @@ impl IpHeader for Ipv6Header {
     }
 }
 
+fn handle_established_payload_and_fin(
+    conn_id: u64,
+    conn: &mut TcpConnection,
+    tcp_payload: &[u8],
+    is_fin: bool,
+    packet_to_send: &mut Option<SendTcpPacketArgs<'static>>,
+    responses: &mut Vec<SlirpResponse>,
+) {
+    if !tcp_payload.is_empty() {
+        conn.recv.nxt = conn.recv.nxt.wrapping_add(tcp_payload.len() as u32);
+        *packet_to_send = Some(SendTcpPacketArgs::ack(conn_id, conn));
+        responses
+            .push(SlirpResponse::WriteToConnection(conn_id, Bytes::copy_from_slice(tcp_payload)));
+    }
+    if is_fin {
+        // Passive close
+        conn.state = State::CloseWait;
+        conn.recv.nxt = conn.recv.nxt.wrapping_add(1);
+        responses.push(SlirpResponse::CloseConnection { conn_id, guest_addr: conn.guest_addr });
+        *packet_to_send = Some(SendTcpPacketArgs::ack(conn_id, conn));
+    }
+}
+
 impl TcpManager {
     pub fn handle_packet(
         &mut self,
@@ -355,6 +378,14 @@ impl TcpManager {
                                         guest_addr: conn.guest_addr,
                                         host_addr: conn.host_addr,
                                     });
+                                    handle_established_payload_and_fin(
+                                        conn_id,
+                                        &mut conn,
+                                        tcp_payload,
+                                        is_fin,
+                                        &mut packet_to_send,
+                                        responses,
+                                    );
                                 }
                             }
                         }
@@ -362,27 +393,14 @@ impl TcpManager {
                             trace!(
                                 "ESTABLISHED::on_packet tcp_header={tcp_header:?}, is_fin={is_fin}"
                             );
-                            if !tcp_payload.is_empty() {
-                                conn.recv.nxt =
-                                    conn.recv.nxt.wrapping_add(tcp_payload.len() as u32);
-                                packet_to_send = Some(SendTcpPacketArgs::ack(conn_id, &conn));
-                                responses.push(SlirpResponse::WriteToConnection(
-                                    conn_id,
-                                    Bytes::copy_from_slice(tcp_payload),
-                                ));
-                            }
-                            if is_fin {
-                                // Passive close
-                                conn.state = State::CloseWait;
-                                conn.recv.nxt = conn.recv.nxt.wrapping_add(1);
-                                responses.push(SlirpResponse::CloseConnection {
-                                    conn_id,
-                                    guest_addr: conn.guest_addr,
-                                });
-                                if packet_to_send.is_none() {
-                                    packet_to_send = Some(SendTcpPacketArgs::ack(conn_id, &conn));
-                                }
-                            }
+                            handle_established_payload_and_fin(
+                                conn_id,
+                                &mut conn,
+                                tcp_payload,
+                                is_fin,
+                                &mut packet_to_send,
+                                responses,
+                            );
                         }
                         State::FinWait1 => {
                             trace!("FINWAIT1::on_packet tcp_header={tcp_header:?}");
