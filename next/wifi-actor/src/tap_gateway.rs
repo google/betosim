@@ -47,6 +47,10 @@ use crate::{gateway::GatewayTrait, medium::Medium, wifi_actor::WifiActor};
 /// Flag to indicate TAP stream ID (High bit set)
 const TAP_FLAG: u32 = 0x8000_0000;
 
+// 14B Ethernet II header + 1500B L3 MTU + 4B 802.1Q tag = 1518B, rounded up.
+#[cfg(target_os = "linux")]
+const TAP_READ_BUF_LEN: usize = 2048;
+
 /// A wrapper around a TAP interface file descriptor.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
@@ -119,12 +123,17 @@ impl TapInterface {
         // AsyncFd takes ownership of the File
         let file = std::fs::File::from(fd);
 
+        let tap = Self::from_file(if_name, file)?;
+        info!("Opened TAP interface: {}", if_name);
+        Ok(tap)
+    }
+
+    fn from_file(if_name: &str, file: std::fs::File) -> WifiResult<Self> {
         // Wrap in AsyncFd
         #[allow(deprecated)]
         let poll_fd =
             AsyncFd::new(file).map_err(|e| WifiError::Internal(Box::from(e.to_string())))?;
 
-        info!("Opened TAP interface: {}", if_name);
         Ok(Self { name: if_name.to_string(), poll_fd })
     }
     async fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -157,6 +166,33 @@ impl TapInterface {
                 Err(_would_block) => continue,
             }
         }
+    }
+
+    fn into_reader_stream(self: Arc<Self>) -> impl futures::Stream<Item = bytes::Bytes> + use<> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut buf = [0u8; TAP_READ_BUF_LEN];
+            loop {
+                match self.read(&mut buf).await {
+                    Ok(n) => {
+                        if let Some(slice) = buf.get(..n)
+                            && !slice.is_empty()
+                        {
+                            let packet = bytes::Bytes::copy_from_slice(slice);
+                            if tx.send(packet).is_err() {
+                                // Receiver closed
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        error!(%error, "TapGateway: Error reading from tap");
+                        break;
+                    }
+                }
+            }
+        });
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
     }
 }
 
@@ -424,32 +460,7 @@ If using a TAP pool (e.g. cvd-etap), ensure the interfaces are created.
         self.taps.insert(chip_id, tap.clone());
 
         // Spawn a reader for this TAP and return it as a stream
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1500]; // Standard MTU
-            loop {
-                match tap.read(&mut buf).await {
-                    Ok(n) => {
-                        if let Some(slice) = buf.get(..n)
-                            && !slice.is_empty()
-                        {
-                            let packet = bytes::Bytes::copy_from_slice(slice);
-                            if tx.send(packet).is_err() {
-                                // Receiver closed
-                                break;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        error!(%error, "TapGateway: Error reading from tap");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(tokio_stream::wrappers::UnboundedReceiverStream::new(rx))
+        Ok(tap.into_reader_stream())
     }
 
     /// Attaches a TAP interface to the Chip and Context.
@@ -631,5 +642,37 @@ mod tests {
         let (idx2, name2) = gw.allocate_next_tap().expect("Should allocate again");
         assert_eq!(idx2, 0);
         assert_eq!(name2, "fixed-tap");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_tap_reader_preserves_full_1514_byte_ethernet_frame() {
+        use std::os::{fd::OwnedFd, unix::net::UnixDatagram};
+
+        use futures::StreamExt;
+
+        let (tx_sock, rx_sock) = UnixDatagram::pair().unwrap();
+        rx_sock.set_nonblocking(true).unwrap();
+        let rx_file = std::fs::File::from(OwnedFd::from(rx_sock));
+
+        let tap = Arc::new(TapInterface::from_file("tap_test0", rx_file).unwrap());
+        let mut stream = tap.into_reader_stream();
+
+        let mut eth_frame = vec![0u8; 1514];
+        eth_frame[0..6].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x01, 0x00]);
+        eth_frame[6..12].copy_from_slice(&[0x02, 0x15, 0xb2, 0x00, 0x00, 0x01]);
+        eth_frame[12..14].copy_from_slice(&[0x86, 0xdd]);
+        for (i, byte) in eth_frame[14..].iter_mut().enumerate() {
+            *byte = (i & 0xff) as u8;
+        }
+
+        tx_sock.send(&eth_frame).unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("timed out waiting for TAP reader stream")
+            .expect("TAP reader stream closed unexpectedly");
+        assert_eq!(received.len(), 1514);
+        assert_eq!(received.as_ref(), eth_frame.as_slice());
     }
 }
