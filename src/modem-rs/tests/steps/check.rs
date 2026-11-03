@@ -197,3 +197,12 @@ pub fn then_no_response(world: &mut World, name: &str) {
         String::from_utf8_lossy(&response.unwrap())
     );
 }
+
+/// Asserts that a modem's assigned phone number matches the expected string.
+pub fn then_phone_number_is(world: &mut World, name: &str, expected: &str) {
+    let (id, _) = world.get_modem(name);
+    let modem = world.manager.get_modem(id).unwrap();
+    let expected_phone = modem_rs::PhoneNumber::try_from(expected)
+        .unwrap_or_else(|e| panic!("Invalid expected phone number '{expected}': {e:?}"));
+    assert_eq!(modem.phone_number().as_ref(), Some(&expected_phone));
+}

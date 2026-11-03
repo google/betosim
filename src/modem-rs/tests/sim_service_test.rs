@@ -2311,3 +2311,37 @@ fn test_pin1_retries_decremented_when_pin2_blocked() {
     assert_pin_retries(&mut world, "A", "SIM PIN", 2, 3);
     assert_pin_retries(&mut world, "A", "SIM PUK2", 10, 10);
 }
+
+// Scenario: Lowest unused default MSISDN index allocation across modem lifecycle
+//   Given a modem "A"
+//   And a modem "B"
+//   Then phone number of "A" is "+15555211001"
+//   And phone number of "B" is "+15555211002"
+//   When modem "A" is removed
+//   And a new modem "C" is created
+//   Then phone number of "C" is "+15555211001"
+//   When a new modem "D" is created
+//   Then phone number of "D" is "+15555211003"
+#[test]
+fn test_default_msisdn_reuse_lowest_unused_index() {
+    let mut world = World::new();
+    // Given a modem "A"
+    world.given_modem("A");
+    // And a modem "B"
+    world.given_modem("B");
+    // Then phone number of "A" is "+15555211001" and "B" is "+15555211002"
+    world.then_phone_number_is("A", "+15555211001");
+    world.then_phone_number_is("B", "+15555211002");
+
+    // When modem "A" is removed
+    world.when_modem_removed("A");
+    // And a new modem "C" is created
+    world.when_modem_created("C");
+    // Then phone number of "C" is "+15555211001"
+    world.then_phone_number_is("C", "+15555211001");
+
+    // When a new modem "D" is created
+    world.when_modem_created("D");
+    // Then phone number of "D" is "+15555211003"
+    world.then_phone_number_is("D", "+15555211003");
+}

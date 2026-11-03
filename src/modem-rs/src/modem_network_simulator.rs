@@ -162,7 +162,6 @@ pub struct ModemNetworkSimulator {
     host_event_tx: mpsc::UnboundedSender<HostEvent>,
     metrics: Arc<Metrics>,
     clock: Arc<dyn Clock>,
-    modem_chip_count: usize,
     incoming_sms: HashMap<ModemId, IncomingSmsQueue>,
 }
 
@@ -184,7 +183,6 @@ impl ModemNetworkSimulator {
             event_queue: BinaryHeap::new(),
             metrics: Arc::new(Metrics::default()),
             clock,
-            modem_chip_count: 0,
             incoming_sms: HashMap::new(),
         }
     }
@@ -304,14 +302,26 @@ impl ModemNetworkSimulator {
         if self.modems.contains_key(&id) {
             return Err(ModemError::DuplicateModemId(id));
         }
-        self.modem_chip_count += 1;
         let profile = profile.unwrap_or_default();
         let target_msisdn = match profile.msisdn.clone() {
             Some(msisdn) => msisdn,
             None => {
-                let s = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, self.modem_chip_count);
-                PhoneNumber::try_from(s.clone()).map_err(|e| {
-                    ModemError::InvalidProfile(format!("Invalid generated phone number '{s}': {e}"))
+                // Pick the lowest unused default MSISDN index rather than a monotonic
+                // counter so single-emulator snapshot disconnect/reconnect keeps its number.
+                let idx = (1u32..)
+                    .find(|&idx| {
+                        let candidate = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, idx);
+                        !self
+                            .modems
+                            .values()
+                            .any(|m| m.phone_number().is_some_and(|n| n.normalized() == candidate))
+                    })
+                    .expect("infinite range");
+                let candidate = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, idx);
+                PhoneNumber::try_from(candidate.as_str()).map_err(|e| {
+                    ModemError::InvalidProfile(format!(
+                        "Invalid generated phone number '{candidate}': {e}"
+                    ))
                 })?
             }
         };

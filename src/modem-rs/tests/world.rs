@@ -21,11 +21,12 @@ use netsim_model::Quirks;
 
 use crate::steps::{
     action::{
-        when_at_command_sent, when_hex_bytes_sent, when_sim_status_set, when_time_advances_ms,
+        when_at_command_sent, when_hex_bytes_sent, when_modem_created, when_modem_removed,
+        when_sim_status_set, when_time_advances_ms,
     },
     check::{
-        then_no_response, then_prompt, then_prompt_is, then_response_contains, then_response_is,
-        then_wait_for_response_containing,
+        then_no_response, then_phone_number_is, then_prompt, then_prompt_is,
+        then_response_contains, then_response_is, then_wait_for_response_containing,
     },
     setup::{
         given_data_modem, given_goldfish_37_data_modem, given_goldfish_37_modem, given_modem,
@@ -178,6 +179,16 @@ impl World {
         when_time_advances_ms(self, ms);
     }
 
+    /// Removes a modem from the network simulator by name.
+    pub fn when_modem_removed(&mut self, name: &str) {
+        when_modem_removed(self, name);
+    }
+
+    /// Creates a new default modem during a When step.
+    pub fn when_modem_created(&mut self, name: &str) {
+        when_modem_created(self, name);
+    }
+
     // --- BDD Then (Pure Verifications / Assertions) ---
 
     /// Asserts that the next response from the modem exactly matches the
@@ -190,6 +201,11 @@ impl World {
     /// expected substring.
     pub fn then_response_contains(&mut self, name: &str, expected: &str) {
         then_response_contains(self, name, expected);
+    }
+
+    /// Asserts that a modem's assigned phone number matches the expected string.
+    pub fn then_phone_number_is(&mut self, name: &str, expected: &str) {
+        then_phone_number_is(self, name, expected);
     }
 
     /// Asserts that the modem emitted an interactive prompt (such as `> `).

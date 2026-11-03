@@ -171,3 +171,14 @@ pub fn when_phone_number_set(world: &mut World, name: &str, number: &str) {
         panic!("Failed to retrieve modem '{name}'");
     }
 }
+
+/// Removes a modem from the network simulator by name during a When step.
+pub fn when_modem_removed(world: &mut World, name: &str) {
+    let (id, _) = world.modems.remove(name).unwrap_or_else(|| panic!("Modem '{name}' not found"));
+    world.manager.remove_modem(id);
+}
+
+/// Creates a new default modem during a When step.
+pub fn when_modem_created(world: &mut World, name: &str) {
+    crate::steps::given_modem(world, name);
+}
