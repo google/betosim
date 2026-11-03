@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Arc,
@@ -252,6 +252,14 @@ impl TokioHost {
                                 info!("Aborting writer task for TCP connection {conn_id}");
                                 conn.writer_handle.abort();
                                 info!("TCP connection {conn_id} tasks aborted");
+                                if self.fast_path_enabled
+                                    && let Entry::Occupied(e) =
+                                        self.fast_path_connections.lock().entry(guest_addr)
+                                    && e.get().same_channel(&conn.writer)
+                                {
+                                    trace!("deactivating fast path for {guest_addr}");
+                                    e.remove();
+                                }
                             }
                             Connection::Icmp(conn) => {
                                 info!("Aborting reader task for ICMP connection {conn_id}");
@@ -268,10 +276,6 @@ impl TokioHost {
                                 info!("UDP connection {conn_id} tasks aborted");
                             }
                         }
-                    }
-                    if self.fast_path_enabled {
-                        trace!("deactivating fast path for {guest_addr}");
-                        self.fast_path_connections.lock().remove(&guest_addr);
                     }
                     info!("Connection {conn_id} closed");
                 }
@@ -887,5 +891,150 @@ mod tests {
         let host = TokioHost::from_channels(slirp_tx, resp_rx, guest_tx, None, Config::default());
 
         assert_eq!(host.connection_count(), 0);
+    }
+
+    struct FastPathTestHarness {
+        resp_tx: mpsc::Sender<SlirpResponse>,
+        test_resp_rx: mpsc::Receiver<SlirpResponse>,
+        fast_path: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>,
+        connections: Arc<Mutex<HashMap<u64, Connection>>>,
+        host_task: JoinHandle<()>,
+    }
+
+    impl FastPathTestHarness {
+        fn new() -> Self {
+            let (slirp_tx, _slirp_rx) = mpsc::channel(10);
+            let (resp_tx, resp_rx) = mpsc::channel(10);
+            let (test_resp_tx, test_resp_rx) = mpsc::channel(10);
+            let (guest_tx, _guest_rx) = mpsc::channel(10);
+            let mut host = TokioHost::from_channels(
+                slirp_tx,
+                resp_rx,
+                guest_tx,
+                Some(test_resp_tx),
+                Config::default(),
+            );
+            let fast_path = Arc::clone(&host.fast_path_connections);
+            let connections = Arc::clone(&host.connections);
+            let host_task = tokio::spawn(async move {
+                host.run().await;
+            });
+            Self { resp_tx, test_resp_rx, fast_path, connections, host_task }
+        }
+
+        fn insert_tcp(&self, conn_id: u64) -> mpsc::Sender<Bytes> {
+            let (writer, _rx) = mpsc::channel(10);
+            self.connections.lock().insert(
+                conn_id,
+                Connection::Tcp(TcpConnection {
+                    writer: writer.clone(),
+                    reader_handle: tokio::spawn(async {}),
+                    writer_handle: tokio::spawn(async {}),
+                }),
+            );
+            writer
+        }
+    }
+
+    #[tokio::test]
+    async fn test_udp_close_preserves_concurrent_tcp_fast_path() {
+        // Scenario: Closing a UDP flow must not evict a concurrent TCP fast-path entry
+        // sharing the same guest IP and port.
+        // Given: An active TCP connection and a UDP flow sharing guest_addr.
+        let mut h = FastPathTestHarness::new();
+        let guest_addr: SocketAddr = "10.0.2.15:12345".parse().unwrap();
+        let host_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+
+        let tcp_conn_id = 1_u64;
+        let udp_conn_id = (1_u64 << 63) | 1;
+
+        let tcp_writer = h.insert_tcp(tcp_conn_id);
+
+        let (udp_writer, _udp_rx) = mpsc::channel(10);
+        h.connections.lock().insert(
+            udp_conn_id,
+            Connection::Udp(UdpConnection {
+                writer: udp_writer,
+                reader_handle: tokio::spawn(async {}),
+                writer_handle: tokio::spawn(async {}),
+            }),
+        );
+
+        // When: Activate fast path for TCP, then close UDP flow sharing guest_addr.
+        h.resp_tx
+            .send(SlirpResponse::ActivateFastPath { conn_id: tcp_conn_id, guest_addr, host_addr })
+            .await
+            .unwrap();
+        h.resp_tx.send(SlirpResponse::Packet(Bytes::new())).await.unwrap();
+
+        let _ = h.test_resp_rx.recv().await;
+        let _ = h.test_resp_rx.recv().await;
+
+        let initial_writer =
+            h.fast_path.lock().get(&guest_addr).cloned().expect("fast path active");
+        assert!(initial_writer.same_channel(&tcp_writer));
+
+        h.resp_tx
+            .send(SlirpResponse::CloseConnection { conn_id: udp_conn_id, guest_addr })
+            .await
+            .unwrap();
+        h.resp_tx.send(SlirpResponse::Packet(Bytes::new())).await.unwrap();
+        let _ = h.test_resp_rx.recv().await; // CloseConnection broadcast
+        let _ = h.test_resp_rx.recv().await; // Packet barrier broadcast
+
+        // Then: TCP fast-path entry is preserved and points to the active TCP channel.
+        let retained_writer =
+            h.fast_path.lock().get(&guest_addr).cloned().expect("tcp fast path preserved");
+        assert!(retained_writer.same_channel(&tcp_writer));
+
+        drop(h.resp_tx);
+        h.host_task.await.expect("host task finishes");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_close_removes_matching_fast_path_but_ignores_stale_tcp_channel() {
+        // Scenario: Closing an active TCP connection removes its fast path, but closing
+        // a stale TCP channel does not evict a newer active TCP fast-path entry.
+        // Given: Two TCP connections registered in the host.
+        let mut h = FastPathTestHarness::new();
+        let guest_addr: SocketAddr = "10.0.2.15:54321".parse().unwrap();
+        let host_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+
+        let _writer_1 = h.insert_tcp(1_u64);
+        let writer_2 = h.insert_tcp(2_u64);
+
+        // When: Fast path is activated for connection 1, then superseded by connection 2,
+        // and connection 1 is closed.
+        h.resp_tx
+            .send(SlirpResponse::ActivateFastPath { conn_id: 1_u64, guest_addr, host_addr })
+            .await
+            .unwrap();
+        h.resp_tx
+            .send(SlirpResponse::ActivateFastPath { conn_id: 2_u64, guest_addr, host_addr })
+            .await
+            .unwrap();
+        h.resp_tx
+            .send(SlirpResponse::CloseConnection { conn_id: 1_u64, guest_addr })
+            .await
+            .unwrap();
+        h.resp_tx.send(SlirpResponse::Packet(Bytes::new())).await.unwrap();
+
+        let _ = h.test_resp_rx.recv().await; // ActivateFastPath 1
+        let _ = h.test_resp_rx.recv().await; // ActivateFastPath 2
+        let _ = h.test_resp_rx.recv().await; // CloseConnection
+        let _ = h.test_resp_rx.recv().await; // Packet barrier
+
+        // Then: Closing connection 1 ignores the stale channel and preserves connection 2.
+        let retained = h.fast_path.lock().get(&guest_addr).cloned().expect("fast path remains");
+        assert!(retained.same_channel(&writer_2));
+
+        h.resp_tx
+            .send(SlirpResponse::CloseConnection { conn_id: 2_u64, guest_addr })
+            .await
+            .unwrap();
+        drop(h.resp_tx);
+        h.host_task.await.expect("host task finishes");
+
+        assert!(!h.fast_path.lock().contains_key(&guest_addr));
     }
 }
