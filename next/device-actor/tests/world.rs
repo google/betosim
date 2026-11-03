@@ -26,13 +26,13 @@ use std::{
 };
 
 use bytes::Bytes;
-use device_actor::{DeviceActor, DeviceClient};
+use device_actor::{DeviceActor, DeviceClient, DeviceError};
 use device_api::{DeviceChipCreate, DeviceConfig, DeviceCreate, DeviceId, DeviceUpdate};
 use futures::{SinkExt, StreamExt};
 use link_api::MockLinkClient;
 use netsim_model::{
-    BluetoothUpdate, ChipClient, ChipKind, ChipUpdate, ChipVariantUpdate, MockChipClient, Pose,
-    RadioUpdate,
+    BluetoothUpdate, ChipClient, ChipId, ChipKind, ChipUpdate, ChipVariantUpdate, ClientError,
+    MockChipClient, Pose, RadioUpdate,
 };
 
 #[derive(Clone)]
@@ -65,6 +65,7 @@ pub struct World {
     pub stats_path: Option<std::path::PathBuf>,
     pub link_state: LinkTestState,
     pub mock_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
+    updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
 }
 
 impl Drop for World {
@@ -90,10 +91,12 @@ impl World {
         let radio_stats = Arc::new(std::sync::Mutex::new(Vec::new()));
         let wifi_stats = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mock_chips = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let updated_chips = Arc::new(std::sync::Mutex::new(Vec::new()));
         let chip_clients = Self::create_default_chip_clients_with_stats(
             radio_stats.clone(),
             wifi_stats.clone(),
             mock_chips.clone(),
+            updated_chips.clone(),
         );
         let (stats_path, _) = Self::temp_stats_path();
         Self::with_clients_internal(
@@ -108,6 +111,7 @@ impl World {
             link_state,
             Some(stats_path),
             mock_chips,
+            updated_chips,
         )
         .await
     }
@@ -120,10 +124,12 @@ impl World {
         let radio_stats = Arc::new(std::sync::Mutex::new(Vec::new()));
         let wifi_stats = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mock_chips = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let updated_chips = Arc::new(std::sync::Mutex::new(Vec::new()));
         let chip_clients = Self::create_default_chip_clients_with_stats(
             radio_stats.clone(),
             wifi_stats.clone(),
             mock_chips.clone(),
+            updated_chips.clone(),
         );
         Self::with_clients_internal(
             chip_clients,
@@ -137,6 +143,7 @@ impl World {
             link_state,
             Some(path),
             mock_chips,
+            updated_chips,
         )
         .await
     }
@@ -150,6 +157,7 @@ impl World {
         let radio_stats = Arc::new(std::sync::Mutex::new(Vec::new()));
         let wifi_stats = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mock_chips = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let updated_chips = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (stats_path, _) = Self::temp_stats_path();
         Self::with_clients_internal(
             chip_clients,
@@ -163,6 +171,7 @@ impl World {
             link_state,
             Some(stats_path),
             mock_chips,
+            updated_chips,
         )
         .await
     }
@@ -178,6 +187,7 @@ impl World {
         let radio_stats = Arc::new(std::sync::Mutex::new(Vec::new()));
         let wifi_stats = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mock_chips = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let updated_chips = Arc::new(std::sync::Mutex::new(Vec::new()));
         let link_state = LinkTestState::new();
 
         // If stats_path is None, create a temp one to avoid pollution
@@ -200,6 +210,7 @@ impl World {
             link_state,
             cleanup_path,
             mock_chips,
+            updated_chips,
         )
         .await
     }
@@ -217,6 +228,7 @@ impl World {
         link_state: LinkTestState,
         stats_file_to_cleanup: Option<std::path::PathBuf>,
         mock_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
+        updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
     ) -> Self {
         let (runner, client) = device_actor::new();
         let mut actor = DeviceActor::new(
@@ -247,6 +259,7 @@ impl World {
             stats_path,
             link_state,
             mock_chips,
+            updated_chips,
         }
     }
 
@@ -254,13 +267,20 @@ impl World {
         let radio_stats = Arc::new(std::sync::Mutex::new(Vec::new()));
         let wifi_stats = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mock_chips = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        Self::create_default_chip_clients_with_stats(radio_stats, wifi_stats, mock_chips)
+        let updated_chips = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Self::create_default_chip_clients_with_stats(
+            radio_stats,
+            wifi_stats,
+            mock_chips,
+            updated_chips,
+        )
     }
 
     pub fn create_default_chip_clients_with_stats(
         radio_stats: Arc<std::sync::Mutex<Vec<netsim_model::NetsimRadioStats>>>,
         wifi_stats: Arc<std::sync::Mutex<HashMap<u32, netsim_proto::stats::WifiStats>>>,
         mock_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
+        updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
     ) -> HashMap<ChipKind, Box<dyn ChipClient>> {
         let mut clients: HashMap<ChipKind, Box<dyn ChipClient>> = HashMap::new();
         // Add default mocks for common chip kinds
@@ -271,6 +291,7 @@ impl World {
                     radio_stats.clone(),
                     wifi_stats.clone(),
                     mock_chips.clone(),
+                    updated_chips.clone(),
                     kind,
                 )),
             );
@@ -282,11 +303,19 @@ impl World {
         radio_stats: Arc<std::sync::Mutex<Vec<netsim_model::NetsimRadioStats>>>,
         wifi_stats: Arc<std::sync::Mutex<HashMap<u32, netsim_proto::stats::WifiStats>>>,
         mock_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
+        updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
         _kind: ChipKind,
     ) -> MockChipClient {
         let mut mock = MockChipClient::new();
         let initial_chips = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        Self::setup_mock_chip_client(&mut mock, mock_chips, initial_chips, radio_stats, wifi_stats);
+        Self::setup_mock_chip_client(
+            &mut mock,
+            mock_chips,
+            initial_chips,
+            radio_stats,
+            wifi_stats,
+            updated_chips,
+        );
         mock
     }
 
@@ -296,17 +325,20 @@ impl World {
         initial_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
         radio_stats: Arc<std::sync::Mutex<Vec<netsim_model::NetsimRadioStats>>>,
         wifi_stats: Arc<std::sync::Mutex<HashMap<u32, netsim_proto::stats::WifiStats>>>,
+        updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
     ) {
         let chips_clone = chips.clone();
         let rs_clone = radio_stats.clone();
         let ws_clone = wifi_stats.clone();
         let initial_chips_clone = initial_chips.clone();
+        let updated_chips_clone = updated_chips.clone();
         mock.expect_clone_box().returning(move || {
             Self::create_shared_mock(
                 chips_clone.clone(),
                 initial_chips_clone.clone(),
                 rs_clone.clone(),
                 ws_clone.clone(),
+                updated_chips_clone.clone(),
             )
         });
 
@@ -338,7 +370,9 @@ impl World {
         });
 
         let chips_update = chips.clone();
+        let updated_chips_rec = updated_chips.clone();
         mock.expect_update().returning(move |id, patch| {
+            updated_chips_rec.lock().unwrap().push(id);
             let mut chips = chips_update.lock().unwrap();
             if let Some(chip) = chips.get_mut(&id) {
                 // Apply patches (simplified)
@@ -419,9 +453,17 @@ impl World {
         initial_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
         radio_stats: Arc<std::sync::Mutex<Vec<netsim_model::NetsimRadioStats>>>,
         wifi_stats: Arc<std::sync::Mutex<HashMap<u32, netsim_proto::stats::WifiStats>>>,
+        updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
     ) -> Box<MockChipClient> {
         let mut mock = MockChipClient::new();
-        Self::setup_mock_chip_client(&mut mock, chips, initial_chips, radio_stats, wifi_stats);
+        Self::setup_mock_chip_client(
+            &mut mock,
+            chips,
+            initial_chips,
+            radio_stats,
+            wifi_stats,
+            updated_chips,
+        );
         Box::new(mock)
     }
 
@@ -570,6 +612,97 @@ impl World {
         update.id = device_id.0;
         update.chips = Some(vec![chip_update]);
         self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: Given a device with chips sharing the given name and specified kinds.
+    pub async fn given_device_with_chips_sharing_name(
+        &self,
+        guid: &str,
+        name: &str,
+        kinds: &[ChipKind],
+    ) -> (DeviceId, Vec<ChipId>) {
+        let mut chip_ids = Vec::new();
+        let mut device_id = None;
+        for (i, &kind) in kinds.iter().enumerate() {
+            let addr = if kind == ChipKind::BLUETOOTH {
+                format!("00:00:00:00:00:{:02x}", (i + 1) as u8)
+            } else {
+                String::new()
+            };
+            let mut params =
+                Self::create_device_add_chip_params(guid.to_string(), name.to_string(), addr);
+            params.chip.kind = kind;
+            params.chip.variant = match kind {
+                ChipKind::BLUETOOTH => params.chip.variant,
+                ChipKind::WIFI => Some(netsim_model::ChipVariant::Wifi(netsim_model::Wifi {
+                    radio: Default::default(),
+                })),
+                ChipKind::UWB => {
+                    Some(netsim_model::ChipVariant::Uwb(netsim_model::Uwb { ..Default::default() }))
+                }
+                _ => None,
+            };
+            let (dev_id, chip_id) = self.client.add_chip_with_id(params).await.unwrap();
+            device_id = Some(dev_id);
+            chip_ids.push(chip_id);
+        }
+        (device_id.expect("kinds must not be empty"), chip_ids)
+    }
+
+    /// BDD Step: When I try to update the device with a specific chip update.
+    pub async fn when_try_update_device_chip(
+        &self,
+        device_id: DeviceId,
+        chip_update: ChipUpdate,
+    ) -> Result<(), DeviceError> {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips = Some(vec![chip_update]);
+        match self.client.update(device_id, update).await {
+            Ok(_) => Ok(()),
+            Err(ClientError::Framework(boxed)) => {
+                match boxed.downcast::<actor_framework::FrameworkError<DeviceError>>() {
+                    Ok(fe) => match *fe {
+                        actor_framework::FrameworkError::ServiceError(de) => Err(de),
+                        other => Err(DeviceError::ActorCommunicationError(ClientError::Framework(
+                            Box::new(other),
+                        ))),
+                    },
+                    Err(boxed) => {
+                        Err(DeviceError::ActorCommunicationError(ClientError::Framework(boxed)))
+                    }
+                }
+            }
+            Err(other) => Err(DeviceError::ActorCommunicationError(other)),
+        }
+    }
+
+    /// BDD Step: Then the update was rejected as invalid input containing the expected substring.
+    pub fn then_update_rejected_as_invalid_input(
+        &self,
+        result: Result<(), DeviceError>,
+        expected_substring: &str,
+    ) {
+        let err = result.expect_err("expected update to fail with InvalidInput");
+        match &err {
+            DeviceError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains(expected_substring),
+                    "expected error message containing '{expected_substring}', got: '{msg}'"
+                );
+            }
+            other => panic!("expected DeviceError::InvalidInput, got: {other:?}"),
+        }
+    }
+
+    /// BDD Step: Then the specified chips received updates.
+    pub fn then_chips_received_updates(&self, expected_chip_ids: &[ChipId]) {
+        let actual = self.updated_chips.lock().unwrap();
+        assert_eq!(
+            actual.as_slice(),
+            expected_chip_ids,
+            "updated chip IDs mismatch: expected {expected_chip_ids:?}, got {actual:?}"
+        );
     }
 
     /// BDD Step: When I notify that a chip was removed.

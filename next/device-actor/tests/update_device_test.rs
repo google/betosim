@@ -21,7 +21,9 @@
 use std::collections::HashMap;
 
 use device_api::DeviceUpdate;
-use netsim_model::{Chip, ChipClient, ChipId, ChipKind, ChipVariantUpdate, MockChipClient};
+use netsim_model::{
+    Chip, ChipClient, ChipId, ChipKind, ChipUpdate, ChipVariantUpdate, MockChipClient, WifiUpdate,
+};
 
 use crate::world::World;
 
@@ -289,4 +291,181 @@ async fn test_update_chip_classic_radio_state() {
     // When I update the device again to ENABLE the Bluetooth Classic state
     let chip_update_enable = World::create_bluetooth_chip_update(None, Some(true));
     world.when_update_device_chip(device_id, chip_update_enable).await;
+}
+
+// Scenario: Update device disambiguates shared chip name by variant
+//   Given a running Device Actor with a device containing a Bluetooth chip
+//     and a Wi-Fi chip both named "cvd-1"
+//   When I update the device specifying chip name "cvd-1" with a Wi-Fi variant
+//     update
+//   Then the Wi-Fi chip receives the update and the Bluetooth chip is untouched
+#[tokio::test]
+async fn test_update_device_disambiguates_shared_name_by_variant() {
+    // Given a running Device Actor with a device containing a Bluetooth chip and a Wi-Fi chip both
+    // named "cvd-1"
+    let world = World::new().await;
+    let (device_id, chip_ids) = world
+        .given_device_with_chips_sharing_name(
+            "guid-1",
+            "cvd-1",
+            &[ChipKind::BLUETOOTH, ChipKind::WIFI],
+        )
+        .await;
+    let wifi_chip_id = chip_ids[1];
+
+    // When I update the device specifying chip name "cvd-1" with a Wi-Fi variant update
+    let chip_update = ChipUpdate {
+        name: Some("cvd-1".to_string()),
+        variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
+        ..Default::default()
+    };
+    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+
+    // Then the Wi-Fi chip receives the update and the Bluetooth chip is untouched
+    assert!(result.is_ok());
+    world.then_chips_received_updates(&[wifi_chip_id]);
+}
+
+// Scenario: Update device rejects ambiguous shared name without variant
+//   Given a running Device Actor with a device containing a Bluetooth chip
+//     and a Wi-Fi chip both named "cvd-1"
+//   When I update the device specifying chip name "cvd-1" without variant
+//   Then the operation fails with an InvalidInput error indicating ambiguous
+//     chip name
+#[tokio::test]
+async fn test_update_device_rejects_ambiguous_shared_name_without_variant() {
+    // Given a running Device Actor with a device containing a Bluetooth chip and a Wi-Fi chip both
+    // named "cvd-1"
+    let world = World::new().await;
+    let (device_id, _) = world
+        .given_device_with_chips_sharing_name(
+            "guid-1",
+            "cvd-1",
+            &[ChipKind::BLUETOOTH, ChipKind::WIFI],
+        )
+        .await;
+
+    // When I update the device specifying chip name "cvd-1" without variant
+    let chip_update =
+        ChipUpdate { name: Some("cvd-1".to_string()), enabled: Some(true), ..Default::default() };
+    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+
+    // Then the operation fails with an InvalidInput error indicating ambiguous chip name
+    world.then_update_rejected_as_invalid_input(
+        result,
+        "Ambiguous chip name 'cvd-1' matches multiple chips on device",
+    );
+}
+
+// Scenario: Update device rejects mismatched ID and variant kind
+//   Given a running Device Actor with a device containing a Bluetooth chip
+//   When I update the device specifying the chip ID with a Wi-Fi variant
+//   Then the operation fails with an InvalidInput error indicating kind
+//     mismatch
+#[tokio::test]
+async fn test_update_device_rejects_mismatched_id_and_variant() {
+    // Given a running Device Actor with a device containing a Bluetooth chip
+    let world = World::new().await;
+    let (device_id, chip_ids) =
+        world.given_device_with_chips_sharing_name("guid-1", "bt-0", &[ChipKind::BLUETOOTH]).await;
+    let bt_chip_id = chip_ids[0];
+
+    // When I update the device specifying the chip ID with a Wi-Fi variant
+    let chip_update = ChipUpdate {
+        id: Some(bt_chip_id),
+        variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
+        ..Default::default()
+    };
+    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+
+    // Then the operation fails with an InvalidInput error indicating kind mismatch
+    world.then_update_rejected_as_invalid_input(
+        result,
+        "has kind BLUETOOTH, but update has kind WIFI",
+    );
+}
+
+// Scenario: Update device rejects mismatched name and variant kind
+//   Given a running Device Actor with a device containing a Bluetooth chip
+//   When I update the device specifying the chip name with a Wi-Fi variant
+//   Then the operation fails with an InvalidInput error indicating kind
+//     mismatch
+#[tokio::test]
+async fn test_update_device_rejects_mismatched_name_and_variant() {
+    // Given a running Device Actor with a device containing a Bluetooth chip
+    let world = World::new().await;
+    let (device_id, _) =
+        world.given_device_with_chips_sharing_name("guid-1", "bt-0", &[ChipKind::BLUETOOTH]).await;
+
+    // When I update the device specifying the chip name with a Wi-Fi variant
+    let chip_update = ChipUpdate {
+        name: Some("bt-0".to_string()),
+        variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
+        ..Default::default()
+    };
+    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+
+    // Then the operation fails with an InvalidInput error indicating kind mismatch
+    world.then_update_rejected_as_invalid_input(
+        result,
+        &format!("Chip name 'bt-0' exists on device {} but not with radio kind WIFI", device_id.0),
+    );
+}
+
+// Scenario: Update device rejects ambiguous shared name and variant when multiple chips match both
+//   Given a running Device Actor with a device containing two Wi-Fi chips both named "wlan-shared"
+//   When I update the device specifying chip name "wlan-shared" with a Wi-Fi variant update
+//   Then the operation fails with an InvalidInput error indicating ambiguous chip name of radio
+//     kind
+#[tokio::test]
+async fn test_update_device_rejects_ambiguous_name_and_variant_for_duplicate_chips() {
+    // Given a running Device Actor with a device containing two Wi-Fi chips both
+    // named "wlan-shared"
+    let world = World::new().await;
+    let (device_id, _) = world
+        .given_device_with_chips_sharing_name(
+            "guid-1",
+            "wlan-shared",
+            &[ChipKind::WIFI, ChipKind::WIFI],
+        )
+        .await;
+
+    // When I update the device specifying chip name "wlan-shared" with a Wi-Fi variant update
+    let chip_update = ChipUpdate {
+        name: Some("wlan-shared".to_string()),
+        variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
+        ..Default::default()
+    };
+    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+
+    // Then the operation fails with an InvalidInput error indicating ambiguous chip name of radio
+    // kind
+    world.then_update_rejected_as_invalid_input(
+        result,
+        "Ambiguous chip name 'wlan-shared' matches multiple chips of radio kind WIFI on device",
+    );
+}
+
+// Scenario: Update device rejects selectorless chip update
+//   Given a running Device Actor with a device
+//   When I update the device with a ChipUpdate lacking id, name, and variant
+//   Then the operation fails with an InvalidInput error indicating at least
+//     one selector is required
+#[tokio::test]
+async fn test_update_device_rejects_selectorless_update() {
+    // Given a running Device Actor with a device
+    let world = World::new().await;
+    let device_name = "test-dev";
+    let device_id = world.when_create_device(device_name).await;
+
+    // When I update the device with a ChipUpdate lacking id, name, and variant
+    let chip_update = ChipUpdate { id: None, name: None, variant: None, ..Default::default() };
+    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+
+    // Then the operation fails with an InvalidInput error indicating at least one selector is
+    // required
+    world.then_update_rejected_as_invalid_input(
+        result,
+        "ChipUpdate requires at least one selector (id, name, or variant)",
+    );
 }
