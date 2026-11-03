@@ -85,12 +85,20 @@ cc_proto_library(
 
 java_proto_library(
     name = "netsim_java_proto",
+    target_compatible_with = select({
+        "//:standalone": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
     deps = [":netsim_proto_library"],
 )
 
 java_grpc_library(
     name = "netsim_java_grpc",
     srcs = [":netsim_proto_library"],
+    target_compatible_with = select({
+        "//:standalone": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
     deps = [":netsim_java_proto"],
 )
 

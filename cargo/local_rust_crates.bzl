@@ -130,7 +130,7 @@ _CRATES = {
     "pest_derive": ("2.9.0", "b3a83744a5c8455b8b3e0dc5031362780a347c878bdd11584d1a8984228cc88d"),
     "pest_generator": ("2.9.0", "e0cd3451aa3de60d4b9a1e736885e4dea6b31617598026f12256ad566d63304a"),
     "pest_meta": ("2.9.0", "e04d3a0849e241d7dfce834c83b1c5edc8622009e8dd51a12ba1927c32f05496"),
-    "pica": ("0.1.13", "b88106b369c5e43802f2d9830266405ff352902543054b9535d998ac17b1e2cf"),
+    "pica": ("0.2.0", "56ff0cbaabe610bdac182cefb7ed1ca0a7e5d8f816070b3c5aa4eef67ac6d167"),
     "pin-project-lite": ("0.2.17", "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"),
     "pin-utils": ("0.1.0", "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"),
     "potential_utf": ("0.1.6", "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"),
