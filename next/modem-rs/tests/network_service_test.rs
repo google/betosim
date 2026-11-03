@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_model::RadioTechnology;
+use netsim_model::{RadioTechnology, RegistrationStatus};
 
 use crate::{common::constants::*, steps::*, world::World};
 
@@ -319,7 +319,6 @@ fn test_network_registration() {
 //   Then unsolicited response from "A" is "+CGREG: 3"
 #[test]
 fn test_set_registration_status() {
-    use modem_rs::RegistrationStatus;
     let mut world = World::new();
     given_modem(&mut world, "A");
 
@@ -653,14 +652,12 @@ fn test_csq_nr_technology() {
     when_at_command_sent(&mut world, "A", "AT+CTEC=64,\"21\"");
     then_response_is(&mut world, "A", "+CTEC: DONE");
 
-    // Verify it triggers URC with CREG = 1 and technology clamped to LTE (7)
-    then_response_is(&mut world, "A", &format!("+CREG: 1,\"{TEST_LAC}\",\"{TEST_CID}\",7"));
-    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    then_response_is(&mut world, "A", &format!("+CREG: 1,\"{TEST_LAC}\",\"{TEST_CID}\",11"));
+    then_response_is(&mut world, "A", RESP_CSQ_NR_DEFAULT);
     then_response_is(&mut world, "A", "OK");
 
-    // 3. Query CSQ, verify LTE fields are reported
     when_at_command_sent(&mut world, "A", "AT+CSQ");
-    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    then_response_is(&mut world, "A", RESP_CSQ_NR_DEFAULT);
     then_response_is(&mut world, "A", "OK");
 }
 
@@ -968,4 +965,191 @@ fn test_cops_auto_register_without_sim_remains_unregistered() {
     world.send_and_expect_ok("A", "AT+COPS=0");
     world.send_and_expect("A", "AT+CREG?", &["+CREG: 1,0", "OK"]);
     world.send_and_expect("A", "AT+CGREG?", &["+CGREG: 1,0", "OK"]);
+}
+
+#[test]
+fn test_physical_channel_config_on_ctec_transitions() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", "+CREG: 1");
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    world.send_and_expect(
+        "A",
+        "AT+CTEC=64,\"21\"",
+        &[
+            "+CTEC: DONE",
+            "+CREG: 1",
+            RESP_CSQ_NR_DEFAULT,
+            &format!("%CGFPCCFG: 1,50000,6,4,{TEST_PDP_CID}"),
+            &format!("%CGFPCCFG: 2,50000,6,4,{TEST_PDP_CID}"),
+            "OK",
+        ],
+    );
+
+    world.send_and_expect(
+        "A",
+        "AT+CTEC=32,\"21\"",
+        &[
+            "+CTEC: DONE",
+            "+CREG: 1",
+            RESP_CSQ_LTE_DEFAULT,
+            &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"),
+            &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"),
+            "OK",
+        ],
+    );
+}
+
+#[test]
+fn test_physical_channel_config_on_external_technology_change() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", "+CREG: 1");
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    when_network_technology_changes(&mut world, "A", RadioTechnology::Nr);
+    world.when_time_advances_ms(10);
+
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", RESP_CSQ_NR_DEFAULT);
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,50000,6,4,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,50000,6,4,{TEST_PDP_CID}"));
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_physical_channel_config_on_registration_recovery_data_then_voice() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    world.send_and_expect_ok("A", "AT+CGREG=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", "+CREG: 1");
+    world.then_response_is("A", "+CGREG: 1");
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::NotRegistered);
+    then_response_is(&mut world, "A", "+CREG: 0");
+    when_data_registration_set(&mut world, "A", RegistrationStatus::NotRegistered);
+    then_response_is(&mut world, "A", "+CGREG: 0");
+
+    when_data_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+    then_response_is(&mut world, "A", "+CGREG: 1");
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_physical_channel_config_on_registration_recovery_voice_then_data() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    world.send_and_expect_ok("A", "AT+CGREG=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", "+CREG: 1");
+    world.then_response_is("A", "+CGREG: 1");
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::NotRegistered);
+    then_response_is(&mut world, "A", "+CREG: 0");
+    when_data_registration_set(&mut world, "A", RegistrationStatus::NotRegistered);
+    then_response_is(&mut world, "A", "+CGREG: 0");
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+
+    when_data_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+    then_response_is(&mut world, "A", "+CGREG: 1");
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_physical_channel_config_not_reemitted_on_home_to_roaming() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", "+CREG: 1");
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::Roaming);
+    then_response_is(&mut world, "A", "+CREG: 5");
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_physical_channel_config_reemitted_on_voice_roaming_to_home() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", "+CREG: 1");
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::Roaming);
+    then_response_is(&mut world, "A", "+CREG: 5");
+    then_no_response(&mut world, "A");
+
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+    then_no_response(&mut world, "A");
 }

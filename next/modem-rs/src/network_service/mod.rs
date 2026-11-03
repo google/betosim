@@ -376,19 +376,28 @@ impl NetworkService {
         mode: CopsMode,
         oper: Option<&str>,
         sim: &impl CardState,
+        data: &impl DataBearerState,
     ) -> NetworkResult {
-        self.handle_set_operator(mode, Some(CopsFormat::LongAlphanumeric), oper, None, sim)
+        self.handle_set_operator(mode, Some(CopsFormat::LongAlphanumeric), oper, None, sim, data)
     }
 
-    pub(crate) fn attach_network(&mut self, sim: &impl CardState) -> Vec<String> {
-        self.attach_network_urcs(sim).iter().map(|u| u.to_string()).collect()
+    pub(crate) fn attach_network(
+        &mut self,
+        sim: &impl CardState,
+        data: &impl DataBearerState,
+    ) -> Vec<String> {
+        self.attach_network_urcs(sim, data).iter().map(|u| u.to_string()).collect()
     }
 
     fn current_signal_strength(&self) -> AidlSignalStrength {
         AidlSignalStrength::from_quality(self.signal_quality, self.act)
     }
 
-    fn attach_network_urcs(&mut self, sim: &impl CardState) -> Vec<NetworkUrc> {
+    fn attach_network_urcs(
+        &mut self,
+        sim: &impl CardState,
+        data: &impl DataBearerState,
+    ) -> Vec<NetworkUrc> {
         info!(
             "attach_network called! is_attached: {}, radio_power: {}",
             self.is_attached, self.radio_power
@@ -411,7 +420,7 @@ impl NetworkService {
             self.data_registration = RegistrationStatus::NotRegistered;
         }
 
-        self.tech_change_urcs()
+        self.tech_change_urcs(data)
     }
 
     #[must_use]
@@ -478,9 +487,10 @@ impl NetworkService {
         }
     }
 
-    pub fn set_network_technology(
+    pub(crate) fn set_network_technology(
         &mut self,
         tech: netsim_model::RadioTechnology,
+        data: &impl DataBearerState,
     ) -> Option<String> {
         info!(
             "set_network_technology: tech={tech:?}, current_mode={}, act={}, is_attached={}",
@@ -501,7 +511,7 @@ impl NetworkService {
             self.act = new_act;
             if self.is_attached {
                 let urcs: String =
-                    self.tech_change_urcs().into_iter().map(|u| u.to_string()).collect();
+                    self.tech_change_urcs(data).into_iter().map(|u| u.to_string()).collect();
                 if urcs.is_empty() { None } else { Some(urcs) }
             } else {
                 None
@@ -543,10 +553,12 @@ impl NetworkService {
         true
     }
 
-    fn tech_change_urcs(&self) -> Vec<NetworkUrc> {
+    #[must_use]
+    fn tech_change_urcs(&self, data: &impl DataBearerState) -> Vec<NetworkUrc> {
         self.all_registration_urcs()
             .into_iter()
             .chain(once(NetworkUrc::SignalQuality(self.current_signal_strength())))
+            .chain(self.physical_channel_config_urcs(data))
             .collect()
     }
 
@@ -574,12 +586,13 @@ impl NetworkService {
         &mut self,
         act: Option<AccessTechnology>,
         sim: &impl CardState,
+        data: &impl DataBearerState,
     ) -> Vec<NetworkUrc> {
         let tech_changed = act.is_some_and(|a| self.apply_resolved_act(a));
         if self.is_attached {
-            if tech_changed { self.tech_change_urcs() } else { Vec::new() }
+            if tech_changed { self.tech_change_urcs(data) } else { Vec::new() }
         } else if self.radio_power == RadioPowerLevel::Full {
-            self.attach_network_urcs(sim)
+            self.attach_network_urcs(sim, data)
         } else {
             Vec::new()
         }
@@ -592,6 +605,7 @@ impl NetworkService {
         oper: Option<&str>,
         act: Option<u8>,
         sim: &impl CardState,
+        data: &impl DataBearerState,
     ) -> NetworkResult {
         info!("handle_set_operator: mode={mode}, format={format:?}, oper={oper:?}, act={act:?}");
 
@@ -605,7 +619,7 @@ impl NetworkService {
                 if let Some(fmt) = format {
                     self.cops_format = fmt;
                 }
-                urcs.extend(self.select_operator(act, sim));
+                urcs.extend(self.select_operator(act, sim, data));
                 if urcs.is_empty() { Ok(None) } else { Ok(Some(NetworkResponse::Urcs(urcs))) }
             }
             CopsMode::Manual => {
@@ -618,7 +632,7 @@ impl NetworkService {
                 }
 
                 if self.is_valid_operator(op_str) {
-                    urcs.extend(self.select_operator(act, sim));
+                    urcs.extend(self.select_operator(act, sim, data));
                     if urcs.is_empty() { Ok(None) } else { Ok(Some(NetworkResponse::Urcs(urcs))) }
                 } else {
                     self.is_attached = false;
@@ -659,7 +673,7 @@ impl NetworkService {
                 };
                 self.cops_format = fmt;
                 if act.is_some_and(|a| self.apply_resolved_act(a)) && self.is_attached {
-                    urcs.extend(self.tech_change_urcs());
+                    urcs.extend(self.tech_change_urcs(data));
                 }
                 if urcs.is_empty() { Ok(None) } else { Ok(Some(NetworkResponse::Urcs(urcs))) }
             }
@@ -676,7 +690,7 @@ impl NetworkService {
                     self.cops_mode = CopsMode::Automatic;
                 }
 
-                urcs.extend(self.select_operator(act, sim));
+                urcs.extend(self.select_operator(act, sim, data));
                 if urcs.is_empty() { Ok(None) } else { Ok(Some(NetworkResponse::Urcs(urcs))) }
             }
         }
@@ -719,7 +733,8 @@ impl NetworkService {
         }
     }
 
-    pub fn registration_status(&self, reg_type: RegistrationType) -> RegistrationStatus {
+    #[must_use]
+    pub(crate) fn registration_status(&self, reg_type: RegistrationType) -> RegistrationStatus {
         match reg_type {
             RegistrationType::Voice => self.voice_registration,
             RegistrationType::Data | RegistrationType::Lte => self.data_registration,
@@ -799,6 +814,7 @@ impl NetworkService {
         &mut self,
         current: CtecTechnology,
         preferred: Option<CtecPreferredMask>,
+        data: &impl DataBearerState,
     ) -> NetworkResult {
         let preferred_mask = preferred.unwrap_or(CtecPreferredMask(0));
         info!("handle_set_ctec: current={current}, preferred_mask={:#X}", preferred_mask.0);
@@ -807,9 +823,7 @@ impl NetworkService {
             CtecTechnology::Gsm => AccessTechnology::Gsm,
             CtecTechnology::Wcdma => AccessTechnology::Wcdma,
             CtecTechnology::Lte => AccessTechnology::Lte,
-            // TODO(b/564626830): Clamp to LTE until %CGFPCCFG physical channel configs are
-            // supported.
-            CtecTechnology::Nr => AccessTechnology::Lte,
+            CtecTechnology::Nr => AccessTechnology::Nr,
             CtecTechnology::Cdma | CtecTechnology::Evdo | CtecTechnology::Tdscdma => {
                 return Err(ExecutionResult::cme_error(CmeError::IncorrectParameters));
             }
@@ -820,7 +834,7 @@ impl NetworkService {
         self.act = new_act;
         info!("handle_set_ctec: updated self.act to {}", self.act);
 
-        let urcs = if self.is_attached { self.tech_change_urcs() } else { Vec::new() };
+        let urcs = if self.is_attached { self.tech_change_urcs(data) } else { Vec::new() };
 
         Ok(Some(NetworkResponse::CtecSetResult { urcs }))
     }
@@ -897,6 +911,7 @@ impl NetworkService {
         command: &NetworkCommand<'a>,
         sim_service: &impl CardState,
         enable_unsolicited_urcs: bool,
+        data_service: &impl DataBearerState,
     ) -> ExecutionResult {
         let res = match command {
             NetworkCommand::QueryOperator => self.handle_query_operator(),
@@ -907,6 +922,7 @@ impl NetworkService {
                 oper.as_ref().map(|s| s.as_str()),
                 *act,
                 sim_service,
+                data_service,
             ),
             NetworkCommand::QuerySignalQuality => self.handle_query_signal_quality(),
             NetworkCommand::QueryExtendedSignalQuality => {
@@ -938,7 +954,7 @@ impl NetworkService {
             NetworkCommand::QuerySupportedNetworkTechnology => self.handle_query_supported_ctec(),
             NetworkCommand::SetNetworkTechnology(raw_current, preferred) => {
                 CtecTechnology::from_wire(*raw_current)
-                    .and_then(|current| self.handle_set_ctec(current, *preferred))
+                    .and_then(|current| self.handle_set_ctec(current, *preferred, data_service))
             }
         };
         res.into()

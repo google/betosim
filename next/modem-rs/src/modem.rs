@@ -373,11 +373,20 @@ impl ModemImpl {
         reg_type: RegistrationType,
         status: RegistrationStatus,
     ) -> Vec<ModemEffect> {
+        let prev_status = self.network_service.registration_status(reg_type);
+        let mut effects = Vec::new();
         if let Some(response) = self.network_service.set_registration(reg_type, status) {
-            vec![ModemEffect::Response(response.into_bytes())]
-        } else {
-            Vec::new()
+            effects.push(ModemEffect::Response(response.into_bytes()));
         }
+        let new_status = self.network_service.registration_status(reg_type);
+        let became_registered = !prev_status.is_registered() && new_status.is_registered();
+        let voice_entered_home = reg_type == RegistrationType::Voice
+            && prev_status != RegistrationStatus::RegisteredHome
+            && new_status == RegistrationStatus::RegisteredHome;
+        if self.enable_unsolicited_urcs && (became_registered || voice_entered_home) {
+            effects.extend(self.update_physical_channel_configs());
+        }
+        effects
     }
 
     pub fn set_voice_registration(&mut self, status: RegistrationStatus) -> Vec<ModemEffect> {
@@ -515,8 +524,10 @@ impl ModemImpl {
 
     pub fn set_network_technology(&mut self, tech: RadioTechnology) -> Vec<ModemEffect> {
         let mut effects = Vec::new();
-        if let Some(response) = self.network_service.set_network_technology(tech) {
-            effects.push(ModemEffect::Response(response.as_bytes().to_vec()));
+        if let Some(response) =
+            self.network_service.set_network_technology(tech, &self.data_service)
+        {
+            effects.push(ModemEffect::Response(response.into_bytes()));
         }
         effects
     }
@@ -594,7 +605,8 @@ impl ModemImpl {
             ModemEvent::AttachNetwork => {
                 if self.sim_service.is_present() {
                     let sim_ready = self.sim_service.is_ready();
-                    let mut responses = self.network_service.attach_network(&self.sim_service);
+                    let mut responses =
+                        self.network_service.attach_network(&self.sim_service, &self.data_service);
                     // NITZ requires normal-service registration unless auto_ctzv quirk is enabled.
                     if (sim_ready || self.quirks.auto_ctzv)
                         && self.misc_service.ctzv_enabled()
@@ -626,8 +638,9 @@ impl ModemImpl {
         let mode = if operator.is_empty() { CopsMode::Automatic } else { CopsMode::Manual };
         let oper = if operator.is_empty() { None } else { Some(operator) };
         let mut effects = Vec::new();
-        if let Ok(Some(crate::network_service::NetworkResponse::Urcs(urcs))) =
-            self.network_service.set_operator_manual(mode, oper, &self.sim_service)
+        if let Ok(Some(crate::network_service::NetworkResponse::Urcs(urcs))) = self
+            .network_service
+            .set_operator_manual(mode, oper, &self.sim_service, &self.data_service)
         {
             effects.extend(Self::network_urcs_to_effects(urcs));
         }
@@ -793,9 +806,12 @@ impl ModemImpl {
             Command::Sms(c) => {
                 self.sms_service.execute(c, &mut self.sim_service, &self.network_service)
             }
-            Command::Network(c) => {
-                self.network_service.execute(c, &self.sim_service, self.enable_unsolicited_urcs)
-            }
+            Command::Network(c) => self.network_service.execute(
+                c,
+                &self.sim_service,
+                self.enable_unsolicited_urcs,
+                &self.data_service,
+            ),
             Command::Data(c) => self.data_service.execute(c, &self.network_service),
             Command::Misc(c) => self.misc_service.execute(c),
             Command::Sup(c) => self.sup_service.execute(c),

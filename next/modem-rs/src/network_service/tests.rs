@@ -197,6 +197,7 @@ fn test_operator_validation_and_selection() {
         Some(Plmn::parse("310260").expect("valid test PLMN")),
     );
     let sim = MockCardState::default();
+    let data = MockDataBearerState::default();
 
     // Verify is_valid_operator helper matching PLMN and standard long/short operator names
     assert!(service.is_valid_operator("310260"));
@@ -206,7 +207,14 @@ fn test_operator_validation_and_selection() {
 
     // Test CopsMode::Automatic attaches and returns URCs
     let auto_res = service
-        .handle_set_operator(CopsMode::Automatic, Some(CopsFormat::Numeric), None, None, &sim)
+        .handle_set_operator(
+            CopsMode::Automatic,
+            Some(CopsFormat::Numeric),
+            None,
+            None,
+            &sim,
+            &data,
+        )
         .unwrap();
     assert!(auto_res.is_some());
     assert!(service.is_attached);
@@ -221,6 +229,7 @@ fn test_operator_validation_and_selection() {
             Some("310260"),
             None,
             &sim,
+            &data,
         )
         .unwrap();
     assert_eq!(service.cops_mode, CopsMode::Manual);
@@ -230,7 +239,7 @@ fn test_operator_validation_and_selection() {
 
     // Test CopsMode::Manual with invalid operator denies registration
     let manual_invalid_res =
-        service.handle_set_operator(CopsMode::Manual, None, Some("InvalidOp"), None, &sim);
+        service.handle_set_operator(CopsMode::Manual, None, Some("InvalidOp"), None, &sim, &data);
     assert!(manual_invalid_res.is_err());
     assert!(!service.is_attached);
     assert_eq!(service.voice_registration, RegistrationStatus::Denied);
@@ -244,6 +253,7 @@ fn test_operator_validation_and_selection() {
             Some("NonExistentOp"),
             None,
             &sim,
+            &data,
         )
         .unwrap();
     assert_eq!(service.cops_mode, CopsMode::Automatic);
@@ -351,4 +361,28 @@ fn test_physical_channel_config_suppression_when_no_active_cids() {
     let mut service = NetworkService::new(Quirks::default(), None);
     service.voice_registration = RegistrationStatus::RegisteredHome;
     assert_eq!(service.physical_channel_config_urcs(&MockDataBearerState(&[])).next(), None);
+}
+
+#[test]
+fn test_handle_set_ctec_nr_unclamped_with_physical_channel_configs() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.is_attached = true;
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+
+    let data = MockDataBearerState(&[1]);
+    let res = service.handle_set_ctec(CtecTechnology::Nr, None, &data).unwrap();
+    assert_eq!(service.act, AccessTechnology::Nr);
+    assert_eq!(service.current_network_mode, CtecTechnology::Nr);
+
+    let Some(NetworkResponse::CtecSetResult { urcs }) = res else {
+        panic!("Expected CtecSetResult with URCs");
+    };
+    let formatted: Vec<String> = urcs
+        .into_iter()
+        .filter(|u| matches!(u, NetworkUrc::PhysicalChannelConfig(_)))
+        .map(|u| u.to_string())
+        .collect();
+    assert_eq!(formatted, &["%CGFPCCFG: 1,50000,6,4,1\r\n", "%CGFPCCFG: 2,50000,6,4,1\r\n"]);
 }
