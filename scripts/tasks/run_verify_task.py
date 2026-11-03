@@ -299,7 +299,7 @@ class VerifyManager:
     netsimd_bin = (
         AOSP_ROOT
         / "bazel-bin/external/netsim+/next/daemon"
-        / binary_extension("daemon")
+        / binary_extension("netsimd")
     )
     if not netsimd_bin.exists():
       logging.error(f"netsimd binary not found at {netsimd_bin}")

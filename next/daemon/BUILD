@@ -15,10 +15,10 @@
 # Common Bazel commands for this package:
 #
 # Build the binary:
-#   bazel build //next/daemon
+#   bazel build //next/daemon:netsimd
 #
 # Run the binary:
-#   bazel run //next/daemon
+#   bazel run //next/daemon:netsimd
 #
 # Run the tests:
 #   bazel test //next/daemon:tests
@@ -100,7 +100,7 @@ netsim_rust_library(
 )
 
 netsim_rust_binary(
-    name = "daemon",
+    name = "netsimd",
     srcs = ["src/main.rs"],
     edition = "2024",
     rustc_flags = [
@@ -115,6 +115,6 @@ netsim_rust_binary(
 )
 
 stripped_binaries(
-    name = "daemon_stripped",
-    srcs = [":daemon"],
+    name = "netsimd_stripped",
+    srcs = [":netsimd"],
 )

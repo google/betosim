@@ -245,7 +245,7 @@ def redirect_dep_to_testing(d):
 STATIC_LIB_OVERRIDES = {"libnetsim_next_ap_actor_cxx"}
 SHARED_LIB_OVERRIDES = {"lib_rootcanal_ffi", "libcrypto"}
 PLATFORM_RUSTLIBS = {
-    "daemon": ["libcommand_fds"],
+    "netsimd": ["libcommand_fds"],
     "daemon-lib": [
         "libcommand_fds",
         "libbytes",
@@ -833,7 +833,7 @@ def netsim_rust_binary(name, srcs=None, deps=None, **kwargs):
 
   soong_name = (
       "netsimd"
-      if name == "daemon"
+      if name == "netsimd"
       else (
           "netsim"
           if name == "netsim"

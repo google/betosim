@@ -74,12 +74,12 @@ alias(
 
 alias(
     name = "netsimd_stripped",
-    actual = "//next/daemon:daemon_stripped",
+    actual = "//next/daemon:netsimd_stripped",
 )
 
 alias(
     name = "netsimd",
-    actual = "//next/daemon:daemon",
+    actual = "//next/daemon:netsimd",
 )
 
 py_test(

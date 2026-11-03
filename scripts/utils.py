@@ -109,12 +109,12 @@ def get_netsim_binaries():
   if platform.system().lower() in ["linux", "darwin"]:
     return {
         "netsim": "next/cli/_stripped/netsim",
-        "netsimd": "next/daemon/_stripped/daemon",
+        "netsimd": "next/daemon/_stripped/netsimd",
     }
   else:
     return {
         "netsim": "next/cli/netsim",
-        "netsimd": "next/daemon/daemon",
+        "netsimd": "next/daemon/netsimd",
     }
 
 

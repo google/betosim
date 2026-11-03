@@ -133,7 +133,7 @@ cleanup() {
   done
 
   # Force-kill any lingering netsimd instances started by other means
-  pkill -u $(whoami) -9 -f "netsim\+/next/daemon/daemon" 2>/dev/null || true
+  pkill -u $(whoami) -9 -f "netsim\+/next/daemon/netsimd" 2>/dev/null || true
   for emu in "${SELECTED_EMULATORS[@]}"; do
     pkill -u $(whoami) -9 -f "qemu-system-x86_64.*${emu#@}" 2>/dev/null || true
   done
@@ -152,7 +152,7 @@ if [ "$NO_BUILD" = false ]; then
   cd "$WORKSPACE_DIR"
   bazel build \
     --spawn_strategy=standalone \
-    @netsim//next/daemon:daemon \
+    @netsim//next/daemon:netsimd \
     @netsim//next/cli:netsim \
     @netsim//next/verify/runner:runner-e2e
 else
@@ -172,9 +172,9 @@ BAZEL_BIN=$(bazel info bazel-bin 2>/dev/null || echo "$WORKSPACE_DIR/bazel-bin")
 BAZEL_OUT=$(dirname $(dirname "$BAZEL_BIN"))
 
 if [ -z "$NETSIMD_PATH" ]; then
-  NETSIMD_BIN=$(find "$BAZEL_OUT" -path "*/daemon/daemon" -type f | head -n 1)
+  NETSIMD_BIN=$(find "$BAZEL_OUT" -path "*/daemon/netsimd" -type f | head -n 1)
   if [ -z "$NETSIMD_BIN" ]; then
-    NETSIMD_BIN="$BAZEL_BIN/external/netsim+/next/daemon/daemon"
+    NETSIMD_BIN="$BAZEL_BIN/external/netsim+/next/daemon/netsimd"
   fi
 else
   NETSIMD_BIN="$NETSIMD_PATH"
