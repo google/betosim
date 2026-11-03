@@ -19,7 +19,7 @@
 /// (dBm) PATH_LOSS at 1m for isotropic antenna transmitting BLE.
 const PATH_LOSS_AT_1M: f32 = 40.20;
 
-const NEARBY_SHARE_TX_POWER_DEFAULT: i8 = -49;
+const NEARBY_SHARE_TX_POWER_DEFAULT: i8 = -30;
 const RSSI_MIN_DBM: f32 = -120.0;
 const RSSI_MAX_DBM: f32 = 20.0;
 const FSPL_MULTIPLIER: f32 = 20.0;
@@ -79,9 +79,15 @@ mod tests {
 
     #[test]
     fn rssi_at_1m() {
-        // With transmit power at 0 dBm verify a reasonable rssi at 1m
-        let rssi_at_1m = distance_to_rssi(0, 1.0);
-        assert!(rssi_at_1m < -35 && rssi_at_1m > -55);
+        assert_eq!(distance_to_rssi(0, 1.0), -30);
+        assert_eq!(distance_to_rssi(1, 1.0), -30);
+    }
+
+    #[test]
+    fn distance_to_rssi_calibrated_fspl_curve() {
+        assert_eq!(distance_to_rssi(0, 10.0), -50);
+        assert_eq!(distance_to_rssi(1, 10.0), -50);
+        assert_eq!(distance_to_rssi(0, 100.0), -70);
     }
 
     #[test]
@@ -101,7 +107,8 @@ mod tests {
 
     #[test]
     fn test_beacon_distance_to_rssi_preserves_zero_and_one() {
-        // Beacon distance calculation does not apply Nearby Share 0 | 1 => -49 dBm fallback.
+        // Beacon distance calculation does not apply Nearby Share
+        // 0 | 1 => -30 dBm fallback.
         // At 1.0 m, log10(1.0) == 0.0, so RSSI == tx_power.
         assert_eq!(beacon_distance_to_rssi(0, 1.0), 0);
         assert_eq!(beacon_distance_to_rssi(1, 1.0), 1);

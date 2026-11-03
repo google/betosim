@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_model::{ChipUpdate, Interval};
+use netsim_model::{ChipUpdate, Interval, Position};
 
 use crate::world::World;
 
@@ -197,4 +197,27 @@ async fn test_update_deadlock_under_load() {
         .await
         .expect("Test timed out (deadlock detected)")
         .unwrap();
+}
+
+// Scenario: Scanner receives calibrated device RSSI across pose updates
+//
+//   Given a scanner chip at (0, 0, 0)
+//   And a device chip placed at 1 meter
+//   When the device advertises with tx_power 1
+//   Then the scanner receives scan reports at -30 dBm
+//   When the device moves to 10 meters
+//   Then the scanner receives scan reports at -50 dBm
+#[tokio::test]
+async fn test_scanner_receives_calibrated_device_rssi_across_pose_updates() {
+    let mut world = World::new();
+
+    world.given_scanner("Scanner").await;
+    world.given_device("Advertiser").await;
+    world.when_update_chip_position("Advertiser", Position { x: 1.0, y: 0.0, z: 0.0 }).await;
+
+    world.when_device_starts_extended_legacy_advertising("Advertiser", 1).await;
+    world.then_scanner_eventually_sees_rssi("Scanner", -30).await;
+
+    world.when_update_chip_position("Advertiser", Position { x: 10.0, y: 0.0, z: 0.0 }).await;
+    world.then_scanner_eventually_sees_rssi("Scanner", -50).await;
 }

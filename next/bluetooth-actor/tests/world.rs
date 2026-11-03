@@ -23,10 +23,16 @@ use netsim_model::{
     ChipId, ChipUpdate, ChipVariant, DeviceId, DeviceParams, Interval, PacketSink, PacketStream,
     ScannerParams, TxPower,
 };
+use netsim_packets::{
+    Address, AdvertisingEventProperties, AdvertisingFilterPolicy, Enable, EnabledSet,
+    FragmentPreference, LeSetExtendedAdvertisingData, LeSetExtendedAdvertisingEnable,
+    LeSetExtendedAdvertisingParameters, Operation, OwnAddressType, PeerAddressType, PrimaryPhyType,
+    Reset, SecondaryPhyType,
+};
 use netsim_proto::{hci_packet::hcipacket::PacketType, protobuf::Enum};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
-use zerocopy::{Immutable, IntoBytes, KnownLayout};
+use zerocopy::{Immutable, IntoBytes, KnownLayout, U16};
 
 /// The BDD World for Bluetooth Actor tests.
 pub struct World {
@@ -420,6 +426,63 @@ impl World {
         self.when_packet_sent(name, h4_packet).await;
     }
 
+    /// Starts extended legacy advertising on the device controller.
+    /// Extended advertising (0x2036) with LEGACY_ADV_IND preserves tx_power in
+    /// RootCanal link-layer packets, unlike legacy 0x2006 which hardcodes
+    /// -10 dBm.
+    pub async fn when_device_starts_extended_legacy_advertising(
+        &mut self,
+        name: &str,
+        tx_power: i8,
+    ) {
+        self.when_command_sent(name, Reset {}).await;
+        self.when_command_sent(
+            name,
+            LeSetExtendedAdvertisingParameters {
+                advertising_handle: 0,
+                advertising_event_properties: AdvertisingEventProperties::LEGACY_ADV_IND,
+                primary_advertising_interval_min: [0x20, 0x00, 0x00],
+                primary_advertising_interval_max: [0x20, 0x00, 0x00],
+                primary_advertising_channel_map: 0x07,
+                own_address_type: OwnAddressType::PUBLIC_DEVICE_ADDRESS,
+                peer_address_type: PeerAddressType::PUBLIC_DEVICE_OR_IDENTITY_ADDRESS,
+                peer_address: Address { bytes: [0; 6] },
+                advertising_filter_policy: AdvertisingFilterPolicy::ALL_DEVICES,
+                advertising_tx_power: tx_power,
+                primary_advertising_phy: PrimaryPhyType::LE_1M,
+                secondary_advertising_max_skip: 0,
+                secondary_advertising_phy: SecondaryPhyType::LE_1M,
+                advertising_sid: 0,
+                scan_request_notification_enable: Enable::DISABLED,
+            },
+        )
+        .await;
+        self.when_command_sent(
+            name,
+            LeSetExtendedAdvertisingData {
+                advertising_handle: 0,
+                operation: Operation::COMPLETE_ADVERTISEMENT,
+                fragment_preference: FragmentPreference::CONTROLLER_MAY_FRAGMENT,
+                advertising_data_length: 3,
+                advertising_data: [0x02u8, 0x01u8, 0x06u8],
+            },
+        )
+        .await;
+        self.when_command_sent(
+            name,
+            LeSetExtendedAdvertisingEnable {
+                enable: Enable::ENABLED,
+                num_sets: 1,
+                enabled_sets: [EnabledSet {
+                    advertising_handle: 0,
+                    duration: U16::ZERO,
+                    max_extended_advertising_events: 0,
+                }],
+            },
+        )
+        .await;
+    }
+
     pub async fn then_packet_received(&mut self, name: &str, expected: &[u8]) {
         let actual = self.receive_packet(name).await;
         assert_eq!(actual, expected, "Packet received by {} does not match expected", name);
@@ -519,6 +582,36 @@ impl World {
         }
     }
 
+    /// Polls scan reports until steady-state RSSI is confirmed after pose
+    /// updates, tolerating transient in-flight packets in the sink channel.
+    pub async fn then_scanner_eventually_sees_rssi(&mut self, name: &str, expected_rssi: i8) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut consecutive_matches = 0;
+        let mut last_observed = None;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Ok(reports) = tokio::time::timeout(remaining, self.receive_scan_report(name)).await
+            else {
+                break;
+            };
+            for report in reports {
+                last_observed = Some(report.rssi);
+                if report.rssi == expected_rssi {
+                    consecutive_matches += 1;
+                    if consecutive_matches >= 2 {
+                        return;
+                    }
+                } else {
+                    consecutive_matches = 0;
+                }
+            }
+        }
+        panic!(
+            "Scanner '{}' did not see 2 consecutive reports with RSSI {} dBm (last observed: {:?})",
+            name, expected_rssi, last_observed
+        );
+    }
+
     pub async fn then_chip_eventually_removed(&self, name: &str) {
         let id = *self.chips.get(name).expect("Chip name tracked in World");
         let duration = std::time::Duration::from_millis(100);
@@ -584,13 +677,16 @@ impl World {
         };
 
         info!(
-            "Beacon '{}': received {} advertisements over {}ms (expected ~{} at {}ms interval, avg gap: {}ms)",
+            "Beacon '{}': received {} advertisements over {}ms (expected ~{} at \
+             {}ms interval, avg gap: {}ms)",
             beacon_name, count, window_ms, expected_count, expected_ms, avg_interval
         );
 
         assert!(
             count >= min_count && count <= max_count,
-            "Beacon '{}' advertisement count {} out of bounds [{}..{}] over {}ms (expected interval {}ms, measured avg interval {}ms). Timestamps: {:?}",
+            "Beacon '{}' advertisement count {} out of bounds [{}..{}] over \
+             {}ms (expected interval {}ms, measured avg interval {}ms). \
+             Timestamps: {:?}",
             beacon_name,
             count,
             min_count,

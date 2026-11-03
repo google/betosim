@@ -299,13 +299,14 @@ mod tests {
         chips.write().insert(chip1_id, chip1);
         chips.write().insert(chip2_id, chip2);
 
-        // For standard Device mode, tx_power 0 and 1 trigger Nearby Share fallback (-49 dBm at 1m).
-        // This verifies the is_beacon check distinguishes Beacon from Device mode.
+        // For standard Device mode, tx_power 0 and 1 trigger Nearby Share
+        // fallback (-30 dBm at 1m). This verifies the is_beacon check
+        // distinguishes Beacon from Device mode.
         let rssi_one = callbacks.on_send_ll(1, 2, &[], Phy::LowEnergy, 1);
-        assert_eq!(rssi_one, Some(-49));
+        assert_eq!(rssi_one, Some(-30));
 
         let rssi_zero = callbacks.on_send_ll(1, 2, &[], Phy::LowEnergy, 0);
-        assert_eq!(rssi_zero, Some(-49));
+        assert_eq!(rssi_zero, Some(-30));
     }
 
     #[test]
