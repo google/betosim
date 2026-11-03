@@ -2268,6 +2268,12 @@ impl CtecTechnology {
         mask
     }
 
+    /// Returns the 0-based Goldfish RIL `ModemTechnology` index (`0..=6`).
+    #[must_use]
+    pub(crate) const fn modem_tech_index(self) -> u8 {
+        (self as u8).trailing_zeros() as u8
+    }
+
     /// Converts an `AT+CTEC` wire value to a single active `CtecTechnology`.
     pub fn from_wire(wire: u8) -> Result<Self, ExecutionResult> {
         match wire {
@@ -3431,16 +3437,17 @@ mod tests {
     fn test_ctec_technology_all_variants_exhaustive() {
         assert_eq!(CtecTechnology::ALL.len(), 7);
         for tech in CtecTechnology::ALL {
-            let mask = match *tech {
-                CtecTechnology::Gsm => 0x01,
-                CtecTechnology::Wcdma => 0x02,
-                CtecTechnology::Cdma => 0x04,
-                CtecTechnology::Evdo => 0x08,
-                CtecTechnology::Tdscdma => 0x10,
-                CtecTechnology::Lte => 0x20,
-                CtecTechnology::Nr => 0x40,
+            let (mask, idx) = match *tech {
+                CtecTechnology::Gsm => (0x01, 0),
+                CtecTechnology::Wcdma => (0x02, 1),
+                CtecTechnology::Cdma => (0x04, 2),
+                CtecTechnology::Evdo => (0x08, 3),
+                CtecTechnology::Tdscdma => (0x10, 4),
+                CtecTechnology::Lte => (0x20, 5),
+                CtecTechnology::Nr => (0x40, 6),
             };
             assert_eq!(*tech as u8, mask);
+            assert_eq!(tech.modem_tech_index(), idx);
         }
         assert_eq!(CtecTechnology::all_mask(), 0x7F);
     }

@@ -14,14 +14,18 @@
 
 // src/network_service.rs
 
+mod physical_channel;
+
 use std::iter::once;
 
 use modem_rs_derive::CommandParser;
 use netsim_model::{Quirks, RegistrationStatus};
+use physical_channel::CellConnectionStatus;
+pub use physical_channel::PhysicalChannelConfig;
 use tracing::{info, warn};
 
 use crate::{
-    CardState, RadioAdmission,
+    CardState, DataBearerState, RadioAdmission,
     capabilities::AdmissionDenial,
     constants::{DEFAULT_OPERATOR_NAME_LONG, DEFAULT_OPERATOR_NAME_SHORT},
     parser::QuotedString,
@@ -140,6 +144,7 @@ pub enum NetworkUrc {
         location: Option<RegistrationLocation>,
     },
     SignalQuality(AidlSignalStrength),
+    PhysicalChannelConfig(PhysicalChannelConfig),
 }
 
 impl std::fmt::Display for NetworkUrc {
@@ -154,6 +159,7 @@ impl std::fmt::Display for NetworkUrc {
                 }
             }
             NetworkUrc::SignalQuality(ss) => write!(f, "+CSQ: {ss}\r\n"),
+            NetworkUrc::PhysicalChannelConfig(config) => write!(f, "{config}"),
         }
     }
 }
@@ -230,7 +236,7 @@ impl std::fmt::Display for NetworkResponse {
             // indices (indexing into kTechsBitmask) rather than bitmasks.
             NetworkResponse::CtecSupported(techs) => {
                 let tech_strs: Vec<String> =
-                    techs.iter().map(|t| (*t as u8).trailing_zeros().to_string()).collect();
+                    techs.iter().map(|t| t.modem_tech_index().to_string()).collect();
                 write!(f, "+CTEC: {}\r\n", tech_strs.join(","))
             }
             NetworkResponse::CtecSetResult { urcs } => {
@@ -408,6 +414,28 @@ impl NetworkService {
         self.tech_change_urcs()
     }
 
+    #[must_use]
+    fn is_normal_registered(&self) -> bool {
+        self.voice_registration.is_registered() || self.data_registration.is_registered()
+    }
+
+    pub(crate) fn physical_channel_config_urcs(
+        &self,
+        data: &impl DataBearerState,
+    ) -> impl Iterator<Item = NetworkUrc> {
+        let active_tech = (self.is_radio_on() && self.is_normal_registered())
+            .then_some(self.current_network_mode);
+        active_tech.into_iter().flat_map(move |tech| {
+            data.active_context_ids().flat_map(move |cid| {
+                CellConnectionStatus::SERVING.map(move |status| {
+                    NetworkUrc::PhysicalChannelConfig(PhysicalChannelConfig::for_serving_cell(
+                        status, tech, cid,
+                    ))
+                })
+            })
+        })
+    }
+
     pub fn set_registration(
         &mut self,
         reg_type: RegistrationType,
@@ -525,13 +553,7 @@ impl NetworkService {
     // --- Pure command handlers ---
 
     fn handle_query_operator(&self) -> NetworkResult {
-        let is_registered = matches!(
-            self.voice_registration,
-            RegistrationStatus::RegisteredHome | RegistrationStatus::Roaming
-        ) || matches!(
-            self.data_registration,
-            RegistrationStatus::RegisteredHome | RegistrationStatus::Roaming
-        );
+        let is_registered = self.is_normal_registered();
 
         Ok(Some(NetworkResponse::OperatorQuery {
             is_registered,

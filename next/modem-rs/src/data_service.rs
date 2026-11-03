@@ -325,13 +325,13 @@ impl Default for DataService {
     }
 }
 
-impl DataService {
-    // --- Helper methods for external services ---
-
-    pub fn on_update_physical_channel_configs(&self) -> Vec<crate::modem::ModemEffect> {
-        vec![crate::modem::ModemEffect::Response(b"+CGEV: NW PDN DEACT 1\r\n".to_vec())]
+impl crate::DataBearerState for DataService {
+    fn active_context_ids(&self) -> impl Iterator<Item = u8> {
+        self.pdp_contexts.iter().filter(|(_, ctx)| ctx.active).map(|(&cid, _)| cid)
     }
+}
 
+impl DataService {
     // --- Pure command handlers ---
 
     pub fn handle_define_pdp_context(

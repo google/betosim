@@ -39,6 +39,11 @@ pub(crate) trait RadioAdmission {
     fn can_terminate_sms(&self) -> bool;
 }
 
+pub(crate) trait DataBearerState {
+    /// Active PDP context identifiers (`<cid>`) in ascending order.
+    fn active_context_ids(&self) -> impl Iterator<Item = u8>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmissionDenial {
     NoNetworkService,

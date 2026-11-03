@@ -24,7 +24,7 @@ use crate::{
     constants::CALL_RING_TIMEOUT,
     data_service::DataService,
     misc_service::MiscService,
-    network_service::{NetworkCommand, NetworkService, RegistrationType},
+    network_service::{NetworkCommand, NetworkService, NetworkUrc, RegistrationType},
     parser::Command,
     sim_service::SimService,
     sms_service::SmsService,
@@ -311,8 +311,14 @@ impl ModemImpl {
         self.call_service.receive_peer_hold(peer_id, on_hold);
     }
 
+    fn network_urcs_to_effects(urcs: impl IntoIterator<Item = NetworkUrc>) -> Vec<ModemEffect> {
+        urcs.into_iter().map(|u| ModemEffect::Response(u.to_string().into_bytes())).collect()
+    }
+
     pub(crate) fn update_physical_channel_configs(&self) -> Vec<ModemEffect> {
-        self.data_service.on_update_physical_channel_configs()
+        Self::network_urcs_to_effects(
+            self.network_service.physical_channel_config_urcs(&self.data_service),
+        )
     }
 
     pub(crate) fn remote_answer(&mut self) -> bool {
@@ -623,9 +629,7 @@ impl ModemImpl {
         if let Ok(Some(crate::network_service::NetworkResponse::Urcs(urcs))) =
             self.network_service.set_operator_manual(mode, oper, &self.sim_service)
         {
-            effects.extend(
-                urcs.into_iter().map(|u| ModemEffect::Response(u.to_string().into_bytes())),
-            );
+            effects.extend(Self::network_urcs_to_effects(urcs));
         }
         effects
     }

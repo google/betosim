@@ -250,3 +250,105 @@ fn test_operator_validation_and_selection() {
     assert!(service.is_attached);
     assert!(manual_auto_res.is_some());
 }
+
+#[derive(Default)]
+struct MockDataBearerState<'a>(&'a [u8]);
+
+impl DataBearerState for MockDataBearerState<'_> {
+    fn active_context_ids(&self) -> impl Iterator<Item = u8> {
+        self.0.iter().copied()
+    }
+}
+
+#[test]
+fn test_physical_channel_config_formatting_lte() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+    service.current_network_mode = CtecTechnology::Lte;
+
+    let formatted: Vec<String> = service
+        .physical_channel_config_urcs(&MockDataBearerState(&[1, 2]))
+        .map(|u| u.to_string())
+        .collect();
+    assert_eq!(
+        formatted,
+        &[
+            "%CGFPCCFG: 1,5000,5,0,1\r\n",
+            "%CGFPCCFG: 2,5000,5,0,1\r\n",
+            "%CGFPCCFG: 1,5000,5,0,2\r\n",
+            "%CGFPCCFG: 2,5000,5,0,2\r\n",
+        ]
+    );
+}
+
+#[test]
+fn test_physical_channel_config_formatting_nr() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+    service.current_network_mode = CtecTechnology::Nr;
+
+    let formatted: Vec<String> = service
+        .physical_channel_config_urcs(&MockDataBearerState(&[1]))
+        .map(|u| u.to_string())
+        .collect();
+    assert_eq!(formatted, &["%CGFPCCFG: 1,50000,6,4,1\r\n", "%CGFPCCFG: 2,50000,6,4,1\r\n"]);
+}
+
+#[test]
+fn test_physical_channel_config_formatting_gsm_and_wcdma() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    service.data_registration = RegistrationStatus::RegisteredHome;
+
+    service.current_network_mode = CtecTechnology::Gsm;
+    let gsm_formatted: Vec<String> = service
+        .physical_channel_config_urcs(&MockDataBearerState(&[1]))
+        .map(|u| u.to_string())
+        .collect();
+    assert_eq!(gsm_formatted, &["%CGFPCCFG: 1,5000,0,0,1\r\n", "%CGFPCCFG: 2,5000,0,0,1\r\n"]);
+
+    service.current_network_mode = CtecTechnology::Wcdma;
+    let wcdma_formatted: Vec<String> = service
+        .physical_channel_config_urcs(&MockDataBearerState(&[1]))
+        .map(|u| u.to_string())
+        .collect();
+    assert_eq!(wcdma_formatted, &["%CGFPCCFG: 1,5000,1,0,1\r\n", "%CGFPCCFG: 2,5000,1,0,1\r\n"]);
+}
+
+#[test]
+fn test_physical_channel_config_suppression_when_radio_off() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    let data = MockDataBearerState(&[1]);
+    service.radio_power = RadioPowerLevel::Minimum;
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    assert_eq!(service.physical_channel_config_urcs(&data).next(), None);
+}
+
+#[test]
+fn test_physical_channel_config_suppression_when_unregistered() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    let data = MockDataBearerState(&[1]);
+    service.radio_power = RadioPowerLevel::Full;
+    service.voice_registration = RegistrationStatus::NotRegistered;
+    service.data_registration = RegistrationStatus::NotRegistered;
+    assert_eq!(service.physical_channel_config_urcs(&data).next(), None);
+}
+
+#[test]
+fn test_physical_channel_config_suppression_when_emergency_only() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    let data = MockDataBearerState(&[1]);
+    service.radio_power = RadioPowerLevel::Full;
+    service.voice_registration = RegistrationStatus::Emergency;
+    service.data_registration = RegistrationStatus::Emergency;
+    assert_eq!(service.physical_channel_config_urcs(&data).next(), None);
+}
+
+#[test]
+fn test_physical_channel_config_suppression_when_no_active_cids() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.voice_registration = RegistrationStatus::RegisteredHome;
+    assert_eq!(service.physical_channel_config_urcs(&MockDataBearerState(&[])).next(), None);
+}

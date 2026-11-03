@@ -19,7 +19,7 @@ mod call_service;
 mod capabilities;
 pub mod config;
 
-pub(crate) use capabilities::{CardState, RadioAdmission, SmsStore};
+pub(crate) use capabilities::{CardState, DataBearerState, RadioAdmission, SmsStore};
 pub mod constants;
 mod data_service;
 mod metrics;

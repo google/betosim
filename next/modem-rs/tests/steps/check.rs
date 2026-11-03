@@ -145,7 +145,7 @@ pub(crate) fn is_unsolicited_response(response: &[u8]) -> bool {
         || s.starts_with("+CREG:")
         || s.starts_with("+CGREG:")
         || s.starts_with("+CEREG:")
-        || s.starts_with("+CGEV:")
+        || s.starts_with("%CGFPCCFG:")
         || s.starts_with("+CSQ:")
         || s.starts_with("+CUSATEND")
         || s.starts_with("%CTZV:")

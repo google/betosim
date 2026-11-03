@@ -57,17 +57,36 @@ fn test_set_pdp_context_activate() {
     then_response_is(&mut world, "A", "OK");
 }
 
-// Scenario: Update Physical Channel Configs
-//   Given a modem "A"
-//   When physical channel configs are updated on "A"
-//   Then response from "A" is "+CGEV: NW PDN DEACT 1"
 #[test]
 fn test_update_physical_channel_configs() {
     let mut world = World::new();
     given_data_modem(&mut world, "A");
 
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
     when_physical_channel_configs_updated(&mut world, "A");
-    then_response_is(&mut world, "A", &format!("+CGEV: NW PDN DEACT {TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 1,5000,5,0,{TEST_PDP_CID}"));
+    then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
+}
+
+#[test]
+fn test_update_physical_channel_configs_suppressed_without_active_context() {
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+
+    when_physical_channel_configs_updated(&mut world, "A");
+    then_no_response(&mut world, "A");
+
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+    world.send_and_expect_ok("A", &format!("AT+CGACT=0,{TEST_PDP_CID}"));
+    when_physical_channel_configs_updated(&mut world, "A");
+    then_no_response(&mut world, "A");
 }
 
 // Scenario: Read Dynamic Parameters
