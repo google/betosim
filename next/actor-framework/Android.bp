@@ -100,6 +100,7 @@ rust_test_host {
     srcs: [
         "tests/mod.rs",
         "tests/service_test.rs",
+        "tests/world.rs",
     ],
     features: [
         "cuttlefish",

@@ -13,3 +13,4 @@
 // limitations under the License.
 
 mod service_test;
+mod world;
