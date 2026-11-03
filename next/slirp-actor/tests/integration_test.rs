@@ -24,6 +24,8 @@ mod backend_test;
 #[cfg(test)]
 mod deficiencies_test;
 #[cfg(test)]
+mod dhcp_compact_test;
+#[cfg(test)]
 mod dhcp_dns_test;
 #[cfg(test)]
 mod http_proxy_test;

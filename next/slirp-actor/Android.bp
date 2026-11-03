@@ -107,6 +107,7 @@ rust_test_host {
         "tests/backend_perf_test.rs",
         "tests/backend_test.rs",
         "tests/deficiencies_test.rs",
+        "tests/dhcp_compact_test.rs",
         "tests/dhcp_dns_test.rs",
         "tests/http_proxy_test.rs",
         "tests/integration_test.rs",
