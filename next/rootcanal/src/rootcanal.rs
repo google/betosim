@@ -269,54 +269,41 @@ impl Rootcanal {
         keys
     }
 
-    /// Receives an HCI packet from the host for a specific controller.
-    pub fn receive_hci(&self, controller_id: ControllerId, h4_packet: Bytes) -> Result<()> {
-        let controller = self
-            .controllers
+    // Clones the controller handle so callers drop the non-reentrant `controllers`
+    // mutex before invoking C++ FFI callbacks that can re-enter via `BtOps`.
+    fn get_controller(&self, controller_id: ControllerId) -> Result<Controller> {
+        self.controllers
             .lock()
             .get(&controller_id)
             .cloned()
-            .ok_or(Error::ControllerNotFound(controller_id))?;
-        controller.receive_hci(h4_packet);
+            .ok_or(Error::ControllerNotFound(controller_id))
+    }
+
+    /// Receives an HCI packet from the host for a specific controller.
+    pub fn receive_hci(&self, controller_id: ControllerId, h4_packet: Bytes) -> Result<()> {
+        self.get_controller(controller_id)?.receive_hci(h4_packet);
         Ok(())
     }
 
     /// Returns the address of a specific controller.
     pub fn get_address(&self, controller_id: ControllerId) -> Result<Address> {
-        self.controllers
-            .lock()
-            .get(&controller_id)
-            .map(|c| c.get_address())
-            .ok_or(Error::ControllerNotFound(controller_id))
+        Ok(self.get_controller(controller_id)?.get_address())
     }
 
     /// Returns the current packet statistics for a specific controller.
     pub fn get_stats(&self, controller_id: ControllerId) -> Result<Stats> {
-        self.controllers
-            .lock()
-            .get(&controller_id)
-            .map(|c| c.get_stats())
-            .ok_or(Error::ControllerNotFound(controller_id))
+        Ok(self.get_controller(controller_id)?.get_stats())
     }
 
     /// Clears the packet statistics for a specific controller.
     pub fn clear_stats(&self, controller_id: ControllerId) -> Result<()> {
-        self.controllers
-            .lock()
-            .get(&controller_id)
-            .ok_or(Error::ControllerNotFound(controller_id))
-            .map(|controller| controller.clear_stats())
+        self.get_controller(controller_id)?.clear_stats();
+        Ok(())
     }
 
     /// Reconfigures a specific controller's properties.
     pub fn set_properties(&self, controller_id: ControllerId, properties: &[u8]) -> Result<()> {
-        let controller = self
-            .controllers
-            .lock()
-            .get(&controller_id)
-            .cloned()
-            .ok_or(Error::ControllerNotFound(controller_id))?;
-        controller.set_properties(properties)
+        self.get_controller(controller_id)?.set_properties(properties)
     }
 }
 
@@ -557,6 +544,21 @@ mod tests {
         setup_bluetooth_with_controllers(&bluetooth, 1);
 
         let result = bluetooth.get_stats(2);
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            Error::ControllerNotFound(id) => assert_eq!(id, 2),
+            _ => panic!("unexpected error type"),
+        }
+    }
+
+    #[test]
+    fn test_set_properties_invalid_id() {
+        let callbacks =
+            Box::new(MockCallbacks { drop_packet: false, packets_sent: AtomicU32::new(0) });
+        let bluetooth = Rootcanal::new(callbacks, false, Box::new(|_, _, _, _| {}));
+        setup_bluetooth_with_controllers(&bluetooth, 1);
+
+        let result = bluetooth.set_properties(2, &[]);
         assert!(result.is_err());
         match result.err().unwrap() {
             Error::ControllerNotFound(id) => assert_eq!(id, 2),
