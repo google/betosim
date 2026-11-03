@@ -21,6 +21,8 @@ jobs:
   build_and_test:
     name: Build, Check, Test
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: '--check-cfg cfg(feature,values("serde"))'
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
       with:
@@ -29,12 +31,18 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
-    - name: Install Rust 1.99.1
+    - name: Install Rust nightly-2026-01-18
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
       with:
-        toolchain: 1.99.1
+        toolchain: nightly-2026-01-18
         targets: ""
-        components: rustfmt, clippy
+        components: rustfmt
+    - name: Install Rust 1.94.1
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      with:
+        toolchain: 1.94.1
+        targets: ""
+        components: clippy
     - name: Setup Rust cache
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
@@ -45,8 +53,30 @@ jobs:
     - name: Test
       run: cd next && cargo test
     - name: Fmt
-      run: cd next && cargo fmt --check --quiet
+      run: cd next && cargo +nightly-2026-01-18 fmt --check --quiet
     - name: Clippy
       run: cd next && cargo clippy --no-deps -- --deny warnings
 
-
+  bazel_build_and_test:
+    name: Bazel Build, Check, Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      with:
+        persist-credentials: false
+    - name: Setup Bazel
+      uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+      with:
+        bazelisk-cache: true
+        disk-cache: true
+        cache-save: ${{ github.event_name != 'pull_request' }}
+        repository-cache: |
+          - .bazelversion
+          - .bazelrc
+          - MODULE.bazel
+          - "**/*.bzl"
+          - cargo/build/**
+    - name: Build
+      run: bazel build --config=standalone //...
+    - name: Test
+      run: bazel test --config=standalone --test_output=errors //...
