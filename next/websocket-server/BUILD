@@ -23,10 +23,10 @@ netsim_rust_library(
     edition = "2024",
     test_deps = [
         "//next/actor-framework:testing",
-        "//next/common",
         "@mockall",
     ],
     deps = [
+        "//next/common",
         "//next/device-actor",
         "//next/device-api",
         "//next/model",

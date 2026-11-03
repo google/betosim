@@ -14,7 +14,7 @@
 
 use std::{collections::HashSet, fs, sync::Arc};
 
-use daemon::{is_valid_mac_address, resolve_bluetooth_mac};
+use daemon::{is_valid_mac_address, resolve_bluetooth_mac, resolve_bluetooth_mac_for_device};
 use tokio::sync::Barrier;
 
 #[tokio::test]
@@ -206,4 +206,124 @@ async fn test_resolve_bluetooth_mac_rejects_nonexistent_avd_path() {
 
     let resolved = resolve_bluetooth_mac(&nonexistent.to_string_lossy(), "").await;
     assert_eq!(resolved, "");
+}
+
+#[tokio::test]
+async fn test_resolve_bluetooth_mac_for_device_persists_across_reboot_without_avd_path() {
+    // When avd_path is empty (e.g. qemu_next), MAC addresses should be assigned
+    // deterministically per device_name and preserved across reboot reconnections.
+    let mac_dev1_initial = resolve_bluetooth_mac_for_device("", "avd-1185951270", "").await;
+    let mac_dev2_initial = resolve_bluetooth_mac_for_device("", "avd2-2487427673", "").await;
+
+    assert!(mac_dev1_initial.starts_with("BB:BB:BB:"));
+    assert!(mac_dev2_initial.starts_with("BB:BB:BB:"));
+    assert_ne!(mac_dev1_initial, mac_dev2_initial);
+
+    // Simulate adb reboot on device 1: reconnecting with empty avd_path and empty
+    // provided_address must return the exact same MAC address.
+    let mac_dev1_after_reboot = resolve_bluetooth_mac_for_device("", "avd-1185951270", "").await;
+    assert_eq!(mac_dev1_after_reboot, mac_dev1_initial);
+
+    // Explicit valid override updates the in-memory mapping for that device.
+    let custom_mac = "BB:BB:BB:00:00:77";
+    assert_eq!(
+        resolve_bluetooth_mac_for_device("", "avd-1185951270", custom_mac).await,
+        custom_mac
+    );
+    assert_eq!(resolve_bluetooth_mac_for_device("", "avd-1185951270", "").await, custom_mac);
+
+    // Invalid provided address is rejected without corrupting the stored MAC.
+    assert_eq!(resolve_bluetooth_mac_for_device("", "avd-1185951270", "invalid-mac").await, "");
+    assert_eq!(resolve_bluetooth_mac_for_device("", "avd-1185951270", "").await, custom_mac);
+}
+
+#[tokio::test]
+async fn test_resolve_bluetooth_mac_mixed_avd_path_and_in_memory_no_collision() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let avd_1_dir = temp_dir.path().join("mixed_1.avd");
+    fs::create_dir_all(&avd_1_dir).unwrap();
+    let ini_1 = temp_dir.path().join("mixed_1.ini");
+    fs::write(&ini_1, format!("path={}\n", avd_1_dir.display())).unwrap();
+    let ini_path_1 = ini_1.to_string_lossy().into_owned();
+
+    let avd_2_dir = temp_dir.path().join("mixed_2.avd");
+    fs::create_dir_all(&avd_2_dir).unwrap();
+    let ini_2 = temp_dir.path().join("mixed_2.ini");
+    fs::write(&ini_2, format!("path={}\n", avd_2_dir.display())).unwrap();
+    let ini_path_2 = ini_2.to_string_lossy().into_owned();
+
+    // Case 1: Disk AVD resolves first, followed by an in-memory device.
+    let mac_disk_1 = resolve_bluetooth_mac_for_device(&ini_path_1, "mixed-disk-1", "").await;
+    let mac_mem_1 = resolve_bluetooth_mac_for_device("", "mixed-mem-1", "").await;
+    // Case 2: In-memory device resolves before a second disk AVD.
+    let mac_disk_2 = resolve_bluetooth_mac_for_device(&ini_path_2, "mixed-disk-2", "").await;
+
+    assert!(!mac_disk_1.is_empty());
+    assert!(!mac_mem_1.is_empty());
+    assert!(!mac_disk_2.is_empty());
+    assert_ne!(mac_disk_1, mac_mem_1);
+    assert_ne!(mac_mem_1, mac_disk_2);
+    assert_ne!(mac_disk_1, mac_disk_2);
+
+    // Case 3: A disk AVD whose pre-existing netsim.ini collides with an active
+    // in-memory device is reassigned a non-colliding MAC, and retains it on
+    // subsequent reconnections.
+    let avd_3_dir = temp_dir.path().join("mixed_3.avd");
+    fs::create_dir_all(&avd_3_dir).unwrap();
+    fs::write(avd_3_dir.join("netsim.ini"), format!("bluetooth.address = {mac_mem_1}\n")).unwrap();
+    let ini_3 = temp_dir.path().join("mixed_3.ini");
+    fs::write(&ini_3, format!("path={}\n", avd_3_dir.display())).unwrap();
+    let ini_path_3 = ini_3.to_string_lossy().into_owned();
+
+    let mac_disk_3 = resolve_bluetooth_mac_for_device(&ini_path_3, "mixed-disk-3", "").await;
+    assert!(!mac_disk_3.is_empty());
+    assert_ne!(mac_disk_3, mac_mem_1);
+    assert_eq!(resolve_bluetooth_mac_for_device(&ini_path_3, "mixed-disk-3", "").await, mac_disk_3);
+
+    // Case 4: Lowercase or hyphen-delimited explicit MACs are normalized to
+    // uppercase colon-separated format.
+    let normalized =
+        resolve_bluetooth_mac_for_device("", "mixed-mem-norm", "bb-bb-bb-00-00-aa").await;
+    assert_eq!(normalized, "BB:BB:BB:00:00:AA");
+}
+
+#[tokio::test]
+async fn test_secondary_avd_in_same_root_keeps_persisted_mac() {
+    // Two AVDs in one avd_root, each with a persisted netsim.ini MAC. The first
+    // resolve scans siblings; the second AVD must keep its own MAC instead of
+    // treating it as a collision.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut inis = Vec::new();
+    for (i, mac) in ["BB:BB:BB:00:01:01", "BB:BB:BB:00:01:02"].iter().enumerate() {
+        let avd_dir = temp_dir.path().join(format!("sibling_{i}.avd"));
+        fs::create_dir_all(&avd_dir).unwrap();
+        fs::write(avd_dir.join("netsim.ini"), format!("bluetooth.address = {mac}\n")).unwrap();
+        let ini = temp_dir.path().join(format!("sibling_{i}.ini"));
+        fs::write(&ini, format!("path={}\n", avd_dir.display())).unwrap();
+        inis.push(ini.to_string_lossy().into_owned());
+    }
+    assert_eq!(resolve_bluetooth_mac(&inis[0], "").await, "BB:BB:BB:00:01:01");
+    assert_eq!(resolve_bluetooth_mac(&inis[1], "").await, "BB:BB:BB:00:01:02");
+}
+
+#[tokio::test]
+async fn test_avd_with_mac_claimed_by_unnamed_device_gets_new_mac() {
+    // An unnamed device registers explicit MAC X; an AVD whose netsim.ini
+    // persists X must not share it.
+    let claimed = "BB:BB:BB:00:03:01";
+    assert_eq!(resolve_bluetooth_mac_for_device("", "", claimed).await, claimed);
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let avd_dir = temp_dir.path().join("anon_collide.avd");
+    fs::create_dir_all(&avd_dir).unwrap();
+    fs::write(avd_dir.join("netsim.ini"), format!("bluetooth.address = {claimed}\n")).unwrap();
+    let ini = temp_dir.path().join("anon_collide.ini");
+    fs::write(&ini, format!("path={}\n", avd_dir.display())).unwrap();
+    let ini_path = ini.to_string_lossy().into_owned();
+
+    let mac = resolve_bluetooth_mac_for_device(&ini_path, "anon-collide-avd", "").await;
+    assert!(!mac.is_empty());
+    assert_ne!(mac, claimed);
+    // The reassigned MAC is persisted and stable on reconnect.
+    assert_eq!(resolve_bluetooth_mac_for_device(&ini_path, "anon-collide-avd", "").await, mac);
 }

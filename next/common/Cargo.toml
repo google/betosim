@@ -28,7 +28,7 @@ libc = "0.2.150"
 protobuf-json-mapping = "3.2.0"
 socket2 = "0.5"
 thiserror = "1.0"
-tokio = { version = "1.0", features = ["net"] }
+tokio = { version = "1.0", features = ["net", "rt", "sync"] }
 tracing = "0.1"
 tracing-log = "0.1"
 tracing-subscriber = { version = "0.3", features = [

@@ -64,11 +64,23 @@ pub(crate) async fn setup_virtual_chip(
         .remove("product_name")
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Google".to_string());
-    let address = query_params
-        .remove("address")
-        .filter(|s| !s.is_empty())
-        .or_else(|| chip_id.filter(|id| id.len() == 17))
-        .unwrap_or_default();
+    let explicit_address =
+        query_params.remove("address").filter(|s| !s.is_empty()).unwrap_or_default();
+    // Legacy clients pass the MAC as a 17-char chip_id; honor it as-is when no
+    // explicit address is given, but never persist it as an explicit override.
+    let legacy_address = chip_id.filter(|id| id.len() == 17);
+    let address = match legacy_address {
+        Some(legacy) if explicit_address.is_empty() => legacy,
+        _ => {
+            resolve_bluetooth_address(
+                chip_kind,
+                &device_name,
+                device_info.as_ref(),
+                &explicit_address,
+            )
+            .await
+        }
+    };
 
     let variant = build_chip_variant(chip_kind, address, device_info.as_ref())
         .map_err(netsim_model::ClientError::from)?;
@@ -98,6 +110,29 @@ pub(crate) async fn setup_virtual_chip(
     };
 
     device_client.add_chip_with_id(request).await.map_err(ServerError::DeviceActor)
+}
+
+/// Resolves the Bluetooth MAC once per connection, mirroring the gRPC/fd path in
+/// netsimd. Unnamed devices (default `websocket-device-{addr}` name) have no
+/// stable identity across reconnects, so they only register an explicit address
+/// to avoid collisions instead of being keyed by name.
+async fn resolve_bluetooth_address(
+    chip_kind: ChipKind,
+    device_name: &str,
+    device_info: Option<&DeviceInfo>,
+    explicit_address: &str,
+) -> String {
+    if chip_kind != ChipKind::BLUETOOTH {
+        return explicit_address.to_string();
+    }
+    let avd_path = device_info.map(|info| info.avd_path.as_str()).unwrap_or_default();
+    let is_unnamed = device_name.starts_with("websocket-device-");
+    if avd_path.is_empty() && is_unnamed && explicit_address.is_empty() {
+        return String::new();
+    }
+    let key = if is_unnamed { "" } else { device_name };
+    common::util::bluetooth_mac::resolve_bluetooth_mac_for_device(avd_path, key, explicit_address)
+        .await
 }
 
 fn extract_device_info(
@@ -349,6 +384,34 @@ fn parse_ws_bt_properties(text: &str) -> Result<BtControllerProperties, serde_js
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_resolve_bluetooth_address_named_device_is_stable() {
+        let first =
+            resolve_bluetooth_address(ChipKind::BLUETOOTH, "ws-named-stable", None, "").await;
+        assert!(first.starts_with("BB:BB:BB:"), "expected generated MAC, got '{first}'");
+        let again =
+            resolve_bluetooth_address(ChipKind::BLUETOOTH, "ws-named-stable", None, "").await;
+        assert_eq!(first, again);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_bluetooth_address_unnamed_device() {
+        // No identity and no address: nothing to resolve.
+        let none =
+            resolve_bluetooth_address(ChipKind::BLUETOOTH, "websocket-device-1.2.3.4:1", None, "")
+                .await;
+        assert!(none.is_empty());
+        // Explicit address is normalized and registered.
+        let explicit = resolve_bluetooth_address(
+            ChipKind::BLUETOOTH,
+            "websocket-device-1.2.3.4:2",
+            None,
+            "bb-bb-bb-00-02-aa",
+        )
+        .await;
+        assert_eq!(explicit, "BB:BB:BB:00:02:AA");
+    }
 
     #[test]
     fn test_build_chip_variant_rejects_unspecified() {

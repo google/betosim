@@ -137,11 +137,15 @@ async fn handle_new_connection(
         return;
     }
 
-    if chip.kind == ChipKind::BLUETOOTH
-        && let Some(device_info) = chip_info.device_info.as_ref().filter(|d| !d.avd_path.is_empty())
-    {
-        chip.address =
-            crate::avd_config::resolve_bluetooth_mac(&device_info.avd_path, &chip.address).await;
+    if chip.kind == ChipKind::BLUETOOTH {
+        let avd_path =
+            chip_info.device_info.as_ref().map(|d| d.avd_path.as_str()).unwrap_or_default();
+        chip.address = crate::avd_config::resolve_bluetooth_mac_for_device(
+            avd_path,
+            &device_name,
+            &chip.address,
+        )
+        .await;
     }
 
     if chip.address.is_empty() && chip.id.len() == 17 {

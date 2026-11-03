@@ -35,11 +35,13 @@ async fn test_percent_encoded_query_parameters() {
             Some("00%3A1a%3A11%3Ae2%3Ae0%3A01"),
         )
         .await;
-    world.then_backend_receives_add_chip_request(client_a, "Pixel 9", "00:1a:11:e2:e0:01");
+    // Explicit MACs are normalized to uppercase by Bluetooth MAC resolution.
+    world.then_backend_receives_add_chip_request(client_a, "Pixel 9", "00:1A:11:E2:E0:01");
 
     // '+' decoded as space in form-urlencoded query strings
     let client_b = world.given_a_websocket_client_connected(Some("Pixel+9"), None).await;
-    world.then_backend_receives_add_chip_request(client_b, "Pixel 9", "");
+    // Same device name reconnecting without an address reuses the name-keyed MAC.
+    world.then_backend_receives_add_chip_request(client_b, "Pixel 9", "00:1A:11:E2:E0:01");
 
     // Plain unencoded values (such as Bumble's) remain unchanged
     let client_c = world

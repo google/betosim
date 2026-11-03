@@ -14,6 +14,7 @@
 
 //! # netsim utilities.
 
+pub mod bluetooth_mac;
 pub mod ini_file;
 pub mod net;
 pub mod netsim_logger;
