@@ -102,3 +102,39 @@ impl ChipClient for EthernetClient {
         Box::new(self.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actor_framework::MockActorClient;
+
+    use super::*;
+
+    const TEST_CHIP_ID: ChipId = ChipId(5);
+
+    #[tokio::test]
+    async fn test_read_statistics_rejects_unexpected_response_variant() {
+        let mut mock = MockActorClient::<EthernetActor>::new();
+        mock.expect_perform_action()
+            .withf(|id, req| id.is_none() && matches!(req, EthernetReq::GetStatistics))
+            .times(1)
+            .returning(|_, _| Ok(EthernetResponse::Chip(Box::new(Chip::default()))));
+        let client = EthernetClient { inner: Box::new(mock) };
+        let err = client.read_statistics().await.expect_err("expected Recv error");
+        assert!(matches!(err, ClientError::Recv(_)), "unexpected error: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_reset_rejects_unexpected_response_variant() {
+        let mut mock = MockActorClient::<EthernetActor>::new();
+        mock.expect_perform_action()
+            .withf(|id, req| {
+                *id == Some(TEST_CHIP_ID)
+                    && matches!(req, EthernetReq::Reset { id } if *id == TEST_CHIP_ID)
+            })
+            .times(1)
+            .returning(|_, _| Ok(EthernetResponse::Statistics(Vec::new().into_boxed_slice())));
+        let client = EthernetClient { inner: Box::new(mock) };
+        let err = client.reset(TEST_CHIP_ID).await.expect_err("expected Recv error");
+        assert!(matches!(err, ClientError::Recv(_)), "unexpected error: {err:?}");
+    }
+}

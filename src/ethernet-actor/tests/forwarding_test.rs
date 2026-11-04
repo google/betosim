@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_model::ChipKind;
+use netsim_model::{ChipId, ChipKind};
 use slirp_actor::SlirpBackend;
 
 use super::world::{GATEWAY_IP, World};
@@ -192,6 +192,8 @@ async fn test_reset_disabled_chip_restores_enabled_radio_and_forwarding() {
     world.when_update_chip(35, Some("cell-disabled"), Some(false), Some(false)).await;
     world.when_guest_sends_arp_request(34, GATEWAY_IP).await;
     world.then_guest_receives_no_arp_reply(34, GATEWAY_IP).await;
+    world.when_guest_sends_arp_request(35, GATEWAY_IP).await;
+    world.then_guest_receives_no_arp_reply(35, GATEWAY_IP).await;
 
     // When both disabled chips are reset
     world.when_reset_chip(34).await;
@@ -206,4 +208,33 @@ async fn test_reset_disabled_chip_restores_enabled_radio_and_forwarding() {
     world.then_guest_receives_arp_reply(34, GATEWAY_IP).await;
     world.when_guest_sends_arp_request(35, GATEWAY_IP).await;
     world.then_guest_receives_arp_reply(35, GATEWAY_IP).await;
+}
+
+// Scenario: Guest chip created in a disabled state drops uplink and downlink frames until reset
+#[tokio::test]
+async fn test_initially_disabled_guest_chip_drops_traffic_until_reset() {
+    let mut world = World::new().await;
+    // Given an initially disabled guest chip and an active peer guest chip
+    world.given_disabled_guest_chip(ChipId(36), GUEST_A_MAC, GUEST_A_IP).await;
+    world.given_guest_chip(37, ChipKind::ETHERNET, GUEST_B_MAC, GUEST_B_IP).await;
+
+    // When the disabled guest sends an ARP request and an unlearned host ARPs the gateway
+    world.when_guest_sends_arp_request(36, GATEWAY_IP).await;
+    world.when_unlearned_host_arps_gateway().await;
+
+    // Then only the active peer receives flooded ARP replies while the disabled guest drops frames
+    world.then_guest_receives_flooded_arp_reply(37, GATEWAY_IP).await;
+    world.then_guest_receives_no_arp_reply(36, GATEWAY_IP).await;
+    // And Slirp has not learned GUEST_A_MAC from the gated uplink ARP, so a reply to GUEST_A_MAC floods to chip 37
+    world.when_slirp_receives_arp_from_mac(GUEST_A_MAC, GUEST_A_IP).await;
+    world.then_guest_receives_arp_reply_for_mac(37, GUEST_A_MAC, GATEWAY_IP).await;
+    world.then_guest_receives_no_arp_reply(36, GATEWAY_IP).await;
+
+    // When the disabled chip is reset
+    world.when_reset_chip(36).await;
+
+    // Then the chip is restored to active Ethernet state and forwards ARP traffic
+    world.then_last_reset_chip_matches(36, ChipKind::ETHERNET, "eth0", true);
+    world.when_guest_sends_arp_request(36, GATEWAY_IP).await;
+    world.then_guest_receives_arp_reply(36, GATEWAY_IP).await;
 }

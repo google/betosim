@@ -149,6 +149,27 @@ impl World {
         mac: [u8; 6],
         ip: [u8; 4],
     ) -> &mut Self {
+        self.register_guest_chip(ChipId(id), mac, ip, chip(kind)).await
+    }
+
+    pub(crate) async fn given_disabled_guest_chip(
+        &mut self,
+        id: ChipId,
+        mac: [u8; 6],
+        ip: [u8; 4],
+    ) -> &mut Self {
+        let mut disabled_chip = chip(ChipKind::ETHERNET);
+        disabled_chip.enabled = false;
+        self.register_guest_chip(id, mac, ip, disabled_chip).await
+    }
+
+    async fn register_guest_chip(
+        &mut self,
+        id: ChipId,
+        mac: [u8; 6],
+        ip: [u8; 4],
+        chip: Chip,
+    ) -> &mut Self {
         let (uplink, uplink_rx) = mpsc::channel(32);
         let (downlink_tx, downlink) = mpsc::channel(32);
         let packet_sink =
@@ -159,10 +180,10 @@ impl World {
         let params = ChipCreate {
             packet_stream: Some(Box::new(ReceiverStream::new(uplink_rx))),
             packet_sink: Some(packet_sink),
-            chip: chip(kind),
+            chip,
         };
-        self.client.create(ChipId(id), params).await.expect("given_guest_chip create");
-        self.guests.insert(ChipId(id), Guest { mac, ip, uplink, downlink });
+        self.client.create(id, params).await.expect("given_guest_chip create");
+        self.guests.insert(id, Guest { mac, ip, uplink, downlink });
         self
     }
 

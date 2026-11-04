@@ -223,3 +223,103 @@ impl ActorService for EthernetActor {
         Ok(self.active_chips.values().cloned().collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actor_framework::{FrameworkError, ResourceActor};
+    use netsim_model::{CellularData, ChipCreate, Ethernet, Radio};
+
+    use super::*;
+
+    fn ethernet_variant(state: Option<bool>) -> Option<ChipVariant> {
+        Some(ChipVariant::Ethernet(Ethernet { radio: Radio { state, ..Default::default() } }))
+    }
+
+    fn cellular_data_variant(state: Option<bool>) -> Option<ChipVariant> {
+        Some(ChipVariant::CellularData(CellularData {
+            radio: Radio { state, ..Default::default() },
+        }))
+    }
+
+    fn chip_with_variant(enabled: bool, variant: Option<ChipVariant>) -> Chip {
+        Chip { enabled, variant, ..Default::default() }
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_false_when_ethernet_chip_disabled() {
+        let chip = chip_with_variant(false, ethernet_variant(Some(true)));
+        assert!(!is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_false_when_cellular_data_chip_disabled() {
+        let chip = chip_with_variant(false, cellular_data_variant(Some(true)));
+        assert!(!is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_true_when_ethernet_radio_state_unspecified() {
+        let chip = chip_with_variant(true, ethernet_variant(None));
+        assert!(is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_true_when_ethernet_radio_enabled() {
+        let chip = chip_with_variant(true, ethernet_variant(Some(true)));
+        assert!(is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_true_when_cellular_data_radio_state_unspecified() {
+        let chip = chip_with_variant(true, cellular_data_variant(None));
+        assert!(is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_true_when_cellular_data_radio_enabled() {
+        let chip = chip_with_variant(true, cellular_data_variant(Some(true)));
+        assert!(is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_true_when_variant_absent() {
+        let chip = chip_with_variant(true, None);
+        assert!(is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_false_when_ethernet_radio_disabled() {
+        let chip = chip_with_variant(true, ethernet_variant(Some(false)));
+        assert!(!is_chip_radio_enabled(&chip));
+    }
+
+    #[test]
+    fn test_is_chip_radio_enabled_returns_false_when_cellular_data_radio_disabled() {
+        let chip = chip_with_variant(true, cellular_data_variant(Some(false)));
+        assert!(!is_chip_radio_enabled(&chip));
+    }
+
+    #[tokio::test]
+    async fn test_handle_create_rejects_missing_chip_id() {
+        let (_, slirp_client) = slirp_actor::new();
+        let (_, device_client) = device_actor::new();
+        let (runner, raw_client) = ResourceActor::new(1);
+        let handle = tokio::spawn(runner.run(EthernetActor::new(slirp_client, device_client)));
+
+        let params = ChipCreate {
+            packet_stream: None,
+            packet_sink: None,
+            chip: Chip { kind: ChipKind::ETHERNET, ..Default::default() },
+        };
+        let err = raw_client.create(params).await.expect_err("expected missing chip id error");
+        assert!(
+            matches!(
+                err,
+                FrameworkError::ServiceError(EthernetError::Internal(ref msg))
+                    if msg == "missing chip id"
+            ),
+            "unexpected error: {err:?}"
+        );
+        handle.abort();
+    }
+}
