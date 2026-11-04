@@ -308,18 +308,15 @@ async fn handle_list(device_client: &DeviceClient) -> Result<String, String> {
     ))
 }
 
-/// Toggles the enabled state of a specific radio (LE or Classic) on a device.
-///
-/// Sends a `DeviceUpdate` to the device actor to patch the chip's enabled
-/// status, and returns a classic-compatible confirmation string.
-async fn handle_phy_state(
+/// Fetches a device, applies `configure_update` to each of its Bluetooth chips,
+/// and sends the resulting `DeviceUpdate` to the device actor.
+async fn update_bluetooth_chips(
     device_client: &DeviceClient,
     device_id: u32,
-    target: PhyTarget,
-    raw_phy_str: &str,
-    enabled: bool,
-    command_name: &str,
-) -> Result<String, String> {
+    empty_chips_error: String,
+    update_error_prefix: &str,
+    mut configure_update: impl FnMut(&mut ChipUpdate),
+) -> Result<(), String> {
     let device_id_typed = DeviceId(device_id);
     let device = device_client
         .get(device_id_typed)
@@ -333,29 +330,13 @@ async fn handle_phy_state(
         .filter(|chip| chip.kind == ChipKind::BLUETOOTH)
         .map(|chip| {
             let mut update = ChipUpdate { id: Some(chip.id.into()), ..Default::default() };
-            match target {
-                PhyTarget::LowEnergy => {
-                    update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
-                        low_energy: RadioUpdate { state: Some(enabled) },
-                        ..Default::default()
-                    }));
-                }
-                PhyTarget::Classic => {
-                    update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
-                        classic: RadioUpdate { state: Some(enabled) },
-                        ..Default::default()
-                    }));
-                }
-                PhyTarget::All => {
-                    update.enabled = Some(enabled);
-                }
-            }
+            configure_update(&mut update);
             update
         })
         .collect();
 
     if chip_updates.is_empty() {
-        return Err(format!("No Bluetooth chips found on device {device_id}"));
+        return Err(empty_chips_error);
     }
 
     let device_update =
@@ -364,7 +345,46 @@ async fn handle_phy_state(
     device_client
         .update(device_id_typed, device_update)
         .await
-        .map_err(|e| format!("Failed to update device: {e}"))?;
+        .map(|_| ())
+        .map_err(|e| format!("{update_error_prefix}: {e}"))
+}
+
+/// Toggles the enabled state of a specific radio (LE or Classic) on a device.
+///
+/// Sends a `DeviceUpdate` to the device actor to patch the chip's enabled
+/// status, and returns a classic-compatible confirmation string.
+async fn handle_phy_state(
+    device_client: &DeviceClient,
+    device_id: u32,
+    target: PhyTarget,
+    raw_phy_str: &str,
+    enabled: bool,
+    command_name: &str,
+) -> Result<String, String> {
+    update_bluetooth_chips(
+        device_client,
+        device_id,
+        format!("No Bluetooth chips found on device {device_id}"),
+        "Failed to update device",
+        |update| match target {
+            PhyTarget::LowEnergy => {
+                update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+                    low_energy: RadioUpdate { state: Some(enabled) },
+                    ..Default::default()
+                }));
+            }
+            PhyTarget::Classic => {
+                update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+                    classic: RadioUpdate { state: Some(enabled) },
+                    ..Default::default()
+                }));
+            }
+            PhyTarget::All => {
+                update.enabled = Some(enabled);
+            }
+        },
+    )
+    .await?;
 
     info!("Successfully toggled Bluetooth chips to enabled={enabled} on device {device_id}");
 
@@ -440,38 +460,15 @@ async fn handle_set_device_configuration(
     device_id: u32,
     preset: &str,
 ) -> Result<String, String> {
-    let device_id_typed = DeviceId(device_id);
-    let device = device_client
-        .get(device_id_typed)
-        .await
-        .map_err(|e| format!("Failed to get device: {e}"))?
-        .ok_or_else(|| format!("Device {device_id} not found"))?;
-
-    let chip_updates: Vec<ChipUpdate> = device
-        .chips
-        .iter()
-        .filter(|chip| chip.kind == ChipKind::BLUETOOTH)
-        .map(|chip| ChipUpdate {
-            id: Some(chip.id.into()),
-            variant: Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
-                preset: Some(preset.to_string()),
-                ..Default::default()
-            })),
+    let empty_err = format!("Device {device_id} has no Bluetooth chip");
+    let err_prefix = "Failed to update device configuration";
+    update_bluetooth_chips(device_client, device_id, empty_err, err_prefix, |update| {
+        update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+            preset: Some(preset.to_string()),
             ..Default::default()
-        })
-        .collect();
-
-    if chip_updates.is_empty() {
-        return Err(format!("Device {device_id} has no Bluetooth chip"));
-    }
-
-    let device_update =
-        DeviceUpdate { id: device_id, chips: Some(chip_updates), ..Default::default() };
-
-    device_client
-        .update(device_id_typed, device_update)
-        .await
-        .map_err(|e| format!("Failed to update device configuration: {e}"))?;
+        }));
+    })
+    .await?;
 
     Ok(format!("set_device_configuration {device_id} {preset}"))
 }
