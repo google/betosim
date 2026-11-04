@@ -116,6 +116,7 @@ rust_test_host {
         "tests/mac_routing_test.rs",
         "tests/napt_test.rs",
         "tests/ndp_ipv6_test.rs",
+        "tests/ndp_rfc4861_regression_test.rs",
         "tests/packet_helpers.rs",
         "tests/port_forwarding_test.rs",
         "tests/recent_fixes_test.rs",

@@ -40,6 +40,8 @@ mod napt_test;
 #[cfg(test)]
 mod ndp_ipv6_test;
 #[cfg(test)]
+mod ndp_rfc4861_regression_test;
+#[cfg(test)]
 mod port_forwarding_test;
 #[cfg(test)]
 mod recent_fixes_test;
