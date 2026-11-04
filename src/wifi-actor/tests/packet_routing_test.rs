@@ -1226,3 +1226,20 @@ async fn test_p2p_action_nack_recovery_non_p2p_scan_and_hosted_ap_nullfunc() {
         "Expected no false ACK when flooding unknown unicast across multiple peers (targets_len > 1)"
     );
 }
+
+/// Scenario: Station-to-station Data packet with Action subtype and FTM request bytes
+/// is not intercepted as an FTM Request and is delivered to the destination station.
+#[tokio::test]
+async fn test_p2p_data_frame_with_ftm_bytes_not_intercepted() {
+    let mut world = World::new().await;
+
+    // Given: Sender and Receiver chips provisioned on the Wi-Fi medium
+    let _sender = world.given_a_chip(1).await;
+    let _receiver = world.given_a_chip(2).await;
+
+    // When: Sender transmits a DataSubType::QosCfAck frame carrying FTM bytes
+    world.when_chip_transmits_qos_cf_ack_with_ftm_bytes(0, 1).await;
+
+    // Then: Receiver receives the DataSubType::QosCfAck frame instead of being intercepted/dropped
+    world.then_chip_receives_data_subtype(1, netsim_packets::DataSubType::QosCfAck).await;
+}

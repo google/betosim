@@ -19,17 +19,19 @@ use ap_actor::{ApActor, ApClient};
 use bytes::Bytes;
 use device_actor::DeviceActor;
 use device_api::{DeviceAction, DeviceId};
-use netsim_model::{ChipClient, ChipCreate, ChipId, Position};
+use netsim_model::{ChipClient, ChipCreate, ChipId, ChipUpdate, PoseUpdate, Position};
 use netsim_packets::{
-    EthernetFrame, FrameDirection, FrameType, Ieee80211, Ieee80211ToAp, MacAddr, MacAddress,
-    ether_type,
+    ActionHeader, DataSubType, EthernetFrame, FineTimingMeasurement, FrameControl, FrameDirection,
+    FrameType, HwsimCmd, HwsimFrame, HwsimMsg, Ieee80211, Ieee80211ToAp, MacAddr, MacAddress,
+    MacHeader3Addr, NlMsgHdr, SequenceControl, category, ether_type, management_subtype,
+    public_action,
 };
 use slirp_actor::SlirpActor;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 use wifi_actor::WifiActor;
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, IntoBytes};
 
 use crate::hwsim_helper::wrap_ethernet_in_hwsim;
 
@@ -53,6 +55,12 @@ pub struct World {
     #[cfg(target_os = "linux")]
     pub gateway_downlink_tx: Option<mpsc::UnboundedSender<Bytes>>,
 }
+
+const WIFI_CHANNEL_1_FREQ_MHZ: u32 = 2412;
+const FTM_TRIGGER_START: u8 = 1;
+const FC_TYPE_SHIFT: u16 = 2;
+const FC_SUBTYPE_SHIFT: u16 = 4;
+const RTM_NEWLINK: u16 = 16;
 
 impl World {
     pub async fn new() -> Self {
@@ -622,21 +630,244 @@ impl World {
         loop {
             tokio::select! {
                 Some(packet) = chip.stream_rx.recv() => {
-                     // Filter out RTM_NEWLINK (Type 16)
-                     if packet.len() >= 6 {
-                         let msg_type = u16::from_le_bytes([packet[4], packet[5]]);
-                         if msg_type == 16 {
-                             info!("Ignored Netlink Control Packet (Type 16, len={})", packet.len());
-                             continue;
-                         }
-                     }
-                     let len = packet.len();
-                     let preview = if len > 10 { &packet[0..10] } else { &packet[..] };
-                     panic!("Chip {} received a packet (len={}, bytes={:?}) but expected nothing", chip.id, len, preview);
+                    if let Ok(msg) = HwsimMsg::decode_full(&packet)
+                        && usize::try_from(msg.nl_hdr.nlmsg_len) == Ok(packet.len())
+                    {
+                        let hwsim_cmd = msg.hwsim_hdr.hwsim_cmd;
+                        if hwsim_cmd == HwsimCmd::TxInfoFrame {
+                            info!("Ignored TxInfoFrame (len={})", packet.len());
+                            continue;
+                        }
+                        panic!(
+                            "Chip {} received an unexpected HwsimMsg ({:?}, len={}) but expected nothing",
+                            chip.id, hwsim_cmd, packet.len()
+                        );
+                    }
+                    if let Ok((nl_hdr, _)) = NlMsgHdr::ref_from_prefix(&packet) {
+                        let nlmsg_len = nl_hdr.nlmsg_len;
+                        let nlmsg_type = nl_hdr.nlmsg_type;
+                        if usize::try_from(nlmsg_len) == Ok(packet.len())
+                            && nlmsg_type == RTM_NEWLINK
+                        {
+                            info!("Ignored Netlink Control Packet (RTM_NEWLINK, len={})", packet.len());
+                            continue;
+                        }
+                    }
+                    let len = packet.len();
+                    let preview = if len > 10 { &packet[0..10] } else { &packet[..] };
+                    panic!("Chip {} received a packet (len={}, bytes={:?}) but expected nothing", chip.id, len, preview);
                 }
                 _ = &mut timeout => {
                     // Success
                     return;
+                }
+            }
+        }
+    }
+
+    pub async fn given_chip_position(&mut self, chip_idx: usize, position: Position) {
+        let chip_id = self.chips[chip_idx].id;
+        let patch = ChipUpdate {
+            pose: PoseUpdate { position: Some(position), ..Default::default() },
+            ..Default::default()
+        };
+        self.wifi_client
+            .update(ChipId(chip_id), patch)
+            .await
+            .expect("Failed to update chip position");
+    }
+
+    async fn transmit_3addr_station_frame(
+        &mut self,
+        sender_idx: usize,
+        receiver_idx: usize,
+        frame_type: FrameType,
+        subtype: u8,
+        body: &[u8],
+    ) {
+        let sa = MacAddress::new(self.chips[sender_idx].mac);
+        let da = MacAddress::new(self.chips[receiver_idx].mac);
+        let bssid = da;
+
+        let fc_val =
+            ((frame_type as u16) << FC_TYPE_SHIFT) | ((subtype as u16) << FC_SUBTYPE_SHIFT);
+        let fc = FrameControl::new(fc_val);
+        let header = MacHeader3Addr::new(fc, 0, da, sa, bssid, SequenceControl::new(0));
+
+        let mut frame_bytes =
+            Vec::with_capacity(std::mem::size_of::<MacHeader3Addr>() + body.len());
+        frame_bytes.extend_from_slice(header.as_bytes());
+        frame_bytes.extend_from_slice(body);
+        let ieee80211 = Ieee80211::decode(&frame_bytes).expect("Failed to decode Ieee80211");
+
+        let msg = wifi_actor::create_hwsim_msg_from_frame(
+            &ieee80211,
+            &da,
+            WIFI_CHANNEL_1_FREQ_MHZ,
+            Some(&sa),
+        )
+        .expect("Failed to create HwsimMsg");
+
+        let bytes = msg.encode_to_vec().expect("Failed to encode HwsimMsg");
+        self.chips[sender_idx]
+            .sink_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("Failed to send 3-address station frame");
+    }
+
+    pub async fn when_chip_transmits_ftm_request(
+        &mut self,
+        sender_idx: usize,
+        receiver_idx: usize,
+    ) {
+        let body = [category::PUBLIC, public_action::FTM_REQUEST, FTM_TRIGGER_START];
+        self.transmit_3addr_station_frame(
+            sender_idx,
+            receiver_idx,
+            FrameType::Management,
+            management_subtype::ACTION,
+            &body,
+        )
+        .await;
+    }
+
+    pub async fn then_chip_receives_ftm_measurement_rtt_ps(
+        &mut self,
+        chip_idx: usize,
+        expected_rtt_ps: u64,
+        tolerance_ps: u64,
+    ) {
+        let chip = &mut self.chips[chip_idx];
+        let timeout = tokio::time::sleep(std::time::Duration::from_millis(3000));
+        tokio::pin!(timeout);
+
+        let mut received_frames: Vec<Ieee80211> = Vec::new();
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Ok(msg) = HwsimMsg::decode_full(&bytes)
+                        && usize::try_from(msg.nl_hdr.nlmsg_len) == Ok(bytes.len())
+                    {
+                        if msg.hwsim_hdr.hwsim_cmd != HwsimCmd::Frame {
+                            continue;
+                        }
+                        if let Ok(frame) = HwsimFrame::parse(&msg) {
+                            received_frames.push(frame.ieee80211);
+                        }
+                    } else if let Ok(frame) = Ieee80211::decode(&bytes) {
+                        received_frames.push(frame);
+                    }
+
+                    if received_frames.len() == 2 {
+                        break;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!(
+                        "Timed out waiting for FTM measurement responses (received {} frames)",
+                        received_frames.len()
+                    );
+                }
+            }
+        }
+
+        let initial_payload = received_frames[0].get_payload();
+        let (initial_action_hdr, initial_rest) =
+            ActionHeader::ref_from_prefix(&initial_payload).expect("Initial ActionHeader");
+        assert_eq!(initial_action_hdr.category, category::PUBLIC);
+        assert_eq!(initial_action_hdr.action, public_action::FINE_TIMING_MEASUREMENT);
+
+        let (initial_ftm, _) = FineTimingMeasurement::ref_from_prefix(initial_rest)
+            .expect("Initial FineTimingMeasurement");
+        let initial_tod = initial_ftm.tod;
+        let initial_toa = initial_ftm.toa;
+        assert_eq!(initial_tod, [0u8; 6], "Initial FTM frame should have zero TOD");
+        assert_eq!(initial_toa, [0u8; 6], "Initial FTM frame should have zero TOA");
+
+        let meas_payload = received_frames[1].get_payload();
+        let (meas_action_hdr, meas_rest) =
+            ActionHeader::ref_from_prefix(&meas_payload).expect("Measurement ActionHeader");
+        assert_eq!(meas_action_hdr.category, category::PUBLIC);
+        assert_eq!(meas_action_hdr.action, public_action::FINE_TIMING_MEASUREMENT);
+
+        let (meas_ftm, _) = FineTimingMeasurement::ref_from_prefix(meas_rest)
+            .expect("Measurement FineTimingMeasurement");
+        let meas_tod = meas_ftm.tod;
+        let meas_toa = meas_ftm.toa;
+
+        let mut tod_buf = [0u8; 8];
+        tod_buf[..6].copy_from_slice(&meas_tod);
+        let t1 = u64::from_le_bytes(tod_buf);
+
+        let mut toa_buf = [0u8; 8];
+        toa_buf[..6].copy_from_slice(&meas_toa);
+        let t4 = u64::from_le_bytes(toa_buf);
+
+        let rtt = t4.saturating_sub(t1);
+        assert!(
+            rtt.abs_diff(expected_rtt_ps) <= tolerance_ps,
+            "RTT {} ps not within tolerance {} ps of expected {} ps",
+            rtt,
+            tolerance_ps,
+            expected_rtt_ps
+        );
+    }
+
+    pub async fn when_chip_transmits_qos_cf_ack_with_ftm_bytes(
+        &mut self,
+        sender_idx: usize,
+        receiver_idx: usize,
+    ) {
+        let body = [category::PUBLIC, public_action::FTM_REQUEST, FTM_TRIGGER_START, 0];
+        self.transmit_3addr_station_frame(
+            sender_idx,
+            receiver_idx,
+            FrameType::Data,
+            u8::from(DataSubType::QosCfAck),
+            &body,
+        )
+        .await;
+    }
+
+    pub async fn then_chip_receives_data_subtype(
+        &mut self,
+        receiver_idx: usize,
+        expected_subtype: DataSubType,
+    ) {
+        let chip = &mut self.chips[receiver_idx];
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Ok(msg) = HwsimMsg::decode_full(&bytes)
+                        && usize::try_from(msg.nl_hdr.nlmsg_len) == Ok(bytes.len())
+                    {
+                        if msg.hwsim_hdr.hwsim_cmd != HwsimCmd::Frame {
+                            continue;
+                        }
+                        if let Ok(frame) = HwsimFrame::parse(&msg) {
+                            assert!(
+                                frame.ieee80211.is_data(),
+                                "Expected data frame, got fc={:#06x}",
+                                frame.ieee80211.get_fc()
+                            );
+                            assert_eq!(
+                                frame.ieee80211.stype(),
+                                u8::from(expected_subtype),
+                                "Expected data subtype {:?}, got {}",
+                                expected_subtype,
+                                frame.ieee80211.stype()
+                            );
+                            return;
+                        }
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!("Timeout waiting for data frame with subtype {:?} on chip {}", expected_subtype, chip.id);
                 }
             }
         }

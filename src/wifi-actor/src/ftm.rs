@@ -32,8 +32,6 @@ pub fn handle_ftm_request(
     responder_pos: &Position,
 ) -> Option<Vec<Bytes>> {
     // 1. Verify Packet is Public Action -> FTM Request
-    // We assume the caller checked the basic frame type, but we verify Action
-    // content.
     let (category_val, action_val, trigger) = parse_ftm_request(packet)?;
 
     if category_val != category::PUBLIC || action_val != public_action::FTM_REQUEST {
@@ -114,10 +112,8 @@ pub fn handle_ftm_request(
 }
 
 fn parse_ftm_request(packet: &Ieee80211) -> Option<(u8, u8, u8)> {
-    // Basic checks provided by caller, just parse body
-    // Body starts at offset 24 for Mgmt frames (Header=24 bytes)
-    // Check if it's Action frame
-    if packet.stype() != netsim_packets::management_subtype::ACTION {
+    // Body starts at offset 24 for 3-address Management Action frames.
+    if !packet.is_mgmt() || packet.stype() != netsim_packets::management_subtype::ACTION {
         return None;
     }
 
