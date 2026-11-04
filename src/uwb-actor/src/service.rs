@@ -278,6 +278,10 @@ impl ActorService for UwbActor {
                     let mut chips = self.chip_states.write();
                     let state = chips.get_mut(&handle).ok_or(ChipError::ChipNotFound(id))?;
                     state.chip = initial_chip.clone();
+                    state.tx_count.store(0, Ordering::Relaxed);
+                    state.rx_count.store(0, Ordering::Relaxed);
+                    state.p2p_tx_count.store(0, Ordering::Relaxed);
+                    state.p2p_rx_count.store(0, Ordering::Relaxed);
                     (state.chip.clone(), state.is_anchor())
                 };
                 if !is_anchor {

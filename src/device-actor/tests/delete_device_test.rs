@@ -154,3 +154,84 @@ async fn test_delete_device_continues_after_chip_error() {
     // And the device is no longer retrievable
     world.then_device_does_not_exist(device_id).await;
 }
+
+/// Scenario: Deleting the last chip on a device auto-deletes the parent device.
+#[tokio::test]
+async fn test_delete_last_chip_auto_deletes_parent_device() {
+    // Given a running Device Actor with a single-chip Bluetooth device
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "single-chip-dev",
+            "bt-0",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    let chip_id = world.given_first_chip_id(device_id).await;
+
+    // When I delete the device's only chip
+    world.when_delete_chip(chip_id).await;
+
+    // Then the parent device is auto-deleted and the chip actor is removed
+    world.then_device_does_not_exist(device_id).await;
+    world.then_device_get_is_none(device_id).await;
+    world.then_mock_chip_present(chip_id, false);
+}
+
+/// Scenario: Deleting one chip of a multi-chip device keeps the device and remaining chips.
+#[tokio::test]
+async fn test_delete_one_chip_of_multi_chip_device_keeps_remaining_chips() {
+    // Given a running Device Actor with a multi-chip device having Bluetooth and Wi-Fi chips
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "multi-chip-dev",
+            "bt-0",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    let bt_chip_id = world.given_first_chip_id(device_id).await;
+    let wifi_chip_id = world
+        .given_chip_added_to_device(
+            device_id,
+            "wifi-0",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await;
+
+    // When I delete the Bluetooth chip
+    world.when_delete_chip(bt_chip_id).await;
+
+    // Then the parent device and Wi-Fi chip remain intact while the Bluetooth chip is removed
+    world.then_device_exists(device_id).await;
+    world.then_chip_count_is(device_id, 1).await;
+    world.then_device_has_chip(device_id, wifi_chip_id, "wifi-0", ChipKind::WIFI).await;
+    world.then_mock_chip_present(bt_chip_id, false);
+    world.then_mock_chip_present(wifi_chip_id, true);
+}
+
+/// Scenario: Deleting an unknown chip ID returns NotFound without altering existing devices.
+#[tokio::test]
+async fn test_delete_unknown_chip_returns_not_found() {
+    const UNKNOWN_CHIP_ID: ChipId = ChipId(999);
+
+    // Given a running Device Actor with an existing single-chip device
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "existing-dev",
+            "bt-0",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    let existing_chip_id = world.given_first_chip_id(device_id).await;
+
+    // When I try to delete a chip ID that does not exist
+    world.when_try_delete_chip(UNKNOWN_CHIP_ID).await;
+
+    // Then the call fails with NotFound and the existing device and chip remain untouched
+    world.then_error_is_not_found(&format!("Chip not found: {UNKNOWN_CHIP_ID}"));
+    world.then_device_exists(device_id).await;
+    world.then_chip_count_is(device_id, 1).await;
+    world.then_mock_chip_present(existing_chip_id, true);
+}

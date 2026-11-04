@@ -19,7 +19,7 @@
 //! arguments, and other device-specific failure modes.
 
 use device_api::DeviceId;
-use netsim_model::ClientError;
+use netsim_model::{ChipKind, ClientError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -32,6 +32,16 @@ pub enum DeviceError {
     AlreadyExists(String),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Chip {0} not found in device {1}")]
+    ChipNotFound(String, String),
+    #[error("Multiple ambiguous matches were found with chip name {0}")]
+    AmbiguousMatch(String),
+    #[error("No chip name is supplied but multiple chips of chip kind {kind:?} exist.")]
+    AmbiguousEmptyMatch { kind: ChipKind },
+    #[error("Duplicate chip name '{name}' for kind {kind:?}")]
+    DuplicateChip { kind: ChipKind, name: String },
+    #[error("Mismatched chip kind: expected {expected:?}, got {actual:?}")]
+    MismatchedChipKind { expected: ChipKind, actual: ChipKind },
     #[error("Actor communication error: {0}")]
     ActorCommunicationError(#[from] ClientError),
     #[error("Chip kind not supported: {0}")]
@@ -44,4 +54,17 @@ pub enum DeviceError {
         chip_reset_errors: Vec<(u32, ClientError)>,
         link_client_error: Option<ClientError>,
     },
+}
+
+impl DeviceError {
+    pub fn downcast_from<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a Self> {
+        let mut curr = Some(err);
+        while let Some(e) = curr {
+            if let Some(dev_err) = e.downcast_ref::<Self>() {
+                return Some(dev_err);
+            }
+            curr = e.source();
+        }
+        None
+    }
 }

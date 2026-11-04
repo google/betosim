@@ -434,6 +434,40 @@ impl ChipUpdate {
             update_variant.apply(chip_variant);
         }
     }
+
+    /// Merges fields from `other` into `self` when `Some`.
+    ///
+    /// `pose` is intentionally excluded: `ChipUpdate.pose` carries proto
+    /// `Chip.offset` echoed from `ListDevice`, so merging it would overwrite
+    /// the device-level `update.pose`.
+    pub fn merge(&mut self, other: Self) {
+        let ChipUpdate {
+            id: _,
+            name: _,
+            manufacturer,
+            product_name,
+            pose: _,
+            variant,
+            links,
+            enabled,
+        } = other;
+
+        if manufacturer.is_some() {
+            self.manufacturer = manufacturer;
+        }
+        if product_name.is_some() {
+            self.product_name = product_name;
+        }
+        if variant.is_some() {
+            self.variant = variant;
+        }
+        if enabled.is_some() {
+            self.enabled = enabled;
+        }
+        if links.is_some() {
+            self.links = links;
+        }
+    }
 }
 
 /// Generic radio chip update (Bluetooth, Wi-Fi, UWB).
@@ -684,5 +718,53 @@ mod tests {
                 "{kind} built {actual:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_chip_update_merge() {
+        let initial_pose = PoseUpdate {
+            position: Some(crate::Position { x: 10.0, y: 20.0, z: 30.0 }),
+            orientation: Some(crate::Orientation { yaw: 1.0, pitch: 0.0, roll: 0.0 }),
+        };
+        let mut base = ChipUpdate {
+            manufacturer: Some("Google".to_string()),
+            product_name: Some("Pixel".to_string()),
+            pose: initial_pose.clone(),
+            variant: Some(ChipVariantUpdate::Wifi(Default::default())),
+            links: Some(vec![(ChipId(1), -50)]),
+            enabled: Some(true),
+            ..Default::default()
+        };
+
+        let overwrite = ChipUpdate {
+            manufacturer: Some("Android".to_string()),
+            product_name: Some("Cuttlefish".to_string()),
+            pose: PoseUpdate {
+                position: Some(crate::Position { x: 99.0, y: 99.0, z: 99.0 }),
+                orientation: Some(crate::Orientation { yaw: 2.0, pitch: 1.0, roll: 1.0 }),
+            },
+            variant: Some(ChipVariantUpdate::Bluetooth(Default::default())),
+            links: Some(vec![(ChipId(2), -70)]),
+            enabled: Some(false),
+            ..Default::default()
+        };
+
+        base.merge(overwrite);
+
+        assert_eq!(base.manufacturer.as_deref(), Some("Android"));
+        assert_eq!(base.product_name.as_deref(), Some("Cuttlefish"));
+        assert!(matches!(base.variant, Some(ChipVariantUpdate::Bluetooth(_))));
+        assert_eq!(base.links, Some(vec![(ChipId(2), -70)]));
+        assert_eq!(base.enabled, Some(false));
+        assert_eq!(base.pose, initial_pose);
+
+        base.merge(ChipUpdate::default());
+
+        assert_eq!(base.manufacturer.as_deref(), Some("Android"));
+        assert_eq!(base.product_name.as_deref(), Some("Cuttlefish"));
+        assert!(matches!(base.variant, Some(ChipVariantUpdate::Bluetooth(_))));
+        assert_eq!(base.links, Some(vec![(ChipId(2), -70)]));
+        assert_eq!(base.enabled, Some(false));
+        assert_eq!(base.pose, initial_pose);
     }
 }

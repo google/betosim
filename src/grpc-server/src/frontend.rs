@@ -149,6 +149,9 @@ impl FrontendClient {
             tracing::warn!(%error, "Failed to get radio stats");
         }
 
+        // Read the timestamp before listing so a concurrent mutation yields a
+        // stale (older) timestamp rather than one newer than the snapshot.
+        let last_modified = client.get_last_modified().await;
         let devices = client.list().await.map_err(|e| {
             RpcStatus::with_message(
                 RpcStatusCode::INTERNAL,
@@ -159,6 +162,16 @@ impl FrontendClient {
         for device in devices {
             proto_response.devices.push(to_proto_device(device));
         }
+        if let Ok(last_modified) = last_modified
+            && let Ok(duration) = last_modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            proto_response.last_modified =
+                protobuf::MessageField::some(protobuf::well_known_types::timestamp::Timestamp {
+                    seconds: duration.as_secs().cast_signed(),
+                    nanos: duration.subsec_nanos().cast_signed(),
+                    ..Default::default()
+                });
+        }
         Ok(proto_response)
     }
 
@@ -166,65 +179,81 @@ impl FrontendClient {
         client: DeviceClient,
         req: netsim_proto::frontend::CreateDeviceRequest,
     ) -> Result<netsim_proto::frontend::CreateDeviceResponse, RpcStatus> {
-        // We only support creating a device with a single chip (Beacon) for now.
-        if let Some(proto_chip_ref) = req.device.chips.first() {
-            let mut proto_chip = proto_chip_ref.clone();
-            // Fallback: Use device name if chip name is missing.
-            if proto_chip.name.is_empty() {
-                proto_chip.name = req.device.name.clone();
-            }
-            if let Some(chip_config) = crate::frontend_converter::from_proto_chip_create(proto_chip)
-            {
-                let device_config = device_api::DeviceConfig {
-                    name: req.device.name.clone(),
-                    visible: true, // Default to true as proto doesn't have this field
-                    pose: Pose {
-                        position: crate::frontend_converter::from_proto_position(
-                            req.device.position.clone().unwrap_or_default(),
-                        ),
-                        orientation: crate::frontend_converter::from_proto_orientation(
-                            req.device.orientation.clone().unwrap_or_default(),
-                        ),
-                    },
-                    builtin: false,
-                    device_info: None,
-                };
-
-                let device_create = device_api::DeviceCreate { device_config, chip: chip_config };
-
-                let id = client
-                    .create_device(device_create)
-                    .await
-                    .map_err(|e| RpcStatus::with_message(RpcStatusCode::INTERNAL, e.to_string()))?;
-                let device = client
-                    .get(id)
-                    .await
-                    .map_err(|e| RpcStatus::with_message(RpcStatusCode::INTERNAL, e.to_string()))?
-                    .ok_or_else(|| {
-                        RpcStatus::with_message(
-                            RpcStatusCode::INTERNAL,
-                            "Device not found after creation".into(),
-                        )
-                    })?;
-
-                Ok(netsim_proto::frontend::CreateDeviceResponse {
-                    device: protobuf::MessageField::some(
-                        crate::frontend_converter::to_proto_device(device),
-                    ),
-                    ..Default::default()
-                })
-            } else {
-                Err(RpcStatus::with_message(
-                    RpcStatusCode::INVALID_ARGUMENT,
-                    "Unsupported chip kind or invalid config".to_string(),
-                ))
-            }
-        } else {
-            Err(RpcStatus::with_message(
+        let mut chip_configs = Vec::with_capacity(req.device.chips.len());
+        for proto_chip in &req.device.chips {
+            let chip_config = crate::frontend_converter::from_proto_chip_create(proto_chip.clone())
+                .ok_or_else(|| {
+                    RpcStatus::with_message(
+                        RpcStatusCode::INVALID_ARGUMENT,
+                        "Unsupported chip kind or invalid config".to_string(),
+                    )
+                })?;
+            chip_configs.push(chip_config);
+        }
+        let mut chip_iter = chip_configs.into_iter();
+        let Some(first_chip) = chip_iter.next() else {
+            return Err(RpcStatus::with_message(
                 RpcStatusCode::INVALID_ARGUMENT,
                 "No chips provided".to_string(),
-            ))
+            ));
+        };
+        let device_config = device_api::DeviceConfig {
+            name: req.device.name.clone(),
+            visible: true, // Default to true as proto doesn't have this field
+            pose: Pose {
+                position: crate::frontend_converter::from_proto_position(
+                    req.device.position.clone().unwrap_or_default(),
+                ),
+                orientation: crate::frontend_converter::from_proto_orientation(
+                    req.device.orientation.clone().unwrap_or_default(),
+                ),
+            },
+            builtin: false,
+            device_info: None,
+        };
+        let id = client
+            .create_device(device_api::DeviceCreate { device_config, chip: first_chip })
+            .await
+            .map_err(|e| match DeviceError::downcast_from(&e) {
+                Some(DeviceError::AlreadyExists(_)) => {
+                    RpcStatus::with_message(RpcStatusCode::ALREADY_EXISTS, e.to_string())
+                }
+                Some(DeviceError::InvalidInput(_) | DeviceError::DuplicateChip { .. }) => {
+                    RpcStatus::with_message(RpcStatusCode::INVALID_ARGUMENT, e.to_string())
+                }
+                _ => RpcStatus::with_message(RpcStatusCode::INTERNAL, e.to_string()),
+            })?;
+        for extra_chip in chip_iter {
+            if let Err(e) = client.add_chip_to_device(id, extra_chip).await {
+                if let Err(error) = client.delete(id).await {
+                    tracing::warn!(%error, "Failed to roll back partially created device {id}");
+                }
+                let status_code = match DeviceError::downcast_from(&e) {
+                    Some(DeviceError::AlreadyExists(_)) => RpcStatusCode::ALREADY_EXISTS,
+                    Some(DeviceError::InvalidInput(_) | DeviceError::DuplicateChip { .. }) => {
+                        RpcStatusCode::INVALID_ARGUMENT
+                    }
+                    _ => RpcStatusCode::INTERNAL,
+                };
+                return Err(RpcStatus::with_message(status_code, e.to_string()));
+            }
         }
+        let device = client
+            .get(id)
+            .await
+            .map_err(|e| RpcStatus::with_message(RpcStatusCode::INTERNAL, e.to_string()))?
+            .ok_or_else(|| {
+                RpcStatus::with_message(
+                    RpcStatusCode::INTERNAL,
+                    "Device not found after creation".into(),
+                )
+            })?;
+        Ok(netsim_proto::frontend::CreateDeviceResponse {
+            device: protobuf::MessageField::some(crate::frontend_converter::to_proto_device(
+                device,
+            )),
+            ..Default::default()
+        })
     }
 
     async fn handle_patch_device(
@@ -266,32 +295,56 @@ impl FrontendClient {
         };
 
         let name_opt = req.device.name.as_deref();
-        client.patch(req.id, name_opt, update).await.map_err(|e| match e {
-            ClientError::Framework(ref framework)
-                if matches!(
-                    framework.downcast_ref::<DeviceError>(),
-                    Some(DeviceError::NotFound(_) | DeviceError::DeviceNotFound(_))
-                ) =>
-            {
-                RpcStatus::with_message(
+        client.patch(req.id, name_opt, update).await.map_err(|e| {
+            match DeviceError::downcast_from(&e) {
+                Some(
+                    DeviceError::NotFound(_)
+                    | DeviceError::DeviceNotFound(_)
+                    | DeviceError::ChipNotFound(_, _),
+                ) => RpcStatus::with_message(
                     RpcStatusCode::NOT_FOUND,
-                    format!("Device not found or patch failed: {}", e),
-                )
+                    format!("Device or chip not found: {e}"),
+                ),
+                Some(DeviceError::AlreadyExists(_)) => RpcStatus::with_message(
+                    RpcStatusCode::ALREADY_EXISTS,
+                    format!("Device already exists: {e}"),
+                ),
+                Some(
+                    DeviceError::InvalidInput(_)
+                    | DeviceError::AmbiguousMatch(_)
+                    | DeviceError::AmbiguousEmptyMatch { .. }
+                    | DeviceError::DuplicateChip { .. }
+                    | DeviceError::MismatchedChipKind { .. },
+                ) => RpcStatus::with_message(
+                    RpcStatusCode::INVALID_ARGUMENT,
+                    format!("Invalid patch argument: {e}"),
+                ),
+                _ => RpcStatus::with_message(
+                    RpcStatusCode::INTERNAL,
+                    format!("Failed to patch device: {e}"),
+                ),
             }
-            _ => RpcStatus::with_message(
-                RpcStatusCode::INTERNAL,
-                format!("Failed to patch device: {}", e),
-            ),
         })
     }
 
     #[deprecated(note = "Use handle_delete_device instead")]
     #[allow(deprecated)]
-    fn handle_delete_chip(
-        _client: DeviceClient,
-        _req: netsim_proto::frontend::DeleteChipRequest,
+    async fn handle_delete_chip(
+        client: DeviceClient,
+        req: netsim_proto::frontend::DeleteChipRequest,
     ) -> Result<(), RpcStatus> {
-        Err(RpcStatus::new(RpcStatusCode::UNIMPLEMENTED))
+        client.delete_chip(ChipId(req.id)).await.map_err(|e| {
+            if let Some(DeviceError::NotFound(msg) | DeviceError::DeviceNotFound(msg)) =
+                DeviceError::downcast_from(&e)
+            {
+                RpcStatus::with_message(RpcStatusCode::NOT_FOUND, msg.clone())
+            } else {
+                RpcStatus::with_message(
+                    RpcStatusCode::INTERNAL,
+                    format!("Failed to delete chip: {e}"),
+                )
+            }
+        })
     }
 
     async fn handle_delete_device(
@@ -580,7 +633,7 @@ impl FrontendService for FrontendClient {
         self.frontend_stats.delete_chip.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.device_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_delete_chip(client, req).map(|_| Empty::new());
+            let res = Self::handle_delete_chip(client, req).await.map(|_| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -668,22 +721,259 @@ impl FrontendService for FrontendClient {
 mod tests {
     use actor_framework::MockActorClient;
     use device_actor::DeviceActor;
+    use device_api::{DeviceAction, DeviceActionResult, DeviceId};
     use link_api::{Link, LinkId, MockLinkClient};
     use netsim_model::{ChipId, ChipKind};
     use protobuf::EnumOrUnknown;
 
     use super::*;
 
-    #[test]
     #[allow(deprecated)]
-    fn test_handle_delete_chip() {
-        let mock_client = MockActorClient::<DeviceActor>::new();
-        let client = DeviceClient::new(Box::new(mock_client));
-        let mut req = netsim_proto::frontend::DeleteChipRequest::new();
-        req.id = 3;
+    mod delete_chip_tests {
+        use super::*;
 
-        let res = FrontendClient::handle_delete_chip(client, req);
-        assert_eq!(res.unwrap_err().code(), RpcStatusCode::UNIMPLEMENTED);
+        #[tokio::test]
+        async fn test_handle_delete_chip() {
+            let mut mock_client = MockActorClient::<DeviceActor>::new();
+            mock_client
+                .expect_perform_action()
+                .withf(|id, action| {
+                    id.is_none() && matches!(action, DeviceAction::DeleteChip(ChipId(3)))
+                })
+                .returning(|_, _| Ok(DeviceActionResult::Success));
+            let client = DeviceClient::new(Box::new(mock_client));
+            let mut req = netsim_proto::frontend::DeleteChipRequest::new();
+            req.id = 3;
+
+            let res = FrontendClient::handle_delete_chip(client, req).await;
+            assert!(res.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_handle_delete_chip_not_found() {
+            let mut mock_client = MockActorClient::<DeviceActor>::new();
+            mock_client
+                .expect_perform_action()
+                .withf(|id, action| {
+                    id.is_none() && matches!(action, DeviceAction::DeleteChip(ChipId(99)))
+                })
+                .returning(|_, _| {
+                    Err(actor_framework::FrameworkError::ServiceError(
+                        device_actor::DeviceError::NotFound("Chip not found: 99".to_string()),
+                    ))
+                });
+            let client = DeviceClient::new(Box::new(mock_client));
+            let mut req = netsim_proto::frontend::DeleteChipRequest::new();
+            req.id = 99;
+
+            let res = FrontendClient::handle_delete_chip(client, req).await;
+            assert_eq!(res.unwrap_err().code(), RpcStatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_handle_delete_chip_device_not_found() {
+            let mut mock_client = MockActorClient::<DeviceActor>::new();
+            mock_client
+                .expect_perform_action()
+                .withf(|id, action| {
+                    id.is_none() && matches!(action, DeviceAction::DeleteChip(ChipId(99)))
+                })
+                .returning(|_, _| {
+                    Err(actor_framework::FrameworkError::ServiceError(
+                        device_actor::DeviceError::DeviceNotFound("99".to_string()),
+                    ))
+                });
+            let client = DeviceClient::new(Box::new(mock_client));
+            let mut req = netsim_proto::frontend::DeleteChipRequest::new();
+            req.id = 99;
+
+            let res = FrontendClient::handle_delete_chip(client, req).await;
+            assert_eq!(res.unwrap_err().code(), RpcStatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_create_device_multi_chip() {
+        let mut mock_client = MockActorClient::<DeviceActor>::new();
+        let expected_id = DeviceId(100);
+
+        mock_client
+            .expect_create()
+            .withf(|params| {
+                params.device_config.name == "multi-device"
+                    && matches!(params.chip.chip, device_api::ChipCreateVariant::Bluetooth(_))
+            })
+            .returning(move |_| Ok(expected_id));
+
+        mock_client
+            .expect_perform_action()
+            .withf(move |id, action| {
+                *id == Some(expected_id)
+                    && matches!(
+                        action,
+                        DeviceAction::AddChip { chip_config, .. }
+                            if matches!(chip_config.chip, device_api::ChipCreateVariant::Uwb(_))
+                    )
+            })
+            .returning(|_, _| Ok(DeviceActionResult::ChipId(ChipId(102))));
+
+        mock_client.expect_get().withf(move |id| *id == expected_id).returning(move |_| {
+            Ok(Some(device_api::Device {
+                id: 100,
+                name: "multi-device".to_string(),
+                visible: true,
+                pose: Default::default(),
+                builtin: false,
+                device_info: None,
+                chips: vec![
+                    netsim_model::Chip {
+                        id: 101,
+                        kind: netsim_model::ChipKind::BLUETOOTH,
+                        name: "bt-chip".to_string(),
+                        manufacturer: "".to_string(),
+                        product_name: "".to_string(),
+                        pose: Default::default(),
+                        variant: Some(netsim_model::ChipVariant::Bluetooth(Default::default())),
+                        ..Default::default()
+                    },
+                    netsim_model::Chip {
+                        id: 102,
+                        kind: netsim_model::ChipKind::UWB,
+                        name: "uwb-chip".to_string(),
+                        manufacturer: "".to_string(),
+                        product_name: "".to_string(),
+                        pose: Default::default(),
+                        variant: Some(netsim_model::ChipVariant::Uwb(Default::default())),
+                        ..Default::default()
+                    },
+                ],
+            }))
+        });
+
+        let client = DeviceClient::new(Box::new(mock_client));
+        let mut req = netsim_proto::frontend::CreateDeviceRequest::new();
+        let mut device_proto = netsim_proto::model::DeviceCreate::new();
+        device_proto.name = "multi-device".to_string();
+
+        let mut chip_proto1 = netsim_proto::model::ChipCreate::new();
+        chip_proto1.name = "bt-chip".to_string();
+        chip_proto1.kind = EnumOrUnknown::new(netsim_proto::common::ChipKind::BLUETOOTH);
+        device_proto.chips.push(chip_proto1);
+
+        let mut chip_proto2 = netsim_proto::model::ChipCreate::new();
+        chip_proto2.name = "uwb-chip".to_string();
+        chip_proto2.kind = EnumOrUnknown::new(netsim_proto::common::ChipKind::UWB);
+        chip_proto2.address = "00:02".to_string();
+        device_proto.chips.push(chip_proto2);
+
+        req.device = protobuf::MessageField::some(device_proto);
+
+        let resp = FrontendClient::handle_create_device(client, req).await.unwrap();
+        assert_eq!(resp.device.name, "multi-device");
+        assert_eq!(resp.device.chips.len(), 2);
+        assert_eq!(
+            resp.device.chips[0].kind,
+            EnumOrUnknown::new(netsim_proto::common::ChipKind::BLUETOOTH)
+        );
+        assert_eq!(
+            resp.device.chips[1].kind,
+            EnumOrUnknown::new(netsim_proto::common::ChipKind::UWB)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_create_device_multi_chip_rollback() {
+        let mut mock_client = MockActorClient::<DeviceActor>::new();
+        let expected_id = DeviceId(100);
+
+        mock_client.expect_create().returning(move |_| Ok(expected_id));
+
+        mock_client.expect_perform_action().returning(|_, _| {
+            Err(actor_framework::FrameworkError::ServiceError(
+                device_actor::DeviceError::ChipKindNotSupported("UWB".to_string()),
+            ))
+        });
+
+        mock_client
+            .expect_delete()
+            .times(1)
+            .withf(move |id| *id == expected_id)
+            .returning(|_| Ok(()));
+
+        let client = DeviceClient::new(Box::new(mock_client));
+        let mut req = netsim_proto::frontend::CreateDeviceRequest::new();
+        let mut device_proto = netsim_proto::model::DeviceCreate::new();
+        device_proto.name = "fail-dev".to_string();
+
+        let mut chip_proto1 = netsim_proto::model::ChipCreate::new();
+        chip_proto1.name = "bt-chip".to_string();
+        chip_proto1.kind = EnumOrUnknown::new(netsim_proto::common::ChipKind::BLUETOOTH);
+        device_proto.chips.push(chip_proto1);
+
+        let mut chip_proto2 = netsim_proto::model::ChipCreate::new();
+        chip_proto2.name = "uwb-chip".to_string();
+        chip_proto2.kind = EnumOrUnknown::new(netsim_proto::common::ChipKind::UWB);
+        chip_proto2.address = "00:02".to_string();
+        device_proto.chips.push(chip_proto2);
+
+        req.device = protobuf::MessageField::some(device_proto);
+
+        let res = FrontendClient::handle_create_device(client, req).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code(), RpcStatusCode::INTERNAL);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_device_populates_last_modified() {
+        let mut mock_client = MockActorClient::<DeviceActor>::new();
+        mock_client
+            .expect_perform_action()
+            .withf(|id, action| id.is_none() && matches!(action, DeviceAction::GetRadioStats))
+            .returning(|_, _| Ok(DeviceActionResult::Statistics(vec![])));
+
+        mock_client.expect_list().returning(|| Ok(vec![]));
+
+        const FIXED_EPOCH_SECS: u64 = 1_700_000_000;
+        let expected_time =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(FIXED_EPOCH_SECS);
+        mock_client
+            .expect_perform_action()
+            .withf(|id, action| id.is_none() && matches!(action, DeviceAction::GetLastModified))
+            .returning(move |_, _| Ok(DeviceActionResult::LastModified(expected_time)));
+
+        let client = DeviceClient::new(Box::new(mock_client));
+        let resp = FrontendClient::handle_list_device(client).await.unwrap();
+        assert!(resp.last_modified.is_some());
+        let ts = resp.last_modified.unwrap();
+        assert_eq!(ts.seconds, i64::try_from(FIXED_EPOCH_SECS).unwrap());
+        assert_eq!(ts.nanos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_patch_device_chip_not_found_returns_not_found() {
+        let mut mock_client = MockActorClient::<DeviceActor>::new();
+        mock_client.expect_update().withf(|id, _| *id == DeviceId(1)).returning(|_, _| {
+            Err(actor_framework::FrameworkError::ServiceError(
+                device_actor::DeviceError::ChipNotFound(
+                    "missing-chip".to_string(),
+                    "dev-1".to_string(),
+                ),
+            ))
+        });
+
+        let client = DeviceClient::new(Box::new(mock_client));
+        let mut req = netsim_proto::frontend::PatchDeviceRequest::new();
+        req.id = Some(1);
+        let mut chip_patch = netsim_proto::model::Chip::new();
+        chip_patch.name = "missing-chip".to_string();
+        let mut device_patch =
+            netsim_proto::frontend::patch_device_request::PatchDeviceFields::new();
+        device_patch.chips.push(chip_patch);
+        req.device = protobuf::MessageField::some(device_patch);
+
+        let res = FrontendClient::handle_patch_device(client, req).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code(), RpcStatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

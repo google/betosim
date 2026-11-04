@@ -45,3 +45,20 @@ async fn test_chip_reset() {
     world.then_reset_response_is_received(chip_id, uci::Status::Ok).await;
     world.then_status_notification_is_received(chip_id, uci::DeviceState::DeviceStateReady).await;
 }
+
+const POST_RESET_UCI_RX_PACKETS: u64 = 2;
+
+// Scenario: Resetting a UWB chip clears its packet counters
+#[tokio::test]
+async fn test_chip_reset_clears_packet_counters() {
+    // Given a UWB chip that has exchanged traffic with non-zero packet counters
+    let mut world = World::new().await;
+    let chip_id = world.given_initialized_chip("uwb-reset-stats").await;
+    world.given_chip_with_nonzero_packet_counters(chip_id).await;
+
+    // When the chip is reset
+    world.when_chip_is_reset(chip_id).await;
+
+    // Then the packet counters are reset to only the post-reset UCI handshake packets
+    world.then_packet_counters_are(chip_id, 0, POST_RESET_UCI_RX_PACKETS).await;
+}

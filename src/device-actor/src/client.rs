@@ -147,6 +147,19 @@ impl DeviceClient {
             })
     }
 
+    /// Fetches the timestamp when device or chip state was last modified.
+    pub async fn get_last_modified(&self) -> Result<std::time::SystemTime, ClientError> {
+        match self
+            .inner
+            .perform_action(None, DeviceAction::GetLastModified)
+            .err_into::<ClientError>()
+            .await?
+        {
+            DeviceActionResult::LastModified(ts) => Ok(ts),
+            _ => Err(ClientError::Recv("Unexpected action result".to_string())),
+        }
+    }
+
     /// Deletes a device (restricted to internal devices).
     pub async fn delete_device(&self, id: DeviceId) -> Result<(), ClientError> {
         debug!("Sending DeleteDevice request for device {}", id);
@@ -157,6 +170,44 @@ impl DeviceClient {
             .await?
         {
             DeviceActionResult::Success => Ok(()),
+            _other => Err(ClientError::Recv("Unexpected action result".to_string())),
+        }
+    }
+
+    /// Deletes a chip by ID, auto-deleting the parent device if no chips remain.
+    pub async fn delete_chip(&self, chip_id: netsim_model::ChipId) -> Result<(), ClientError> {
+        debug!("Sending DeleteChip request for chip {chip_id}");
+        match self
+            .inner
+            .perform_action(None, DeviceAction::DeleteChip(chip_id))
+            .err_into::<ClientError>()
+            .await?
+        {
+            DeviceActionResult::Success => Ok(()),
+            _other => Err(ClientError::Recv("Unexpected action result".to_string())),
+        }
+    }
+
+    /// Adds a chip to an existing device by ID.
+    pub async fn add_chip_to_device(
+        &self,
+        id: DeviceId,
+        chip_config: device_api::DeviceChipCreate,
+    ) -> Result<netsim_model::ChipId, ClientError> {
+        match self
+            .inner
+            .perform_action(
+                Some(id),
+                DeviceAction::AddChip {
+                    chip_config: Box::new(chip_config),
+                    packet_stream: None,
+                    packet_sink: None,
+                },
+            )
+            .err_into::<ClientError>()
+            .await?
+        {
+            DeviceActionResult::ChipId(chip_id) => Ok(chip_id),
             _other => Err(ClientError::Recv("Unexpected action result".to_string())),
         }
     }

@@ -90,11 +90,15 @@ impl World {
         }
     }
 
-    pub async fn when_create_chip(&mut self, chip_id: u32) -> Result<(), ClientError> {
+    pub async fn when_create_chip_with_name(
+        &mut self,
+        chip_id: u32,
+        name: &str,
+    ) -> Result<(), ClientError> {
         let id = ChipId(chip_id);
         let (stream, packet_tx) = mock_stream();
         let (sink, packet_rx) = mock_sink();
-        let mut chip = Chip::new_test_uwb(format!("uwb_chip_{id}"));
+        let mut chip = Chip::new_test_uwb(name.to_string());
         chip.id = id.0;
         chip.device_id = DeviceId(1);
 
@@ -106,6 +110,10 @@ impl World {
         self.packet_rxs.insert(id, packet_rx);
 
         Ok(())
+    }
+
+    pub async fn when_create_chip(&mut self, chip_id: u32) -> Result<(), ClientError> {
+        self.when_create_chip_with_name(chip_id, &format!("uwb_chip_{chip_id}")).await
     }
 
     pub async fn when_delete_chip(&self, chip_id: u32) -> Result<(), ClientError> {
@@ -166,8 +174,33 @@ impl World {
         self.when_create_chip(chip_id).await.expect("GIVEN: Failed to create chip");
     }
 
-    pub async fn when_chip_is_reset(&self, chip_id: u32) {
-        self.client.reset(ChipId(chip_id)).await.expect("WHEN: Failed to reset chip");
+    pub async fn given_chip_created(&mut self, name: &str) -> ChipId {
+        let chip_id = 1;
+        self.when_create_chip_with_name(chip_id, name).await.expect("GIVEN: Failed to create chip");
+        ChipId(chip_id)
+    }
+
+    pub async fn given_initialized_chip(&mut self, name: &str) -> ChipId {
+        let chip_id = self.given_chip_created(name).await;
+        self.then_status_notification_is_received(chip_id.0, uci::DeviceState::DeviceStateReady)
+            .await;
+        chip_id
+    }
+
+    pub async fn given_chip_with_nonzero_packet_counters(&mut self, chip_id: impl Into<ChipId>) {
+        let chip_id = chip_id.into();
+        self.when_uci_is_reset(chip_id.0).await;
+        let stats = self.client.read_statistics().await.expect("Failed to read statistics");
+        let chip_stats = stats
+            .iter()
+            .find(|s| s.id == chip_id.0)
+            .unwrap_or_else(|| panic!("chip {} not found in statistics", chip_id.0));
+        assert!(chip_stats.tx_count > 0, "tx_count was 0");
+        assert!(chip_stats.rx_count > 0, "rx_count was 0");
+    }
+
+    pub async fn when_chip_is_reset(&self, chip_id: impl Into<ChipId>) {
+        self.client.reset(chip_id.into()).await.expect("WHEN: Failed to reset chip");
     }
 
     pub async fn then_reset_response_is_received(&mut self, chip_id: u32, status: uci::Status) {
@@ -400,5 +433,21 @@ impl World {
 
         assert_eq!(ntf.two_way_ranging_measurements.len(), 1, "Expected exactly one measurement");
         ntf.two_way_ranging_measurements[0].clone()
+    }
+
+    pub async fn then_packet_counters_are(
+        &self,
+        chip_id: impl Into<ChipId>,
+        expected_tx: u64,
+        expected_rx: u64,
+    ) {
+        let chip_id = chip_id.into();
+        let stats = self.client.read_statistics().await.expect("Failed to read statistics");
+        let chip_stats = stats
+            .iter()
+            .find(|s| s.id == chip_id.0)
+            .unwrap_or_else(|| panic!("chip {} not found in statistics", chip_id.0));
+        assert_eq!(chip_stats.tx_count, expected_tx, "tx_count mismatch");
+        assert_eq!(chip_stats.rx_count, expected_rx, "rx_count mismatch");
     }
 }

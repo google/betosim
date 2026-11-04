@@ -40,6 +40,7 @@ pub struct DeviceActor {
     pub(crate) stats_write_task: Option<tokio::task::JoinHandle<()>>,
     pub(crate) stats: crate::stats::Stats,
     pub(crate) stats_interval: std::time::Duration,
+    pub(crate) last_modified: std::time::SystemTime,
     // Client to send messages to self (e.g. for periodic stats)
     pub(crate) self_client: Option<DeviceClient>,
 }
@@ -75,6 +76,7 @@ impl DeviceActor {
             stats_write_task: None,
             stats: crate::stats::Stats::new(version.clone(), stats_path, frontend_stats),
             stats_interval: stats_interval.unwrap_or(std::time::Duration::from_secs(10)),
+            last_modified: std::time::SystemTime::now(),
             self_client: None,
         }
     }

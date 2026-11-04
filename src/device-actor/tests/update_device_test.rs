@@ -25,7 +25,9 @@ use netsim_model::{
     Chip, ChipClient, ChipId, ChipKind, ChipUpdate, ChipVariantUpdate, MockChipClient, WifiUpdate,
 };
 
-use crate::world::World;
+use crate::world::{
+    DEFAULT_MANUFACTURER, MATCHED_MANUFACTURER, UPDATED_MANUFACTURER, UPDATED_PRODUCT_NAME, World,
+};
 
 // Scenario: Update device properties propagates to chips
 //   Given a running Device Actor with expectation for Update call
@@ -41,7 +43,14 @@ async fn test_update_device_propagates_to_chips() {
         .expect_update()
         .withf(|_, patch| patch.pose.position.is_some() && patch.pose.orientation.is_some())
         .times(1)
-        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
+        .returning(|id, _| {
+            Ok(Chip {
+                id: id.0,
+                kind: ChipKind::BLUETOOTH,
+                name: "beacon".to_string(),
+                ..Default::default()
+            })
+        });
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -148,7 +157,14 @@ async fn test_update_device_propagates_by_variant() {
         // Verify that update is called despite NO ID being provided in the patch
         .withf(|_, patch| patch.variant.is_some())
         .times(1)
-        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
+        .returning(|id, _| {
+            Ok(Chip {
+                id: id.0,
+                kind: ChipKind::BLUETOOTH,
+                name: "beacon".to_string(),
+                ..Default::default()
+            })
+        });
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -192,7 +208,14 @@ async fn test_update_chip_ble_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
+        .returning(|id, _| {
+            Ok(Chip {
+                id: id.0,
+                kind: ChipKind::BLUETOOTH,
+                name: "beacon".to_string(),
+                ..Default::default()
+            })
+        });
 
     mock_chip_client
         .expect_update()
@@ -205,7 +228,14 @@ async fn test_update_chip_ble_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
+        .returning(|id, _| {
+            Ok(Chip {
+                id: id.0,
+                kind: ChipKind::BLUETOOTH,
+                name: "beacon".to_string(),
+                ..Default::default()
+            })
+        });
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -255,7 +285,14 @@ async fn test_update_chip_classic_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
+        .returning(|id, _| {
+            Ok(Chip {
+                id: id.0,
+                kind: ChipKind::BLUETOOTH,
+                name: "beacon".to_string(),
+                ..Default::default()
+            })
+        });
 
     mock_chip_client
         .expect_update()
@@ -268,7 +305,14 @@ async fn test_update_chip_classic_radio_state() {
         })
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|id, _| Ok(Chip { id: id.0, kind: ChipKind::BLUETOOTH, ..Default::default() }));
+        .returning(|id, _| {
+            Ok(Chip {
+                id: id.0,
+                kind: ChipKind::BLUETOOTH,
+                name: "beacon".to_string(),
+                ..Default::default()
+            })
+        });
 
     let mut chip_clients = HashMap::new();
     chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
@@ -319,10 +363,9 @@ async fn test_update_device_disambiguates_shared_name_by_variant() {
         variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
         ..Default::default()
     };
-    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+    world.when_update_device_chip(device_id, chip_update).await;
 
     // Then the Wi-Fi chip receives the update and the Bluetooth chip is untouched
-    assert!(result.is_ok());
     world.then_chips_received_updates(&[wifi_chip_id]);
 }
 
@@ -330,8 +373,7 @@ async fn test_update_device_disambiguates_shared_name_by_variant() {
 //   Given a running Device Actor with a device containing a Bluetooth chip
 //     and a Wi-Fi chip both named "cvd-1"
 //   When I update the device specifying chip name "cvd-1" without variant
-//   Then the operation fails with an InvalidInput error indicating ambiguous
-//     chip name
+//   Then the operation fails with an AmbiguousMatch error
 #[tokio::test]
 async fn test_update_device_rejects_ambiguous_shared_name_without_variant() {
     // Given a running Device Actor with a device containing a Bluetooth chip and a Wi-Fi chip both
@@ -348,20 +390,16 @@ async fn test_update_device_rejects_ambiguous_shared_name_without_variant() {
     // When I update the device specifying chip name "cvd-1" without variant
     let chip_update =
         ChipUpdate { name: Some("cvd-1".to_string()), enabled: Some(true), ..Default::default() };
-    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+    world.when_try_update_device_chip(device_id, chip_update).await;
 
-    // Then the operation fails with an InvalidInput error indicating ambiguous chip name
-    world.then_update_rejected_as_invalid_input(
-        result,
-        "Ambiguous chip name 'cvd-1' matches multiple chips on device",
-    );
+    // Then the operation fails with an AmbiguousMatch error
+    world.then_error_is_ambiguous_match("cvd-1");
 }
 
 // Scenario: Update device rejects mismatched ID and variant kind
 //   Given a running Device Actor with a device containing a Bluetooth chip
 //   When I update the device specifying the chip ID with a Wi-Fi variant
-//   Then the operation fails with an InvalidInput error indicating kind
-//     mismatch
+//   Then the operation fails with a MismatchedChipKind error
 #[tokio::test]
 async fn test_update_device_rejects_mismatched_id_and_variant() {
     // Given a running Device Actor with a device containing a Bluetooth chip
@@ -376,20 +414,16 @@ async fn test_update_device_rejects_mismatched_id_and_variant() {
         variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
         ..Default::default()
     };
-    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+    world.when_try_update_device_chip(device_id, chip_update).await;
 
-    // Then the operation fails with an InvalidInput error indicating kind mismatch
-    world.then_update_rejected_as_invalid_input(
-        result,
-        "has kind BLUETOOTH, but update has kind WIFI",
-    );
+    // Then the operation fails with a MismatchedChipKind error
+    world.then_error_is_mismatched_chip_kind(ChipKind::WIFI, ChipKind::BLUETOOTH);
 }
 
 // Scenario: Update device rejects mismatched name and variant kind
 //   Given a running Device Actor with a device containing a Bluetooth chip
 //   When I update the device specifying the chip name with a Wi-Fi variant
-//   Then the operation fails with an InvalidInput error indicating kind
-//     mismatch
+//   Then the operation fails with a MismatchedChipKind error
 #[tokio::test]
 async fn test_update_device_rejects_mismatched_name_and_variant() {
     // Given a running Device Actor with a device containing a Bluetooth chip
@@ -403,30 +437,33 @@ async fn test_update_device_rejects_mismatched_name_and_variant() {
         variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
         ..Default::default()
     };
-    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+    world.when_try_update_device_chip(device_id, chip_update).await;
 
-    // Then the operation fails with an InvalidInput error indicating kind mismatch
-    world.then_update_rejected_as_invalid_input(
-        result,
-        &format!("Chip name 'bt-0' exists on device {} but not with radio kind WIFI", device_id.0),
-    );
+    // Then the operation fails with a MismatchedChipKind error
+    world.then_error_is_mismatched_chip_kind(ChipKind::WIFI, ChipKind::BLUETOOTH);
 }
 
 // Scenario: Update device rejects ambiguous shared name and variant when multiple chips match both
-//   Given a running Device Actor with a device containing two Wi-Fi chips both named "wlan-shared"
+//   Given a running Device Actor with a device containing two Wi-Fi chips sharing substring "wlan-shared"
 //   When I update the device specifying chip name "wlan-shared" with a Wi-Fi variant update
-//   Then the operation fails with an InvalidInput error indicating ambiguous chip name of radio
-//     kind
+//   Then the operation fails with an AmbiguousMatch error
 #[tokio::test]
 async fn test_update_device_rejects_ambiguous_name_and_variant_for_duplicate_chips() {
-    // Given a running Device Actor with a device containing two Wi-Fi chips both
-    // named "wlan-shared"
+    // Given a running Device Actor with a device containing two Wi-Fi chips sharing substring
+    // "wlan-shared"
     let world = World::new().await;
-    let (device_id, _) = world
-        .given_device_with_chips_sharing_name(
-            "guid-1",
-            "wlan-shared",
-            &[ChipKind::WIFI, ChipKind::WIFI],
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "wlan-shared-0",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "wlan-shared-1",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
         )
         .await;
 
@@ -436,14 +473,10 @@ async fn test_update_device_rejects_ambiguous_name_and_variant_for_duplicate_chi
         variant: Some(ChipVariantUpdate::Wifi(WifiUpdate::default())),
         ..Default::default()
     };
-    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+    world.when_try_update_device_chip(device_id, chip_update).await;
 
-    // Then the operation fails with an InvalidInput error indicating ambiguous chip name of radio
-    // kind
-    world.then_update_rejected_as_invalid_input(
-        result,
-        "Ambiguous chip name 'wlan-shared' matches multiple chips of radio kind WIFI on device",
-    );
+    // Then the operation fails with an AmbiguousMatch error
+    world.then_error_is_ambiguous_match("wlan-shared");
 }
 
 // Scenario: Update device rejects selectorless chip update
@@ -460,12 +493,484 @@ async fn test_update_device_rejects_selectorless_update() {
 
     // When I update the device with a ChipUpdate lacking id, name, and variant
     let chip_update = ChipUpdate { id: None, name: None, variant: None, ..Default::default() };
-    let result = world.when_try_update_device_chip(device_id, chip_update).await;
+    world.when_try_update_device_chip(device_id, chip_update).await;
 
     // Then the operation fails with an InvalidInput error indicating at least one selector is
     // required
     world.then_update_rejected_as_invalid_input(
-        result,
         "ChipUpdate requires at least one selector (id, name, or variant)",
     );
+}
+
+const BROADCAST_POS_X: f32 = 50.0;
+const BROADCAST_POS_Y: f32 = 60.0;
+const BROADCAST_POS_Z: f32 = 70.0;
+const BROADCAST_YAW: f32 = 1.5;
+
+// Scenario: Update chip metadata succeeds and updates device view
+#[tokio::test]
+async fn test_update_chip_metadata() {
+    // Given a running Device Actor with chip client configured to accept metadata updates
+    let world = World::given_with_bluetooth_metadata_mock().await;
+    let device_id = world.given_device_created("test-dev").await;
+
+    // When I update the chip manufacturer and product name
+    world
+        .when_patch_chip_metadata(device_id, "beacon", UPDATED_MANUFACTURER, UPDATED_PRODUCT_NAME)
+        .await;
+
+    // Then the device view reflects the updated chip metadata
+    world.then_chip_count_is(device_id, 1).await;
+    world
+        .then_chip_metadata_is(device_id, "beacon", UPDATED_MANUFACTURER, UPDATED_PRODUCT_NAME)
+        .await;
+}
+
+// Scenario: Exact chip name match wins over ambiguous prefix/suffix match
+#[tokio::test]
+async fn test_patch_chip_exact_match_wins_over_ambiguous() {
+    // Given a device with chips "chip" and "chip-extra"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "chip-extra",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I update chip "chip" with a new manufacturer
+    world.when_patch_chip_manufacturer(device_id, "chip", MATCHED_MANUFACTURER).await;
+
+    // Then only the exact matching chip "chip" receives the updated manufacturer
+    world.then_chip_manufacturer_is(device_id, "chip", MATCHED_MANUFACTURER).await;
+    world.then_chip_manufacturer_is(device_id, "chip-extra", DEFAULT_MANUFACTURER).await;
+}
+
+// Scenario: Substring match updates unique matching chip
+#[tokio::test]
+async fn test_patch_chip_substring_match() {
+    // Given a device with chip "my-awesome-bluetooth-chip"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "my-awesome-bluetooth-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I update chip using substring "awesome" with a new manufacturer
+    world.when_patch_chip_manufacturer(device_id, "awesome", MATCHED_MANUFACTURER).await;
+
+    // Then the matching chip receives the updated manufacturer
+    world
+        .then_chip_manufacturer_is(device_id, "my-awesome-bluetooth-chip", MATCHED_MANUFACTURER)
+        .await;
+}
+
+// Scenario: Patching with an ambiguous chip name returns AmbiguousMatch error
+#[tokio::test]
+async fn test_patch_chip_ambiguous_error() {
+    // Given a device with two chips "beacon-alpha" and "beacon-beta"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "beacon-alpha",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "beacon-beta",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I update with common substring "beacon"
+    world.when_try_patch_chip_by_name(device_id, "beacon").await;
+
+    // Then the update fails with AmbiguousMatch
+    world.then_error_is_ambiguous_match("beacon");
+}
+
+// Scenario: Exact match on chip name across different chip kinds is ambiguous without variant
+#[tokio::test]
+async fn test_patch_chip_ambiguous_exact_match_across_kinds() {
+    // Given a device with Bluetooth and UWB chips sharing the name "shared-name"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "shared-name",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "shared-name",
+            device_api::ChipCreateVariant::Uwb(Default::default()),
+        )
+        .await;
+
+    // When I update chip "shared-name" without specifying a variant filter
+    world.when_try_patch_chip_by_name(device_id, "shared-name").await;
+
+    // Then the update fails with AmbiguousMatch
+    world.then_error_is_ambiguous_match("shared-name");
+}
+
+// Scenario: Disambiguate identical chip names across kinds by specifying variant
+#[tokio::test]
+async fn test_patch_chip_disambiguate_exact_match_across_kinds_with_variant() {
+    // Given a device with Bluetooth and UWB chips both named "shared-name"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "shared-name",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "shared-name",
+            device_api::ChipCreateVariant::Uwb(Default::default()),
+        )
+        .await;
+
+    // When I update chip "shared-name" specifying UWB variant and new manufacturer
+    world
+        .when_patch_chip_variant_manufacturer(
+            device_id,
+            "shared-name",
+            ChipVariantUpdate::Uwb(Default::default()),
+            MATCHED_MANUFACTURER,
+        )
+        .await;
+
+    // Then the UWB chip receives the updated manufacturer while Bluetooth chip remains unchanged
+    world
+        .then_chip_of_kind_manufacturer_is(
+            device_id,
+            netsim_model::ChipKind::UWB,
+            MATCHED_MANUFACTURER,
+        )
+        .await;
+    world
+        .then_chip_of_kind_manufacturer_is(
+            device_id,
+            netsim_model::ChipKind::BLUETOOTH,
+            DEFAULT_MANUFACTURER,
+        )
+        .await;
+}
+
+// Scenario: Empty chip name update fails when multiple chips of that kind exist
+#[tokio::test]
+async fn test_patch_chip_ambiguous_empty_name_error() {
+    // Given a device with two Bluetooth chips "bt-1" and "bt-2"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "bt-1",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "bt-2",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I update without a chip name specifying Bluetooth state
+    world.when_try_patch_bluetooth_chip(device_id, Some(true), None).await;
+
+    // Then the update fails with AmbiguousEmptyMatch for Bluetooth
+    world.then_error_is_ambiguous_empty_match(ChipKind::BLUETOOTH);
+}
+
+// Scenario: Patching a non-existent chip name returns ChipNotFound error
+#[tokio::test]
+async fn test_patch_chip_not_found_error() {
+    // Given a device "test-dev"
+    let world = World::new().await;
+    let device_id = world.given_device_created("test-dev").await;
+
+    // When I update a chip with name "ghost-chip"
+    world.when_try_patch_chip_by_name(device_id, "ghost-chip").await;
+
+    // Then the update fails with ChipNotFound
+    world.then_error_is_chip_not_found("ghost-chip", "test-dev");
+}
+
+// Scenario: Patching a chip by ID with mismatched kind variant fails
+#[tokio::test]
+async fn test_patch_chip_id_mismatched_kind_error() {
+    // Given a device with a Bluetooth chip
+    let world = World::new().await;
+    let device_id = world.given_device_created("test-dev").await;
+    let bt_chip_id = world.given_first_chip_id(device_id).await;
+
+    // When I update the Bluetooth chip by ID but specify Wifi variant
+    world
+        .when_try_patch_chip_variant_by_id(
+            device_id,
+            bt_chip_id,
+            ChipVariantUpdate::Wifi(Default::default()),
+        )
+        .await;
+
+    // Then the update fails with MismatchedChipKind
+    world.then_error_is_mismatched_chip_kind(ChipKind::WIFI, ChipKind::BLUETOOTH);
+}
+
+// Scenario: Updating device pose broadcasts position and orientation to all chips
+#[tokio::test]
+async fn test_patch_device_pose_broadcast_to_all_chips() {
+    // Given a device with multiple chips
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "multi-radio",
+            "bt-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "wifi-chip",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await;
+
+    // When I update the device-level pose
+    world
+        .when_patch_device_pose_and_chip(
+            device_id,
+            BROADCAST_POS_X,
+            BROADCAST_POS_Y,
+            BROADCAST_POS_Z,
+            BROADCAST_YAW,
+            "bt-chip",
+            "updated-bt",
+        )
+        .await;
+
+    // Then all chips on the device receive the broadcast position and orientation
+    world
+        .then_device_and_chips_pose_is(
+            device_id,
+            BROADCAST_POS_X,
+            BROADCAST_POS_Y,
+            BROADCAST_POS_Z,
+            BROADCAST_YAW,
+        )
+        .await;
+}
+
+// Scenario: Patching device pose ignores stale echoed chip offset pose
+#[tokio::test]
+async fn test_patch_device_ignores_stale_chip_offset_pose() {
+    // Given a device with a chip
+    let world = World::given_with_passthrough_bluetooth_and_wifi_mocks().await;
+    let device_id = world
+        .given_device_with_chip(
+            "pose-dev",
+            "bt-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When patching device pose while echoing a stale chip offset pose
+    world
+        .when_patch_device_pose_with_stale_chip_offset(
+            device_id,
+            "bt-chip",
+            BROADCAST_POS_X,
+            BROADCAST_POS_Y,
+            BROADCAST_POS_Z,
+            BROADCAST_YAW,
+        )
+        .await;
+
+    // Then the device and chip receive the new device pose, ignoring stale offset, and metadata is updated
+    world
+        .then_device_and_chips_pose_is(
+            device_id,
+            BROADCAST_POS_X,
+            BROADCAST_POS_Y,
+            BROADCAST_POS_Z,
+            BROADCAST_YAW,
+        )
+        .await;
+    world.then_chip_manufacturer_is(device_id, "bt-chip", MATCHED_MANUFACTURER).await;
+}
+
+// Scenario: Device last modified timestamp is not bumped when chip update fails
+#[tokio::test]
+async fn test_patch_device_timestamp_not_bumped_on_failure() {
+    // Given a device with a chip client configured to fail on update
+    let world = World::given_with_failing_bluetooth_update_mock().await;
+    let device_id = world.given_device_created("test-dev").await;
+    let initial_ts = world.given_recorded_last_modified().await;
+
+    // When an update fails
+    world.when_try_patch_bluetooth_chip(device_id, Some(true), None).await;
+
+    // Then the update fails with actor communication error
+    world.then_error_is_actor_communication();
+
+    // And the last modified timestamp is unchanged
+    world.then_last_modified_is(initial_ts).await;
+}
+
+// Scenario: Adding a chip with duplicate name and kind to a device is rejected
+#[tokio::test]
+async fn test_create_device_duplicate_chip_rejected() {
+    // Given a device with chip "same-chip"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "same-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I add another chip with the same name and kind
+    world
+        .when_try_add_chip_variant(
+            device_id,
+            "same-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // Then the operation fails with DuplicateChip
+    world.then_error_is_duplicate_chip("same-chip");
+}
+
+// Scenario: Creating a device with a name that already exists is rejected
+#[tokio::test]
+async fn test_create_device_name_already_exists_rejected() {
+    // Given an existing device named "existing-device"
+    let world = World::new().await;
+    world
+        .given_device_with_chip(
+            "existing-device",
+            "chip-1",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I attempt to create another device with the name "existing-device"
+    world
+        .when_try_create_device_with_chip(
+            "existing-device",
+            "chip-2",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // Then creation fails with AlreadyExists
+    world.then_error_is_already_exists("existing-device");
+}
+
+// Scenario: Empty chip names use the device name for the first chip and <KIND>-<id> afterward
+#[tokio::test]
+async fn test_auto_naming_uses_kind_and_id_after_first_chip() {
+    // Given a device "test-dev" with an unnamed Bluetooth chip
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+
+    // When I add an unnamed WiFi chip and a second unnamed Bluetooth chip
+    let wifi_chip_id = world
+        .when_add_chip_variant(
+            device_id,
+            "",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await
+        .unwrap();
+    let second_bt_chip_id = world
+        .when_add_chip_variant(
+            device_id,
+            "",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await
+        .unwrap();
+
+    // Then the first chip uses the device name and subsequent chips use <KIND>-<id>
+    world.then_chip_count_is(device_id, 3).await;
+    world.then_first_chip_of_kind_name_is(device_id, ChipKind::BLUETOOTH, "test-dev").await;
+    world
+        .then_first_chip_of_kind_name_is(
+            device_id,
+            ChipKind::WIFI,
+            &format!("WIFI-{}", wifi_chip_id.0),
+        )
+        .await;
+    world
+        .then_chip_name_by_id_is(
+            device_id,
+            second_bt_chip_id,
+            &format!("BLUETOOTH-{}", second_bt_chip_id.0),
+        )
+        .await;
+    world
+        .then_chip_name_by_id_is(device_id, wifi_chip_id, &format!("WIFI-{}", wifi_chip_id.0))
+        .await;
+}
+
+// Scenario: Empty chip names on an unnamed device fall back to <KIND>-<id>
+#[tokio::test]
+async fn test_auto_naming_with_empty_device_name_uses_kind_and_id() {
+    // Given an unnamed device created with an unnamed WiFi chip
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip("", "", device_api::ChipCreateVariant::Wifi(Default::default()))
+        .await;
+    let first_chip_id = world.given_first_chip_id(device_id).await;
+
+    // When I add a second unnamed WiFi chip to the device
+    let second_chip_id = world
+        .when_add_chip_variant(
+            device_id,
+            "",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await
+        .unwrap();
+
+    // Then both chips are named using <KIND>-<id>
+    world.then_chip_count_is(device_id, 2).await;
+    world
+        .then_chip_name_by_id_is(device_id, first_chip_id, &format!("WIFI-{}", first_chip_id.0))
+        .await;
+    world
+        .then_chip_name_by_id_is(device_id, second_chip_id, &format!("WIFI-{}", second_chip_id.0))
+        .await;
 }

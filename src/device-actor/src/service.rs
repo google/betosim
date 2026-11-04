@@ -490,6 +490,7 @@ impl DeviceActor {
         {
             self.guid_to_id.remove(guid);
         }
+        self.last_modified = std::time::SystemTime::now();
         self.stats.update_device_count(self.devices.len(), false);
         self.update_idle_state(ctx);
         self.save_stats_async().await;
@@ -540,6 +541,7 @@ impl DeviceActor {
             info!("DeviceActor: Device {} is empty, auto-deleting", device_id);
             self.handle_delete(device_id, ctx).await?;
         } else {
+            self.last_modified = std::time::SystemTime::now();
             // Save stats if we didn't delete the device (partial update)
             self.save_stats_async().await;
             info!("DeviceActor: Device {} is NOT empty after chip removal", device_id);
@@ -657,14 +659,32 @@ impl DeviceActor {
 
         let chip_id = ChipId(next_chip_id.fetch_add(1, Ordering::SeqCst));
         let chip_kind = chip.kind;
-        let mut chip_name =
-            if chip.name.is_empty() { entity.device.name.clone() } else { chip.name.clone() };
+        let chip_name = if chip.name.is_empty() {
+            if matches!(
+                chip.variant,
+                Some(netsim_model::ChipVariant::Bluetooth(ref bt))
+                    if matches!(bt.mode, netsim_model::BluetoothMode::Beacon(_))
+            ) && entity.device.name.is_empty()
+            {
+                format!("Beacon-{}", chip_id.0)
+            } else if !entity.device.name.is_empty()
+                && !entity.device.chips.iter().any(|c| c.name == entity.device.name)
+            {
+                entity.device.name.clone()
+            } else {
+                format!("{}-{}", chip_kind, chip_id.0)
+            }
+        } else {
+            chip.name.clone()
+        };
+
+        if entity.device.chips.iter().any(|c| c.kind == chip_kind && c.name == chip_name) {
+            return Err(DeviceError::DuplicateChip { kind: chip_kind, name: chip_name });
+        }
+
         if let Some(netsim_model::ChipVariant::Bluetooth(ref mut bt)) = chip.variant
             && let netsim_model::BluetoothMode::Beacon(ref mut beacon_params) = bt.mode
         {
-            if chip_name.is_empty() {
-                chip_name = format!("Beacon-{}", chip_id.0);
-            }
             if entity.device.name.is_empty() {
                 entity.device.name = chip_name.clone();
             }
@@ -704,10 +724,10 @@ impl DeviceActor {
             chip.product_name.clone()
         };
 
-        if !chip.name.is_empty() && chip.name != entity.device.name {
+        if !chip_name.is_empty() && chip_name != entity.device.name {
             info!(
                 "DeviceActor: AddChip {chip_id} (kind {chip_kind}, name \"{}\") to device {} ({})",
-                chip.name, entity.device.id, entity.device.name
+                chip_name, entity.device.id, entity.device.name
             );
         } else {
             info!(
@@ -786,6 +806,7 @@ impl DeviceActor {
             self.next_device_id += 1;
         }
         self.devices.insert(id, entity);
+        self.last_modified = std::time::SystemTime::now();
         self.stats.update_device_count(self.devices.len(), true);
 
         if let Some(device_info) = &params.device_config.device_info {
@@ -825,6 +846,7 @@ impl DeviceActor {
                 params.packet_sink,
             )
             .await?;
+            self.last_modified = std::time::SystemTime::now();
 
             // Trigger immediate save
             self.save_stats_async().await;
@@ -948,7 +970,9 @@ impl DeviceActor {
 
         let mut chip_reset_errors = Vec::new();
         for device_id in devices_to_reset {
-            let device = self.devices.get_mut(&device_id).expect("list has not changed");
+            let Some(device) = self.devices.get_mut(&device_id) else {
+                continue;
+            };
             info!("DeviceActor: Resetting device {}", device.device.name);
 
             let (original_pos, original_orient) = device
@@ -996,6 +1020,7 @@ impl DeviceActor {
         };
 
         self.save_stats_async().await;
+        self.last_modified = std::time::SystemTime::now();
 
         if !chip_reset_errors.is_empty() {
             Err(DeviceError::ResetErrors {
@@ -1007,84 +1032,116 @@ impl DeviceActor {
             Ok(())
         }
     }
+
+    fn match_target_chip(
+        chips: &[netsim_model::Chip],
+        kind: Option<ChipKind>,
+        name: &str,
+        device_name: &str,
+    ) -> Result<usize, DeviceError> {
+        let is_empty = name.is_empty();
+        let mut exact_matches = Vec::new();
+        let mut substring_matches = Vec::new();
+
+        for (idx, chip) in chips.iter().enumerate() {
+            if kind.is_none_or(|k| chip.kind == k) && chip.name.contains(name) {
+                if !is_empty && chip.name == name {
+                    exact_matches.push(idx);
+                } else {
+                    substring_matches.push(idx);
+                }
+            }
+        }
+
+        if exact_matches.len() > 1 {
+            return Err(DeviceError::AmbiguousMatch(name.to_string()));
+        }
+        if let Some(&target) = exact_matches.first() {
+            return Ok(target);
+        }
+
+        if substring_matches.is_empty() {
+            if !is_empty
+                && let Some(expected_kind) = kind
+                && let Some(wrong_kind_chip) = chips
+                    .iter()
+                    .find(|c| c.name == name)
+                    .or_else(|| chips.iter().find(|c| c.name.contains(name)))
+            {
+                return Err(DeviceError::MismatchedChipKind {
+                    expected: expected_kind,
+                    actual: wrong_kind_chip.kind,
+                });
+            }
+            return Err(DeviceError::ChipNotFound(name.to_string(), device_name.to_string()));
+        }
+        if substring_matches.len() > 1 {
+            if is_empty {
+                let ambiguous_kind = substring_matches
+                    .first()
+                    .and_then(|&idx| chips.get(idx))
+                    .map(|c| c.kind)
+                    .unwrap_or_default();
+                return Err(DeviceError::AmbiguousEmptyMatch { kind: ambiguous_kind });
+            }
+            return Err(DeviceError::AmbiguousMatch(name.to_string()));
+        }
+
+        substring_matches
+            .first()
+            .copied()
+            .ok_or_else(|| DeviceError::ChipNotFound(name.to_string(), device_name.to_string()))
+    }
 }
 
-fn validate_update_chips(
+fn resolve_chip_updates(
     id: DeviceId,
     existing_device: &InternalDevice,
     devices: &HashMap<DeviceId, InternalDevice>,
-    chips: &[ChipUpdate],
-) -> Result<(), DeviceError> {
+    chips: Vec<ChipUpdate>,
+) -> Result<HashMap<usize, Vec<ChipUpdate>>, DeviceError> {
     if chips.is_empty() {
         return Err(DeviceError::InvalidInput("chips list cannot be empty".to_string()));
     }
+    let mut resolved_chip_updates: HashMap<usize, Vec<ChipUpdate>> = HashMap::new();
     for u in chips {
-        let matched_chip = if let Some(target_id) = u.id {
-            let Some(c) = existing_device.device.chips.iter().find(|c| c.id == target_id.0) else {
-                return Err(DeviceError::NotFound(format!(
-                    "Chip id {target_id} not found on device {id}"
-                )));
-            };
-            if let Some(v) = &u.variant
-                && v.kind() != c.kind
-            {
-                return Err(DeviceError::InvalidInput(format!(
-                    "Chip id {target_id} has kind {:?}, but update has kind {:?}",
-                    c.kind,
-                    v.kind()
-                )));
-            }
-            c
-        } else if let Some(name) = u.name.as_deref().filter(|n| !n.is_empty()) {
-            let matches: Vec<_> =
-                existing_device.device.chips.iter().filter(|c| c.name == name).collect();
-            if matches.is_empty() {
-                return Err(DeviceError::NotFound(format!(
-                    "Chip '{name}' not found on device {id}"
-                )));
-            }
-            if let Some(v) = &u.variant {
-                let kind_matches: Vec<_> =
-                    matches.into_iter().filter(|c| v.kind() == c.kind).collect();
-                match kind_matches.as_slice() {
-                    [] => {
-                        return Err(DeviceError::InvalidInput(format!(
-                            "Chip name '{name}' exists on device {id} but not with radio kind {:?}",
-                            v.kind()
-                        )));
-                    }
-                    [c] => *c,
-                    _ => {
-                        let msg = format!(
-                            "Ambiguous chip name '{name}' matches multiple \
-                             chips of radio kind {:?} on device {id}",
-                            v.kind()
-                        );
-                        return Err(DeviceError::InvalidInput(msg));
-                    }
-                }
-            } else {
-                match matches.as_slice() {
-                    [c] => *c,
-                    _ => {
-                        return Err(DeviceError::InvalidInput(format!(
-                            "Ambiguous chip name '{name}' matches multiple chips on device {id}"
-                        )));
-                    }
-                }
-            }
-        } else if let Some(v) = &u.variant {
-            let Some(c) = existing_device.device.chips.iter().find(|c| v.kind() == c.kind) else {
-                return Err(DeviceError::NotFound(format!(
-                    "Chip of kind {:?} not found on device {id}",
-                    v.kind()
-                )));
-            };
-            c
-        } else {
+        if u.id.is_none() && u.name.as_deref().unwrap_or("").is_empty() && u.variant.is_none() {
             return Err(DeviceError::InvalidInput(
                 "ChipUpdate requires at least one selector (id, name, or variant)".to_string(),
             ));
+        }
+        let target_idx = if let Some(chip_id) = u.id {
+            let (idx, actual_kind) = existing_device
+                .device
+                .chips
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| (ChipId(c.id) == chip_id).then_some((i, c.kind)))
+                .ok_or_else(|| {
+                    DeviceError::ChipNotFound(
+                        chip_id.to_string(),
+                        existing_device.device.name.clone(),
+                    )
+                })?;
+            if let Some(variant) = &u.variant {
+                let expected_kind = variant.kind();
+                if actual_kind != expected_kind {
+                    return Err(DeviceError::MismatchedChipKind {
+                        expected: expected_kind,
+                        actual: actual_kind,
+                    });
+                }
+            }
+            idx
+        } else {
+            let name = u.name.as_deref().unwrap_or("");
+            let kind = u.variant.as_ref().map(|v| v.kind());
+            DeviceActor::match_target_chip(
+                &existing_device.device.chips,
+                kind,
+                name,
+                &existing_device.device.name,
+            )?
         };
 
         if let Some(netsim_model::ChipVariantUpdate::Bluetooth(bt_upd)) = &u.variant
@@ -1095,11 +1152,11 @@ fn validate_update_chips(
             if !is_valid_ble_address(addr) {
                 return Err(DeviceError::InvalidInput(format!("Invalid BLE address: {addr}")));
             }
-            let target_chip_id = matched_chip.id;
+            let target_chip_id = existing_device.device.chips.get(target_idx).map(|c| c.id);
             if addr != "00:00:00:00:00:00"
                 && devices.values().any(|d| {
                     d.device.chips.iter().any(|c| {
-                        !(d.device.id == id.0 && c.id == target_chip_id)
+                        !(d.device.id == id.0 && Some(c.id) == target_chip_id)
                             && matches!(
                                 &c.variant,
                                 Some(netsim_model::ChipVariant::Bluetooth(existing_bt))
@@ -1113,8 +1170,9 @@ fn validate_update_chips(
                 )));
             }
         }
+        resolved_chip_updates.entry(target_idx).or_default().push(u);
     }
-    Ok(())
+    Ok(resolved_chip_updates)
 }
 
 impl ActorService for DeviceActor {
@@ -1157,21 +1215,23 @@ impl ActorService for DeviceActor {
     async fn handle_update(
         &mut self,
         id: Self::Id,
-        update: Self::Update,
+        mut update: Self::Update,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
-        // Validate target device, chip selectors, and BLE beacon addresses before mutating state.
         let Some(existing_device) = self.devices.get(&id) else {
             return Err(DeviceError::DeviceNotFound(id.to_string()));
         };
-        if let Some(chips) = &update.chips {
-            validate_update_chips(id, existing_device, &self.devices, chips)?;
-        }
+        let mut resolved_chip_updates = if let Some(chips) = update.chips.take() {
+            resolve_chip_updates(id, existing_device, &self.devices, chips)?
+        } else {
+            HashMap::new()
+        };
 
         // Update does not affect device count, so no timeout logic change needed.
         let Some(entity) = self.devices.get_mut(&id) else {
             return Err(DeviceError::DeviceNotFound(id.to_string()));
         };
+
         if update.pose.position.is_some()
             || update.pose.orientation.is_some()
             || update.name.is_some()
@@ -1181,52 +1241,20 @@ impl ActorService for DeviceActor {
         }
         update.apply(&mut entity.device);
 
-        for chip in entity.device.chips.iter_mut() {
+        for (idx, chip) in entity.device.chips.iter_mut().enumerate() {
             let Some(chip_client) = self.chip_clients.get(&chip.kind) else {
                 continue;
             };
 
             let mut chip_update = ChipUpdate { pose: update.pose.clone(), ..Default::default() };
 
-            // Start with ID-based matching
-            let mut specific_update = None;
-            if let Some(chips) = &update.chips {
-                // Priority 1: Exact ID match
-                specific_update = chips.iter().find(|u| u.id == Some(ChipId(chip.id)));
-
-                // Priority 2: Exact non-empty name match (if no ID specified)
-                if specific_update.is_none() {
-                    specific_update = chips.iter().find(|u| {
-                        u.id.is_none()
-                            && u.name.as_deref().is_some_and(|n| !n.is_empty() && n == chip.name)
-                            && u.variant.as_ref().is_none_or(|v| v.kind() == chip.kind)
-                    });
-                }
-
-                // Priority 3: Variant match (if neither ID nor non-empty name was specified)
-                if specific_update.is_none() {
-                    specific_update = chips.iter().find(|u| {
-                        u.id.is_none()
-                            && u.name.as_deref().is_none_or(str::is_empty)
-                            && u.variant.as_ref().is_some_and(|v| v.kind() == chip.kind)
-                    });
+            if let Some(updates) = resolved_chip_updates.remove(&idx) {
+                for u in updates {
+                    chip_update.merge(u);
                 }
             }
 
-            if let Some(u) = specific_update {
-                if u.variant.is_some() {
-                    chip_update.variant = u.variant.clone();
-                }
-                if u.enabled.is_some() {
-                    chip_update.enabled = u.enabled;
-                }
-            }
-
-            if chip_update.pose.position.is_some()
-                || chip_update.pose.orientation.is_some()
-                || chip_update.variant.is_some()
-                || chip_update.enabled.is_some()
-            {
+            if chip_update != ChipUpdate::default() {
                 info!(
                     "DeviceActor: Updating chip {} (kind {}) with {:?}",
                     chip.id, chip.kind, chip_update
@@ -1234,6 +1262,9 @@ impl ActorService for DeviceActor {
                 *chip = chip_client.update(ChipId(chip.id), chip_update).await?;
             }
         }
+
+        self.last_modified = std::time::SystemTime::now();
+
         Ok(entity.device.clone())
     }
 
@@ -1256,6 +1287,9 @@ impl ActorService for DeviceActor {
             DeviceAction::GetRadioStats => {
                 let stats = self.collect_radio_stats_async().await;
                 Ok(DeviceActionResult::Statistics(stats))
+            }
+            DeviceAction::GetLastModified => {
+                Ok(DeviceActionResult::LastModified(self.last_modified))
             }
             DeviceAction::SaveStats => {
                 self.save_stats_async().await;
@@ -1293,6 +1327,15 @@ impl ActorService for DeviceActor {
                 self.perform_device_deletion(id, ctx).await?;
                 Ok(DeviceActionResult::Success)
             }
+            DeviceAction::DeleteChip(chip_id) => {
+                let Some(device_id) = self.devices.iter().find_map(|(&dev_id, dev)| {
+                    dev.device.chips.iter().any(|c| c.id == chip_id.0).then_some(dev_id)
+                }) else {
+                    return Err(DeviceError::NotFound(format!("Chip not found: {chip_id}")));
+                };
+                self.perform_chip_removal(device_id, chip_id, ctx).await?;
+                Ok(DeviceActionResult::Success)
+            }
             DeviceAction::AddChip { chip_config, packet_stream, packet_sink } => {
                 let Some(id) = id else {
                     return Err(DeviceError::NotFound("AddChip requires a device ID".into()));
@@ -1318,6 +1361,7 @@ impl ActorService for DeviceActor {
                 .await;
                 match chip_id_res {
                     Ok(chip_id) => {
+                        self.last_modified = std::time::SystemTime::now();
                         self.save_stats_async().await;
                         Ok(DeviceActionResult::ChipId(chip_id))
                     }
@@ -1395,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_update_chips_missing_variant_kind_returns_not_found() {
+    fn test_resolve_chip_updates_missing_variant_kind_returns_not_found() {
         let (id, internal_device, devices) = device_with_chips(vec![Chip {
             id: 10,
             name: "bt-0".to_string(),
@@ -1409,11 +1453,11 @@ mod tests {
             )),
             ..Default::default()
         }];
-        let err = validate_update_chips(id, &internal_device, &devices, &missing_wifi_update)
-            .unwrap_err();
+        let err =
+            resolve_chip_updates(id, &internal_device, &devices, missing_wifi_update).unwrap_err();
         assert!(matches!(
             &err,
-            DeviceError::NotFound(msg) if msg == "Chip of kind WIFI not found on device 1"
+            DeviceError::ChipNotFound(name, dev) if name.is_empty() && dev == "dev-1"
         ));
 
         let matching_bt_update = vec![ChipUpdate {
@@ -1422,11 +1466,11 @@ mod tests {
             )),
             ..Default::default()
         }];
-        assert!(validate_update_chips(id, &internal_device, &devices, &matching_bt_update).is_ok());
+        assert!(resolve_chip_updates(id, &internal_device, &devices, matching_bt_update).is_ok());
     }
 
     #[test]
-    fn test_validate_update_chips_rejects_selectorless_update() {
+    fn test_resolve_chip_updates_rejects_selectorless_update() {
         let (id, internal_device, devices) = device_with_chips(vec![Chip {
             id: 10,
             name: "bt-0".to_string(),
@@ -1436,8 +1480,8 @@ mod tests {
 
         let selectorless_update =
             vec![ChipUpdate { id: None, name: None, variant: None, ..Default::default() }];
-        let err = validate_update_chips(id, &internal_device, &devices, &selectorless_update)
-            .unwrap_err();
+        let err =
+            resolve_chip_updates(id, &internal_device, &devices, selectorless_update).unwrap_err();
         assert!(matches!(
             &err,
             DeviceError::InvalidInput(msg)
@@ -1451,7 +1495,7 @@ mod tests {
             ..Default::default()
         }];
         let err2 =
-            validate_update_chips(id, &internal_device, &devices, &empty_name_update).unwrap_err();
+            resolve_chip_updates(id, &internal_device, &devices, empty_name_update).unwrap_err();
         assert!(matches!(
             &err2,
             DeviceError::InvalidInput(msg)
@@ -1460,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_update_chips_rejects_mismatched_id_and_variant() {
+    fn test_resolve_chip_updates_rejects_mismatched_id_and_variant() {
         let (id, internal_device, devices) = device_with_chips(vec![Chip {
             id: 10,
             name: "bt-0".to_string(),
@@ -1476,16 +1520,18 @@ mod tests {
             ..Default::default()
         }];
         let err =
-            validate_update_chips(id, &internal_device, &devices, &mismatched_update).unwrap_err();
+            resolve_chip_updates(id, &internal_device, &devices, mismatched_update).unwrap_err();
         assert!(matches!(
             &err,
-            DeviceError::InvalidInput(msg)
-                if msg == "Chip id 10 has kind BLUETOOTH, but update has kind WIFI"
+            DeviceError::MismatchedChipKind {
+                expected: ChipKind::WIFI,
+                actual: ChipKind::BLUETOOTH,
+            }
         ));
     }
 
     #[test]
-    fn test_validate_update_chips_rejects_mismatched_name_and_variant() {
+    fn test_resolve_chip_updates_rejects_mismatched_name_and_variant() {
         let (id, internal_device, devices) = device_with_chips(vec![Chip {
             id: 10,
             name: "bt-0".to_string(),
@@ -1501,16 +1547,18 @@ mod tests {
             ..Default::default()
         }];
         let err =
-            validate_update_chips(id, &internal_device, &devices, &mismatched_update).unwrap_err();
+            resolve_chip_updates(id, &internal_device, &devices, mismatched_update).unwrap_err();
         assert!(matches!(
             &err,
-            DeviceError::InvalidInput(msg)
-                if msg == "Chip name 'bt-0' exists on device 1 but not with radio kind WIFI"
+            DeviceError::MismatchedChipKind {
+                expected: ChipKind::WIFI,
+                actual: ChipKind::BLUETOOTH,
+            }
         ));
     }
 
     #[test]
-    fn test_validate_update_chips_rejects_ambiguous_name_and_variant() {
+    fn test_resolve_chip_updates_rejects_ambiguous_name_and_variant() {
         let (id, internal_device, devices) = device_with_chips(vec![
             Chip { id: 10, name: "wlan-0".to_string(), kind: ChipKind::WIFI, ..Default::default() },
             Chip { id: 11, name: "wlan-0".to_string(), kind: ChipKind::WIFI, ..Default::default() },
@@ -1524,16 +1572,12 @@ mod tests {
             ..Default::default()
         }];
         let err =
-            validate_update_chips(id, &internal_device, &devices, &ambiguous_update).unwrap_err();
-        let expected = concat!(
-            "Ambiguous chip name 'wlan-0' matches multiple chips of ",
-            "radio kind WIFI on device 1"
-        );
-        assert!(matches!(&err, DeviceError::InvalidInput(msg) if msg == expected));
+            resolve_chip_updates(id, &internal_device, &devices, ambiguous_update).unwrap_err();
+        assert!(matches!(&err, DeviceError::AmbiguousMatch(name) if name == "wlan-0"));
     }
 
     #[test]
-    fn test_validate_update_chips_rejects_ambiguous_name_without_variant() {
+    fn test_resolve_chip_updates_rejects_ambiguous_name_without_variant() {
         let (id, internal_device, devices) = device_with_chips(vec![
             Chip {
                 id: 10,
@@ -1550,16 +1594,12 @@ mod tests {
             ..Default::default()
         }];
         let err =
-            validate_update_chips(id, &internal_device, &devices, &ambiguous_update).unwrap_err();
-        assert!(matches!(
-            &err,
-            DeviceError::InvalidInput(msg)
-                if msg == "Ambiguous chip name 'cvd-1' matches multiple chips on device 1"
-        ));
+            resolve_chip_updates(id, &internal_device, &devices, ambiguous_update).unwrap_err();
+        assert!(matches!(&err, DeviceError::AmbiguousMatch(name) if name == "cvd-1"));
     }
 
     #[test]
-    fn test_validate_update_chips_disambiguates_shared_name_by_variant() {
+    fn test_resolve_chip_updates_disambiguates_shared_name_by_variant() {
         let (id, internal_device, devices) = device_with_chips(vec![
             Chip {
                 id: 10,
@@ -1577,8 +1617,9 @@ mod tests {
             )),
             ..Default::default()
         }];
-        assert!(
-            validate_update_chips(id, &internal_device, &devices, &disambiguated_update).is_ok()
-        );
+        let resolved =
+            resolve_chip_updates(id, &internal_device, &devices, disambiguated_update).unwrap();
+        assert!(resolved.contains_key(&1));
+        assert!(!resolved.contains_key(&0));
     }
 }

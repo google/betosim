@@ -35,6 +35,11 @@ use netsim_model::{
     MockChipClient, Pose, RadioUpdate,
 };
 
+pub const DEFAULT_MANUFACTURER: &str = "Netsim";
+pub const UPDATED_MANUFACTURER: &str = "updated-manufacturer";
+pub const UPDATED_PRODUCT_NAME: &str = "updated-product-name";
+pub const MATCHED_MANUFACTURER: &str = "Matched-Vendor";
+
 #[derive(Clone)]
 pub struct LinkTestState {
     pub links: Arc<std::sync::Mutex<Vec<netsim_model::Link>>>,
@@ -66,6 +71,7 @@ pub struct World {
     pub link_state: LinkTestState,
     pub mock_chips: Arc<std::sync::Mutex<HashMap<netsim_model::ChipId, netsim_model::Chip>>>,
     updated_chips: Arc<std::sync::Mutex<Vec<netsim_model::ChipId>>>,
+    pub last_error: std::sync::Mutex<Option<ClientError>>,
 }
 
 impl Drop for World {
@@ -260,6 +266,7 @@ impl World {
             link_state,
             mock_chips,
             updated_chips,
+            last_error: std::sync::Mutex::new(None),
         }
     }
 
@@ -382,15 +389,19 @@ impl World {
                 if let Some(orient) = &patch.pose.orientation {
                     chip.pose.orientation = *orient;
                 }
-                if let Some(netsim_model::ChipVariantUpdate::Bluetooth(bt_update)) = patch.variant
-                    && let Some(netsim_model::ChipVariant::Bluetooth(bt)) = &mut chip.variant
+                if let Some(mfr) = &patch.manufacturer {
+                    chip.manufacturer = mfr.clone();
+                }
+                if let Some(prod) = &patch.product_name {
+                    chip.product_name = prod.clone();
+                }
+                if let Some(enabled) = patch.enabled {
+                    chip.enabled = enabled;
+                }
+                if let (Some(update_variant), Some(chip_variant)) =
+                    (&patch.variant, &mut chip.variant)
                 {
-                    if let Some(s) = bt_update.low_energy.state {
-                        bt.low_energy.state = Some(s);
-                    }
-                    if let Some(s) = bt_update.classic.state {
-                        bt.classic.state = Some(s);
-                    }
+                    update_variant.apply(chip_variant);
                 }
                 Ok(chip.clone())
             } else {
@@ -650,49 +661,25 @@ impl World {
     }
 
     /// BDD Step: When I try to update the device with a specific chip update.
-    pub async fn when_try_update_device_chip(
-        &self,
-        device_id: DeviceId,
-        chip_update: ChipUpdate,
-    ) -> Result<(), DeviceError> {
+    pub async fn when_try_update_device_chip(&self, device_id: DeviceId, chip_update: ChipUpdate) {
         let mut update = DeviceUpdate::default();
         update.id = device_id.0;
         update.chips = Some(vec![chip_update]);
-        match self.client.update(device_id, update).await {
-            Ok(_) => Ok(()),
-            Err(ClientError::Framework(boxed)) => {
-                match boxed.downcast::<actor_framework::FrameworkError<DeviceError>>() {
-                    Ok(fe) => match *fe {
-                        actor_framework::FrameworkError::ServiceError(de) => Err(de),
-                        other => Err(DeviceError::ActorCommunicationError(ClientError::Framework(
-                            Box::new(other),
-                        ))),
-                    },
-                    Err(boxed) => {
-                        Err(DeviceError::ActorCommunicationError(ClientError::Framework(boxed)))
-                    }
-                }
-            }
-            Err(other) => Err(DeviceError::ActorCommunicationError(other)),
-        }
+        let res = self.client.update(device_id, update).await;
+        *self.last_error.lock().unwrap() = res.err();
     }
 
     /// BDD Step: Then the update was rejected as invalid input containing the expected substring.
-    pub fn then_update_rejected_as_invalid_input(
-        &self,
-        result: Result<(), DeviceError>,
-        expected_substring: &str,
-    ) {
-        let err = result.expect_err("expected update to fail with InvalidInput");
-        match &err {
-            DeviceError::InvalidInput(msg) => {
-                assert!(
-                    msg.contains(expected_substring),
-                    "expected error message containing '{expected_substring}', got: '{msg}'"
-                );
-            }
-            other => panic!("expected DeviceError::InvalidInput, got: {other:?}"),
-        }
+    pub fn then_update_rejected_as_invalid_input(&self, expected_substring: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::InvalidInput(msg)) if msg.contains(expected_substring)
+            ),
+            "Expected InvalidInput containing '{expected_substring}', got: {err:?}"
+        );
     }
 
     /// BDD Step: Then the specified chips received updates.
@@ -723,6 +710,17 @@ impl World {
     /// BDD Step: When I delete the device.
     pub async fn when_delete_device(&self, id: DeviceId) {
         self.client.delete(id).await.unwrap();
+    }
+
+    /// BDD Step: When I delete a chip by ID.
+    pub async fn when_delete_chip(&self, chip_id: netsim_model::ChipId) {
+        self.client.delete_chip(chip_id).await.unwrap();
+    }
+
+    /// BDD Step: When I try to delete a chip by ID.
+    pub async fn when_try_delete_chip(&self, chip_id: netsim_model::ChipId) {
+        let res = self.client.delete_chip(chip_id).await;
+        *self.last_error.lock().unwrap() = res.err();
     }
 
     /// BDD Step: When I add two chips with the same device GUID concurrently
@@ -1410,6 +1408,61 @@ impl World {
         );
     }
 
+    /// BDD Step: Then fetching a specific device by ID returns None.
+    pub async fn then_device_get_is_none(&self, id: DeviceId) {
+        assert!(
+            self.client.get(id).await.unwrap().is_none(),
+            "Device {} should not be retrievable via get()",
+            id.0
+        );
+    }
+
+    /// BDD Step: Then the mock chip actor presence matches expected.
+    pub fn then_mock_chip_present(&self, chip_id: netsim_model::ChipId, expected: bool) {
+        let present = self.mock_chips.lock().unwrap().contains_key(&chip_id);
+        assert_eq!(
+            present, expected,
+            "Mock chip {chip_id} presence mismatch: expected {expected}, got {present}"
+        );
+    }
+
+    /// BDD Step: Then the device contains a chip matching ID, name, and kind.
+    pub async fn then_device_has_chip(
+        &self,
+        device_id: DeviceId,
+        chip_id: netsim_model::ChipId,
+        expected_name: &str,
+        expected_kind: netsim_model::ChipKind,
+    ) {
+        let device = self
+            .client
+            .get(device_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("Device {} not found", device_id.0));
+        let chip = device
+            .chips
+            .iter()
+            .find(|c| c.id == chip_id.0)
+            .unwrap_or_else(|| panic!("Chip {chip_id} not found on device {}", device_id.0));
+        assert_eq!(chip.id, chip_id.0);
+        assert_eq!(chip.name, expected_name);
+        assert_eq!(chip.kind, expected_kind);
+    }
+
+    /// BDD Step: Then the last error is NotFound containing the expected substring.
+    pub fn then_error_is_not_found(&self, expected_substring: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::NotFound(msg)) if msg.contains(expected_substring)
+            ),
+            "Expected NotFound containing '{expected_substring}', got: {err:?}"
+        );
+    }
+
     /// BDD Step: Then a specific device should be reset
     pub async fn then_device_properties_are_reset(&self, id: DeviceId) {
         let device = self
@@ -1518,5 +1571,476 @@ impl World {
                 chip_id.0, orientation, chip.pose.orientation
             );
         }
+    }
+
+    /// BDD Step: Given a device with a named chip of the specified variant.
+    pub async fn given_device_with_chip(
+        &self,
+        device_name: &str,
+        chip_name: &str,
+        chip_variant: device_api::ChipCreateVariant,
+    ) -> DeviceId {
+        let params = DeviceCreate {
+            device_config: DeviceConfig::new(device_name.to_string(), true, Pose::default(), false),
+            chip: DeviceChipCreate {
+                name: chip_name.to_string(),
+                manufacturer: DEFAULT_MANUFACTURER.to_string(),
+                product_name: "Netsim".to_string(),
+                chip: chip_variant,
+            },
+        };
+        self.client.create_device(params).await.unwrap()
+    }
+
+    /// BDD Constructor: Given a running Device Actor with default passthrough Bluetooth and Wi-Fi mocks.
+    pub async fn given_with_passthrough_bluetooth_and_wifi_mocks() -> Self {
+        Self::new().await
+    }
+
+    /// BDD Constructor: Given a running Device Actor with chip client configured to accept metadata updates.
+    pub async fn given_with_bluetooth_metadata_mock() -> Self {
+        let mut mock_chip_client = MockChipClient::new();
+        mock_chip_client.expect_create().returning(|_, _| Ok(()));
+        mock_chip_client
+            .expect_update()
+            .withf(|_, patch| {
+                patch.name.is_none()
+                    && patch.manufacturer.as_deref() == Some(UPDATED_MANUFACTURER)
+                    && patch.product_name.as_deref() == Some(UPDATED_PRODUCT_NAME)
+            })
+            .returning(|id, patch| {
+                Ok(netsim_model::Chip {
+                    id: id.0,
+                    kind: ChipKind::BLUETOOTH,
+                    name: "beacon".to_string(),
+                    manufacturer: patch.manufacturer.unwrap_or_default(),
+                    product_name: patch.product_name.unwrap_or_default(),
+                    ..Default::default()
+                })
+            });
+
+        let mut chip_clients = HashMap::new();
+        chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
+        let mock_link_client = Self::create_default_link_client();
+        Self::with_clients(chip_clients, mock_link_client).await
+    }
+
+    /// BDD Constructor: Given a running Device Actor with a chip client configured to fail on update.
+    pub async fn given_with_failing_bluetooth_update_mock() -> Self {
+        let mut mock_chip_client = MockChipClient::new();
+        mock_chip_client.expect_create().returning(|_, _| Ok(()));
+        mock_chip_client
+            .expect_update()
+            .returning(|_, _| Err(netsim_model::ClientError::Send("transport error".to_string())));
+
+        let mut chip_clients = HashMap::new();
+        chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
+        let mock_link_client = Self::create_default_link_client();
+        Self::with_clients(chip_clients, mock_link_client).await
+    }
+
+    /// BDD Step: Given a created device.
+    pub async fn given_device_created(&self, device_name: &str) -> DeviceId {
+        self.when_create_device(device_name).await
+    }
+
+    /// BDD Step: Given a chip added to an existing device.
+    pub async fn given_chip_added_to_device(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        chip_variant: device_api::ChipCreateVariant,
+    ) -> netsim_model::ChipId {
+        self.when_add_chip_variant(device_id, chip_name, chip_variant).await.unwrap()
+    }
+
+    /// BDD Step: Given ID of the first chip on device.
+    pub async fn given_first_chip_id(&self, device_id: DeviceId) -> netsim_model::ChipId {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        netsim_model::ChipId(device.chips[0].id)
+    }
+
+    /// BDD Step: Given recorded last modified timestamp.
+    pub async fn given_recorded_last_modified(&self) -> std::time::SystemTime {
+        self.client.get_last_modified().await.unwrap()
+    }
+
+    /// BDD Step: When I add a chip with the specified variant to an existing device.
+    pub async fn when_add_chip_variant(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        chip_variant: device_api::ChipCreateVariant,
+    ) -> Result<netsim_model::ChipId, netsim_model::ClientError> {
+        let extra_chip = DeviceChipCreate {
+            name: chip_name.to_string(),
+            manufacturer: "Netsim".to_string(),
+            product_name: "Netsim".to_string(),
+            chip: chip_variant,
+        };
+        self.client.add_chip_to_device(device_id, extra_chip).await
+    }
+
+    /// BDD Step: When I try to add a chip with the specified variant to an existing device.
+    pub async fn when_try_add_chip_variant(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        chip_variant: device_api::ChipCreateVariant,
+    ) {
+        let res = self.when_add_chip_variant(device_id, chip_name, chip_variant).await;
+        *self.last_error.lock().unwrap() = res.err();
+    }
+
+    /// BDD Step: When I attempt to create a device with a named chip.
+    pub async fn when_try_create_device_with_chip(
+        &self,
+        device_name: &str,
+        chip_name: &str,
+        chip_variant: device_api::ChipCreateVariant,
+    ) {
+        let params = DeviceCreate {
+            device_config: DeviceConfig::new(device_name.to_string(), true, Pose::default(), false),
+            chip: DeviceChipCreate {
+                name: chip_name.to_string(),
+                manufacturer: "Netsim".to_string(),
+                product_name: "Netsim".to_string(),
+                chip: chip_variant,
+            },
+        };
+        let res = self.client.create_device(params).await;
+        *self.last_error.lock().unwrap() = res.err();
+    }
+
+    /// BDD Step: When I patch chip metadata on device.
+    pub async fn when_patch_chip_metadata(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        manufacturer: &str,
+        product_name: &str,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips = Some(vec![ChipUpdate {
+            name: Some(chip_name.to_string()),
+            manufacturer: Some(manufacturer.to_string()),
+            product_name: Some(product_name.to_string()),
+            ..Default::default()
+        }]);
+        self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: When I patch chip manufacturer on device.
+    pub async fn when_patch_chip_manufacturer(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        manufacturer: &str,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips = Some(vec![ChipUpdate {
+            name: Some(chip_name.to_string()),
+            manufacturer: Some(manufacturer.to_string()),
+            ..Default::default()
+        }]);
+        self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: When I try to patch a chip by name.
+    pub async fn when_try_patch_chip_by_name(&self, device_id: DeviceId, chip_name: &str) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips =
+            Some(vec![ChipUpdate { name: Some(chip_name.to_string()), ..Default::default() }]);
+        let res = self.client.update(device_id, update).await;
+        *self.last_error.lock().unwrap() = res.err();
+    }
+
+    /// BDD Step: When I patch chip with variant filter and manufacturer.
+    pub async fn when_patch_chip_variant_manufacturer(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        variant: ChipVariantUpdate,
+        manufacturer: &str,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips = Some(vec![ChipUpdate {
+            name: Some(chip_name.to_string()),
+            variant: Some(variant),
+            manufacturer: Some(manufacturer.to_string()),
+            ..Default::default()
+        }]);
+        self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: When I try to patch Bluetooth chip properties.
+    pub async fn when_try_patch_bluetooth_chip(
+        &self,
+        device_id: DeviceId,
+        low_energy: Option<bool>,
+        classic: Option<bool>,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips = Some(vec![Self::create_bluetooth_chip_update(low_energy, classic)]);
+        let res = self.client.update(device_id, update).await;
+        *self.last_error.lock().unwrap() = res.err();
+    }
+
+    /// BDD Step: When I try to patch a chip variant by ID.
+    pub async fn when_try_patch_chip_variant_by_id(
+        &self,
+        device_id: DeviceId,
+        chip_id: netsim_model::ChipId,
+        variant: ChipVariantUpdate,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.chips = Some(vec![ChipUpdate {
+            id: Some(chip_id),
+            variant: Some(variant),
+            ..Default::default()
+        }]);
+        let res = self.client.update(device_id, update).await;
+        *self.last_error.lock().unwrap() = res.err();
+    }
+
+    /// BDD Step: When I patch device pose and chip.
+    pub async fn when_patch_device_pose_and_chip(
+        &self,
+        device_id: DeviceId,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        chip_name: &str,
+        manufacturer: &str,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.pose = device_api::PoseUpdate {
+            position: Some(device_api::Position { x, y, z }),
+            orientation: Some(device_api::Orientation { yaw, pitch: 0.0, roll: 0.0 }),
+        };
+        update.chips = Some(vec![ChipUpdate {
+            name: Some(chip_name.to_string()),
+            manufacturer: Some(manufacturer.to_string()),
+            ..Default::default()
+        }]);
+        self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: Then a device and all its chips have the specified position and yaw.
+    pub async fn then_device_and_chips_pose_is(
+        &self,
+        device_id: DeviceId,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+    ) {
+        self.then_device_and_chips_position_and_orientation_match(
+            device_id,
+            device_api::Position { x, y, z },
+            device_api::Orientation { yaw, pitch: 0.0, roll: 0.0 },
+        )
+        .await;
+    }
+
+    /// BDD Step: When patching device pose while echoing a stale chip offset pose.
+    pub async fn when_patch_device_pose_with_stale_chip_offset(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+    ) {
+        let mut update = DeviceUpdate::default();
+        update.id = device_id.0;
+        update.pose = device_api::PoseUpdate {
+            position: Some(device_api::Position { x, y, z }),
+            orientation: Some(device_api::Orientation { yaw, pitch: 0.0, roll: 0.0 }),
+        };
+        update.chips = Some(vec![ChipUpdate {
+            name: Some(chip_name.to_string()),
+            manufacturer: Some(MATCHED_MANUFACTURER.to_string()),
+            pose: netsim_model::PoseUpdate {
+                position: Some(netsim_model::Position { x: 1.0, y: 2.0, z: 3.0 }),
+                orientation: Some(netsim_model::Orientation { yaw: 0.5, pitch: 0.0, roll: 0.0 }),
+            },
+            ..Default::default()
+        }]);
+        self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: Then the last error is ChipNotFound.
+    pub fn then_error_is_chip_not_found(&self, expected_chip: &str, expected_device: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::ChipNotFound(name, dev)) if name == expected_chip && dev == expected_device
+            ),
+            "Expected ChipNotFound({expected_chip}, {expected_device}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is AmbiguousMatch.
+    pub fn then_error_is_ambiguous_match(&self, expected_name: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::AmbiguousMatch(name)) if name == expected_name
+            ),
+            "Expected AmbiguousMatch({expected_name}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is AmbiguousEmptyMatch.
+    pub fn then_error_is_ambiguous_empty_match(&self, expected_kind: ChipKind) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::AmbiguousEmptyMatch { kind }) if *kind == expected_kind
+            ),
+            "Expected AmbiguousEmptyMatch({expected_kind:?}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is MismatchedChipKind.
+    pub fn then_error_is_mismatched_chip_kind(&self, expected: ChipKind, actual: ChipKind) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::MismatchedChipKind { expected: e, actual: a }) if *e == expected && *a == actual
+            ),
+            "Expected MismatchedChipKind({expected:?}, {actual:?}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is DuplicateChip.
+    pub fn then_error_is_duplicate_chip(&self, expected_name: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::DuplicateChip { name, .. }) if name == expected_name
+            ),
+            "Expected DuplicateChip({expected_name}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is AlreadyExists.
+    pub fn then_error_is_already_exists(&self, expected_name: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::AlreadyExists(name)) if name == expected_name
+            ),
+            "Expected AlreadyExists({expected_name}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is ActorCommunicationError.
+    pub fn then_error_is_actor_communication(&self) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(
+                DeviceError::downcast_from(err),
+                Some(DeviceError::ActorCommunicationError(_))
+            ),
+            "Expected ActorCommunicationError, got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the device's last modified timestamp matches expected.
+    pub async fn then_last_modified_is(&self, expected: std::time::SystemTime) {
+        let ts = self.client.get_last_modified().await.unwrap();
+        assert_eq!(ts, expected);
+    }
+
+    /// BDD Step: Then a chip's manufacturer matches expected.
+    pub async fn then_chip_manufacturer_is(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        expected: &str,
+    ) {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        let chip = device.chips.iter().find(|c| c.name == chip_name).unwrap();
+        assert_eq!(chip.manufacturer, expected);
+    }
+
+    /// BDD Step: Then the chip count on device matches expected.
+    pub async fn then_chip_count_is(&self, device_id: DeviceId, expected_len: usize) {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        assert_eq!(device.chips.len(), expected_len);
+    }
+
+    /// BDD Step: Then the chip metadata matches expected.
+    pub async fn then_chip_metadata_is(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        expected_mfr: &str,
+        expected_product: &str,
+    ) {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        let chip = device.chips.iter().find(|c| c.name == chip_name).unwrap();
+        assert_eq!(chip.manufacturer, expected_mfr);
+        assert_eq!(chip.product_name, expected_product);
+    }
+
+    /// BDD Step: Then the chip of specified kind has the expected manufacturer.
+    pub async fn then_chip_of_kind_manufacturer_is(
+        &self,
+        device_id: DeviceId,
+        kind: ChipKind,
+        expected_mfr: &str,
+    ) {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        let chip = device.chips.iter().find(|c| c.kind == kind).unwrap();
+        assert_eq!(chip.manufacturer, expected_mfr);
+    }
+
+    /// BDD Step: Then the first chip of specified kind has the expected name.
+    pub async fn then_first_chip_of_kind_name_is(
+        &self,
+        device_id: DeviceId,
+        kind: ChipKind,
+        expected_name: &str,
+    ) {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        let chip = device.chips.iter().find(|c| c.kind == kind).unwrap();
+        assert_eq!(chip.name, expected_name);
+    }
+
+    /// BDD Step: Then the chip with specified ID has the expected name.
+    pub async fn then_chip_name_by_id_is(
+        &self,
+        device_id: DeviceId,
+        chip_id: netsim_model::ChipId,
+        expected_name: &str,
+    ) {
+        let device = self.client.get(device_id).await.unwrap().unwrap();
+        let chip = device.chips.iter().find(|c| c.id == chip_id.0).unwrap();
+        assert_eq!(chip.name, expected_name);
     }
 }
