@@ -53,6 +53,11 @@ impl World {
         World { _actor_task: actor_task, client }
     }
 
+    pub async fn teardown(mut self) {
+        self.client.shutdown().await.expect("link actor shutdown should succeed");
+        (&mut self._actor_task).await.expect("link actor task should not panic");
+    }
+
     // TODO: move this to a common place for Link and Device actors
     fn create_default_mock() -> MockChipClient {
         let mut mock = MockChipClient::new();

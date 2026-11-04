@@ -162,6 +162,6 @@ impl<T: ActorService> Context<T> for FrameworkContext<T> {
     }
 
     fn cancel_timer(&mut self, key: TimerKey) {
-        self.timers.remove(&key);
+        let _ = self.timers.try_remove(&key);
     }
 }

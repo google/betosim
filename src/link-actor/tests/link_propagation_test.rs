@@ -83,7 +83,7 @@ async fn test_link_propagation() {
     world.client.delete(link_id).await.unwrap();
 
     // Then
-    // Verification happens on drop of `mock_client` inside the actor task
+    world.teardown().await;
 }
 
 // Scenario: Link update (RSSI) is propagated to chip clients
@@ -138,7 +138,7 @@ async fn test_update_link_propagates_patch() {
     world.when_update_link(link_id, -70).await.unwrap();
 
     // Then
-    // Verification happens on drop
+    world.teardown().await;
 }
 
 // Scenario: Chip removal triggers link deletion patch to peer
@@ -201,14 +201,14 @@ async fn test_chip_removal_propagates_patch() {
     world.when_notify_chip_added(chip_removed, ChipKind::BLUETOOTH).await;
     world.when_notify_chip_added(chip_peer, ChipKind::BLUETOOTH).await;
 
-    // Create link (triggers updates to both)
     world.when_create_link(chip_removed, chip_peer, -50).await.unwrap();
+    world.when_create_link(chip_peer, chip_removed, -50).await.unwrap();
 
     // When
     world.when_notify_chip_removed(chip_removed).await;
 
     // Then
-    // Verification happens on drop
+    world.teardown().await;
 }
 
 // Scenario: Reset notifies downstream chip clients of cleared links
@@ -282,7 +282,7 @@ async fn test_reset_propagates_link_removal_to_chips() {
     link_api::LinkClient::reset(&world.client).await.unwrap();
 
     // Then
-    // Verification happens on drop
+    world.teardown().await;
 }
 
 type ChipUpdateRecord = (ChipId, Option<Vec<(ChipId, i8)>>);

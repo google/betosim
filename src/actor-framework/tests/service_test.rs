@@ -143,15 +143,17 @@ async fn test_task_abort_and_timer_cancellation() {
 
     // When (Schedule timer 1 and cancel it immediately, then schedule timer 2 to fire)
     world
-        .when_schedule_timer(1, Duration::from_millis(10))
+        .when_schedule_timer(1, Duration::from_millis(500))
         .await
         .when_cancel_timer(1)
         .await
-        .when_schedule_timer(2, Duration::from_millis(20))
+        .when_schedule_timer(2, Duration::from_millis(1000))
         .await;
 
     // Then (Only timer 2 fires)
     world.then_timer_fired_received(2).await;
+
+    world.when_cancel_timer(2).await.then_last_action_result_is(2);
 }
 
 // Scenario: Actor shutdown stops the event loop and rejects subsequent client requests
