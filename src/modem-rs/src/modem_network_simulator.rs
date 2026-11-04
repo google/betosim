@@ -490,6 +490,31 @@ impl ModemNetworkSimulator {
         network_events
     }
 
+    /// Queues one or more `+CMT` notifications for `id`, returning the effect
+    /// for whichever one may be delivered now. TS 27.005 § 3.4.1 is
+    /// stop-and-wait, so the rest are released by `AT+CNMA`.
+    fn enqueue_incoming_sms(
+        &mut self,
+        id: ModemId,
+        notifications: Vec<Vec<u8>>,
+        mut status_report: Option<PendingStatusReport>,
+    ) -> Vec<(ModemId, ModemEffect)> {
+        if notifications.is_empty() {
+            return Vec::new();
+        }
+        let mut effects = Vec::new();
+        let queue = self.incoming_sms.entry(id).or_default();
+        let total = notifications.len();
+        for (index, packet) in notifications.into_iter().enumerate() {
+            let is_last = index + 1 == total;
+            let report = if is_last { status_report.take() } else { None };
+            if let Some(deliver_response) = queue.enqueue(packet, report) {
+                effects.push((id, ModemEffect::Response(deliver_response)));
+            }
+        }
+        effects
+    }
+
     fn apply_to_modem<F>(&mut self, id: ModemId, f: F) -> Vec<NetworkEvent>
     where
         F: FnOnce(&mut ModemImpl) -> Vec<ModemEffect>,
@@ -620,10 +645,11 @@ impl ModemNetworkSimulator {
                     let status_report_pending =
                         status_report.map(|report| PendingStatusReport { sender_id: id, report });
 
-                    let queue = self.incoming_sms.entry(peer_id).or_default();
-                    if let Some(deliver_response) = queue.enqueue(response, status_report_pending) {
-                        effects.push((peer_id, ModemEffect::Response(deliver_response)));
-                    }
+                    effects.extend(self.enqueue_incoming_sms(
+                        peer_id,
+                        vec![response],
+                        status_report_pending,
+                    ));
                 }
             }
             CommandAction::AcknowledgeIncomingSms { ack } => {
@@ -674,8 +700,8 @@ impl ModemNetworkSimulator {
                 if let Some(pid) = peer_id {
                     let sender_num_str = sender_num.as_ref().map(|n| n.as_str()).unwrap_or("");
                     if let Some(peer_modem) = self.modems.get_mut(&pid) {
-                        let peer_effects = peer_modem.trigger_incoming_sms(sender_num_str, &text);
-                        effects.extend(peer_effects.into_iter().map(|e| (pid, e)));
+                        let notifications = peer_modem.generate_incoming_sms(sender_num_str, &text);
+                        effects.extend(self.enqueue_incoming_sms(pid, notifications, None));
                     }
                 }
             }
@@ -751,11 +777,24 @@ impl ModemNetworkSimulator {
         sender: &str,
         text: &str,
     ) -> Vec<NetworkEvent> {
-        self.apply_to_modem(id, |modem| modem.trigger_incoming_sms(sender, text))
+        let notifications = self
+            .modems
+            .get_mut(&id)
+            .map(|m| m.generate_incoming_sms(sender, text))
+            .unwrap_or_default();
+        let effects = self.enqueue_incoming_sms(id, notifications, None);
+        self.process_effects(effects)
     }
 
     pub fn send_incoming_pdu(&mut self, id: ModemId, pdu: &str) -> Vec<NetworkEvent> {
-        self.apply_to_modem(id, |modem| modem.trigger_incoming_pdu(pdu))
+        let notifications = self
+            .modems
+            .get_mut(&id)
+            .and_then(|m| m.generate_incoming_pdu(pdu))
+            .into_iter()
+            .collect();
+        let effects = self.enqueue_incoming_sms(id, notifications, None);
+        self.process_effects(effects)
     }
 
     pub fn send_cell_broadcast(

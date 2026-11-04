@@ -29,7 +29,7 @@ use crate::{
     },
     parser::Command,
     sim_service::SimService,
-    sms_service::SmsService,
+    sms_service::{MessageFormat, SmsService},
     stk_service::StkService,
     sup_service::SupService,
     time::Clock,
@@ -168,45 +168,41 @@ impl ModemImpl {
         effects
     }
 
-    pub fn trigger_incoming_sms(&mut self, sender: &str, text: &str) -> Vec<ModemEffect> {
+    /// Builds the `+CMT` notifications for an injected incoming message, one
+    /// per part. The caller is responsible for delivering them, which lets the
+    /// network simulator route them through the stop-and-wait acknowledgement
+    /// queue (3GPP TS 27.005 § 3.4.1).
+    pub(crate) fn generate_incoming_sms(&mut self, sender: &str, text: &str) -> Vec<Vec<u8>> {
         if !self.network_service.can_terminate_sms() {
             return Vec::new();
         }
         debug!(
-            "trigger_incoming_sms: id = {}, message_format = {:?}",
+            "generate_incoming_sms: id = {}, message_format = {:?}",
             self.id, self.sms_service.message_format
         );
-        if self.sms_service.message_format == crate::sms_service::MessageFormat::Pdu {
+        if self.sms_service.message_format == MessageFormat::Pdu {
             let pdu_hex = crate::pdu::create_deliver_pdu_ucs2(sender, text);
-            return self.trigger_incoming_pdu(&pdu_hex);
+            return self.generate_incoming_pdu(&pdu_hex).into_iter().collect();
         }
-        let mut effects = Vec::new();
         // Format: +CMT: "<sender>",,"<timestamp>"\r\n<text>
         let timestamp = "22/01/01,12:00:00+00";
         let response = format!("+CMT: \"{sender}\",,\"{timestamp}\"\r\n{text}\r\n");
-        effects.push(ModemEffect::Response(response.as_bytes().to_vec()));
-        effects
+        vec![response.into_bytes()]
     }
 
-    pub fn trigger_incoming_pdu(&mut self, pdu: &str) -> Vec<ModemEffect> {
+    pub(crate) fn generate_incoming_pdu(&self, pdu: &str) -> Option<Vec<u8>> {
         if !self.network_service.can_terminate_sms() {
-            return Vec::new();
+            return None;
         }
-        // Calculate TPDU length
-        let mut effects = Vec::new();
-        if let Ok(bytes) = hex::decode(pdu)
-            && let Some(&sca_len_byte) = bytes.first()
-        {
-            let sca_len = sca_len_byte as usize;
-            if bytes.len() > 1 + sca_len {
-                let tpdu_len = bytes.len() - 1 - sca_len;
-                let omit_cmt_leading_comma = self.quirks.goldfish_ril_37_or_earlier;
-                let comma = if omit_cmt_leading_comma { "" } else { "," };
-                let response = format!("+CMT: {comma}{tpdu_len}\r\n{pdu}\r\n");
-                effects.push(ModemEffect::Response(response.as_bytes().to_vec()));
-            }
+        let bytes = hex::decode(pdu).ok()?;
+        let sca_len = usize::from(*bytes.first()?);
+        if bytes.len() <= 1 + sca_len {
+            return None;
         }
-        effects
+        let tpdu_len = bytes.len() - 1 - sca_len;
+        let comma = if self.quirks.goldfish_ril_37_or_earlier { "" } else { "," };
+        let response = format!("+CMT: {comma}{tpdu_len}\r\n{pdu}\r\n");
+        Some(response.into_bytes())
     }
 
     pub fn trigger_incoming_cell_broadcast(

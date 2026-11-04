@@ -433,6 +433,9 @@ fn test_incoming_sms() {
     then_wait_for_response_containing(&mut world, "A", &format!("+CMT: \"{TEST_PHONE_NUMBER}\""));
     then_response_is(&mut world, "A", TEST_SMS_TEXT);
 
+    // TS 27.005 § 3.4.1: acknowledge before the network may deliver the next one.
+    world.send_and_expect_ok("A", "AT+CNMA");
+
     // 2. PDU Mode
     // Construct PDU for "Hello World"
     // PDU_HEX = "0011000B915155255155F40000AA01F0"
@@ -545,6 +548,9 @@ fn test_legacy_sms() {
     // then_response_is/normalize)
     then_wait_for_response_containing(&mut world, "B", "+CMT: \"98765\"");
     then_response_is(&mut world, "B", "Hello");
+
+    // TS 27.005 § 3.4.1: acknowledge before the network may deliver the next one.
+    world.send_and_expect_ok("B", "AT+CNMA");
 
     // 2. PDU Mode SMS Reception (B receives from A, via incoming PDU injection)
     // Switch B back to PDU mode
@@ -1046,4 +1052,98 @@ fn test_cell_broadcast_suppressed_when_unregistered_or_radio_off() {
     world.send_and_expect_ok("A", "AT+CFUN=0");
     when_cell_broadcast_received(&mut world, "A", 0x1123, 0x1112, 0x01, "Hello");
     world.then_no_response("A");
+}
+
+// Scenario: Injected incoming SMS stop-and-wait serialization
+//   Given a modem "A" in text mode (AT+CMGF=1)
+//   When two external text SMS messages are injected back-to-back
+//   Then "A" receives the first +CMT
+//   And the second +CMT is held until "A" acknowledges with AT+CNMA
+#[test]
+fn test_incoming_sms_injection_serialized_until_cnma_ack() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, "First");
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, "Second");
+
+    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: \"{TEST_PHONE_NUMBER}\""));
+    then_response_is(&mut world, "A", "First");
+
+    // 3GPP TS 27.005 § 3.4.1: stop-and-wait queue withholds subsequent messages until acknowledged.
+    then_no_response(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CNMA");
+
+    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: \"{TEST_PHONE_NUMBER}\""));
+    then_response_is(&mut world, "A", "Second");
+}
+
+// Scenario: Peer-to-peer text-mode incoming SMS stop-and-wait serialization
+//   Given modems "A" and "B" in text mode (AT+CMGF=1)
+//   When "A" sends two consecutive text-mode SMS messages to "B"
+//   Then "B" receives the first +CMT
+//   And the second +CMT is held until "B" acknowledges with AT+CNMA
+#[test]
+fn test_receive_text_sms_serialized_until_cnma_ack() {
+    let mut world = World::new();
+    given_modem_with_number(&mut world, "A", SMS_SENDER);
+    given_modem_with_number(&mut world, "B", SMS_RECEIVER);
+
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+    world.send_and_expect_ok("B", "AT+CMGF=1");
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS=\"{SMS_RECEIVER}\""));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", TEXT_SMS_BODY_HEX);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+
+    then_wait_for_response_containing(&mut world, "B", &format!("+CMT: \"{SMS_SENDER}\""));
+    then_response_is(&mut world, "B", TEXT_SMS_BODY);
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS=\"{SMS_RECEIVER}\""));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", TEXT_SMS_BODY_HEX);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+
+    // 3GPP TS 27.005 § 3.4.1: stop-and-wait queue withholds subsequent messages until acknowledged.
+    then_no_response(&mut world, "B");
+
+    world.send_and_expect_ok("B", "AT+CNMA");
+
+    then_wait_for_response_containing(&mut world, "B", &format!("+CMT: \"{SMS_SENDER}\""));
+    then_response_is(&mut world, "B", TEXT_SMS_BODY);
+}
+
+// Scenario: Incoming PDU injection stop-and-wait serialization
+//   Given a modem "A" in PDU mode (AT+CMGF=0)
+//   When two external PDUs are injected back-to-back
+//   Then "A" receives the first +CMT
+//   And the second +CMT is held until "A" acknowledges with AT+CNMA
+#[test]
+fn test_incoming_pdu_injection_serialized_until_cnma_ack() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+
+    when_incoming_pdu_received(&mut world, "A", TEST_SMS_PDU);
+    when_incoming_pdu_received(&mut world, "A", TEST_SMS_PDU);
+
+    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: ,{TEST_SMS_TPDU_LEN}"));
+    then_response_is(&mut world, "A", TEST_SMS_PDU);
+
+    // 3GPP TS 27.005 § 3.4.1: stop-and-wait queue withholds subsequent messages until acknowledged.
+    then_no_response(&mut world, "A");
+
+    world.send_and_expect_ok("A", "AT+CNMA");
+
+    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: ,{TEST_SMS_TPDU_LEN}"));
+    then_response_is(&mut world, "A", TEST_SMS_PDU);
 }
