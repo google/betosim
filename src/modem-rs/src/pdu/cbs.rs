@@ -22,7 +22,13 @@
 //! - Octet 5: Page Parameter (bits 7..4 = current page 1..=15, bits 3..0 = total pages 1..=15)
 //! - Octets 6..=87: 82 octets of message content (`CBS_CONTENT_LEN`)
 
-use super::{EncodeError, ParseError};
+use super::{
+    EncodeError, ParseError,
+    charset::{
+        GSM7_CR, GSM7_ESC, encode_gsm7_septets, gsm7_basic_to_char, gsm7_ext_to_char,
+        pack_septets_with_fill,
+    },
+};
 
 /// Total length in octets of a single 3GPP TS 23.041 CBS PDU page.
 pub const CBS_PDU_LEN: usize = 88;
@@ -36,11 +42,6 @@ pub const CBS_MAX_GSM7_SEPTETS_PER_PAGE: usize = 93;
 pub const CBS_MAX_UCS2_CHARS_PER_PAGE: usize = 41;
 /// Maximum number of pages in a concatenated CBS message (3GPP TS 23.041 §9.4.1.2.4).
 pub const CBS_MAX_PAGES: usize = 15;
-
-/// GSM 7-bit carriage return (`<CR>`, `0x0D`) used as CBS padding character per 3GPP TS 23.038.
-const GSM7_CR: u8 = 0x0D;
-/// GSM 7-bit escape character (`0x1B`) for the basic character set extension table.
-const GSM7_ESC: u8 = 0x1B;
 
 /// Represents a single 88-octet 3GPP TS 23.041 Cell Broadcast Service (CBS) PDU page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,22 +266,6 @@ fn is_ucs2_cbs_dcs(dcs: u8) -> bool {
     }
 }
 
-/// Encodes a UTF-8 string into GSM 7-bit default alphabet septets (including extension table).
-fn encode_gsm7_septets(text: &str) -> Result<Vec<u8>, EncodeError> {
-    let mut septets = Vec::with_capacity(text.len());
-    for ch in text.chars() {
-        if let Some(code) = char_to_gsm7_basic(ch) {
-            septets.push(code);
-        } else if let Some(ext_code) = char_to_gsm7_ext(ch) {
-            septets.push(GSM7_ESC);
-            septets.push(ext_code);
-        } else {
-            return Err(EncodeError::InvalidFormat);
-        }
-    }
-    Ok(septets)
-}
-
 /// Packs up to 93 GSM 7-bit septets into an 82-octet CBS page, padding unused septets with `0x0D`.
 fn pack_gsm7_cbs_page(septets: &[u8]) -> Result<[u8; CBS_CONTENT_LEN], EncodeError> {
     if septets.len() > CBS_MAX_GSM7_SEPTETS_PER_PAGE {
@@ -295,28 +280,14 @@ fn pack_gsm7_cbs_page(septets: &[u8]) -> Result<[u8; CBS_CONTENT_LEN], EncodeErr
         *dst = src;
     }
 
-    let mut out = [0u8; CBS_CONTENT_LEN];
-    for (i, &septet) in padded.iter().enumerate() {
-        let bit_offset = i * 7;
-        let byte_idx = bit_offset / 8;
-        let bit_shift = bit_offset % 8;
-
-        if let Some(b) = out.get_mut(byte_idx) {
-            *b |= (septet & 0x7F) << bit_shift;
-        }
-        if bit_shift > 1
-            && let Some(b_next) = out.get_mut(byte_idx + 1)
-        {
-            *b_next |= (septet & 0x7F) >> (8 - bit_shift);
-        }
-    }
-    Ok(out)
+    <[u8; CBS_CONTENT_LEN]>::try_from(pack_septets_with_fill(&padded, 0))
+        .map_err(|_err| EncodeError::InvalidFormat)
 }
 
 /// Splits a text string into up to 15 GSM 7-bit packed 82-octet CBS pages, avoiding splitting
 /// a 2-septet `0x1B` extension sequence across a page boundary.
 fn encode_gsm7_pages(text: &str) -> Result<Vec<[u8; CBS_CONTENT_LEN]>, EncodeError> {
-    let septets = encode_gsm7_septets(text)?;
+    let septets = encode_gsm7_septets(text).ok_or(EncodeError::InvalidFormat)?;
     if septets.is_empty() {
         return Ok(vec![pack_gsm7_cbs_page(&[])?]);
     }
@@ -446,96 +417,6 @@ fn encode_8bit_pages(data: &[u8]) -> Result<Vec<[u8; CBS_CONTENT_LEN]>, EncodeEr
         pages.push(page);
     }
     Ok(pages)
-}
-
-const GSM7_BASIC_SPECIALS: &[(char, u8)] = &[
-    ('@', 0x00),
-    ('£', 0x01),
-    ('$', 0x02),
-    ('¥', 0x03),
-    ('è', 0x04),
-    ('é', 0x05),
-    ('ù', 0x06),
-    ('ì', 0x07),
-    ('ò', 0x08),
-    ('Ç', 0x09),
-    ('\n', 0x0A),
-    ('Ø', 0x0B),
-    ('ø', 0x0C),
-    ('\r', 0x0D),
-    ('Å', 0x0E),
-    ('å', 0x0F),
-    ('Δ', 0x10),
-    ('_', 0x11),
-    ('Φ', 0x12),
-    ('Γ', 0x13),
-    ('Λ', 0x14),
-    ('Ω', 0x15),
-    ('Π', 0x16),
-    ('Ψ', 0x17),
-    ('Σ', 0x18),
-    ('Θ', 0x19),
-    ('Ξ', 0x1A),
-    ('Æ', 0x1C),
-    ('æ', 0x1D),
-    ('ß', 0x1E),
-    ('É', 0x1F),
-    ('¤', 0x24),
-    ('¡', 0x40),
-    ('Ä', 0x5B),
-    ('Ö', 0x5C),
-    ('Ñ', 0x5D),
-    ('Ü', 0x5E),
-    ('§', 0x5F),
-    ('¿', 0x60),
-    ('ä', 0x7B),
-    ('ö', 0x7C),
-    ('ñ', 0x7D),
-    ('ü', 0x7E),
-    ('à', 0x7F),
-];
-
-const GSM7_EXTENSION_MAP: &[(char, u8)] = &[
-    ('\x0C', 0x0A),
-    ('^', 0x14),
-    ('{', 0x28),
-    ('}', 0x29),
-    ('\\', 0x2F),
-    ('[', 0x3C),
-    ('~', 0x3D),
-    (']', 0x3E),
-    ('|', 0x40),
-    ('€', 0x65),
-];
-
-/// Maps a Unicode character to its 3GPP TS 23.038 GSM 7-bit default alphabet code point.
-fn char_to_gsm7_basic(ch: char) -> Option<u8> {
-    if let Some(&(_, code)) = GSM7_BASIC_SPECIALS.iter().find(|(c, _)| *c == ch) {
-        return Some(code);
-    }
-    if matches!(ch, ' '..='#' | '%'..='?' | 'A'..='Z' | 'a'..='z') { Some(ch as u8) } else { None }
-}
-
-/// Maps a 3GPP TS 23.038 GSM 7-bit default alphabet code point to a Unicode character.
-fn gsm7_basic_to_char(code: u8) -> char {
-    if let Some(&(ch, _)) = GSM7_BASIC_SPECIALS.iter().find(|(_, c)| *c == code) {
-        return ch;
-    }
-    match code {
-        GSM7_ESC => ' ',
-        0x20..=0x7A => code as char,
-        _ => '?',
-    }
-}
-
-/// Maps a Unicode character to its GSM 7-bit extension table code point (preceded by `0x1B`).
-fn char_to_gsm7_ext(ch: char) -> Option<u8> {
-    GSM7_EXTENSION_MAP.iter().find(|(c, _)| *c == ch).map(|&(_, code)| code)
-}
-
-/// Maps a GSM 7-bit extension table code point to a Unicode character.
-fn gsm7_ext_to_char(code: u8) -> Option<char> {
-    GSM7_EXTENSION_MAP.iter().find(|(_, c)| *c == code).map(|&(ch, _)| ch)
 }
 
 #[cfg(test)]

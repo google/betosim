@@ -24,6 +24,7 @@ use crate::types::TypeOfAddress;
 
 pub(crate) mod bcd;
 pub(crate) mod cbs;
+mod charset;
 
 pub use cbs::{CBS_CONTENT_LEN, CBS_HEADER_LEN, CBS_PDU_LEN, CbsPdu};
 
