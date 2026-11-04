@@ -42,8 +42,7 @@ use log::{info, trace, warn};
 use netsim_packets::{
     DHCP_SERVER_PORT, DHCPV6_SERVER_PORT, DNS_PORT, EthernetFrame, EthernetPacket, IP_P_ICMP,
     IP_P_ICMPV6, IP_P_TCP, IP_P_UDP, Icmpv6Header, Ipv4Builder, Ipv4Header, Ipv6Builder,
-    Ipv6Header, MacAddr, NeighborSolicitation, RouterAdvertisementBuilder, RouterSolicitation,
-    TFTP_PORT, UdpBuilder, ether_type, icmpv6_checksum,
+    Ipv6Header, MacAddr, TFTP_PORT, UdpBuilder, ether_type,
 };
 use serde::{Deserialize, Serialize};
 pub use utils::{clock, timers};
@@ -94,8 +93,7 @@ impl Slirp {
     pub fn new_with_clock(config: Config, clock: Box<dyn Clock>) -> Self {
         let mut arp_table = ArpTable::new();
         arp_table.add_entry(config.host_ipv4, config.gateway_mac);
-        let mut ndp_table = NdpTable::new();
-        ndp_table.add_entry(config.host_ipv6, config.gateway_mac);
+        let ndp_table = NdpTable::new();
 
         let mut timer_manager = TimerManager::new(clock);
         timer_manager.schedule(Duration::from_secs(600), TimerEvent::NdpRouterAdvertisement);
@@ -465,7 +463,7 @@ impl Slirp {
             self.ndp_table.add_entry(source_ip, guest_mac);
         }
         if header.next_header == IP_P_ICMPV6 {
-            self.handle_icmpv6_packet(packet, header, payload, responses);
+            self.handle_icmpv6_packet(guest_mac, packet, header, payload, responses);
         } else if header.next_header == IP_P_TCP {
             self.tcp_manager.handle_ipv6_packet(
                 responses,
@@ -481,6 +479,7 @@ impl Slirp {
 
     fn handle_icmpv6_packet(
         &mut self,
+        guest_mac: MacAddr,
         packet: &ParsedPacket,
         header: &Ipv6Header,
         payload: &[u8],
@@ -491,188 +490,19 @@ impl Slirp {
             return;
         };
 
-        // Neighbor Solicitation is type 135
-        if icmpv6_header.icmpv6_type == 135 {
-            let Some(ns) = NeighborSolicitation::parse(icmpv6_payload) else {
-                trace!("Failed to parse Neighbor Solicitation");
-                return;
-            };
-
-            if let Some(na_payload) = self.ndp_table.handle_packet(&ns) {
-                self.send_neighbor_advertisement(responses, packet, header, &na_payload);
+        if let Some(reply) = crate::ndp::handle_ndp_packet(
+            &self.config,
+            guest_mac,
+            header,
+            &icmpv6_header,
+            icmpv6_payload,
+        ) {
+            if let Some(packet) = reply.to_packet() {
+                responses.push(SlirpResponse::Packet(packet));
             }
-        // Router Solicitation is type 133
-        } else if icmpv6_header.icmpv6_type == 133 {
-            let Some(_rs) = RouterSolicitation::parse(icmpv6_payload) else {
-                trace!("Failed to parse Router Solicitation");
-                return;
-            };
-            self.send_router_advertisement(responses, packet, header);
         } else {
             self.icmpv6_manager.handle_packet(responses, &self.config, packet, payload);
         }
-    }
-
-    fn send_neighbor_advertisement(
-        &mut self,
-        responses: &mut Vec<SlirpResponse>,
-        original_packet: &ParsedPacket,
-        original_ipv6_header: &Ipv6Header,
-        na_payload: &[u8],
-    ) {
-        let eth_header_len = 14;
-        let ipv6_header_len = 40;
-        let icmpv6_header_len = 8;
-        let total_icmpv6_len = icmpv6_header_len + na_payload.len();
-        let total_ipv6_len = ipv6_header_len + total_icmpv6_len;
-        let total_len = eth_header_len + total_ipv6_len;
-
-        let mut buffer = vec![0u8; total_len];
-
-        // 1. Fill Ethernet Header
-        let guest_mac = match original_packet.ethernet {
-            EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-            EthernetPacket::Vlan { frame, .. } => frame.src_addr,
-        };
-        let (eth_slice, eth_payload) = buffer.split_at_mut(eth_header_len);
-        let eth_frame = EthernetFrame::mut_from_bytes(eth_slice).unwrap();
-        eth_frame.dst_addr = guest_mac;
-        eth_frame.src_addr = self.config.gateway_mac;
-        eth_frame.ethertype = 0x86DD.into(); // IPv6
-
-        // 2. Build IPv6 Header
-        let (ipv6_slice, ipv6_payload) = eth_payload.split_at_mut(ipv6_header_len);
-        let mut ipv6_builder = Ipv6Builder::new(
-            ipv6_slice,
-            IP_P_ICMPV6,
-            self.config.host_ipv6,
-            Ipv6Addr::from(original_ipv6_header.source_addr),
-        )
-        .unwrap();
-        ipv6_builder.hop_limit(255); // NDP requires Hop Limit = 255
-
-        // 3. Build ICMPv6 Header and copy NA payload
-        let (icmpv6_slice, icmpv6_payload_slice) = ipv6_payload.split_at_mut(icmpv6_header_len);
-        let icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_slice).unwrap();
-        icmpv6_header.icmpv6_type = 136; // Neighbor Advertisement
-        icmpv6_header.icmpv6_code = 0;
-        icmpv6_header.icmpv6_checksum = 0.into();
-        icmpv6_header.rest = [0u8; 4];
-
-        icmpv6_payload_slice.copy_from_slice(na_payload);
-
-        // 4. Calculate ICMPv6 Checksum (uses pseudo-header)
-        let checksum = icmpv6_checksum(
-            ipv6_payload,
-            self.config.host_ipv6,
-            Ipv6Addr::from(original_ipv6_header.source_addr),
-        );
-        let (icmpv6_hdr_slice, _) = ipv6_payload.split_at_mut(icmpv6_header_len);
-        let mut_icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_hdr_slice).unwrap();
-        mut_icmpv6_header.icmpv6_checksum.set(checksum);
-
-        // 5. Finalize IPv6 Header
-        ipv6_builder.payload_len(total_icmpv6_len);
-        ipv6_builder.build();
-
-        responses.push(SlirpResponse::Packet(Bytes::from(buffer)));
-    }
-
-    fn send_router_advertisement(
-        &mut self,
-        responses: &mut Vec<SlirpResponse>,
-        original_packet: &ParsedPacket,
-        original_ipv6_header: &Ipv6Header,
-    ) {
-        let source_ip = Ipv6Addr::from(original_ipv6_header.source_addr);
-        let (dest_ip, dest_mac) = if source_ip.is_unspecified() {
-            (
-                Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1),
-                MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x01] },
-            )
-        } else {
-            let guest_mac = match original_packet.ethernet {
-                EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                EthernetPacket::Vlan { frame, .. } => frame.src_addr,
-            };
-            (source_ip, guest_mac)
-        };
-
-        self.send_router_advertisement_raw(responses, dest_ip, dest_mac);
-    }
-
-    fn send_periodic_router_advertisement(&mut self, responses: &mut Vec<SlirpResponse>) {
-        let dest_ip = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
-        let dest_mac = MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x01] };
-        self.send_router_advertisement_raw(responses, dest_ip, dest_mac);
-    }
-
-    fn send_router_advertisement_raw(
-        &mut self,
-        responses: &mut Vec<SlirpResponse>,
-        dest_ip: Ipv6Addr,
-        dest_mac: MacAddr,
-    ) {
-        let eth_header_len = 14;
-        let ipv6_header_len = 40;
-        let icmpv6_header_len = 8;
-        let ra_payload_len = 76; // SLLA (8) + PIO (32) + RDNSS (24) + RA (12) = 76 bytes!
-        let total_icmpv6_len = icmpv6_header_len + ra_payload_len;
-        let total_ipv6_len = ipv6_header_len + total_icmpv6_len;
-        let total_len = eth_header_len + total_ipv6_len;
-
-        let mut buffer = vec![0u8; total_len];
-
-        // 1. Fill Ethernet Header
-        let (eth_slice, eth_payload) = buffer.split_at_mut(eth_header_len);
-        let eth_frame = EthernetFrame::mut_from_bytes(eth_slice).unwrap();
-        eth_frame.dst_addr = dest_mac;
-        eth_frame.src_addr = self.config.gateway_mac;
-        eth_frame.ethertype = 0x86DD.into(); // IPv6
-
-        // 2. Build IPv6 Header
-        let (ipv6_slice, ipv6_payload) = eth_payload.split_at_mut(ipv6_header_len);
-        let mut ipv6_builder =
-            Ipv6Builder::new(ipv6_slice, IP_P_ICMPV6, self.config.host_ipv6, dest_ip).unwrap();
-        ipv6_builder.hop_limit(255); // NDP requires Hop Limit = 255
-
-        // 3. Build ICMPv6 Header
-        let (icmpv6_slice, icmpv6_payload_slice) = ipv6_payload.split_at_mut(icmpv6_header_len);
-        let icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_slice).unwrap();
-        icmpv6_header.icmpv6_type = 134; // Router Advertisement
-        icmpv6_header.icmpv6_code = 0;
-        icmpv6_header.icmpv6_checksum = 0.into();
-        icmpv6_header.rest = [0u8; 4];
-
-        // 4. Build RA Payload (RA Header + Options)
-        let prefix = (u128::from(self.config.guest_ipv6) & (u128::MAX << 64)).to_be_bytes();
-
-        let ra_builder = RouterAdvertisementBuilder::new(icmpv6_payload_slice).unwrap();
-        ra_builder
-            .build(
-                64,
-                0,
-                1800,
-                0,
-                0,
-                self.config.gateway_mac.bytes,
-                prefix,
-                64,
-                Some(self.config.host_ipv6.octets()), // Announce gateway as DNS server!
-            )
-            .unwrap();
-
-        // 5. Calculate ICMPv6 Checksum
-        let checksum = icmpv6_checksum(ipv6_payload, self.config.host_ipv6, dest_ip);
-        let (icmpv6_hdr_slice, _) = ipv6_payload.split_at_mut(icmpv6_header_len);
-        let mut_icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_hdr_slice).unwrap();
-        mut_icmpv6_header.icmpv6_checksum.set(checksum);
-
-        // 6. Finalize IPv6 Header
-        ipv6_builder.payload_len(total_icmpv6_len);
-        ipv6_builder.build();
-
-        responses.push(SlirpResponse::Packet(Bytes::from(buffer)));
     }
 
     fn handle_udp_packet(
@@ -808,7 +638,12 @@ impl Slirp {
                     self.tcp_manager.handle_timer(responses, &mut self.timer_manager, conn_id);
                 }
                 TimerEvent::NdpRouterAdvertisement => {
-                    self.send_periodic_router_advertisement(responses);
+                    if let Some(packet) =
+                        crate::ndp::NdpReply::periodic_router_advertisement(&self.config)
+                            .to_packet()
+                    {
+                        responses.push(SlirpResponse::Packet(packet));
+                    }
                     self.timer_manager
                         .schedule(Duration::from_secs(600), TimerEvent::NdpRouterAdvertisement);
                 }

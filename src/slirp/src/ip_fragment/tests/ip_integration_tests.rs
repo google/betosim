@@ -23,8 +23,7 @@ use bytes::Bytes;
 use netsim_packets::{
     EthernetFrame, IP_P_ICMP, IP_P_ICMPV6, IP_P_TCP, IP_P_UDP, IcmpHeader, Icmpv6Header,
     Ipv4Builder, Ipv4Header, Ipv6Builder, Ipv6Header, MacAddr, NeighborAdvertisement,
-    NeighborSolicitation, NeighborSolicitationBuilder, TcpBuilder, TcpHeader, UdpHeader,
-    UdpPacketBuilder, ether_type,
+    PacketBuilder, TcpBuilder, TcpHeader, UdpHeader, UdpPacketBuilder, ether_type,
 };
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -359,59 +358,28 @@ fn test_icmp_time_exceeded_integration() {
     assert_eq!(Ipv4Addr::from(original_ip_header_reply.dest_addr), dst_ip);
 }
 
+const GUEST_LINK_LOCAL_IPV6: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+const ALL_ROUTERS_MULTICAST_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
+const ALL_ROUTERS_MAC: MacAddr = MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x02] };
+const DAD_TARGET_MULTICAST_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 2);
+const DAD_TARGET_MAC: [u8; 6] = [0x33, 0x33, 0xff, 0x00, 0x00, 0x02];
+const GUEST_DAD_TARGET_MULTICAST_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 1);
+const GUEST_DAD_TARGET_MAC: [u8; 6] = [0x33, 0x33, 0xff, 0x00, 0x00, 0x01];
+
 #[test]
-fn test_ndp_neighbor_solicitation_integration() {
+fn test_ndp_ns_gateway_host_ipv6() {
     let config = Config::default();
     let mut slirp = Slirp::new(config.clone());
 
-    // 1. Build Neighbor Solicitation payload
-    let ns_len = std::mem::size_of::<NeighborSolicitation>();
-    let mut ns_payload = vec![0u8; ns_len];
-    let ns_builder = NeighborSolicitationBuilder::new(&mut ns_payload).unwrap();
-    ns_builder.target_addr(config.host_ipv6.octets()).build();
+    let eth_packet = netsim_packets::build_icmpv6_ns_frame(
+        config.guest_mac.bytes,
+        config.gateway_mac.bytes,
+        config.guest_ipv6,
+        config.host_ipv6,
+        config.host_ipv6,
+    );
 
-    // 2. Build ICMPv6 Header
-    let icmpv6_header_len = 8;
-    let mut icmpv6_packet = vec![0u8; icmpv6_header_len + ns_len];
-    let (icmpv6_slice, icmpv6_payload_slice) = icmpv6_packet.split_at_mut(icmpv6_header_len);
-    let icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_slice).unwrap();
-    icmpv6_header.icmpv6_type = 135; // Neighbor Solicitation
-    icmpv6_header.icmpv6_code = 0;
-    icmpv6_header.icmpv6_checksum = 0.into();
-    icmpv6_header.rest = [0u8; 4];
-    icmpv6_payload_slice.copy_from_slice(&ns_payload);
-
-    // Calculate ICMPv6 checksum (uses pseudo-header)
-    let checksum =
-        netsim_packets::icmpv6_checksum(&icmpv6_packet, config.guest_ipv6, config.host_ipv6);
-    let icmpv6_header =
-        Icmpv6Header::mut_from_bytes(&mut icmpv6_packet[..icmpv6_header_len]).unwrap();
-    icmpv6_header.icmpv6_checksum.set(checksum);
-
-    // 3. Build IPv6 Header
-    let ipv6_header_len = 40;
-    let mut ipv6_packet = vec![0u8; ipv6_header_len + icmpv6_packet.len()];
-    let (ipv6_slice, ipv6_payload_slice) = ipv6_packet.split_at_mut(ipv6_header_len);
-    let mut ipv6_builder =
-        Ipv6Builder::new(ipv6_slice, IP_P_ICMPV6, config.guest_ipv6, config.host_ipv6).unwrap();
-    ipv6_builder.hop_limit(255);
-    ipv6_builder.payload_len(icmpv6_packet.len());
-    ipv6_builder.build();
-    ipv6_payload_slice.copy_from_slice(&icmpv6_packet);
-
-    // 4. Build Ethernet Frame
-    let mut eth_packet = vec![0u8; 14 + ipv6_packet.len()];
-    let (eth_header, eth_payload) = eth_packet.split_at_mut(14);
-    let eth_frame = EthernetFrame::mut_from_bytes(eth_header).unwrap();
-    eth_frame.dst_addr = config.gateway_mac;
-    eth_frame.src_addr = config.guest_mac;
-    eth_frame.ethertype = 0x86DD.into(); // IPv6
-    eth_payload.copy_from_slice(&ipv6_packet);
-
-    // 5. Send to Slirp
-    let responses = slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_packet)));
-
-    // 6. Verify response
+    let responses = slirp.handle_request(SlirpRequest::Packet(eth_packet));
     assert_eq!(responses.len(), 1, "Should return exactly one response");
 
     let response_packet = match &responses[0] {
@@ -419,34 +387,153 @@ fn test_ndp_neighbor_solicitation_integration() {
         _ => panic!("Expected Packet response"),
     };
 
-    // Parse Ethernet
-    let (eth_frame_reply, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
+    let (eth_frame_reply, rest) = EthernetFrame::ref_from_prefix(response_packet).unwrap();
     assert_eq!(eth_frame_reply.dst_addr, config.guest_mac);
     assert_eq!(eth_frame_reply.src_addr, config.gateway_mac);
-    assert_eq!(eth_frame_reply.ethertype.get(), 0x86DD);
+    assert_eq!(eth_frame_reply.ethertype.get(), ether_type::IPV6);
 
-    // Parse IPv6
-    let (ipv6_header_reply, ipv6_payload_reply) = Ipv6Header::parse(eth_payload_reply).unwrap();
+    let (ipv6_header_reply, ipv6_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
     assert_eq!(ipv6_header_reply.next_header, IP_P_ICMPV6);
-    assert_eq!(ipv6_header_reply.hop_limit, 255);
+    assert_eq!(ipv6_header_reply.hop_limit, netsim_packets::NDP_HOP_LIMIT);
+    assert_eq!(usize::from(ipv6_header_reply.payload_length.get()), ipv6_payload.len());
     assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), config.host_ipv6);
     assert_eq!(Ipv6Addr::from(ipv6_header_reply.dest_addr), config.guest_ipv6);
 
-    // Parse ICMPv6
-    let (icmpv6_header_reply, icmpv6_payload_reply) =
-        Icmpv6Header::parse(ipv6_payload_reply).unwrap();
-    assert_eq!(icmpv6_header_reply.icmpv6_type, 136); // Neighbor Advertisement
+    let (icmpv6_header_reply, rest) = Icmpv6Header::ref_from_prefix(ipv6_payload).unwrap();
+    assert_eq!(
+        icmpv6_header_reply.icmpv6_type,
+        netsim_packets::Icmpv6Type::NeighborAdvertisement as u8
+    );
     assert_eq!(icmpv6_header_reply.icmpv6_code, 0);
+    assert_eq!(
+        icmpv6_header_reply.na_flags(),
+        netsim_packets::na_flags::ROUTER
+            | netsim_packets::na_flags::SOLICITED
+            | netsim_packets::na_flags::OVERRIDE
+    );
 
-    // Verify ICMPv6 checksum
-    let calculated_checksum =
-        netsim_packets::icmpv6_checksum(ipv6_payload_reply, config.host_ipv6, config.guest_ipv6);
-    assert_eq!(calculated_checksum, 0, "ICMPv6 checksum should be valid");
-
-    // Parse Neighbor Advertisement
-    let na_reply = NeighborAdvertisement::parse(icmpv6_payload_reply).unwrap();
-    assert_eq!(na_reply.flags, 0b01100000); // Solicited, Override
+    let (na_reply, rest) = NeighborAdvertisement::ref_from_prefix(rest).unwrap();
     assert_eq!(Ipv6Addr::from(na_reply.target_addr), config.host_ipv6);
+
+    let (tlla, rest) = netsim_packets::TargetLinkLayerAddressOption::ref_from_prefix(rest).unwrap();
+    assert_eq!(tlla.option_type, netsim_packets::ndp_option::TARGET_LINK_LAYER_ADDR);
+    assert_eq!(tlla.length, netsim_packets::TargetLinkLayerAddressOption::LENGTH_UNITS);
+    assert_eq!(tlla.addr, config.gateway_mac.bytes);
+    assert!(rest.is_empty());
+
+    assert_eq!(
+        netsim_packets::icmpv6_checksum(ipv6_payload, config.host_ipv6, config.guest_ipv6),
+        0
+    );
+}
+
+#[test]
+fn test_ndp_ns_gateway_link_local() {
+    let config = Config::default();
+    let mut slirp = Slirp::new(config.clone());
+
+    let eth_ll_packet = netsim_packets::build_icmpv6_ns_frame(
+        config.guest_mac.bytes,
+        config.gateway_mac.bytes,
+        config.guest_ipv6,
+        crate::ndp::GATEWAY_LINK_LOCAL_IPV6,
+        crate::ndp::GATEWAY_LINK_LOCAL_IPV6,
+    );
+
+    let responses_ll = slirp.handle_request(SlirpRequest::Packet(eth_ll_packet));
+    assert_eq!(responses_ll.len(), 1);
+    let response_ll_packet = match &responses_ll[0] {
+        SlirpResponse::Packet(p) => p,
+        _ => panic!("Expected Packet response"),
+    };
+
+    let (_, rest) = EthernetFrame::ref_from_prefix(response_ll_packet).unwrap();
+    let (ipv6_header_ll_reply, ipv6_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
+    assert_eq!(
+        Ipv6Addr::from(ipv6_header_ll_reply.source_addr),
+        crate::ndp::GATEWAY_LINK_LOCAL_IPV6
+    );
+
+    let (icmpv6_header_ll_reply, rest) = Icmpv6Header::ref_from_prefix(ipv6_payload).unwrap();
+    assert_eq!(
+        icmpv6_header_ll_reply.na_flags(),
+        netsim_packets::na_flags::ROUTER
+            | netsim_packets::na_flags::SOLICITED
+            | netsim_packets::na_flags::OVERRIDE
+    );
+    let (na_ll_reply, rest) = NeighborAdvertisement::ref_from_prefix(rest).unwrap();
+    assert_eq!(Ipv6Addr::from(na_ll_reply.target_addr), crate::ndp::GATEWAY_LINK_LOCAL_IPV6);
+    let (_tlla_ll, rest) =
+        netsim_packets::TargetLinkLayerAddressOption::ref_from_prefix(rest).unwrap();
+    assert!(rest.is_empty());
+}
+
+#[test]
+fn test_ndp_ns_gateway_dad_multicast() {
+    let config = Config::default();
+    let mut slirp = Slirp::new(config.clone());
+
+    let eth_dad_packet = netsim_packets::build_icmpv6_ns_frame(
+        config.guest_mac.bytes,
+        DAD_TARGET_MAC,
+        Ipv6Addr::UNSPECIFIED,
+        DAD_TARGET_MULTICAST_V6,
+        config.host_ipv6,
+    );
+
+    let responses_dad = slirp.handle_request(SlirpRequest::Packet(eth_dad_packet));
+    assert_eq!(responses_dad.len(), 1);
+    let response_dad_packet = match &responses_dad[0] {
+        SlirpResponse::Packet(p) => p,
+        _ => panic!("Expected Packet response"),
+    };
+
+    let (eth_frame_dad_reply, rest) = EthernetFrame::ref_from_prefix(response_dad_packet).unwrap();
+    assert_eq!(eth_frame_dad_reply.dst_addr, crate::ndp::ALL_NODES_MAC);
+    assert_eq!(eth_frame_dad_reply.src_addr, config.gateway_mac);
+
+    let (ipv6_header_dad_reply, ipv6_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
+    assert_eq!(Ipv6Addr::from(ipv6_header_dad_reply.source_addr), config.host_ipv6);
+    assert_eq!(Ipv6Addr::from(ipv6_header_dad_reply.dest_addr), crate::ndp::ALL_NODES_MULTICAST_V6);
+    assert_eq!(ipv6_header_dad_reply.hop_limit, netsim_packets::NDP_HOP_LIMIT);
+
+    let (icmpv6_header_dad_reply, rest) = Icmpv6Header::ref_from_prefix(ipv6_payload).unwrap();
+    assert_eq!(
+        icmpv6_header_dad_reply.icmpv6_type,
+        netsim_packets::Icmpv6Type::NeighborAdvertisement as u8
+    );
+    assert_eq!(
+        icmpv6_header_dad_reply.na_flags(),
+        netsim_packets::na_flags::ROUTER | netsim_packets::na_flags::OVERRIDE
+    );
+
+    let (na_dad_reply, rest) = NeighborAdvertisement::ref_from_prefix(rest).unwrap();
+    assert_eq!(Ipv6Addr::from(na_dad_reply.target_addr), config.host_ipv6);
+
+    let (_tlla_dad, rest) =
+        netsim_packets::TargetLinkLayerAddressOption::ref_from_prefix(rest).unwrap();
+    assert!(rest.is_empty());
+}
+
+#[test]
+fn test_ndp_ns_guest_dad_ignored() {
+    let config = Config::default();
+    let mut slirp = Slirp::new(config.clone());
+
+    let eth_guest_dad_packet = netsim_packets::build_icmpv6_ns_frame(
+        config.guest_mac.bytes,
+        GUEST_DAD_TARGET_MAC,
+        Ipv6Addr::UNSPECIFIED,
+        GUEST_DAD_TARGET_MULTICAST_V6,
+        config.guest_ipv6,
+    );
+
+    let responses_guest_dad = slirp.handle_request(SlirpRequest::Packet(eth_guest_dad_packet));
+    assert_eq!(
+        responses_guest_dad.len(),
+        0,
+        "Gateway must not reply to DAD for guest-owned address"
+    );
 }
 
 #[test]
@@ -1413,53 +1500,18 @@ fn test_udp_ipv6_integration() {
 }
 
 #[test]
-fn test_ndp_router_solicitation_integration() {
+fn test_ndp_router_solicitation_unicast_source() {
     let config = Config::default();
     let mut slirp = Slirp::new(config.clone());
 
-    // --- CASE A: Solicited RS with Unicast Source IP ---
-    let guest_link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-    let all_routers_multicast = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
+    let eth_rs =
+        PacketBuilder::new(ALL_ROUTERS_MAC.bytes, config.guest_mac.bytes, ether_type::IPV6)
+            .ipv6(GUEST_LINK_LOCAL_IPV6.octets(), ALL_ROUTERS_MULTICAST_V6.octets(), IP_P_ICMPV6)
+            .hop_limit(netsim_packets::NDP_HOP_LIMIT)
+            .icmpv6(netsim_packets::Icmpv6Type::RouterSolicitation as u8, 0, [0u8; 4])
+            .build();
 
-    let mut rs_payload = vec![0u8; 4];
-    let rs_builder = netsim_packets::RouterSolicitationBuilder::new(&mut rs_payload).unwrap();
-    rs_builder.build();
-
-    let mut ip_rs = vec![0u8; 40 + 8 + rs_payload.len()];
-    let (ip_header_slice, ip_payload_slice) = ip_rs.split_at_mut(40);
-    let mut ipv6_builder =
-        Ipv6Builder::new(ip_header_slice, IP_P_ICMPV6, guest_link_local, all_routers_multicast)
-            .unwrap();
-    ipv6_builder.hop_limit(255);
-    ipv6_builder.payload_len(8 + rs_payload.len());
-    ipv6_builder.build();
-
-    let (icmpv6_slice, icmpv6_payload_slice) = ip_payload_slice.split_at_mut(8);
-    let icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_slice).unwrap();
-    icmpv6_header.icmpv6_type = 133;
-    icmpv6_header.icmpv6_code = 0;
-    icmpv6_header.icmpv6_checksum = 0.into();
-    icmpv6_header.rest = [0u8; 4];
-    icmpv6_payload_slice.copy_from_slice(&rs_payload);
-
-    let checksum = netsim_packets::icmpv6_checksum(
-        &ip_payload_slice[..12],
-        guest_link_local,
-        all_routers_multicast,
-    );
-    let mut_icmpv6_header = Icmpv6Header::mut_from_bytes(&mut ip_payload_slice[..8]).unwrap();
-    mut_icmpv6_header.icmpv6_checksum.set(checksum);
-
-    let mut eth_rs = vec![0u8; 14 + ip_rs.len()];
-    let (eth_header_slice, eth_payload_slice) = eth_rs.split_at_mut(14);
-    let eth_frame_rs = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
-    eth_frame_rs.dst_addr = MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x02] };
-    eth_frame_rs.src_addr = config.guest_mac;
-    eth_frame_rs.ethertype = 0x86DD.into();
-    eth_payload_slice.copy_from_slice(&ip_rs);
-
-    let responses_unicast =
-        slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_rs)));
+    let responses_unicast = slirp.handle_request(SlirpRequest::Packet(Bytes::from(eth_rs)));
 
     assert_eq!(responses_unicast.len(), 1, "Should return exactly one reply packet");
     let response_packet = match &responses_unicast[0] {
@@ -1467,87 +1519,68 @@ fn test_ndp_router_solicitation_integration() {
         _ => panic!("Expected Packet response"),
     };
 
-    let (_, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
-    let eth_frame_reply = EthernetFrame::parse(response_packet).unwrap().0;
+    let (eth_frame_reply, rest) = EthernetFrame::ref_from_prefix(response_packet).unwrap();
     assert_eq!(eth_frame_reply.dst_addr, config.guest_mac);
     assert_eq!(eth_frame_reply.src_addr, config.gateway_mac);
 
-    let (ipv6_header_reply, ip_payload_reply) = Ipv6Header::parse(eth_payload_reply).unwrap();
+    let (ipv6_header_reply, ipv6_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
     assert_eq!(ipv6_header_reply.next_header, IP_P_ICMPV6);
     assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), config.host_ipv6);
-    assert_eq!(Ipv6Addr::from(ipv6_header_reply.dest_addr), guest_link_local);
+    assert_eq!(Ipv6Addr::from(ipv6_header_reply.dest_addr), GUEST_LINK_LOCAL_IPV6);
+    assert_eq!(usize::from(ipv6_header_reply.payload_length.get()), ipv6_payload.len());
 
-    let (icmpv6_header_reply, icmpv6_payload_reply) =
-        Icmpv6Header::parse(ip_payload_reply).unwrap();
-    assert_eq!(icmpv6_header_reply.icmpv6_type, 134);
+    let (icmpv6_header_reply, rest) = Icmpv6Header::ref_from_prefix(ipv6_payload).unwrap();
+    assert_eq!(
+        icmpv6_header_reply.icmpv6_type,
+        netsim_packets::Icmpv6Type::RouterAdvertisement as u8
+    );
     assert_eq!(icmpv6_header_reply.icmpv6_code, 0);
+    assert_eq!(
+        icmpv6_header_reply.ra_fields(),
+        (crate::ndp::RA_CUR_HOP_LIMIT, 0, crate::ndp::RA_ROUTER_LIFETIME_SECS)
+    );
 
-    let ra = netsim_packets::RouterAdvertisement::parse(icmpv6_payload_reply).unwrap();
-    assert_eq!(ra.cur_hop_limit, 64);
-    assert_eq!(ra.router_lifetime.get(), 1800);
+    let (ra, rest) = netsim_packets::RouterAdvertisement::ref_from_prefix(rest).unwrap();
+    assert_eq!(ra.reachable_time.get(), 0);
+    assert_eq!(ra.retrans_timer.get(), 0);
 
-    // Verify NDP Options
-    let options_slice = &icmpv6_payload_reply[12..];
-
-    // 1. Verify SLLA Option (offset 0..8)
-    let slla = netsim_packets::SourceLinkLayerAddressOption::parse(&options_slice[0..8]).unwrap();
-    assert_eq!(slla.option_type, 1);
-    assert_eq!(slla.length, 1);
+    let (slla, rest) = netsim_packets::SourceLinkLayerAddressOption::ref_from_prefix(rest).unwrap();
+    assert_eq!(slla.option_type, netsim_packets::ndp_option::SOURCE_LINK_LAYER_ADDR);
+    assert_eq!(slla.length, netsim_packets::SourceLinkLayerAddressOption::LENGTH_UNITS);
     assert_eq!(slla.addr, config.gateway_mac.bytes);
 
-    // 2. Verify PIO Option (offset 8..40)
-    let pio = netsim_packets::PrefixInformationOption::parse(&options_slice[8..40]).unwrap();
-    assert_eq!(pio.option_type, 3);
-    assert_eq!(pio.length, 4);
-    assert_eq!(pio.prefix_length, 64);
-    let mut expected_prefix = [0u8; 16];
-    expected_prefix[..8].copy_from_slice(&config.guest_ipv6.octets()[..8]);
-    assert_eq!(pio.prefix, expected_prefix);
+    let (pio, rest) = netsim_packets::PrefixInformationOption::ref_from_prefix(rest).unwrap();
+    assert_eq!(pio.option_type, netsim_packets::ndp_option::PREFIX_INFORMATION);
+    assert_eq!(pio.length, netsim_packets::PrefixInformationOption::LENGTH_UNITS);
+    assert_eq!(pio.prefix_length, crate::ndp::SLAAC_PREFIX_LEN);
+    assert_eq!(Ipv6Addr::from(pio.prefix), Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0));
 
-    // 3. Verify RDNSS Option (offset 40..64)
-    let rdnss = netsim_packets::RdnssOption::parse(&options_slice[40..64]).unwrap();
-    assert_eq!(rdnss.option_type, 25);
-    assert_eq!(rdnss.length, 3);
-    assert_eq!(rdnss.lifetime.get(), 1800);
+    let (rdnss, rest) = netsim_packets::RdnssOption::ref_from_prefix(rest).unwrap();
+    assert_eq!(rdnss.option_type, netsim_packets::ndp_option::RDNSS);
+    assert_eq!(rdnss.length, netsim_packets::RdnssOption::LENGTH_UNITS);
+    assert_eq!(rdnss.lifetime.get(), u32::from(crate::ndp::RA_ROUTER_LIFETIME_SECS));
     assert_eq!(rdnss.dns_servers, [config.host_ipv6.octets()]);
+    assert!(rest.is_empty());
 
-    // --- CASE B: Solicited RS with Unspecified Source IP (::) ---
-    let unspecified_ip = Ipv6Addr::UNSPECIFIED;
-    let mut ip_rs_unspec = vec![0u8; 40 + 8 + rs_payload.len()];
-    let (ip_header_slice, ip_payload_slice) = ip_rs_unspec.split_at_mut(40);
-    let mut ipv6_builder =
-        Ipv6Builder::new(ip_header_slice, IP_P_ICMPV6, unspecified_ip, all_routers_multicast)
-            .unwrap();
-    ipv6_builder.hop_limit(255);
-    ipv6_builder.payload_len(8 + rs_payload.len());
-    ipv6_builder.build();
-
-    let (icmpv6_slice, icmpv6_payload_slice) = ip_payload_slice.split_at_mut(8);
-    let icmpv6_header = Icmpv6Header::mut_from_bytes(icmpv6_slice).unwrap();
-    icmpv6_header.icmpv6_type = 133;
-    icmpv6_header.icmpv6_code = 0;
-    icmpv6_header.icmpv6_checksum = 0.into();
-    icmpv6_header.rest = [0u8; 4];
-    icmpv6_payload_slice.copy_from_slice(&rs_payload);
-
-    let checksum = netsim_packets::icmpv6_checksum(
-        &ip_payload_slice[..12],
-        unspecified_ip,
-        all_routers_multicast,
+    assert_eq!(
+        netsim_packets::icmpv6_checksum(ipv6_payload, config.host_ipv6, GUEST_LINK_LOCAL_IPV6),
+        0
     );
-    let mut_icmpv6_header = Icmpv6Header::mut_from_bytes(&mut ip_payload_slice[..8]).unwrap();
-    mut_icmpv6_header.icmpv6_checksum.set(checksum);
+}
 
-    let mut eth_rs_unspec = vec![0u8; 14 + ip_rs_unspec.len()];
-    let (eth_header_slice, eth_payload_slice) = eth_rs_unspec.split_at_mut(14);
-    let eth_frame_rs = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
-    eth_frame_rs.dst_addr = MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x02] };
-    eth_frame_rs.src_addr = config.guest_mac;
-    eth_frame_rs.ethertype = 0x86DD.into();
-    eth_payload_slice.copy_from_slice(&ip_rs_unspec);
+#[test]
+fn test_ndp_router_solicitation_unspecified_source() {
+    let config = Config::default();
+    let mut slirp = Slirp::new(config.clone());
 
-    let responses_unspec =
-        slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_rs_unspec)));
+    let eth_rs_unspec =
+        PacketBuilder::new(ALL_ROUTERS_MAC.bytes, config.guest_mac.bytes, ether_type::IPV6)
+            .ipv6(Ipv6Addr::UNSPECIFIED.octets(), ALL_ROUTERS_MULTICAST_V6.octets(), IP_P_ICMPV6)
+            .hop_limit(netsim_packets::NDP_HOP_LIMIT)
+            .icmpv6(netsim_packets::Icmpv6Type::RouterSolicitation as u8, 0, [0u8; 4])
+            .build();
+
+    let responses_unspec = slirp.handle_request(SlirpRequest::Packet(Bytes::from(eth_rs_unspec)));
 
     assert_eq!(responses_unspec.len(), 1, "Should return exactly one reply packet");
     let response_packet_unspec = match &responses_unspec[0] {
@@ -1555,20 +1588,18 @@ fn test_ndp_router_solicitation_integration() {
         _ => panic!("Expected Packet response"),
     };
 
-    let (_, eth_payload_reply_unspec) = EthernetFrame::parse(response_packet_unspec).unwrap();
-    let eth_frame_reply_unspec = EthernetFrame::parse(response_packet_unspec).unwrap().0;
-    assert_eq!(
-        eth_frame_reply_unspec.dst_addr,
-        MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x01] }
-    );
+    let (eth_frame_reply_unspec, rest) =
+        EthernetFrame::ref_from_prefix(response_packet_unspec).unwrap();
+    assert_eq!(eth_frame_reply_unspec.dst_addr, crate::ndp::ALL_NODES_MAC);
     assert_eq!(eth_frame_reply_unspec.src_addr, config.gateway_mac);
 
-    let (ipv6_header_reply_unspec, _) = Ipv6Header::parse(eth_payload_reply_unspec).unwrap();
+    let (ipv6_header_reply_unspec, _) = Ipv6Header::ref_from_prefix(rest).unwrap();
     assert_eq!(ipv6_header_reply_unspec.next_header, IP_P_ICMPV6);
+    assert_eq!(ipv6_header_reply_unspec.hop_limit, netsim_packets::NDP_HOP_LIMIT);
     assert_eq!(Ipv6Addr::from(ipv6_header_reply_unspec.source_addr), config.host_ipv6);
     assert_eq!(
         Ipv6Addr::from(ipv6_header_reply_unspec.dest_addr),
-        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)
+        crate::ndp::ALL_NODES_MULTICAST_V6
     );
 }
 
@@ -1616,51 +1647,42 @@ fn test_ndp_periodic_router_advertisement() {
     let next_timer = next_timer.expect("Should have rescheduled timer");
     assert!(next_timer.as_secs() <= 600, "Next timer should be scheduled in 600s");
 
-    let (_, eth_payload_reply) = EthernetFrame::parse(ra_packet).unwrap();
-    let eth_frame_reply = EthernetFrame::parse(ra_packet).unwrap().0;
-    assert_eq!(eth_frame_reply.dst_addr, MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x01] });
+    let (eth_frame_reply, rest) = EthernetFrame::ref_from_prefix(ra_packet).unwrap();
+    assert_eq!(eth_frame_reply.dst_addr, crate::ndp::ALL_NODES_MAC);
     assert_eq!(eth_frame_reply.src_addr, config.gateway_mac);
 
-    let (ipv6_header_reply, ip_payload_reply) = Ipv6Header::parse(eth_payload_reply).unwrap();
+    let (ipv6_header_reply, ipv6_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
     assert_eq!(ipv6_header_reply.next_header, IP_P_ICMPV6);
+    assert_eq!(ipv6_header_reply.hop_limit, netsim_packets::NDP_HOP_LIMIT);
+    assert_eq!(usize::from(ipv6_header_reply.payload_length.get()), ipv6_payload.len());
     assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), config.host_ipv6);
+    assert_eq!(Ipv6Addr::from(ipv6_header_reply.dest_addr), crate::ndp::ALL_NODES_MULTICAST_V6);
+
+    let (icmpv6_header_reply, rest) = Icmpv6Header::ref_from_prefix(ipv6_payload).unwrap();
     assert_eq!(
-        Ipv6Addr::from(ipv6_header_reply.dest_addr),
-        Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)
+        icmpv6_header_reply.icmpv6_type,
+        netsim_packets::Icmpv6Type::RouterAdvertisement as u8
+    );
+    assert_eq!(
+        icmpv6_header_reply.ra_fields(),
+        (crate::ndp::RA_CUR_HOP_LIMIT, 0, crate::ndp::RA_ROUTER_LIFETIME_SECS)
     );
 
-    let (icmpv6_header_reply, icmpv6_payload_reply) =
-        Icmpv6Header::parse(ip_payload_reply).unwrap();
-    assert_eq!(icmpv6_header_reply.icmpv6_type, 134);
+    let (_ra, rest) = netsim_packets::RouterAdvertisement::ref_from_prefix(rest).unwrap();
+    let (_slla, rest) =
+        netsim_packets::SourceLinkLayerAddressOption::ref_from_prefix(rest).unwrap();
+    let (_pio, rest) = netsim_packets::PrefixInformationOption::ref_from_prefix(rest).unwrap();
+    let (_rdnss, rest) = netsim_packets::RdnssOption::ref_from_prefix(rest).unwrap();
+    assert!(rest.is_empty());
 
-    let ra = netsim_packets::RouterAdvertisement::parse(icmpv6_payload_reply).unwrap();
-    assert_eq!(ra.cur_hop_limit, 64);
-    assert_eq!(ra.router_lifetime.get(), 1800);
-
-    // Verify NDP Options
-    let options_slice = &icmpv6_payload_reply[12..];
-
-    // 1. Verify SLLA Option (offset 0..8)
-    let slla = netsim_packets::SourceLinkLayerAddressOption::parse(&options_slice[0..8]).unwrap();
-    assert_eq!(slla.option_type, 1);
-    assert_eq!(slla.length, 1);
-    assert_eq!(slla.addr, config.gateway_mac.bytes);
-
-    // 2. Verify PIO Option (offset 8..40)
-    let pio = netsim_packets::PrefixInformationOption::parse(&options_slice[8..40]).unwrap();
-    assert_eq!(pio.option_type, 3);
-    assert_eq!(pio.length, 4);
-    assert_eq!(pio.prefix_length, 64);
-    let mut expected_prefix = [0u8; 16];
-    expected_prefix[..8].copy_from_slice(&config.guest_ipv6.octets()[..8]);
-    assert_eq!(pio.prefix, expected_prefix);
-
-    // 3. Verify RDNSS Option (offset 40..64)
-    let rdnss = netsim_packets::RdnssOption::parse(&options_slice[40..64]).unwrap();
-    assert_eq!(rdnss.option_type, 25);
-    assert_eq!(rdnss.length, 3);
-    assert_eq!(rdnss.lifetime.get(), 1800);
-    assert_eq!(rdnss.dns_servers, [config.host_ipv6.octets()]);
+    assert_eq!(
+        netsim_packets::icmpv6_checksum(
+            ipv6_payload,
+            config.host_ipv6,
+            crate::ndp::ALL_NODES_MULTICAST_V6
+        ),
+        0
+    );
 
     // 4. Advance clock by next_timer duration - second periodic RA fires!
     clock.lock().unwrap().advance(next_timer);

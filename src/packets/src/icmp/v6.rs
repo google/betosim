@@ -92,6 +92,31 @@ impl Icmpv6Header {
     pub fn set_pointer(&mut self, pointer: u32) {
         self.rest = pointer.to_be_bytes();
     }
+
+    /// Returns the Neighbor Advertisement flags from `rest[0]`.
+    #[must_use]
+    pub fn na_flags(&self) -> u8 {
+        let [flags, ..] = self.rest;
+        flags
+    }
+
+    /// Sets the Neighbor Advertisement flags in `rest[0]`.
+    pub fn set_na_flags(&mut self, flags: u8) {
+        self.rest = [flags, 0, 0, 0];
+    }
+
+    /// Returns the Router Advertisement fields `(cur_hop_limit, flags, router_lifetime)`.
+    #[must_use]
+    pub fn ra_fields(&self) -> (u8, u8, u16) {
+        let [cur_hop_limit, flags, hi, lo] = self.rest;
+        (cur_hop_limit, flags, u16::from_be_bytes([hi, lo]))
+    }
+
+    /// Sets the Router Advertisement fields `(cur_hop_limit, flags, router_lifetime)`.
+    pub fn set_ra_fields(&mut self, cur_hop_limit: u8, flags: u8, router_lifetime: u16) {
+        let [hi, lo] = router_lifetime.to_be_bytes();
+        self.rest = [cur_hop_limit, flags, hi, lo];
+    }
 }
 
 /// Represents the header for an ICMPv6 Echo request or reply message.
@@ -177,5 +202,34 @@ mod tests {
     fn test_icmpv6_header_parsing_too_short() {
         let bytes: [u8; 7] = [128, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9A];
         assert!(Icmpv6Header::parse(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_na_flags_roundtrip() {
+        let mut header = Icmpv6Header {
+            icmpv6_type: Icmpv6Type::NeighborAdvertisement as u8,
+            icmpv6_code: 0,
+            icmpv6_checksum: 0.into(),
+            rest: [0; 4],
+        };
+        let flags = crate::icmp::na_flags::ROUTER
+            | crate::icmp::na_flags::SOLICITED
+            | crate::icmp::na_flags::OVERRIDE;
+        header.set_na_flags(flags);
+        assert_eq!(header.na_flags(), flags);
+        assert_eq!(header.rest, [0xe0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_ra_fields_roundtrip() {
+        let mut header = Icmpv6Header {
+            icmpv6_type: Icmpv6Type::RouterAdvertisement as u8,
+            icmpv6_code: 0,
+            icmpv6_checksum: 0.into(),
+            rest: [0; 4],
+        };
+        header.set_ra_fields(64, 0x80, 1800);
+        assert_eq!(header.ra_fields(), (64, 0x80, 1800));
+        assert_eq!(header.rest, [64, 0x80, 0x07, 0x08]);
     }
 }

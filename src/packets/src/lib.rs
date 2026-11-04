@@ -217,8 +217,8 @@ pub use icmp::{
     Icmpv6TimeExceededCode, Icmpv6Type, Icmpv6UnreachableCode, NDP_HOP_LIMIT,
     NeighborAdvertisement, NeighborAdvertisementBuilder, NeighborSolicitation,
     NeighborSolicitationBuilder, PrefixInformationOption, RdnssOption, RouterAdvertisement,
-    RouterAdvertisementBuilder, RouterSolicitation, RouterSolicitationBuilder,
-    SourceLinkLayerAddressOption, na_flags, ndp_option,
+    RouterAdvertisementBuilder, SourceLinkLayerAddressOption, TargetLinkLayerAddressOption,
+    na_flags, ndp_option, pio_flags,
 };
 // ieee80211 constants
 pub use ieee80211::{

@@ -18,8 +18,10 @@ use std::net::Ipv6Addr;
 
 use netsim_packets::{
     DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, Dhcpv6Header, EthernetFrame, IP_P_ICMPV6, IP_P_UDP,
-    Icmpv6Header, Icmpv6Type, Ipv6Header, MSG_INFORMATION_REQUEST, MSG_REPLY, MacAddr,
-    OPTION_CLIENTID, PacketBuilder, UdpHeader, ether_type, icmpv6_checksum, udp_checksum_v6,
+    Icmpv6Header, Icmpv6Type, Ipv6Header, MSG_INFORMATION_REQUEST, MSG_REPLY, NDP_HOP_LIMIT,
+    NeighborAdvertisement, NeighborSolicitation, OPTION_CLIENTID, PacketBuilder,
+    RouterAdvertisement, SourceLinkLayerAddressOption, TargetLinkLayerAddressOption, UdpHeader,
+    ether_type, na_flags, ndp_option, udp_checksum_v6,
 };
 use slirp_actor::SlirpBackend;
 use zerocopy::FromBytes;
@@ -32,74 +34,47 @@ const GUEST_MAC: [u8; 6] = [0x02, 0x15, 0xb2, 0x00, 0x00, 0x00];
 const GUEST_LINK_LOCAL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0215, 0xb2ff, 0xfe00, 0);
 /// ff02::2, the all-routers multicast group.
 const ALL_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
+/// All-routers multicast MAC address (33:33:00:00:00:02).
+const ALL_ROUTERS_MAC: [u8; 6] = [0x33, 0x33, 0x00, 0x00, 0x00, 0x02];
 /// ff02::1:ff00:2, the solicited-node multicast group for fec0::2.
 const SOLICITED_NODE: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 2);
+/// Solicited-node multicast MAC address (33:33:ff:00:00:02).
+const SOLICITED_NODE_MAC: [u8; 6] = [0x33, 0x33, 0xff, 0x00, 0x00, 0x02];
 /// fec0::2, the gateway address being resolved.
 const GATEWAY_IPV6: Ipv6Addr = Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 2);
+const GATEWAY_LINK_LOCAL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+const RA_CUR_HOP_LIMIT: u8 = 64;
+const TEST_BUF_CAP: usize = 256;
 
 fn create_router_solicitation_packet() -> bytes::Bytes {
-    let mut eth_data = vec![0u8; 14 + 40 + 8];
-    let (eth_header_slice, eth_payload_slice) = eth_data.split_at_mut(14);
-    let eth_frame = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
-    eth_frame.dst_addr = MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x02] }; // All-Routers multicast
-    eth_frame.src_addr = MacAddr { bytes: [0x02, 0x15, 0xb2, 0x00, 0x00, 0x00] };
-    eth_frame.ethertype = 0x86DD.into();
+    let frame = PacketBuilder::new(ALL_ROUTERS_MAC, GUEST_MAC, ether_type::IPV6)
+        .ipv6(GUEST_LINK_LOCAL.octets(), ALL_ROUTERS.octets(), IP_P_ICMPV6)
+        .hop_limit(NDP_HOP_LIMIT)
+        .icmpv6(Icmpv6Type::RouterSolicitation as u8, 0, [0; 4])
+        .build();
 
-    eth_payload_slice[0] = 0x60;
-    eth_payload_slice[4] = 0x00;
-    eth_payload_slice[5] = 0x08;
-    eth_payload_slice[6] = 58; // ICMPv6
-    eth_payload_slice[7] = 255;
-
-    eth_payload_slice[8..24].copy_from_slice(&GUEST_LINK_LOCAL.octets());
-    eth_payload_slice[24..40].copy_from_slice(&ALL_ROUTERS.octets());
-
-    // ICMPv6 Router Solicitation: Type 133, Code 0
-    eth_payload_slice[40] = 133;
-    eth_payload_slice[41] = 0;
-
-    // ICMPv6 mandates a checksum over the IPv6 pseudo-header (RFC 4443 2.3);
-    // unlike UDP over IPv4 there is no "zero means unchecked" exemption.
-    let checksum = icmpv6_checksum(&eth_payload_slice[40..], GUEST_LINK_LOCAL, ALL_ROUTERS);
-    eth_payload_slice[42..44].copy_from_slice(&checksum.to_be_bytes());
-
-    bytes::Bytes::from(eth_data)
+    bytes::Bytes::from(frame)
 }
 
-fn create_neighbor_solicitation_packet() -> bytes::Bytes {
-    let mut eth_data = vec![0u8; 14 + 40 + 32];
-    let (eth_header_slice, eth_payload_slice) = eth_data.split_at_mut(14);
-    let eth_frame = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
-    eth_frame.dst_addr = MacAddr { bytes: [0x33, 0x33, 0xff, 0x00, 0x00, 0x02] }; // Solicited-node multicast
-    eth_frame.src_addr = MacAddr { bytes: GUEST_MAC };
-    eth_frame.ethertype = 0x86DD.into();
+fn create_neighbor_solicitation_packet(target_ip: Ipv6Addr) -> bytes::Bytes {
+    let mut ns_buf = [0u8; TEST_BUF_CAP];
+    let initial_len = ns_buf.len();
+    let (ns, rest) =
+        NeighborSolicitation::mut_from_prefix(&mut ns_buf).expect("buffer too small for NS");
+    ns.target_addr = target_ip.octets();
+    let (slla, rest) =
+        SourceLinkLayerAddressOption::mut_from_prefix(rest).expect("buffer too small for SLLA");
+    *slla = SourceLinkLayerAddressOption::new(GUEST_MAC);
+    let ns_len = initial_len - rest.len();
+    let ns_payload = ns_buf.get(..ns_len).expect("slice NS payload");
 
-    eth_payload_slice[0] = 0x60;
-    eth_payload_slice[4] = 0x00;
-    eth_payload_slice[5] = 32; // ICMPv6 length: 24-byte NS + 8-byte option
-    eth_payload_slice[6] = 58; // ICMPv6
-    eth_payload_slice[7] = 255;
+    let frame = PacketBuilder::new(SOLICITED_NODE_MAC, GUEST_MAC, ether_type::IPV6)
+        .ipv6(GUEST_LINK_LOCAL.octets(), SOLICITED_NODE.octets(), IP_P_ICMPV6)
+        .hop_limit(NDP_HOP_LIMIT)
+        .icmpv6(Icmpv6Type::NeighborSolicitation as u8, 0, [0; 4])
+        .payload(ns_payload);
 
-    eth_payload_slice[8..24].copy_from_slice(&GUEST_LINK_LOCAL.octets());
-    eth_payload_slice[24..40].copy_from_slice(&SOLICITED_NODE.octets());
-
-    // ICMPv6 Neighbor Solicitation: Type 135, Code 0
-    eth_payload_slice[40] = 135;
-    eth_payload_slice[41] = 0;
-    eth_payload_slice[48..64].copy_from_slice(&GATEWAY_IPV6.octets());
-
-    // Source Link-Layer Address option (type 1, length 1 unit of 8 bytes).
-    // RFC 4861 4.3 says a solicitation sent from a unicast address should carry
-    // it, and it is what lets the responder answer without soliciting back.
-    eth_payload_slice[64] = 1;
-    eth_payload_slice[65] = 1;
-    eth_payload_slice[66..72].copy_from_slice(&GUEST_MAC);
-
-    // ICMPv6 mandates a checksum over the IPv6 pseudo-header (RFC 4443 2.3).
-    let checksum = icmpv6_checksum(&eth_payload_slice[40..], GUEST_LINK_LOCAL, SOLICITED_NODE);
-    eth_payload_slice[42..44].copy_from_slice(&checksum.to_be_bytes());
-
-    bytes::Bytes::from(eth_data)
+    bytes::Bytes::from(frame)
 }
 
 // -----------------------------------------------------------------------------
@@ -112,10 +87,32 @@ async fn run_ipv6_router_solicitation_test(backend: SlirpBackend) {
 
     // When guest sends IPv6 Router Solicitation
     let rs_packet = create_router_solicitation_packet();
-    let result = driver.send_packet(rs_packet).await;
+    assert!(driver.send_packet(rs_packet).await.is_ok());
 
-    // Then Slirp accepts and processes the Router Solicitation
-    assert!(result.is_ok());
+    // Then Slirp answers Router Solicitation with Router Advertisement
+    let is_ra = |packet: &bytes::Bytes| {
+        EthernetFrame::parse(packet)
+            .filter(|(eth, _)| eth.ethertype.get() == ether_type::IPV6)
+            .and_then(|(_, payload)| Ipv6Header::parse(payload))
+            .filter(|(ip, _)| ip.next_header == IP_P_ICMPV6)
+            .and_then(|(_, payload)| Icmpv6Header::parse(payload))
+            .is_some_and(|(icmp, _)| icmp.icmpv6_type == Icmpv6Type::RouterAdvertisement as u8)
+    };
+    let reply =
+        tokio::time::timeout(std::time::Duration::from_millis(500), driver.recv_matching(is_ra))
+            .await
+            .expect("Timeout waiting for Router Advertisement reply")
+            .expect("Expected a Router Advertisement packet");
+
+    let (_, eth_payload) =
+        EthernetFrame::parse(&reply).expect("Failed to parse reply Ethernet frame");
+    let (_, ip_payload) = Ipv6Header::parse(eth_payload).expect("Failed to parse IPv6 header");
+    let (icmpv6, icmpv6_payload) =
+        Icmpv6Header::parse(ip_payload).expect("Failed to parse ICMPv6 header");
+    assert_eq!(icmpv6.ra_fields().0, RA_CUR_HOP_LIMIT, "Expected cur_hop_limit == 64");
+
+    let _ra = RouterAdvertisement::parse(icmpv6_payload)
+        .expect("Failed to parse Router Advertisement payload");
 }
 
 #[tokio::test]
@@ -129,52 +126,78 @@ async fn test_ipv6_router_solicitation() {
 // 2. IPv6 Neighbor Solicitation Test
 // -----------------------------------------------------------------------------
 
-async fn run_ipv6_neighbor_solicitation_test(backend: SlirpBackend) {
+async fn run_ipv6_neighbor_solicitation_test(backend: SlirpBackend, target_ip: Ipv6Addr) {
     // Given a Slirp driver running the specified backend
     let mut driver = SlirpTestDriver::new(backend, None).await;
 
-    // When guest sends Neighbor Solicitation for gateway fe80::2
-    let ns_packet = create_neighbor_solicitation_packet();
-    let result = driver.send_packet(ns_packet).await;
+    // When guest sends Neighbor Solicitation for gateway
+    let ns_packet = create_neighbor_solicitation_packet(target_ip);
+    assert!(driver.send_packet(ns_packet).await.is_ok());
 
-    // Then Slirp accepts Neighbor Solicitation packet
-    assert!(result.is_ok());
+    // Then Slirp answers Neighbor Solicitation with a Neighbor Advertisement for the gateway
+    let is_na = |packet: &bytes::Bytes| {
+        EthernetFrame::parse(packet)
+            .filter(|(eth, _)| eth.ethertype.get() == ether_type::IPV6)
+            .and_then(|(_, payload)| Ipv6Header::parse(payload))
+            .filter(|(ip, _)| ip.next_header == IP_P_ICMPV6)
+            .and_then(|(_, payload)| Icmpv6Header::parse(payload))
+            .is_some_and(|(icmp, _)| icmp.icmpv6_type == Icmpv6Type::NeighborAdvertisement as u8)
+    };
+    let reply =
+        tokio::time::timeout(std::time::Duration::from_millis(500), driver.recv_matching(is_na))
+            .await
+            .expect("Timeout waiting for Neighbor Advertisement reply")
+            .expect("Expected a Neighbor Advertisement packet");
 
-    // And, if it answers, the answer must be a Neighbor Advertisement for the
-    // gateway addressed back to the guest.
-    //
-    // NOTE: only the C backend answers today; the native backend stays silent,
-    // tracked in b/565480441. Make this unconditional once that is fixed.
-    if let Ok(Some(reply)) =
-        tokio::time::timeout(std::time::Duration::from_millis(500), driver.recv_packet()).await
-    {
-        let (eth, eth_payload) =
-            EthernetFrame::parse(&reply).expect("Failed to parse reply Ethernet frame");
-        assert_eq!(eth.ethertype.get(), 0x86DD, "Reply must be IPv6");
-        assert_eq!(eth.dst_addr.bytes, GUEST_MAC, "Advertisement must target the guest");
+    let (eth, eth_payload) =
+        EthernetFrame::parse(&reply).expect("Failed to parse reply Ethernet frame");
+    assert_eq!(eth.dst_addr.bytes, GUEST_MAC, "Advertisement must target the guest");
 
-        let (ip, ip_payload) = Ipv6Header::parse(eth_payload).expect("Failed to parse IPv6 header");
-        assert_eq!(ip.next_header, IP_P_ICMPV6, "Reply must be ICMPv6");
+    let (ip, ip_payload) = Ipv6Header::parse(eth_payload).expect("Failed to parse IPv6 header");
+    assert_eq!(
+        Ipv6Addr::from(ip.source_addr),
+        target_ip,
+        "Advertisement must come from the solicited target"
+    );
 
-        let (icmpv6, _) = Icmpv6Header::parse(ip_payload).expect("Failed to parse ICMPv6 header");
-        assert_eq!(
-            icmpv6.icmpv6_type,
-            Icmpv6Type::NeighborAdvertisement as u8,
-            "Expected a Neighbor Advertisement"
-        );
-        assert_eq!(
-            Ipv6Addr::from(ip.source_addr),
-            GATEWAY_IPV6,
-            "Advertisement must come from the solicited target"
-        );
-    }
+    let (icmpv6, icmpv6_payload) =
+        Icmpv6Header::parse(ip_payload).expect("Failed to parse ICMPv6 header");
+    assert_eq!(
+        icmpv6.na_flags(),
+        na_flags::ROUTER | na_flags::SOLICITED | na_flags::OVERRIDE,
+        "Expected R|S|O flags"
+    );
+
+    let (na, rest) = NeighborAdvertisement::ref_from_prefix(icmpv6_payload)
+        .expect("Failed to parse Neighbor Advertisement");
+    assert_eq!(Ipv6Addr::from(na.target_addr), target_ip, "Target address must match solicited IP");
+
+    let (tlla, rest) = TargetLinkLayerAddressOption::ref_from_prefix(rest)
+        .expect("Failed to parse Target Link-Layer Address option");
+    assert_eq!(tlla.option_type, ndp_option::TARGET_LINK_LAYER_ADDR);
+    assert_eq!(tlla.length, TargetLinkLayerAddressOption::LENGTH_UNITS);
+    assert_eq!(tlla.addr, eth.src_addr.bytes);
+    assert!(rest.is_empty());
 }
 
 #[tokio::test]
-async fn test_ipv6_neighbor_solicitation() {
-    for backend in [SlirpBackend::CFfi, SlirpBackend::Native] {
-        run_ipv6_neighbor_solicitation_test(backend).await;
-    }
+async fn test_ipv6_neighbor_solicitation_c_ffi() {
+    run_ipv6_neighbor_solicitation_test(SlirpBackend::CFfi, GATEWAY_IPV6).await;
+}
+
+#[tokio::test]
+async fn test_ipv6_neighbor_solicitation_native() {
+    run_ipv6_neighbor_solicitation_test(SlirpBackend::Native, GATEWAY_IPV6).await;
+}
+
+#[tokio::test]
+async fn test_ipv6_neighbor_solicitation_link_local_c_ffi() {
+    run_ipv6_neighbor_solicitation_test(SlirpBackend::CFfi, GATEWAY_LINK_LOCAL).await;
+}
+
+#[tokio::test]
+async fn test_ipv6_neighbor_solicitation_link_local_native() {
+    run_ipv6_neighbor_solicitation_test(SlirpBackend::Native, GATEWAY_LINK_LOCAL).await;
 }
 
 // -----------------------------------------------------------------------------

@@ -14,6 +14,12 @@
 
 mod ndp_impl;
 pub use ndp_impl::NdpTable;
+#[cfg(test)]
+pub(crate) use ndp_impl::{
+    ALL_NODES_MAC, ALL_NODES_MULTICAST_V6, GATEWAY_LINK_LOCAL_IPV6, RA_CUR_HOP_LIMIT,
+    RA_ROUTER_LIFETIME_SECS, SLAAC_PREFIX_LEN,
+};
+pub(crate) use ndp_impl::{NdpReply, handle_ndp_packet};
 
 #[cfg(test)]
 mod tests;

@@ -19,49 +19,52 @@ use std::net::Ipv6Addr;
 
 use netsim_packets::{
     DHCPV6_CLIENT_PORT, DHCPV6_SERVER_PORT, EthernetFrame, IP_P_ICMPV6, IP_P_UDP, Icmpv6Header,
-    Icmpv6Type, Ipv6Builder, MacAddr, RouterAdvertisementBuilder, UdpBuilder,
+    Icmpv6Type, Ipv6Builder, MacAddr, NDP_HOP_LIMIT, PacketBuilder, RouterAdvertisementBuilder,
+    UdpBuilder, ether_type,
 };
 use slirp_actor::SlirpBackend;
 use zerocopy::FromBytes;
 
 use super::test_driver::SlirpTestDriver;
 
+const RA_SRC_MAC: [u8; 6] = [0x02, 0x15, 0xb2, 0x00, 0x00, 0x00];
+const ALL_NODES_MAC: [u8; 6] = [0x33, 0x33, 0x00, 0x00, 0x00, 0x01];
+const RA_SRC_IPV6: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0215, 0xb2ff, 0xfe00, 0);
+const ALL_NODES_IPV6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+const RA_CUR_HOP_LIMIT: u8 = 64;
+const RA_ROUTER_LIFETIME_SECS: u16 = 1800;
+const SLAAC_PREFIX_LEN: u8 = 64;
+const SLAAC_PREFIX: [u8; 16] = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0).octets();
+const GATEWAY_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+const DNS_SERVER_IPV6: [u8; 16] = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 3).octets();
+const TEST_BUF_CAP: usize = 256;
+
 /// Helper to create an IPv6 Router Advertisement (RA) packet containing
 /// RDNSS DNS option and SLAAC prefix info.
 fn create_ipv6_ra_rdnss_packet() -> bytes::Bytes {
-    let src_ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0215, 0xb2ff, 0xfe00, 0);
-    let dst_ip = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+    let mut ra_hdr = Icmpv6Header {
+        icmpv6_type: Icmpv6Type::RouterAdvertisement as u8,
+        icmpv6_code: 0,
+        icmpv6_checksum: 0.into(),
+        rest: [0; 4],
+    };
+    ra_hdr.set_ra_fields(RA_CUR_HOP_LIMIT, 0, RA_ROUTER_LIFETIME_SECS);
 
-    let mut icmp_data = vec![0u8; 80];
-    let icmp_header = Icmpv6Header::mut_from_bytes(&mut icmp_data[..8]).unwrap();
-    icmp_header.icmpv6_type = Icmpv6Type::RouterAdvertisement as u8;
-    icmp_header.icmpv6_code = 0;
-    icmp_header.icmpv6_checksum.set(0);
+    let mut ra_buf = [0u8; TEST_BUF_CAP];
+    let ra_builder = RouterAdvertisementBuilder::new(&mut ra_buf).expect("buffer too small for RA");
+    let ra_len = ra_builder
+        .rdnss(DNS_SERVER_IPV6, u32::from(RA_ROUTER_LIFETIME_SECS))
+        .build(0, 0, GATEWAY_MAC, SLAAC_PREFIX, SLAAC_PREFIX_LEN)
+        .expect("build RA");
+    let ra_payload = ra_buf.get(..ra_len).expect("slice RA payload");
 
-    let builder = RouterAdvertisementBuilder::new(&mut icmp_data[4..]).unwrap();
-    let prefix = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let gateway_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-    let dns_server = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3];
-    builder.build(64, 0, 1800, 0, 0, gateway_mac, prefix, 64, Some(dns_server)).unwrap();
+    let frame = PacketBuilder::new(ALL_NODES_MAC, RA_SRC_MAC, ether_type::IPV6)
+        .ipv6(RA_SRC_IPV6.octets(), ALL_NODES_IPV6.octets(), IP_P_ICMPV6)
+        .hop_limit(NDP_HOP_LIMIT)
+        .icmpv6(Icmpv6Type::RouterAdvertisement as u8, 0, ra_hdr.rest)
+        .payload(ra_payload);
 
-    let checksum = netsim_packets::icmpv6_checksum(&icmp_data, src_ip, dst_ip);
-    let icmp_header_mut = Icmpv6Header::mut_from_bytes(&mut icmp_data[..8]).unwrap();
-    icmp_header_mut.icmpv6_checksum.set(checksum);
-
-    let mut ip_data = vec![0u8; 40 + icmp_data.len()];
-    let mut ipv6_builder = Ipv6Builder::new(&mut ip_data, IP_P_ICMPV6, src_ip, dst_ip).unwrap();
-    ipv6_builder.payload(&icmp_data).unwrap();
-    ipv6_builder.build().unwrap();
-
-    let mut eth_data = vec![0u8; 14 + ip_data.len()];
-    let (eth_header_slice, eth_payload_slice) = eth_data.split_at_mut(14);
-    let eth_frame = EthernetFrame::mut_from_bytes(eth_header_slice).unwrap();
-    eth_frame.dst_addr = MacAddr { bytes: [0x33, 0x33, 0x00, 0x00, 0x00, 0x01] };
-    eth_frame.src_addr = MacAddr { bytes: [0x02, 0x15, 0xb2, 0x00, 0x00, 0x00] };
-    eth_frame.ethertype = 0x86DD.into();
-    eth_payload_slice.copy_from_slice(&ip_data);
-
-    bytes::Bytes::from(eth_data)
+    bytes::Bytes::from(frame)
 }
 
 /// Helper to create a DHCPv6 Solicit packet (UDP src 546 -> dst 547, Message
