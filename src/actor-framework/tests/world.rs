@@ -21,8 +21,65 @@ use actor_framework::{
 };
 use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::{field::Visit, instrument::WithSubscriber};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Default)]
+struct CapturedWarning {
+    actor: Option<String>,
+    event: Option<String>,
+    elapsed_ms: Option<u64>,
+    threshold_ms: Option<u64>,
+}
+
+impl Visit for CapturedWarning {
+    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "actor" => self.actor = Some(value.to_string()),
+            "event" => self.event = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "elapsed_ms" => self.elapsed_ms = Some(value),
+            "threshold_ms" => self.threshold_ms = Some(value),
+            _ => {}
+        }
+    }
+}
+
+struct WarningCaptureSubscriber {
+    tx: mpsc::UnboundedSender<CapturedWarning>,
+}
+
+impl tracing::Subscriber for WarningCaptureSubscriber {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut warning = CapturedWarning::default();
+            event.record(&mut warning);
+            let _ = self.tx.send(warning);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct User {
@@ -47,6 +104,8 @@ enum UserAction {
     Promote,
     ResetAll,
     AttachTypedStream { stream_id: usize, rx: mpsc::Receiver<String> },
+    AttachByteStream { stream_id: u32, rx: mpsc::Receiver<bytes::Bytes>, handler_delay: Duration },
+    SimulateSlowAction(Duration),
     SpawnCompletingTask(u32),
     SpawnPendingTask(u32),
     AbortTask(u32),
@@ -66,6 +125,7 @@ enum UserError {
 enum ActorEvent {
     TypedStreamItem { stream_id: usize, item: String },
     TypedStreamClosed(usize),
+    ByteStreamItem { stream_id: u32, len: usize },
     TaskClosed(u32),
     TimerFired(u32),
     Shutdown,
@@ -75,18 +135,32 @@ struct UserActor {
     users: HashMap<u32, User>,
     next_id: u32,
     timers: HashMap<u32, TimerKey>,
+    byte_stream_delays: HashMap<u32, Duration>,
     event_tx: mpsc::UnboundedSender<ActorEvent>,
 }
 
 impl UserActor {
     fn new(event_tx: mpsc::UnboundedSender<ActorEvent>) -> Self {
-        Self { users: HashMap::new(), next_id: 0, timers: HashMap::new(), event_tx }
+        Self {
+            users: HashMap::new(),
+            next_id: 0,
+            timers: HashMap::new(),
+            byte_stream_delays: HashMap::new(),
+            event_tx,
+        }
     }
 }
 
 impl ActorLifecycle for UserActor {
     async fn on_start(&mut self, _ctx: &mut DynContext<Self>) {
         self.next_id = 1;
+    }
+
+    async fn on_stream(&mut self, id: u32, msg: bytes::Bytes, _ctx: &mut DynContext<Self>) {
+        if let Some(&delay) = self.byte_stream_delays.get(&id).filter(|d| !d.is_zero()) {
+            tokio::time::sleep(delay).await;
+        }
+        let _ = self.event_tx.send(ActorEvent::ByteStreamItem { stream_id: id, len: msg.len() });
     }
 
     async fn on_typed_stream(
@@ -198,6 +272,15 @@ impl ActorService for UserActor {
                 ctx.add_typed_stream(stream_id, Box::pin(ReceiverStream::new(rx)));
                 Ok(stream_id)
             }
+            UserAction::AttachByteStream { stream_id, rx, handler_delay } => {
+                self.byte_stream_delays.insert(stream_id, handler_delay);
+                ctx.add_stream(stream_id, Box::pin(ReceiverStream::new(rx)));
+                Ok(stream_id as usize)
+            }
+            UserAction::SimulateSlowAction(duration) => {
+                tokio::time::sleep(duration).await;
+                Ok(1)
+            }
             UserAction::SpawnCompletingTask(task_id) => {
                 ctx.spawn(task_id, Box::pin(async move { task_id }));
                 Ok(task_id as usize)
@@ -248,6 +331,8 @@ pub(crate) struct TestWorld {
     actor_handle: JoinHandle<()>,
     event_rx: mpsc::UnboundedReceiver<ActorEvent>,
     stream_senders: HashMap<usize, mpsc::Sender<String>>,
+    byte_stream_senders: HashMap<u32, mpsc::Sender<bytes::Bytes>>,
+    warn_rx: mpsc::UnboundedReceiver<CapturedWarning>,
     last_created_id: Option<u32>,
     last_action_result: Option<usize>,
     last_error: Option<FrameworkError<UserError>>,
@@ -262,13 +347,28 @@ impl Drop for TestWorld {
 impl TestWorld {
     pub(crate) fn new() -> Self {
         let (actor, client) = ResourceActor::new(16);
+        Self::from_actor(actor, client)
+    }
+
+    pub(crate) fn with_stall_threshold(stall_threshold: Duration) -> Self {
+        let (actor, client) = ResourceActor::new(16);
+        Self::from_actor(actor.with_stall_threshold(stall_threshold), client)
+    }
+
+    fn from_actor(actor: ResourceActor<UserActor>, client: ResourceClient<UserActor>) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let actor_handle = tokio::spawn(actor.run(UserActor::new(event_tx)));
+        let (warn_tx, warn_rx) = mpsc::unbounded_channel();
+        let subscriber = WarningCaptureSubscriber { tx: warn_tx };
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let actor_task = actor.run(UserActor::new(event_tx)).with_subscriber(dispatch);
+        let actor_handle = tokio::spawn(actor_task);
         Self {
             client,
             actor_handle,
             event_rx,
             stream_senders: HashMap::new(),
+            byte_stream_senders: HashMap::new(),
+            warn_rx,
             last_created_id: None,
             last_action_result: None,
             last_error: None,
@@ -333,6 +433,38 @@ impl TestWorld {
 
     pub(crate) async fn when_reset_all_users(&mut self) -> &mut Self {
         self.run_action(None, UserAction::ResetAll).await
+    }
+
+    pub(crate) async fn when_run_slow_action(&mut self, duration: Duration) -> &mut Self {
+        self.run_action(None, UserAction::SimulateSlowAction(duration)).await
+    }
+
+    pub(crate) async fn given_attached_byte_stream(
+        &mut self,
+        stream_id: u32,
+        handler_delay: Duration,
+    ) -> &mut Self {
+        let (tx, rx) = mpsc::channel(16);
+        self.byte_stream_senders.insert(stream_id, tx);
+        self.run_action(None, UserAction::AttachByteStream { stream_id, rx, handler_delay }).await;
+        assert!(self.last_error.is_none(), "attaching byte stream should succeed");
+        self
+    }
+
+    pub(crate) async fn when_send_byte_stream_item(
+        &mut self,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> &mut Self {
+        let sender = self
+            .byte_stream_senders
+            .get(&stream_id)
+            .expect("byte stream sender must be registered");
+        sender
+            .send(bytes::Bytes::copy_from_slice(payload))
+            .await
+            .expect("sending item to byte stream should succeed");
+        self
     }
 
     pub(crate) async fn given_attached_typed_stream(&mut self, stream_id: usize) -> &mut Self {
@@ -452,6 +584,19 @@ impl TestWorld {
         self
     }
 
+    pub(crate) async fn then_byte_stream_item_received(
+        &mut self,
+        expected_stream_id: u32,
+        expected_len: usize,
+    ) -> &mut Self {
+        let event = self.next_event().await;
+        assert_eq!(
+            event,
+            ActorEvent::ByteStreamItem { stream_id: expected_stream_id, len: expected_len }
+        );
+        self
+    }
+
     pub(crate) async fn then_typed_stream_item_received(
         &mut self,
         expected_stream_id: usize,
@@ -496,6 +641,55 @@ impl TestWorld {
             .await
             .expect("actor task should exit after shutdown")
             .expect("actor task should not panic");
+        self
+    }
+
+    pub(crate) async fn then_stall_warning_recorded(
+        &mut self,
+        expected_actor_substr: &str,
+        expected_event: &str,
+        expected_threshold: Duration,
+    ) -> &mut Self {
+        let warning = timeout(EVENT_TIMEOUT, self.warn_rx.recv())
+            .await
+            .expect("timed out waiting for stall warning")
+            .expect("warn_rx channel closed unexpectedly");
+
+        let actor = warning.actor.expect("expected structured 'actor' field on warning");
+        assert!(
+            actor.contains(expected_actor_substr),
+            "expected actor to contain {expected_actor_substr:?}, got {actor:?}"
+        );
+
+        let event = warning.event.expect("expected structured 'event' field on warning");
+        assert_eq!(event, expected_event, "expected event {expected_event:?}, got {event:?}");
+
+        let expected_threshold_ms =
+            u64::try_from(expected_threshold.as_millis()).unwrap_or(u64::MAX);
+        let threshold_ms =
+            warning.threshold_ms.expect("expected structured 'threshold_ms' field on warning");
+        assert_eq!(
+            threshold_ms, expected_threshold_ms,
+            "expected threshold_ms {expected_threshold_ms}, got {threshold_ms}"
+        );
+
+        let elapsed_ms =
+            warning.elapsed_ms.expect("expected structured 'elapsed_ms' field on warning");
+        assert!(
+            elapsed_ms >= threshold_ms,
+            "expected elapsed_ms {elapsed_ms} >= threshold_ms {threshold_ms}"
+        );
+
+        self
+    }
+
+    pub(crate) async fn then_no_stall_warnings_recorded(&mut self) -> &mut Self {
+        self.client.list().await.expect("synchronizing list should succeed");
+        let recv_result = self.warn_rx.try_recv();
+        assert!(
+            matches!(recv_result, Err(mpsc::error::TryRecvError::Empty)),
+            "expected no stall warnings, got: {recv_result:?}"
+        );
         self
     }
 

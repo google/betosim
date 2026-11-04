@@ -175,3 +175,73 @@ async fn test_actor_shutdown_closes_client() {
     world.when_create_user("AfterShutdown").await;
     world.then_last_error_is_actor_closed();
 }
+
+// Scenario: Stalled action execution emits structured stall warning
+//
+//   Given an actor running with default 100ms stall threshold
+//   When a custom action stalls for 150ms (> 100ms threshold)
+//   Then a structured warning is emitted with actor, event, elapsed_ms, and threshold_ms
+#[tokio::test]
+async fn test_stalled_action_emits_stall_warning() {
+    const DEFAULT_STALL_ACTION_DELAY: Duration = Duration::from_millis(150);
+
+    // Given
+    let mut world = TestWorld::new();
+
+    // When
+    world.when_run_slow_action(DEFAULT_STALL_ACTION_DELAY).await;
+
+    // Then
+    world
+        .then_stall_warning_recorded("UserActor", "handle_action", Duration::from_millis(100))
+        .await;
+}
+
+// Scenario: Stalled stream handler execution emits structured stall warning
+//
+//   Given an actor running with a 10ms stall threshold and an attached byte stream
+//   When a byte stream item triggers an on_stream handler stalling for 35ms
+//   Then the item is processed and a structured on_stream warning is recorded
+#[tokio::test]
+async fn test_stalled_stream_handler_emits_stall_warning() {
+    const FAST_STALL_THRESHOLD: Duration = Duration::from_millis(10);
+    const STALL_HANDLER_DELAY: Duration = Duration::from_millis(35);
+
+    // Given
+    let mut world = TestWorld::with_stall_threshold(FAST_STALL_THRESHOLD);
+    let stream_id = 99;
+    world.given_attached_byte_stream(stream_id, STALL_HANDLER_DELAY).await;
+
+    // When
+    world.when_send_byte_stream_item(stream_id, b"stream-payload").await;
+
+    // Then
+    world
+        .then_byte_stream_item_received(stream_id, b"stream-payload".len())
+        .await
+        .then_stall_warning_recorded("UserActor", "on_stream", FAST_STALL_THRESHOLD)
+        .await;
+}
+
+// Scenario: Fast handlers below stall threshold do not emit warnings
+//
+//   Given an actor running with a generous 5s stall threshold
+//   When standard CRUD operations execute normally
+//   Then no stall warnings are recorded
+#[tokio::test]
+async fn test_fast_handlers_below_stall_threshold_do_not_warn() {
+    const GENEROUS_STALL_THRESHOLD: Duration = Duration::from_secs(5);
+
+    // Given
+    let mut world = TestWorld::with_stall_threshold(GENEROUS_STALL_THRESHOLD);
+
+    // When
+    let alice_id = world.when_create_user("Alice").await;
+    world.when_update_user_name(alice_id, "Alicia").await;
+    world.when_rename_user(alice_id, "Alice").await;
+    world.when_promote_user(alice_id).await;
+    world.when_delete_user(alice_id).await;
+
+    // Then
+    world.then_no_stall_warnings_recorded().await;
+}

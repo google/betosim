@@ -19,15 +19,40 @@
 //! Actor Model, processing messages sequentially and ensuring exclusive access
 //! to the resource store.
 
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
+
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::{
     ActorLifecycle, ActorService, DynContext, client::ResourceClient, context::FrameworkContext,
     message::ResourceRequest,
 };
+
+const DEFAULT_STALL_THRESHOLD: Duration = Duration::from_millis(100);
+
+fn stall_warning_ms(elapsed: Duration, threshold: Duration) -> Option<(u64, u64)> {
+    (elapsed > threshold).then(|| {
+        (
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            u64::try_from(threshold.as_millis()).unwrap_or(u64::MAX),
+        )
+    })
+}
+
+fn warn_if_elapsed_exceeds<T>(elapsed: Duration, threshold: Duration, event: &'static str) {
+    if let Some((elapsed_ms, threshold_ms)) = stall_warning_ms(elapsed, threshold) {
+        warn!(
+            actor = std::any::type_name::<T>(),
+            event, elapsed_ms, threshold_ms, "Actor loop stalled"
+        );
+    }
+}
 
 /// The generic actor that manages a collection of resources.
 ///
@@ -171,6 +196,7 @@ pub struct ResourceActor<T: ActorService> {
     receiver: mpsc::Receiver<ResourceRequest<T>>,
     shutdown_rx: oneshot::Receiver<()>,
     ctx: FrameworkContext<T>,
+    stall_threshold: Duration,
 }
 
 impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
@@ -191,9 +217,16 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
     pub fn new(channel_size: usize) -> (Self, ResourceClient<T>) {
         let (sender, receiver) = mpsc::channel(channel_size);
         let (ctx, shutdown_rx) = FrameworkContext::new();
-        let actor = Self { receiver, shutdown_rx, ctx };
+        let actor = Self { receiver, shutdown_rx, ctx, stall_threshold: DEFAULT_STALL_THRESHOLD };
         let client = ResourceClient::new(sender);
         (actor, client)
+    }
+
+    /// Sets the handler execution duration threshold above which a stall warning is logged.
+    #[must_use]
+    pub fn with_stall_threshold(mut self, stall_threshold: Duration) -> Self {
+        self.stall_threshold = stall_threshold;
+        self
     }
 
     /// Runs the actor's event loop, processing messages until the channel
@@ -205,7 +238,8 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
     /// were created *after* the actor was instantiated but *before* the
     /// loop started.
     pub async fn run(mut self, mut actor: T) {
-        actor.on_start(&mut self.ctx).await;
+        let threshold = self.stall_threshold;
+        Self::run_timed(threshold, "on_start", actor.on_start(&mut self.ctx)).await;
 
         loop {
             // Framework Starvation Pattern:
@@ -218,33 +252,66 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
 
             tokio::select! {
                 Some(msg) = self.receiver.recv() => {
-                    Self::handle_message(&mut actor, msg, &mut self.ctx).await;
+                    let event = Self::request_event_name(&msg);
+                    Self::run_timed(
+                        threshold,
+                        event,
+                        Self::handle_message(&mut actor, msg, &mut self.ctx),
+                    )
+                    .await;
                 }
                 _ = self.ctx.interval.tick() => {
-                    actor.on_tick(&mut self.ctx).await;
+                    Self::run_timed(threshold, "on_tick", actor.on_tick(&mut self.ctx)).await;
                 }
                 // Lazy Polling: Only poll collections if they are non-empty.
                 // The `if` guard format in tokio::select! is the most efficient
                 // way to dynamically disable branches.
                 Some((id, msg_opt)) = self.ctx.streams.next(), if !self.ctx.streams.is_empty() => {
-                    Self::handle_stream_event(&mut actor, id, msg_opt, &mut self.ctx).await;
+                    let event =
+                        if msg_opt.is_some() { "on_stream" } else { "on_stream_closed" };
+                    Self::run_timed(
+                        threshold,
+                        event,
+                        Self::handle_stream_event(&mut actor, id, msg_opt, &mut self.ctx),
+                    )
+                    .await;
                 }
                 Some((id, msg_opt)) = self.ctx.typed_streams.next(), if !self.ctx.typed_streams.is_empty() => {
-                    Self::handle_typed_stream_event(&mut actor, id, msg_opt, &mut self.ctx).await;
+                    let event = if msg_opt.is_some() {
+                        "on_typed_stream"
+                    } else {
+                        "on_typed_stream_closed"
+                    };
+                    Self::run_timed(
+                        threshold,
+                        event,
+                        Self::handle_typed_stream_event(&mut actor, id, msg_opt, &mut self.ctx),
+                    )
+                    .await;
                 }
                 Some(expired) = self.ctx.timers.next(), if !self.ctx.timers.is_empty() => {
                     let task = expired.into_inner();
+                    let start = Instant::now();
                     task(&mut actor, &mut self.ctx);
+                    warn_if_elapsed_exceeds::<T>(start.elapsed(), threshold, "timer");
                 }
                 Some(res) = self.ctx.tasks.join_next(), if !self.ctx.tasks.is_empty() => {
                     match res {
-                        Ok(id) => Self::handle_task_closed(&mut actor, id, &mut self.ctx).await,
+                        Ok(id) => {
+                            Self::run_timed(
+                                threshold,
+                                "on_task_closed",
+                                Self::handle_task_closed(&mut actor, id, &mut self.ctx),
+                            )
+                            .await;
+                        }
                         Err(error) if error.is_cancelled() => debug!(%error, "Monitored task cancelled"),
                         Err(error) => error!(%error, "Monitored task failed"),
                     }
                 }
                 _ = &mut self.shutdown_rx => {
-                    Self::handle_shutdown(&mut actor).await;
+                    Self::run_timed(threshold, "on_shutdown", Self::handle_shutdown(&mut actor))
+                        .await;
                     break;
                 }
             }
@@ -318,5 +385,48 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                 let _ = respond_to.send(Ok(()));
             }
         }
+    }
+
+    async fn run_timed<F>(threshold: Duration, event: &'static str, fut: F)
+    where
+        F: Future<Output = ()> + Send,
+    {
+        let start = Instant::now();
+        fut.await;
+        warn_if_elapsed_exceeds::<T>(start.elapsed(), threshold, event);
+    }
+
+    const fn request_event_name(msg: &ResourceRequest<T>) -> &'static str {
+        match msg {
+            ResourceRequest::Create { .. } => "handle_create",
+            ResourceRequest::Get { .. } => "handle_get",
+            ResourceRequest::Update { .. } => "handle_update",
+            ResourceRequest::Delete { .. } => "handle_delete",
+            ResourceRequest::Action { .. } => "handle_action",
+            ResourceRequest::List { .. } => "handle_list",
+            ResourceRequest::Shutdown { .. } => "shutdown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_stall_warning_ms_boundary_below_and_at_threshold() {
+        let threshold = Duration::from_millis(100);
+        assert_eq!(stall_warning_ms(Duration::from_millis(99), threshold), None);
+        assert_eq!(stall_warning_ms(threshold, threshold), None);
+    }
+
+    #[test]
+    fn test_stall_warning_ms_boundary_above_threshold() {
+        let threshold = Duration::from_millis(100);
+        assert_eq!(stall_warning_ms(Duration::from_millis(125), threshold), Some((125, 100)));
+        assert_eq!(stall_warning_ms(Duration::from_micros(100_500), threshold), Some((100, 100)));
+        assert_eq!(stall_warning_ms(Duration::MAX, threshold), Some((u64::MAX, 100)));
     }
 }
