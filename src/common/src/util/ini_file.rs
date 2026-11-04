@@ -25,10 +25,10 @@ use tracing::{error, warn};
 use super::os_utils::get_discovery_directory_with_env;
 
 /// Maximum time spent probing a resolved socket address from `netsim.ini`.
-pub const SERVER_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+const SERVER_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Checks whether `addr` accepts a TCP connection in the current network
-/// namespace within [`SERVER_PROBE_TIMEOUT`].
+/// namespace within `SERVER_PROBE_TIMEOUT`.
 pub fn is_server_reachable(addr: &str) -> bool {
     let Ok(sock_addrs) = addr.to_socket_addrs() else {
         return false;
@@ -44,7 +44,7 @@ pub struct IniParserOptions {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum IniParseErrorKind {
+enum IniParseErrorKind {
     #[error("Empty key")]
     EmptyKey,
     #[error("Missing `=`")]
@@ -56,10 +56,10 @@ pub enum IniParseErrorKind {
 #[derive(Debug, thiserror::Error)]
 #[error("{line_number}:{column_number} {kind} ({line_content})")]
 pub struct IniParseError {
-    pub line_number: usize,
-    pub column_number: usize,
-    pub kind: IniParseErrorKind,
-    pub line_content: String,
+    line_number: usize,
+    column_number: usize,
+    kind: IniParseErrorKind,
+    line_content: String,
 }
 
 pub fn parse_ini(
@@ -196,7 +196,7 @@ pub fn get_http_server_address(instance_num: u16) -> Option<String> {
     get_address_by_key(instance_num, "http.port")
 }
 
-pub(crate) fn get_ini_filepath_with_env<F>(get_env: F, instance_num: u16) -> PathBuf
+fn get_ini_filepath_with_env<F>(get_env: F, instance_num: u16) -> PathBuf
 where
     F: Fn(&str) -> Result<String, env::VarError>,
 {

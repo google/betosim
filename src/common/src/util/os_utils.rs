@@ -175,7 +175,7 @@ pub fn redirect_std_stream(instance_name: &str) -> Result<(), NulError> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
 
     #[test]

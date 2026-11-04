@@ -116,7 +116,7 @@ pub fn log_current_time() -> String {
 }
 
 /// Return the timestamp of the current time for files
-pub fn file_current_time() -> String {
+pub(crate) fn file_current_time() -> String {
     get_current_time().utc_display()
 }
 
