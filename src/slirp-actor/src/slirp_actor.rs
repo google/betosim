@@ -517,9 +517,20 @@ mod tests {
 
     #[test]
     fn test_validate_ambient_http_proxy_unreachable_loopback_cleared() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let closed_port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let (reserved_v4, reserved_v6, closed_port) = (0..10)
+            .find_map(|_| {
+                let v4 = tokio::net::TcpSocket::new_v4().unwrap();
+                v4.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+                let port = v4.local_addr().unwrap().port();
+                match tokio::net::TcpSocket::new_v6().and_then(|v6| {
+                    v6.bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))).map(|()| v6)
+                }) {
+                    Ok(v6) => Some((v4, Some(v6), port)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => None,
+                    Err(_) => Some((v4, None, port)),
+                }
+            })
+            .unwrap();
 
         assert_eq!(
             validate_ambient_http_proxy(Some(format!("http://127.0.0.1:{closed_port}"))),
@@ -530,6 +541,7 @@ mod tests {
             validate_ambient_http_proxy(Some(format!("http://user:pass@[::1]:{closed_port}"))),
             None
         );
+        drop((reserved_v4, reserved_v6));
     }
 
     #[test]

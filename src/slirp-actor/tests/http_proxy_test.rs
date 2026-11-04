@@ -53,9 +53,9 @@ async fn test_http_proxy_wiring() {
 
 #[tokio::test]
 async fn test_unreachable_ambient_loopback_http_proxy_falls_back_to_direct_egress() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let closed_port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let reserved_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    reserved_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed_port = reserved_socket.local_addr().unwrap().port();
 
     let validated =
         slirp_actor::validate_ambient_http_proxy(Some(format!("http://127.0.0.1:{closed_port}")));
