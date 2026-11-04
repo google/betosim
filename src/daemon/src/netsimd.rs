@@ -170,16 +170,8 @@ async fn handle_new_connection(
             Some(netsim_model::ChipVariant::Wifi(netsim_model::Wifi { radio: Default::default() }))
         }
         ChipKind::CELLULAR => {
-            let is_cuttlefish =
-                chip_info.device_info.as_ref().is_some_and(|d| d.kind == "CUTTLEFISH");
-            let is_emulator = chip_info.device_info.as_ref().is_some_and(|d| d.kind == "EMULATOR");
-            let sdk_version = chip_info
-                .device_info
-                .as_ref()
-                .and_then(|d| d.sdk_version.parse::<i32>().ok())
-                .unwrap_or(0);
-
-            let network_configs = if is_cuttlefish {
+            let quirks = netsim_model::Quirks::from_device_info(device_config.device_info.as_ref());
+            let network_configs = if quirks.is_cuttlefish {
                 crate::cuttlefish::resolve_cuttlefish_network_config(&device_name)
                     .await
                     .into_iter()
@@ -188,24 +180,10 @@ async fn handle_new_connection(
                 Vec::new()
             };
 
-            let goldfish_ril_37_or_earlier = is_emulator && sdk_version < 38;
-            // Emulators rely on automatic NITZ time zone reporting from the modem
-            // without requiring explicit AT+CTZV activation.
-            let auto_ctzv = is_cuttlefish || is_emulator;
-            // Cuttlefish host TAP and Goldfish SLIRP only provision IPv4 cellular routing;
-            // fall back to IPv4 when an IPv6 PDP context is requested on emulators.
-            let allow_ipv4_for_ipv6 = is_cuttlefish || is_emulator;
-
             Some(netsim_model::ChipVariant::Cell(netsim_model::Cell {
                 sim_type: chip.sim_type,
                 sim_profile: chip.sim_profile.clone(),
-                quirks: netsim_model::Quirks {
-                    goldfish_ril_37_or_earlier,
-                    is_cuttlefish,
-                    auto_ctzv,
-                    allow_ipv4_for_ipv6,
-                    dynamic_slirp_lease: is_emulator,
-                },
+                quirks,
                 network_configs,
                 ..Default::default()
             }))

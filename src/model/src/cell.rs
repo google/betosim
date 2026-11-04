@@ -58,6 +58,30 @@ pub struct Quirks {
     pub dynamic_slirp_lease: bool,
 }
 
+impl Quirks {
+    /// Constructs Quirks from device kind and sdk_version strings.
+    fn from_kind_and_sdk_version(kind: &str, sdk_version: &str) -> Self {
+        let is_cuttlefish = kind.eq_ignore_ascii_case("CUTTLEFISH");
+        let is_emulator = kind.eq_ignore_ascii_case("EMULATOR");
+        let sdk_major =
+            sdk_version.split('.').next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        Self {
+            goldfish_ril_37_or_earlier: is_emulator && sdk_major < 38,
+            is_cuttlefish,
+            auto_ctzv: is_cuttlefish || is_emulator,
+            allow_ipv4_for_ipv6: is_cuttlefish || is_emulator,
+            dynamic_slirp_lease: is_emulator,
+        }
+    }
+
+    /// Constructs Quirks from optional DeviceInfo.
+    pub fn from_device_info(device_info: Option<&crate::device::DeviceInfo>) -> Self {
+        device_info
+            .map(|d| Self::from_kind_and_sdk_version(&d.kind, &d.sdk_version))
+            .unwrap_or_default()
+    }
+}
+
 /// Cellular technology specific chip information.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
@@ -255,5 +279,47 @@ mod tests {
         let json = serde_json::to_string(&update).unwrap();
         let decoded: CellUpdate = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, update);
+    }
+
+    #[test]
+    fn test_quirks_from_device_info() {
+        let default_quirks = Quirks::from_device_info(None);
+        assert_eq!(default_quirks, Quirks::default());
+
+        let cuttlefish_info = crate::device::DeviceInfo {
+            kind: "cuttlefish".to_string(),
+            sdk_version: "35".to_string(),
+            ..Default::default()
+        };
+        let cuttlefish_quirks = Quirks::from_device_info(Some(&cuttlefish_info));
+        assert!(cuttlefish_quirks.is_cuttlefish);
+        assert!(cuttlefish_quirks.auto_ctzv);
+        assert!(cuttlefish_quirks.allow_ipv4_for_ipv6);
+        assert!(!cuttlefish_quirks.goldfish_ril_37_or_earlier);
+        assert!(!cuttlefish_quirks.dynamic_slirp_lease);
+
+        // Regression coverage for < 38 emulator SDK versions; the behavioral
+        // change is guarded by the 38.1 case below.
+        let emu_37_info = crate::device::DeviceInfo {
+            kind: "EMULATOR".to_string(),
+            sdk_version: "37.2".to_string(),
+            ..Default::default()
+        };
+        let emu_37_quirks = Quirks::from_device_info(Some(&emu_37_info));
+        assert!(emu_37_quirks.goldfish_ril_37_or_earlier);
+        assert!(emu_37_quirks.auto_ctzv);
+        assert!(emu_37_quirks.allow_ipv4_for_ipv6);
+        assert!(emu_37_quirks.dynamic_slirp_lease);
+
+        let emu_38_info = crate::device::DeviceInfo {
+            kind: "emulator".to_string(),
+            sdk_version: "38.1".to_string(),
+            ..Default::default()
+        };
+        let emu_38_quirks = Quirks::from_device_info(Some(&emu_38_info));
+        assert!(!emu_38_quirks.goldfish_ril_37_or_earlier);
+        assert!(emu_38_quirks.auto_ctzv);
+        assert!(emu_38_quirks.allow_ipv4_for_ipv6);
+        assert!(emu_38_quirks.dynamic_slirp_lease);
     }
 }

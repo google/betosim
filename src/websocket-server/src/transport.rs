@@ -169,20 +169,7 @@ fn build_chip_variant(
         ChipVariant::Bluetooth(bt) => bt.address = address,
         ChipVariant::Uwb(uwb) => uwb.address = address,
         ChipVariant::Cell(cell) => {
-            cell.quirks = device_info
-                .map(|info| {
-                    let is_cuttlefish = info.kind.eq_ignore_ascii_case("CUTTLEFISH");
-                    let is_emulator = info.kind.eq_ignore_ascii_case("EMULATOR");
-                    let sdk_version = info.sdk_version.parse::<i32>().unwrap_or(0);
-                    Quirks {
-                        goldfish_ril_37_or_earlier: is_emulator && sdk_version < 38,
-                        is_cuttlefish,
-                        auto_ctzv: is_cuttlefish || is_emulator,
-                        allow_ipv4_for_ipv6: is_cuttlefish || is_emulator,
-                        dynamic_slirp_lease: is_emulator,
-                    }
-                })
-                .unwrap_or_default();
+            cell.quirks = Quirks::from_device_info(device_info);
         }
         ChipVariant::Wifi(_)
         | ChipVariant::Nfc(_)
@@ -474,6 +461,17 @@ mod tests {
             }
             _ => panic!("expected cell variant"),
         }
+
+        let emulator_info_38_1 = DeviceInfo {
+            kind: "EMULATOR".to_string(),
+            sdk_version: "38.1".to_string(),
+            ..Default::default()
+        };
+        let cell_38_1 =
+            build_chip_variant(ChipKind::CELLULAR, String::new(), Some(&emulator_info_38_1))
+                .expect("cell variant should build");
+        let ChipVariant::Cell(cell) = cell_38_1 else { panic!("expected cell variant") };
+        assert!(!cell.quirks.goldfish_ril_37_or_earlier);
 
         let cuttlefish_info = DeviceInfo {
             kind: "CUTTLEFISH".to_string(),
