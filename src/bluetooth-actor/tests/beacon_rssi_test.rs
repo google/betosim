@@ -12,141 +12,160 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+//! Integration tests verifying Beacon RSSI updates and transmit power levels.
 
-use bluetooth_actor::{REPORT_ADDR_OFFSET, REPORT_NUM_REPORTS_OFFSET, is_le_advertising_report};
-use netsim_model::Position;
-use netsim_packets::{
-    Enable, LeScanType, LeScanningFilterPolicy, LeSetEventMask, LeSetScanEnable,
-    LeSetScanParameters, OwnAddressType, Reset, SetEventMask,
-};
-use tokio;
+use netsim_model::{AdvertiseTxPower, Position, TxPower};
 
 use crate::world::World;
 
-/// Scenario: Scanner receives RSSI updates from Beacon
-///   Given a world with a scanner and a beacon
-///   When the scanner enables scanning
-///   Then the scanner receives advertising reports with decreasing RSSI as
-/// distance increases
+// Scenario: Scanner receives decreasing RSSI as beacon distance increases
+//   Given a world with a scanner and a beacon at 1.0 m distance
+//   When the beacon moves to 10.0 m
+//   Then the scanner receives an advertising report with lower RSSI
+//   When the beacon moves to 20.0 m
+//   Then the scanner receives an advertising report with lower RSSI
 #[tokio::test]
-async fn test_rssi_updates() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-
-    // GIVEN a world with a scanner and a beacon
+async fn test_rssi_updates() {
     let mut world = World::new();
 
-    // Create Scanner Device using World helper
-    // Name "scanner" will be used to reference it.
-    world.given_device("scanner").await;
+    // Given a world with a scanner and a beacon at 1.0 m distance
+    world.given_scanner("scanner").await;
+    world.given_beacon_at("beacon", Position { x: 1.0, y: 0.0, z: 0.0 }).await;
+    let rssi_1m =
+        world.then_scanner_sees_adv_with_rssi_lower_than("scanner", "beacon", i8::MAX).await;
 
-    // Create Beacon Device at initial position (1, 0, 0)
-    let beacon_address = "00:00:00:00:00:02";
-    world.given_beacon_with_address("beacon", beacon_address).await;
+    // When the beacon moves to 10.0 m
+    world.when_beacon_moves_to("beacon", Position { x: 10.0, y: 0.0, z: 0.0 }).await;
+    // Then the scanner receives an advertising report with lower RSSI
+    let rssi_10m =
+        world.then_scanner_sees_adv_with_rssi_lower_than("scanner", "beacon", rssi_1m).await;
 
-    let beacon_id = *world.chips.get("beacon").expect("Beacon should exist");
+    // When the beacon moves to 20.0 m
+    world.when_beacon_moves_to("beacon", Position { x: 20.0, y: 0.0, z: 0.0 }).await;
+    // Then the scanner receives an advertising report with lower RSSI
+    world.then_scanner_sees_adv_with_rssi_lower_than("scanner", "beacon", rssi_10m).await;
+}
 
-    // Move beacon to initial position
-    {
-        let mut update = netsim_model::ChipUpdate::default();
-        update.pose.position = Some(Position { x: 1.0, y: 0.0, z: 0.0 });
-        update.id = Some(beacon_id);
-        world.client.0.update(beacon_id, update).await?;
-    }
+// Scenario: Scanner receives updated RSSI and AD payload across
+// AdvertiseTxPower levels
+//   Given a world with a scanner and a beacon at 1.0 m distance
+//   When the beacon tx_power is reconfigured across UltraLow, Low, Medium, High
+//   Then the scanner receives matching RSSI and TX Power Level AD element
+#[tokio::test]
+async fn test_beacon_advertise_tx_power_levels() {
+    let mut world = World::new();
 
-    // WHEN the scanner enables scanning
-    world.when_command_sent("scanner", Reset {}).await;
-    world.when_command_sent("scanner", SetEventMask { event_mask: u64::MAX.into() }).await;
+    // Given a world with a scanner and a beacon at 1.0 m distance
+    world.given_scanner("scanner").await;
+    world.given_beacon_at("beacon", Position { x: 1.0, y: 0.0, z: 0.0 }).await;
+
+    // When beacon tx_power is reconfigured to UltraLow (-21 dBm)
     world
-        .when_command_sent("scanner", LeSetEventMask { le_event_mask: (u8::MAX as u64).into() })
+        .when_update_beacon_tx_power("beacon", TxPower::TxPowerLevel(AdvertiseTxPower::UltraLow))
         .await;
+    // Then scanner receives ADV_SCAN_IND at -21 dBm RSSI with AD tx_power
+    // -21 dBm
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", -21, -21).await;
+
+    // When beacon tx_power is reconfigured to Low (-15 dBm)
+    world.when_update_beacon_tx_power("beacon", TxPower::TxPowerLevel(AdvertiseTxPower::Low)).await;
+    // Then scanner receives ADV_SCAN_IND at -15 dBm RSSI with AD tx_power
+    // -15 dBm
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", -15, -15).await;
+
+    // When beacon tx_power is reconfigured to Medium (-7 dBm)
     world
-        .when_command_sent(
-            "scanner",
-            LeSetScanParameters {
-                le_scan_type: LeScanType::PASSIVE,
-                le_scan_interval: 0x0010.into(),
-                le_scan_window: 0x0010.into(),
-                own_address_type: OwnAddressType::PUBLIC_DEVICE_ADDRESS,
-                scanning_filter_policy: LeScanningFilterPolicy::ACCEPT_ALL,
-            },
+        .when_update_beacon_tx_power("beacon", TxPower::TxPowerLevel(AdvertiseTxPower::Medium))
+        .await;
+    // Then scanner receives ADV_SCAN_IND at -7 dBm RSSI with AD tx_power -7 dBm
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", -7, -7).await;
+
+    // When beacon tx_power is reconfigured to High (+1 dBm)
+    world
+        .when_update_beacon_tx_power("beacon", TxPower::TxPowerLevel(AdvertiseTxPower::High))
+        .await;
+    // Then scanner receives ADV_SCAN_IND at 1 dBm RSSI with AD tx_power 1 dBm
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", 1, 1).await;
+}
+
+// Scenario: Beacon tx_power honors custom dBm and clamps out-of-range values
+//   Given a world with a scanner and a beacon at 1.0 m distance
+//   When the beacon tx_power is set to -128 dBm (below hardware floor)
+//   Then the scanner receives ADV_SCAN_IND clamped to -120 dBm RSSI with
+//     -127 dBm AD payload
+//   When the beacon tx_power is set to +10 dBm
+//   Then the scanner receives ADV_SCAN_IND at 10 dBm RSSI with
+//     10 dBm AD payload
+//   When the beacon tx_power is set to +25 dBm (above hardware ceiling)
+//   Then the scanner receives ADV_SCAN_IND clamped to 20 dBm RSSI with
+//     20 dBm AD payload
+#[tokio::test]
+async fn test_beacon_custom_and_clamped_tx_power() {
+    let mut world = World::new();
+
+    // Given a world with a scanner and a beacon at 1.0 m distance
+    world.given_scanner("scanner").await;
+    world.given_beacon_at("beacon", Position { x: 1.0, y: 0.0, z: 0.0 }).await;
+
+    // When beacon tx_power is set to -128 dBm (below hardware floor)
+    world.when_update_beacon_tx_power("beacon", TxPower::Dbm(-128)).await;
+    // Then scanner receives ADV_SCAN_IND clamped to -120 dBm RSSI with
+    // -127 dBm AD payload
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", -127, -120).await;
+
+    // When beacon tx_power is set to +10 dBm
+    world.when_update_beacon_tx_power("beacon", TxPower::Dbm(10)).await;
+    // Then scanner receives ADV_SCAN_IND at 10 dBm RSSI with 10 dBm AD payload
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", 10, 10).await;
+
+    // When beacon tx_power is set to +25 dBm (above hardware ceiling)
+    world.when_update_beacon_tx_power("beacon", TxPower::Dbm(25)).await;
+    // Then scanner receives ADV_SCAN_IND clamped to 20 dBm RSSI with
+    // 20 dBm AD payload
+    world.then_scanner_sees_adv_with_tx_power_and_rssi("scanner", "beacon", 20, 20).await;
+}
+
+// Scenario: Non-scannable beacon updates tx_power and transitions to scannable
+//   Given a world with an active scanner and a non-scannable beacon at 1.0 m
+//     distance
+//   Then initial report is ADV_NONCONN_IND (0x03) with Low power (-15 dBm)
+//   When updating tx_power to 5 dBm
+//   Then emits ADV_NONCONN_IND (0x03) at 5 dBm RSSI
+//   When transitioning to scannable with scan response and 9 dBm tx_power
+//   Then emits ADV_SCAN_IND (0x02) at 9 dBm RSSI
+//   And active scanner receives SCAN_RSP (0x04) at 9 dBm RSSI
+#[tokio::test]
+async fn test_non_scannable_beacon_tx_power_and_scannable_transition() {
+    let mut world = World::new();
+
+    // Given a world with an active scanner and a non-scannable beacon at
+    // 1.0 m distance
+    world.given_active_scanner("scanner").await;
+    world
+        .given_non_scannable_beacon_at(
+            "nonconn_beacon",
+            Position { x: 1.0, y: 0.0, z: 0.0 },
+            TxPower::TxPowerLevel(AdvertiseTxPower::Low),
         )
         .await;
+
+    // Then initial report is ADV_NONCONN_IND (0x03) with Low power (-15 dBm)
+    world.then_scanner_sees_adv_type_and_rssi("scanner", "nonconn_beacon", 0x03, -15).await;
+
+    // When updating tx_power to 5 dBm
+    world.when_update_non_scannable_beacon_tx_power("nonconn_beacon", TxPower::Dbm(5)).await;
+
+    // Then emits ADV_NONCONN_IND (0x03) at 5 dBm RSSI
+    world.then_scanner_sees_adv_type_and_rssi("scanner", "nonconn_beacon", 0x03, 5).await;
+
+    // When transitioning to scannable with scan response and 9 dBm tx_power
     world
-        .when_command_sent(
-            "scanner",
-            LeSetScanEnable {
-                le_scan_enable: Enable::ENABLED,
-                filter_duplicates: Enable::DISABLED,
-            },
-        )
+        .when_transition_beacon_to_scannable("nonconn_beacon", TxPower::Dbm(9), vec![0x01, 0x02])
         .await;
 
-    // THEN the scanner receives advertising reports with decreasing RSSI as
-    // distance increases
-    let distances = [1.0, 10.0, 20.0];
-    let mut last_rssi = i8::MAX;
+    // Then emits ADV_SCAN_IND (0x02) at 9 dBm RSSI
+    world.then_scanner_sees_adv_type_and_rssi("scanner", "nonconn_beacon", 0x02, 9).await;
 
-    // Derive expected address byte dynamically
-    let last_byte_str =
-        beacon_address.split(':').last().ok_or("Invalid beacon address format: missing bytes")?;
-    let expected_addr_byte = u8::from_str_radix(last_byte_str, 16)?;
-
-    for distance in distances {
-        // Move beacon
-        {
-            let mut update = netsim_model::ChipUpdate::default();
-            update.pose.position = Some(Position { x: distance, y: 0.0, z: 0.0 });
-            update.id = Some(beacon_id);
-            world.client.0.update(beacon_id, update).await?;
-        }
-
-        // Wait for pose to propagate and old packets to settle
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Drain stale packets
-        if let Some(rx) = world.sinks.get_mut("scanner") {
-            while rx.try_recv().is_ok() {}
-        }
-
-        // Wait up to 2 seconds for a valid packet
-        let start = std::time::Instant::now();
-        let mut found_rssi = None;
-
-        while start.elapsed() < Duration::from_secs(2) {
-            let packet = world.receive_packet("scanner").await;
-
-            if is_le_advertising_report(&packet) {
-                // Strict validation: Check Num Reports
-                if packet[REPORT_NUM_REPORTS_OFFSET] < 1 {
-                    continue;
-                }
-
-                // Check address.
-                if packet.len() > REPORT_ADDR_OFFSET
-                    && packet[REPORT_ADDR_OFFSET] == expected_addr_byte
-                {
-                    // Found our beacon!
-                    // RSSI is the last byte
-                    if let Some(&rssi_byte) = packet.last() {
-                        let rssi = rssi_byte as i8;
-                        found_rssi = Some(rssi);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let rssi = found_rssi.ok_or(format!("Failed to find RSSI for distance {}", distance))?;
-
-        assert!(
-            rssi < last_rssi,
-            "RSSI {} should be less than last RSSI {} at distance {}",
-            rssi,
-            last_rssi,
-            distance
-        );
-        last_rssi = rssi;
-    }
-    Ok(())
+    // And active scanner receives SCAN_RSP (0x04) at 9 dBm RSSI
+    world.then_scanner_sees_scan_response_with_rssi("scanner", "nonconn_beacon", 9).await;
 }

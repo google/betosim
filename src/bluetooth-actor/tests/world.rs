@@ -16,12 +16,13 @@ use std::collections::HashMap;
 
 use actor_framework::ResourceClient;
 use bluetooth_actor::{BluetoothActor, BluetoothClient, BluetoothError};
-use common::util::scanner_util::parse_hci_scan_report;
+use common::util::scanner_util::{ScanResult, parse_hci_scan_report};
 use device_actor::client::DeviceClient;
 use netsim_model::{
-    AdvertiseSettings, AdvertiseTxPower, BeaconParams, BleBeacon, BluetoothMode, Chip, ChipCreate,
-    ChipId, ChipUpdate, ChipVariant, DeviceId, DeviceParams, Interval, PacketSink, PacketStream,
-    ScannerParams, TxPower,
+    AdvertiseData, AdvertiseDataUpdate, AdvertiseSettings, AdvertiseSettingsUpdate,
+    AdvertiseTxPower, BeaconParams, BleBeacon, BleBeaconUpdate, BluetoothMode, BluetoothUpdate,
+    Chip, ChipCreate, ChipId, ChipUpdate, ChipVariant, ChipVariantUpdate, DeviceId, DeviceParams,
+    Interval, PacketSink, PacketStream, ScannerParams, TxPower,
 };
 use netsim_packets::{
     Address, AdvertisingEventProperties, AdvertisingFilterPolicy, Enable, EnabledSet,
@@ -217,6 +218,54 @@ impl World {
         self.sinks.insert(name.to_string(), slow_rx);
     }
 
+    /// Internal helper to wait for actor state to settle and drain pending
+    /// packets from all sinks.
+    async fn settle_and_drain_sinks(&mut self) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        for sink in self.sinks.values_mut() {
+            while sink.try_recv().is_ok() {}
+        }
+    }
+
+    /// Internal helper to receive the next scan report matching beacon name
+    /// and optional event type.
+    async fn receive_beacon_report_matching(
+        &mut self,
+        scanner_name: &str,
+        beacon_name: &str,
+        expected_event_type: Option<u8>,
+    ) -> ScanResult {
+        let beacon_id = *self
+            .chips
+            .get(beacon_name)
+            .unwrap_or_else(|| panic!("Beacon '{beacon_name}' not found"));
+        let expected_byte_4 = ((beacon_id.0 >> 8) & 0xFF) as u8;
+        let expected_byte_5 = (beacon_id.0 & 0xFF) as u8;
+
+        let timeout = std::time::Duration::from_secs(3);
+        tokio::time::timeout(timeout, async {
+            loop {
+                let packet = self.receive_packet(scanner_name).await;
+                if let Ok(reports) = parse_hci_scan_report(&packet) {
+                    if let Some(report) = reports.into_iter().find(|r| {
+                        r.mac[4] == expected_byte_4
+                            && r.mac[5] == expected_byte_5
+                            && expected_event_type.is_none_or(|et| r.event_type == et)
+                    }) {
+                        return report;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_err| {
+            panic!(
+                "Timed out waiting for report from '{beacon_name}' on scanner '{scanner_name}' \
+                 (event_type: {expected_event_type:?})"
+            )
+        })
+    }
+
     /// Internal helper to create a beacon chip
     async fn create_beacon_chip(
         &mut self,
@@ -281,11 +330,6 @@ impl World {
             panic!("Failed to create default beacon: {:?}", e);
         }
         id
-    }
-
-    /// Creates a Bluetooth chip in Beacon mode with a specific address.
-    pub async fn given_beacon_with_address(&mut self, name: &str, address: &str) {
-        self.create_beacon_chip(name, Some(address.to_string()), None).await;
     }
 
     /// Creates a Bluetooth chip in Beacon mode with a specific interval.
@@ -354,6 +398,59 @@ impl World {
         self.sinks.insert(name.to_string(), sink_rx);
     }
 
+    /// Creates a beacon with 50ms interval at a specific initial position.
+    pub async fn given_beacon_at(&mut self, name: &str, position: netsim_model::Position) {
+        self.given_beacon_with_interval(name, Interval::Milliseconds(50)).await;
+        self.when_update_chip_position(name, position).await;
+        self.settle_and_drain_sinks().await;
+    }
+
+    /// Creates a non-scannable beacon at a specific initial position and
+    /// tx_power.
+    pub async fn given_non_scannable_beacon_at(
+        &mut self,
+        name: &str,
+        position: netsim_model::Position,
+        tx_power: TxPower,
+    ) {
+        let id = self.next_chip_id();
+        let address = format!("60:70:80:90:{:02X}:{:02X}", (id.0 >> 8) & 0xFF, id.0 & 0xFF);
+
+        let mut chip = Chip::new_test_ble(name);
+        chip.id = id.0;
+        chip.device_id = self.device_id;
+        chip.pose.position = position;
+        chip.variant = Some(ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
+            address: address.clone(),
+            mode: BluetoothMode::Beacon(Box::new(BeaconParams {
+                ble_beacon: BleBeacon {
+                    address,
+                    settings: Some(AdvertiseSettings {
+                        tx_power: Some(tx_power),
+                        scannable: false,
+                        interval: Some(Interval::Milliseconds(50)),
+                        ..Default::default()
+                    }),
+                    adv_data: Some(AdvertiseData {
+                        include_device_name: true,
+                        ..Default::default()
+                    }),
+                    scan_response: None,
+                },
+            })),
+            ..Default::default()
+        })));
+
+        self.client
+            .0
+            .create_with_id(id, ChipCreate { packet_stream: None, packet_sink: None, chip })
+            .await
+            .unwrap_or_else(|e| panic!("Failed to create non-scannable beacon '{name}': {e:?}"));
+
+        self.chips.insert(name.to_string(), id);
+        self.settle_and_drain_sinks().await;
+    }
+
     // --- When Steps ---
 
     pub async fn when_delete_chip(
@@ -381,6 +478,107 @@ impl World {
             ..Default::default()
         };
         self.client.0.update(id, update).await.expect("Failed to update chip");
+    }
+
+    /// Moves a beacon to a new position, settling Rootcanal and draining sinks.
+    pub async fn when_beacon_moves_to(&mut self, name: &str, position: netsim_model::Position) {
+        self.when_update_chip_position(name, position).await;
+        self.settle_and_drain_sinks().await;
+    }
+
+    /// Reconfigures a beacon's tx_power and enables TX power level
+    /// inclusion in AD data.
+    pub async fn when_update_beacon_tx_power(&mut self, name: &str, tx_power: TxPower) {
+        let id = *self.chips.get(name).unwrap_or_else(|| panic!("Beacon '{name}' not found"));
+        let mut update = ChipUpdate::default();
+        update.id = Some(id);
+        update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+            ble_beacon: Some(BleBeaconUpdate {
+                settings: Some(AdvertiseSettingsUpdate {
+                    tx_power: Some(tx_power),
+                    scannable: Some(true),
+                    interval: Some(Interval::Milliseconds(50)),
+                    ..Default::default()
+                }),
+                adv_data: Some(AdvertiseDataUpdate {
+                    include_tx_power_level: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        self.client
+            .0
+            .update(id, update)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to update beacon '{name}' tx_power: {e:?}"));
+
+        self.settle_and_drain_sinks().await;
+    }
+
+    /// Updates a non-scannable beacon's tx_power (keeping scannable = false).
+    pub async fn when_update_non_scannable_beacon_tx_power(
+        &mut self,
+        name: &str,
+        tx_power: TxPower,
+    ) {
+        let id = *self.chips.get(name).unwrap_or_else(|| panic!("Beacon '{name}' not found"));
+        let mut update = ChipUpdate::default();
+        update.id = Some(id);
+        update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+            ble_beacon: Some(BleBeaconUpdate {
+                settings: Some(AdvertiseSettingsUpdate {
+                    tx_power: Some(tx_power),
+                    scannable: Some(false),
+                    interval: Some(Interval::Milliseconds(50)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        self.client.0.update(id, update).await.unwrap_or_else(|e| {
+            panic!("Failed to update non-scannable beacon '{name}' tx_power: {e:?}")
+        });
+
+        self.settle_and_drain_sinks().await;
+    }
+
+    /// Transitions a non-scannable beacon to scannable with custom scan
+    /// response data.
+    pub async fn when_transition_beacon_to_scannable(
+        &mut self,
+        name: &str,
+        tx_power: TxPower,
+        scan_response_mfr_data: Vec<u8>,
+    ) {
+        let id = *self.chips.get(name).unwrap_or_else(|| panic!("Beacon '{name}' not found"));
+        let mut update = ChipUpdate::default();
+        update.id = Some(id);
+        update.variant = Some(ChipVariantUpdate::Bluetooth(BluetoothUpdate {
+            ble_beacon: Some(BleBeaconUpdate {
+                settings: Some(AdvertiseSettingsUpdate {
+                    tx_power: Some(tx_power),
+                    scannable: Some(true),
+                    interval: Some(Interval::Milliseconds(50)),
+                    ..Default::default()
+                }),
+                scan_response: Some(AdvertiseDataUpdate {
+                    manufacturer_data: Some(scan_response_mfr_data),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        self.client
+            .0
+            .update(id, update)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to transition beacon '{name}' to scannable: {e:?}"));
+
+        self.settle_and_drain_sinks().await;
     }
 
     // --- Then Steps ---
@@ -695,6 +893,94 @@ impl World {
             expected_ms,
             avg_interval,
             timestamps
+        );
+    }
+
+    /// Asserts that the scanner receives an advertisement from the beacon
+    /// with RSSI lower than `previous_rssi`, returning the newly observed
+    /// RSSI for subsequent chaining.
+    pub async fn then_scanner_sees_adv_with_rssi_lower_than(
+        &mut self,
+        scanner_name: &str,
+        beacon_name: &str,
+        previous_rssi: i8,
+    ) -> i8 {
+        let report = self.receive_beacon_report_matching(scanner_name, beacon_name, None).await;
+        assert!(
+            report.rssi < previous_rssi,
+            "Observed RSSI {} should be lower than previous RSSI {}",
+            report.rssi,
+            previous_rssi
+        );
+        report.rssi
+    }
+
+    /// Asserts that the scanner receives an advertisement with the specified
+    /// event_type and RSSI.
+    pub async fn then_scanner_sees_adv_type_and_rssi(
+        &mut self,
+        scanner_name: &str,
+        beacon_name: &str,
+        expected_event_type: u8,
+        expected_rssi: i8,
+    ) {
+        let report = self
+            .receive_beacon_report_matching(scanner_name, beacon_name, Some(expected_event_type))
+            .await;
+        assert_eq!(
+            report.event_type, expected_event_type,
+            "Report event type mismatch on '{scanner_name}'"
+        );
+        assert_eq!(
+            report.rssi, expected_rssi,
+            "Received RSSI {} on '{scanner_name}' does not match expected {}",
+            report.rssi, expected_rssi
+        );
+    }
+
+    /// Asserts that the scanner receives ADV_SCAN_IND (0x02) with expected
+    /// TX Power Level AD element and RSSI.
+    pub async fn then_scanner_sees_adv_with_tx_power_and_rssi(
+        &mut self,
+        scanner_name: &str,
+        beacon_name: &str,
+        expected_ad_tx_power: i8,
+        expected_rssi: i8,
+    ) {
+        let report =
+            self.receive_beacon_report_matching(scanner_name, beacon_name, Some(0x02)).await;
+        assert_eq!(report.event_type, 0x02, "Scannable beacon should emit ADV_SCAN_IND (0x02)");
+        assert_eq!(
+            report.rssi, expected_rssi,
+            "Received RSSI {} does not match expected {}",
+            report.rssi, expected_rssi
+        );
+        assert!(
+            report.payload.ends_with(&[0x02, 0x0A, expected_ad_tx_power as u8]),
+            "Payload {:?} should end with TX Power Level AD [0x02, 0x0A, {:#04X}]",
+            report.payload,
+            expected_ad_tx_power as u8
+        );
+    }
+
+    /// Asserts that the scanner receives SCAN_RSP (0x04) with the expected
+    /// RSSI.
+    pub async fn then_scanner_sees_scan_response_with_rssi(
+        &mut self,
+        scanner_name: &str,
+        beacon_name: &str,
+        expected_rssi: i8,
+    ) {
+        let report =
+            self.receive_beacon_report_matching(scanner_name, beacon_name, Some(0x04)).await;
+        assert_eq!(
+            report.event_type, 0x04,
+            "Scan response report should have event type SCAN_RSP (0x04)"
+        );
+        assert_eq!(
+            report.rssi, expected_rssi,
+            "Scan response received RSSI {} does not match expected {}",
+            report.rssi, expected_rssi
         );
     }
 
