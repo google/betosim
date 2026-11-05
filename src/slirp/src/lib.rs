@@ -45,7 +45,7 @@ use netsim_packets::{
     Ipv6Header, MacAddr, TFTP_PORT, UdpBuilder, ether_type,
 };
 use serde::{Deserialize, Serialize};
-pub use utils::{clock, timers};
+pub(crate) use utils::{clock, timers};
 use zerocopy::FromBytes;
 
 use crate::{
@@ -90,7 +90,7 @@ impl Slirp {
         Self::new_with_clock(config, Box::new(SystemClock))
     }
 
-    pub fn new_with_clock(config: Config, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new_with_clock(config: Config, clock: Box<dyn Clock>) -> Self {
         let mut arp_table = ArpTable::new();
         arp_table.add_entry(config.host_ipv4, config.gateway_mac);
         let ndp_table = NdpTable::new();
