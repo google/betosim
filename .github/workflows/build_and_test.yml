@@ -46,16 +46,16 @@ jobs:
     - name: Setup Rust cache
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
-        workspaces: "next -> target"
+        workspaces: "src -> target"
         cache-on-failure: true
     - name: Build
-      run: cd next && cargo build
+      run: cd src && cargo build
     - name: Test
-      run: cd next && cargo test
+      run: cd src && cargo test
     - name: Fmt
-      run: cd next && cargo +nightly-2026-01-18 fmt --check --quiet
+      run: cd src && cargo +nightly-2026-01-18 fmt --check --quiet
     - name: Clippy
-      run: cd next && cargo clippy --no-deps -- --deny warnings
+      run: cd src && cargo clippy --no-deps -- --deny warnings
 
   bazel_build_and_test:
     name: Bazel Build, Check, Test
@@ -76,6 +76,7 @@ jobs:
           - MODULE.bazel
           - "**/*.bzl"
           - cargo/build/**
+          - registry/**
     - name: Build
       run: bazel build --config=standalone //...
     - name: Test
