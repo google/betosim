@@ -21,10 +21,10 @@ use device_actor::DeviceActor;
 use device_api::{DeviceAction, DeviceId};
 use netsim_model::{ChipClient, ChipCreate, ChipId, ChipUpdate, PoseUpdate, Position};
 use netsim_packets::{
-    ActionHeader, DataSubType, EthernetFrame, FineTimingMeasurement, FrameControl, FrameDirection,
-    FrameType, HwsimCmd, HwsimFrame, HwsimMsg, Ieee80211, Ieee80211ToAp, MacAddr, MacAddress,
-    MacHeader3Addr, NlMsgHdr, SequenceControl, category, ether_type, management_subtype,
-    public_action,
+    ActionHeader, BeaconFixedFields, DataSubType, EthernetFrame, FineTimingMeasurement,
+    FrameControl, FrameDirection, FrameType, HwsimCmd, HwsimFrame, HwsimMsg, IeIterator, Ieee80211,
+    Ieee80211ToAp, MacAddr, MacAddress, MacHeader3Addr, NlMsgHdr, SequenceControl, category,
+    ether_type, management_subtype, public_action, tags, write_ie,
 };
 use slirp_actor::SlirpActor;
 use tokio::sync::mpsc;
@@ -417,15 +417,14 @@ impl World {
         self.chips[sender_idx].sink_tx.send(Bytes::from(bytes)).await.unwrap();
     }
 
-    pub async fn when_chip_transmits_mgmt_to_ap(&mut self, sender_idx: usize) {
+    async fn transmit_mgmt_to_ap(&mut self, sender_idx: usize, stype: u8, payload: &[u8]) {
         let sender_mac = self.chips[sender_idx].mac;
-        let bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00]; // AP BSSID
+        let bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
 
-        // Construct Mgmt Frame (e.g., Auth or Assoc Request)
         let mgmt_frame = Ieee80211ToAp {
             version: 0,
-            ftype: FrameType::Management, // Management
-            stype: 0,                     // Assoc Req? (Doesn't matter for routing)
+            ftype: FrameType::Management,
+            stype,
             destination: MacAddress::new(bssid),
             source: MacAddress::new(sender_mac),
             bssid: MacAddress::new(bssid),
@@ -438,21 +437,106 @@ impl World {
             retry: 0,
             pm: 0,
             more_data: 0,
-            payload: vec![0x11; 32], // Mgmt payload
+            payload: payload.to_vec(),
         };
 
         let ieee80211: Ieee80211 = mgmt_frame.try_into().unwrap();
 
         let msg = wifi_actor::create_hwsim_msg_from_frame(
             &ieee80211,
-            &MacAddress::new(bssid), // Dest Hwsim (AP)
+            &MacAddress::new(bssid),
             2412,
-            Some(&MacAddress::new(sender_mac)), // Src Hwsim
+            Some(&MacAddress::new(sender_mac)),
         )
         .expect("Failed to create HwsimMsg");
 
         let bytes = msg.encode_to_vec().unwrap();
         self.chips[sender_idx].sink_tx.send(Bytes::from(bytes)).await.unwrap();
+    }
+
+    pub async fn when_chip_transmits_mgmt_to_ap(&mut self, sender_idx: usize) {
+        self.transmit_mgmt_to_ap(sender_idx, management_subtype::ASSOCIATION_REQUEST, &[0x11; 32])
+            .await;
+    }
+
+    pub async fn when_chip_transmits_probe_request(&mut self, sender_idx: usize) {
+        let mut payload = Vec::new();
+        write_ie(&mut payload, tags::SSID, b"TestAP");
+        self.transmit_mgmt_to_ap(sender_idx, management_subtype::PROBE_REQUEST, &payload).await;
+    }
+
+    pub fn when_chip_installs_ptk_session(&mut self, chip_idx: usize) {
+        let mac = MacAddress::new(self.chips[chip_idx].mac);
+        self.shared_keys.add_session(mac, vec![0x42; 16]);
+    }
+
+    pub async fn then_chip_receives_assoc_response(&mut self, receiver_idx: usize) {
+        let chip = &mut self.chips[receiver_idx];
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Some(ieee) = crate::hwsim_helper::unwrap_hwsim_to_ieee80211(&bytes)
+                        && ieee.is_mgmt()
+                        && ieee.stype() == management_subtype::ASSOCIATION_RESPONSE
+                    {
+                        info!("Chip {} received Association Response", chip.id);
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!("Timeout waiting for Association Response on chip {}", chip.id);
+                }
+            }
+        }
+    }
+
+    pub async fn then_chip_receives_plaintext_mgmt_with_ssid(
+        &mut self,
+        receiver_idx: usize,
+        expected_stype: u8,
+        expected_ssid: &[u8],
+    ) {
+        let chip = &mut self.chips[receiver_idx];
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Some(ieee) = crate::hwsim_helper::unwrap_hwsim_to_ieee80211(&bytes)
+                        && ieee.is_mgmt()
+                        && ieee.stype() == expected_stype
+                    {
+                        assert!(
+                            !ieee.needs_decryption(),
+                            "Management frame stype {} should not be encrypted",
+                            expected_stype
+                        );
+                        let payload = ieee.get_payload();
+                        let (_, ies) = BeaconFixedFields::ref_from_prefix(&payload)
+                            .expect("valid beacon fixed fields");
+                        let found_ssid = IeIterator::new(ies)
+                            .find(|ie| ie.id == tags::SSID)
+                            .map(|ie| ie.body);
+                        assert_eq!(
+                            found_ssid,
+                            Some(expected_ssid),
+                            "Management frame SSID mismatch"
+                        );
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!(
+                        "Timeout waiting for plaintext mgmt frame stype {} on chip {}",
+                        expected_stype, chip.id
+                    );
+                }
+            }
+        }
     }
 
     pub async fn then_chip_receives_payload(

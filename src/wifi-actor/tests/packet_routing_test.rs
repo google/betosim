@@ -1243,3 +1243,55 @@ async fn test_p2p_data_frame_with_ftm_bytes_not_intercepted() {
     // Then: Receiver receives the DataSubType::QosCfAck frame instead of being intercepted/dropped
     world.then_chip_receives_data_subtype(1, netsim_packets::DataSubType::QosCfAck).await;
 }
+
+// ============================================================================
+// Feature: WPA2/WPA3 Infrastructure Management Frames
+// ============================================================================
+
+/// Scenario: Beacons broadcast from a secure AP remain plaintext even after
+/// association installs a group temporal key.
+#[tokio::test]
+async fn test_secure_ap_beacons_remain_plaintext() {
+    // Given
+    let mut world = World::new().await;
+    world.given_a_secure_ap().await;
+    let _chip = world.given_a_chip(1).await;
+
+    // When
+    world.when_chip_transmits_mgmt_to_ap(0).await;
+    world.then_chip_receives_assoc_response(0).await;
+
+    // Then
+    world
+        .then_chip_receives_plaintext_mgmt_with_ssid(
+            0,
+            netsim_packets::management_subtype::BEACON,
+            b"TestAP",
+        )
+        .await;
+}
+
+/// Scenario: Probe Responses unicast from a secure AP to an associated station
+/// remain plaintext even when a pairwise temporal key session exists.
+#[tokio::test]
+async fn test_secure_ap_probe_responses_remain_plaintext() {
+    // Given
+    let mut world = World::new().await;
+    world.given_a_secure_ap().await;
+    let _chip = world.given_a_chip(1).await;
+
+    // When
+    world.when_chip_transmits_mgmt_to_ap(0).await;
+    world.then_chip_receives_assoc_response(0).await;
+    world.when_chip_installs_ptk_session(0);
+    world.when_chip_transmits_probe_request(0).await;
+
+    // Then
+    world
+        .then_chip_receives_plaintext_mgmt_with_ssid(
+            0,
+            netsim_packets::management_subtype::PROBE_RESPONSE,
+            b"TestAP",
+        )
+        .await;
+}

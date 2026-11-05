@@ -122,6 +122,9 @@ impl SharedKeyStore {
     }
 
     pub fn try_encrypt(&self, ieee80211: &Ieee80211) -> Option<Vec<u8>> {
+        if !ieee80211.is_payload_bearing_data() {
+            return None;
+        }
         let dest = ieee80211.get_destination();
         let is_group = dest.is_multicast() || dest.is_broadcast();
 
@@ -271,5 +274,172 @@ mod tests {
         assert!(store.get_gtk(&other_bssid).is_none());
         assert!(store.sessions.read().is_empty());
         assert_eq!(store.gtk_tx_pn.load(Ordering::SeqCst), 1);
+    }
+
+    use netsim_packets::{
+        BeaconFixedFields, DataSubType, FrameControl, FrameType, MacHeader3Addr, SequenceControl,
+        management_subtype,
+    };
+
+    fn create_dummy_ethernet(src: &[u8; 6], dst: &[u8; 6], payload: &[u8]) -> Vec<u8> {
+        let dst_mac = netsim_packets::MacAddr::new(*dst);
+        let src_mac = netsim_packets::MacAddr::new(*src);
+        let frame =
+            netsim_packets::EthernetFrame::new(dst_mac, src_mac, netsim_packets::ether_type::IPV4);
+        let mut bytes = frame.as_bytes().to_vec();
+        bytes.extend_from_slice(payload);
+        if bytes.len() < 60 {
+            bytes.resize(60, 0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn test_try_encrypt_skips_management_frames() {
+        let store = SharedKeyStore::new();
+        let bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+
+        store.add_bssid(bssid);
+        store.set_gtk(bssid, [0x11; 16]);
+        store.add_session(sta_mac, vec![0x42; 16]);
+
+        let mut beacon_bytes = Vec::new();
+        let beacon_hdr = MacHeader3Addr {
+            frame_control: FrameControl::new(
+                ((management_subtype::BEACON as u16) << 4) | ((FrameType::Management as u16) << 2),
+            ),
+            duration_id: zerocopy::U16::ZERO,
+            addr1: MacAddress::new([0xFF; 6]),
+            addr2: bssid,
+            addr3: bssid,
+            sequence_control: SequenceControl::new(0),
+        };
+        beacon_bytes.extend_from_slice(beacon_hdr.as_bytes());
+        let fixed = BeaconFixedFields {
+            timestamp: [0; 8],
+            beacon_interval: zerocopy::U16::new(100),
+            capabilities: zerocopy::U16::ZERO,
+        };
+        beacon_bytes.extend_from_slice(fixed.as_bytes());
+        let beacon = Ieee80211::decode(&beacon_bytes).expect("decode beacon");
+
+        let mut probe_resp_bytes = Vec::new();
+        let probe_hdr = MacHeader3Addr {
+            frame_control: FrameControl::new(
+                ((management_subtype::PROBE_RESPONSE as u16) << 4)
+                    | ((FrameType::Management as u16) << 2),
+            ),
+            duration_id: zerocopy::U16::ZERO,
+            addr1: sta_mac,
+            addr2: bssid,
+            addr3: bssid,
+            sequence_control: SequenceControl::new(0),
+        };
+        probe_resp_bytes.extend_from_slice(probe_hdr.as_bytes());
+        probe_resp_bytes.extend_from_slice(fixed.as_bytes());
+        let probe_resp = Ieee80211::decode(&probe_resp_bytes).expect("decode probe response");
+
+        assert!(store.try_encrypt(&beacon).is_none());
+        assert!(store.try_encrypt(&probe_resp).is_none());
+
+        let eth_bcast = create_dummy_ethernet(&bssid.bytes, &[0xFF; 6], b"BroadcastPayload");
+        let bcast_data = netsim_packets::Ieee80211::from_ieee8023(
+            &bytes::Bytes::from(eth_bcast),
+            bssid,
+            netsim_packets::FrameDirection::FromAp,
+            100,
+        )
+        .expect("create broadcast 802.11");
+        let encrypted_bcast = store.try_encrypt(&bcast_data).expect("encrypt broadcast data");
+        let decoded_bcast =
+            Ieee80211::decode(&encrypted_bcast).expect("decode encrypted broadcast");
+        assert_eq!(decoded_bcast.get_packet_number(), [0, 0, 0, 0, 0, 1]);
+
+        let eth_unicast = create_dummy_ethernet(&bssid.bytes, &sta_mac.bytes, b"UnicastPayload");
+        let unicast_data = netsim_packets::Ieee80211::from_ieee8023(
+            &bytes::Bytes::from(eth_unicast),
+            bssid,
+            netsim_packets::FrameDirection::FromAp,
+            101,
+        )
+        .expect("create unicast 802.11");
+        let encrypted_unicast = store.try_encrypt(&unicast_data).expect("encrypt unicast data");
+        let decoded_unicast =
+            Ieee80211::decode(&encrypted_unicast).expect("decode encrypted unicast");
+        assert_eq!(decoded_unicast.get_packet_number(), [0, 0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_try_encrypt_skips_null_data() {
+        let store = SharedKeyStore::new();
+        let bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+
+        store.add_bssid(bssid);
+        store.add_session(sta_mac, vec![0x42; 16]);
+
+        let null_hdr = MacHeader3Addr {
+            frame_control: FrameControl::new(
+                ((DataSubType::Nodata as u16) << 4) | ((FrameType::Data as u16) << 2) | 0x0200,
+            ),
+            duration_id: zerocopy::U16::ZERO,
+            addr1: sta_mac,
+            addr2: bssid,
+            addr3: bssid,
+            sequence_control: SequenceControl::new(0),
+        };
+        let null_data = Ieee80211::decode(null_hdr.as_bytes()).expect("decode null data");
+
+        assert!(store.try_encrypt(&null_data).is_none());
+
+        let eth_unicast = create_dummy_ethernet(&bssid.bytes, &sta_mac.bytes, b"UnicastPayload");
+        let unicast_data = netsim_packets::Ieee80211::from_ieee8023(
+            &bytes::Bytes::from(eth_unicast),
+            bssid,
+            netsim_packets::FrameDirection::FromAp,
+            101,
+        )
+        .expect("create unicast 802.11");
+        let encrypted = store.try_encrypt(&unicast_data).expect("encrypt unicast data");
+        let decoded = Ieee80211::decode(&encrypted).expect("decode encrypted unicast");
+        assert_eq!(decoded.get_packet_number(), [0, 0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_try_encrypt_encrypts_payload_bearing_data() {
+        let store = SharedKeyStore::new();
+        let bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+
+        store.add_bssid(bssid);
+        store.set_gtk(bssid, [0x11; 16]);
+        store.add_session(sta_mac, vec![0x42; 16]);
+
+        let eth_bcast = create_dummy_ethernet(&bssid.bytes, &[0xFF; 6], b"BroadcastPayload");
+        let bcast_data = netsim_packets::Ieee80211::from_ieee8023(
+            &bytes::Bytes::from(eth_bcast),
+            bssid,
+            netsim_packets::FrameDirection::FromAp,
+            100,
+        )
+        .expect("create broadcast 802.11");
+        let encrypted_bcast = store.try_encrypt(&bcast_data).expect("encrypt broadcast data");
+        let decoded_bcast =
+            Ieee80211::decode(&encrypted_bcast).expect("decode encrypted broadcast");
+        assert!(decoded_bcast.needs_decryption());
+
+        let eth_unicast = create_dummy_ethernet(&bssid.bytes, &sta_mac.bytes, b"UnicastPayload");
+        let unicast_data = netsim_packets::Ieee80211::from_ieee8023(
+            &bytes::Bytes::from(eth_unicast),
+            bssid,
+            netsim_packets::FrameDirection::FromAp,
+            101,
+        )
+        .expect("create unicast 802.11");
+        let encrypted_unicast = store.try_encrypt(&unicast_data).expect("encrypt unicast data");
+        let decoded_unicast =
+            Ieee80211::decode(&encrypted_unicast).expect("decode encrypted unicast");
+        assert!(decoded_unicast.needs_decryption());
     }
 }

@@ -49,7 +49,7 @@ The WiFi-Actor component handles the logic for:
   and Wi-Fi Aware / NAN), AP reflection (`ToDS` to `FromDS`), and multicast-to-unicast
   (M2U) conversion for infrastructure mDNS traffic.
 - **WPA2/WPA3 Data-Plane Crypto Integration**: Decrypting incoming protected
-  frames and re-encrypting outgoing infrastructure frames per recipient station
+  frames and re-encrypting outgoing infrastructure data frames per recipient station
   using PTK/GTK keys stored in `ap_actor::SharedKeyStore`.
 - **Infrastructure Gateways**: Bridging `ToDS`/`FromDS` data frames to
   `slirp-actor` (`SlirpGateway`) or Linux `/dev/net/tun` (`TapGateway` in
@@ -232,9 +232,11 @@ WiFi-Actor sits at the center of the Wi-Fi simulation subsystem inside `netsim`:
 - **RQ-MED-02 (WPA2/WPA3 Frame Decryption & Re-Encryption)**: On uplink (`rx`),
   `Medium` shall attempt to decrypt protected 802.11 frames via
   `SharedKeyStore::try_decrypt` prior to routing. On downlink/delivery (`tx`),
-  `Medium` shall encrypt infrastructure frames for the target station via
+  `Medium` shall encrypt payload-bearing infrastructure data frames via
   `SharedKeyStore::try_encrypt` (falling back to the original encrypted frame
-  for GTK multicast traffic when keys are not directly re-encrypted).
+  for GTK multicast traffic when keys are not directly re-encrypted), while
+  management frames (e.g. Beacons, Probe Responses) remain unencrypted per
+  IEEE 802.11.
 - **RQ-MED-03 (Peer-to-Peer & Multicast Station Routing)**: Frames addressed to
   a known station MAC or a multicast/broadcast MAC shall be delivered across
   `Medium` to matching enabled stations (`transmit`), incrementing P2P TX/RX
@@ -418,7 +420,7 @@ Unit and integration tests are located in `src/wifi-actor/src/` and
 | **RQ-HWSIM-02** | Immediate `TxInfoFrame` Ack | `packet_routing_test.rs::test_p2p_wifi_direct_flow`, `stats_test.rs::test_tx_error_stat` | `epics/wifi.md` | **Full** |
 | **RQ-HWSIM-03** | Outbound `HwsimMsg` Encapsulation | `packet_routing_test.rs::test_p2p_wifi_direct_flow`, `packet_routing_test.rs::test_infra_flow_real` | `epics/wifi.md` | **Full** |
 | **RQ-MED-01** | Station Learning & Dual MAC Mapping | `slirp_dual_mapping_test.rs::test_slirp_does_not_drop_with_dual_mapping` | `bdd/wifi/WifiManager/wifi_ap.feature` | **Full** |
-| **RQ-MED-02** | WPA2/WPA3 Decryption & Re-Encryption | `packet_routing_test.rs::test_secure_network_dhcp_broadcast`, `packet_routing_test.rs::test_dhcp_m2u_race_condition` | `bdd/wifi/WifiManager/wifi_auth.feature` (`REQ-WIFI-03`, `REQ-WIFI-04`) | **Full** |
+| **RQ-MED-02** | WPA2/WPA3 Decryption & Re-Encryption | `packet_routing_test.rs::test_secure_network_dhcp_broadcast`, `packet_routing_test.rs::test_dhcp_m2u_race_condition`, `packet_routing_test.rs::test_secure_ap_beacons_remain_plaintext`, `packet_routing_test.rs::test_secure_ap_probe_responses_remain_plaintext` | `bdd/wifi/WifiManager/wifi_auth.feature` (`REQ-WIFI-03`, `REQ-WIFI-04`) | **Full** |
 | **RQ-MED-03** | P2P & Multicast Station Routing | `packet_routing_test.rs::test_p2p_wifi_direct_flow`, `packet_routing_test.rs::test_broadcast_flow_real`, `packet_routing_test.rs::test_p2p_transparent_proxy`, `packet_routing_test.rs::test_p2p_data_frame_with_ftm_bytes_not_intercepted` | `bdd/wifi/WifiP2pManager/wifi_p2p.feature`, `bdd/wifi/WifiAwareManager/wifi_aware.feature` (`REQ-WIFI-08`..`10`), `bdd/core/p2p.feature` | **Full** |
 | **RQ-MED-04** | AP Management & EAPOL Routing | `packet_routing_test.rs::test_station_to_ap_mgmt_stub`, `packet_routing_test.rs::test_infra_flow_real`, `stats_test.rs::test_hostapd_and_network_tx_stats` | `bdd/wifi/WifiManager/wifi_ap.feature`, `wifi_scanning.feature` (`REQ-WIFI-01`, `REQ-WIFI-02`) | **Full** |
 | **RQ-MED-05** | AP Reflection & Infrastructure M2U | `packet_routing_test.rs::test_ap_reflection_flow_stub`, `test_open_network_mdns_m2u`, `test_open_network_non_mdns_remains_broadcast`, `test_mdns_discovery_infrastructure_flow` | `bdd/wifi/NsdManager/wifi_service_discovery.feature` (`REQ-WIFI-07`), `bdd/network_services/nsd.feature` | **Full** |
