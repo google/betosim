@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -92,6 +92,13 @@ impl World {
 
     pub async fn when_shutdown(&self) -> Result<(), FrameworkError<CaptureError>> {
         self.client.shutdown().await
+    }
+
+    pub async fn when_set_capture_directory(&self, path: std::path::PathBuf) {
+        self.client
+            .perform_action(None, capture_api::CaptureAction::SetCaptureDirectory { path })
+            .await
+            .expect("Failed to set capture directory");
     }
 
     pub async fn then_capture_is_none(&self, chip_id: u32) {
@@ -203,6 +210,37 @@ impl World {
             }
         })
         .await;
+    }
+
+    pub async fn then_capture_filepath_is(&self, chip_id: u32, expected_path: &Path) {
+        let info = self.client.get_capture(netsim_model::ChipId(chip_id)).await.unwrap().unwrap();
+        assert_eq!(info.filepath.as_deref(), Some(expected_path));
+        assert!(expected_path.exists());
+    }
+
+    pub async fn then_capture_error_is_chip_not_found<T: std::fmt::Debug>(
+        &self,
+        res: Result<T, netsim_model::ClientError>,
+        expected_id: u32,
+    ) {
+        use actor_framework::FrameworkError;
+        use capture_actor::CaptureError;
+        use netsim_model::{ChipError, ChipId, ClientError};
+
+        let err = res.expect_err("Expected ClientError::Framework(ChipNotFound)");
+        match err {
+            ClientError::Framework(boxed) => {
+                match boxed.downcast_ref::<FrameworkError<CaptureError>>() {
+                    Some(FrameworkError::ServiceError(CaptureError::Chip(
+                        ChipError::ChipNotFound(id),
+                    ))) => {
+                        assert_eq!(*id, ChipId(expected_id));
+                    }
+                    other => panic!("Unexpected service error: {other:?}"),
+                }
+            }
+            other => panic!("Expected ClientError::Framework, got: {other:?}"),
+        }
     }
 
     async fn poll_until<F, Fut, T>(&self, mut f: F) -> T

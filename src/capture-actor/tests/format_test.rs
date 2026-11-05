@@ -177,3 +177,25 @@ async fn test_nfc_nci_capture() {
     // And: the PCAP file header has correct NFC NCI DLT (147)
     world.then_capture_file_has_dlt(DataLinkType::User0).await;
 }
+
+// Scenario: UNSPECIFIED chip kind falls back to User0 DLT
+#[tokio::test]
+async fn test_unspecified_chip_kind_uses_user0_dlt() {
+    let world = World::new().await;
+    let chip_id = 99;
+
+    // Given: an enabled capture session for an UNSPECIFIED chip kind
+    world
+        .when_create_capture(chip_id, ChipKind::UNSPECIFIED, "test_unspecified_dev", true)
+        .await
+        .unwrap();
+
+    // When: a dummy packet is sent
+    world.when_dummy_packet_is_sent(chip_id).await;
+
+    // Then: the capture info reflects the written packet
+    world.then_capture_stats_are(chip_id, 1, 4).await;
+
+    // And: the PCAP file header falls back to User0 DLT
+    world.then_capture_file_has_dlt(DataLinkType::User0).await;
+}

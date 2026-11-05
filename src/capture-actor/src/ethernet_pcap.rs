@@ -38,3 +38,16 @@ impl EthernetPcapWriter {
         (Box::new(pcap), rx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_ethernet_pcap_writer_stream_dlt() {
+        let (_writer, mut rx) = EthernetPcapWriter::new_stream();
+        let header = rx.recv().await.expect("Expected PCAP global header chunk");
+        assert_eq!(header.len(), 24);
+        assert_eq!(&header[20..24], &DataLinkType::Ethernet.as_u32().to_le_bytes());
+    }
+}

@@ -114,3 +114,69 @@ async fn test_list_and_patch_captures() {
     world.then_capture_is_enabled(11, true).await;
     world.then_capture_is_enabled(12, false).await;
 }
+
+// Scenario: Device name containing illegal filesystem characters is sanitized
+#[tokio::test]
+async fn test_device_name_character_sanitization() {
+    let world = World::new().await;
+    let chip_id = 42;
+
+    // Given: an enabled capture session created with illegal filesystem characters in device name
+    world
+        .when_create_capture(chip_id, ChipKind::BLUETOOTH, "radio/dev:0 test", true)
+        .await
+        .unwrap();
+
+    // Then: the resulting capture file path is sanitized to avoid directory separators or colons
+    let expected_path = world.temp_dir.join("netsim-42-radio_dev_0_test-BLUETOOTH.pcap");
+    world.then_capture_filepath_is(chip_id, &expected_path).await;
+}
+
+/// RAII guard to clean up test temporary directory on Drop even on panic.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+// Scenario: Global SetCaptureDirectory dynamically changes destination directory
+#[tokio::test]
+async fn test_dynamic_set_capture_directory() {
+    let world = World::new().await;
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let new_dir =
+        std::env::temp_dir().join(format!("netsim-capture-test-{}-{}", std::process::id(), nanos));
+    std::fs::create_dir_all(&new_dir).unwrap();
+    let _guard = TempDirGuard(new_dir.clone());
+
+    // When: the global capture directory is reconfigured
+    world.when_set_capture_directory(new_dir.clone()).await;
+
+    let chip_id = 10;
+    world.when_create_capture(chip_id, ChipKind::BLUETOOTH, "test_dyn_dev", true).await.unwrap();
+
+    // Then: subsequent captures are written to the new destination directory
+    let expected_path = new_dir.join("netsim-10-test_dyn_dev-BLUETOOTH.pcap");
+    world.then_capture_filepath_is(chip_id, &expected_path).await;
+    assert_eq!(std::fs::read_dir(&world.temp_dir).unwrap().count(), 0);
+}
+
+// Scenario: Operations on non-existent ChipId return ChipNotFound
+#[tokio::test]
+async fn test_unregistered_chip_id_operations_fail() {
+    let world = World::new().await;
+    let invalid_id = 999;
+
+    // When: updating an unregistered ChipId, Then: ChipNotFound error is returned
+    let update_res = world.when_update_capture(invalid_id, true).await;
+    world.then_capture_error_is_chip_not_found(update_res, invalid_id).await;
+
+    // When: deleting an unregistered ChipId, Then: ChipNotFound error is returned
+    let delete_res = world.when_delete_capture(invalid_id).await;
+    world.then_capture_error_is_chip_not_found(delete_res, invalid_id).await;
+}
