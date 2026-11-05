@@ -1328,11 +1328,20 @@ impl ActorService for DeviceActor {
                 Ok(DeviceActionResult::Success)
             }
             DeviceAction::DeleteChip(chip_id) => {
-                let Some(device_id) = self.devices.iter().find_map(|(&dev_id, dev)| {
-                    dev.device.chips.iter().any(|c| c.id == chip_id.0).then_some(dev_id)
-                }) else {
+                let Some((device_id, is_external)) =
+                    self.devices.iter().find_map(|(&dev_id, dev)| {
+                        dev.device
+                            .chips
+                            .iter()
+                            .any(|c| c.id == chip_id.0)
+                            .then_some((dev_id, dev.guid.is_some()))
+                    })
+                else {
                     return Err(DeviceError::NotFound(format!("Chip not found: {chip_id}")));
                 };
+                if is_external {
+                    return Err(DeviceError::NotFound("Cannot delete external device".to_string()));
+                }
                 self.perform_chip_removal(device_id, chip_id, ctx).await?;
                 Ok(DeviceActionResult::Success)
             }

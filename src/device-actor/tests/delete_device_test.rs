@@ -235,3 +235,41 @@ async fn test_delete_unknown_chip_returns_not_found() {
     world.then_chip_count_is(device_id, 1).await;
     world.then_mock_chip_present(existing_chip_id, true);
 }
+
+/// Scenario: Deleting the only chip on a single-chip external device returns NotFound without auto-deleting the device.
+#[tokio::test]
+async fn test_delete_chip_on_single_chip_external_device_returns_not_found() {
+    // Given a running Device Actor with a single-chip external device registered by GUID
+    let world = World::new().await;
+    let device_id = world.when_add_chip("guid-ext-single", "bt-0").await;
+    let chip_id = world.given_first_chip_id(device_id).await;
+
+    // When I try to delete the external device's only chip
+    world.when_try_delete_chip(chip_id).await;
+
+    // Then the call fails with NotFound and neither the chip nor the external parent device is deleted
+    world.then_error_is_not_found("Cannot delete external device");
+    world.then_device_exists(device_id).await;
+    world.then_chip_count_is(device_id, 1).await;
+    world.then_mock_chip_present(chip_id, true);
+}
+
+/// Scenario: Deleting a chip on a multi-chip external device returns NotFound and preserves all chips.
+#[tokio::test]
+async fn test_delete_chip_on_multi_chip_external_device_returns_not_found() {
+    // Given a running Device Actor with two chips registered on the same external device GUID
+    let world = World::new().await;
+    let device_id = world.when_add_chip("guid-ext-multi", "bt-0").await;
+    let first_chip_id = world.given_first_chip_id(device_id).await;
+    let second_device_id = world.when_add_chip("guid-ext-multi", "bt-1").await;
+    assert_eq!(second_device_id, device_id);
+
+    // When I try to delete the first chip on the external device
+    world.when_try_delete_chip(first_chip_id).await;
+
+    // Then the call fails with NotFound and the external device keeps both chips intact
+    world.then_error_is_not_found("Cannot delete external device");
+    world.then_device_exists(device_id).await;
+    world.then_chip_count_is(device_id, 2).await;
+    world.then_mock_chip_present(first_chip_id, true);
+}
