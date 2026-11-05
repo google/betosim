@@ -15,7 +15,7 @@
 use std::{sync::Arc, time::Duration};
 
 use netsim_model::{CellNetworkConfig, Quirks, RadioTechnology, RegistrationStatus};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::{
     CardState, RadioAdmission,
@@ -181,13 +181,33 @@ impl ModemImpl {
             self.id, self.sms_service.message_format
         );
         if self.sms_service.message_format == MessageFormat::Pdu {
-            let pdu_hex = crate::pdu::create_deliver_pdu_ucs2(sender, text);
-            return self.generate_incoming_pdu(&pdu_hex).into_iter().collect();
+            let scts = crate::pdu::get_current_timestamp_bcd();
+            let pdus = match crate::pdu::create_deliver_pdus(sender, text, scts, || {
+                self.sms_service.next_concat_reference()
+            }) {
+                Ok(pdus) => pdus,
+                Err(error) => {
+                    warn!(?error, "Dropping incoming SMS exceeding concatenation limit");
+                    return Vec::new();
+                }
+            };
+            return pdus.iter().filter_map(|pdu| self.generate_incoming_pdu(pdu)).collect();
         }
-        // Format: +CMT: "<sender>",,"<timestamp>"\r\n<text>
+        let segments = match crate::pdu::TextMessage::new(text).split_segments() {
+            Ok(segments) => segments,
+            Err(error) => {
+                warn!(?error, "Dropping incoming text SMS exceeding concatenation limit");
+                return Vec::new();
+            }
+        };
+        // Format: +CMT: "<sender>",,"<timestamp>"\r\n<segment>\r\n
         let timestamp = "22/01/01,12:00:00+00";
-        let response = format!("+CMT: \"{sender}\",,\"{timestamp}\"\r\n{text}\r\n");
-        vec![response.into_bytes()]
+        segments
+            .into_iter()
+            .map(|segment| {
+                format!("+CMT: \"{sender}\",,\"{timestamp}\"\r\n{segment}\r\n").into_bytes()
+            })
+            .collect()
     }
 
     pub(crate) fn generate_incoming_pdu(&self, pdu: &str) -> Option<Vec<u8>> {

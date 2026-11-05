@@ -222,10 +222,8 @@ pub enum SmsTransactionState {
     Idle,
     Sending {
         destination: Option<PhoneNumber>,
-        expected_len: usize,
     },
     Storing {
-        expected_len: usize,
         status: SmsMessageStatus,
     },
 }
@@ -242,6 +240,7 @@ pub struct SmsService {
     quirks: Quirks,
     clock: Arc<dyn Clock>,
     message_reference: u8,
+    concat_reference: u8,
     messages: BTreeMap<usize, SimSmsMessage>,
     storage1: MessageStorage,
     storage2: MessageStorage,
@@ -257,6 +256,7 @@ impl Default for SmsService {
     fn default() -> Self {
         Self {
             message_reference: 1,
+            concat_reference: 1,
             quirks: Default::default(),
             clock: Arc::new(SystemClock),
             messages: Default::default(),
@@ -288,6 +288,14 @@ impl SmsService {
         mr
     }
 
+    /// Allocates the next 8-bit concatenation reference, which ties together
+    /// the parts of one multi-part message (3GPP TS 23.040 § 9.2.3.24.1).
+    pub(crate) fn next_concat_reference(&mut self) -> u8 {
+        let reference = self.concat_reference;
+        self.concat_reference = self.concat_reference.wrapping_add(1);
+        reference
+    }
+
     pub fn is_waiting_for_prompt(&self) -> bool {
         self.transaction_state.is_active()
     }
@@ -312,10 +320,13 @@ impl SmsService {
             };
         }
         let (message_reference, actions) = if self.message_format == MessageFormat::Text {
+            let text = String::from_utf8_lossy(pdu);
+            if crate::pdu::TextMessage::new(&text).validate_single_part().is_err() {
+                return ExecutionResult::cms_error(CmsError::InvalidTextModeParameter);
+            }
             let to = destination.map(String::from).unwrap_or_default();
-            let text = String::from_utf8_lossy(pdu).into_owned();
             let mr = self.next_message_reference();
-            (mr, vec![CommandAction::ReceiveTextSms { to, text }])
+            (mr, vec![CommandAction::ReceiveTextSms { to, text: text.into_owned() }])
         } else {
             match self.handle_sms_pdu(pdu, sender) {
                 Ok(result) => result,
@@ -372,10 +383,10 @@ impl SmsService {
         let pdu = command_bytes.strip_suffix(b"\x1a")?;
 
         let exec_res = match std::mem::take(&mut self.transaction_state) {
-            SmsTransactionState::Storing { status, .. } => {
+            SmsTransactionState::Storing { status } => {
                 self.handle_store_sms(sim, pdu, status).into()
             }
-            SmsTransactionState::Sending { destination, .. } => {
+            SmsTransactionState::Sending { destination } => {
                 self.handle_send_sms(pdu, sender, destination, network_service)
             }
             SmsTransactionState::Idle => {
@@ -480,14 +491,9 @@ impl SmsService {
         Ok(SmsSuccess::with_actions(None, vec![CommandAction::AcknowledgeIncomingSms { ack }]))
     }
 
-    pub fn handle_wait_for_store_sms(
-        &mut self,
-        len: u16,
-        stat: Option<MessageStatus>,
-    ) -> SmsResult {
+    fn handle_wait_for_store_sms(&mut self, stat: Option<MessageStatus>) -> SmsResult {
         let status = stat.unwrap_or(SmsMessageStatus::StoredUnsent);
-        self.transaction_state =
-            SmsTransactionState::Storing { expected_len: len as usize, status };
+        self.transaction_state = SmsTransactionState::Storing { status };
         Ok(SmsSuccess::new(Some(SmsResponse::Prompt {
             goldfish_compat: self.quirks.goldfish_ril_37_or_earlier,
         })))
@@ -507,16 +513,11 @@ impl SmsService {
                     PhoneNumber::try_from(destination_address.as_str()).map_err(|_err| {
                         ExecutionResult::cms_error(CmsError::InvalidTextModeParameter)
                     })?;
-                self.transaction_state = SmsTransactionState::Sending {
-                    destination: Some(destination),
-                    // TODO(b/558794976): Calculate the actual GSM 7-bit packing limit rather
-                    // than assuming 160.
-                    expected_len: 160,
-                };
-            }
-            (MessageFormat::Pdu, SendSmsArgs::Pdu { length }) => {
                 self.transaction_state =
-                    SmsTransactionState::Sending { destination: None, expected_len: length };
+                    SmsTransactionState::Sending { destination: Some(destination) };
+            }
+            (MessageFormat::Pdu, SendSmsArgs::Pdu { .. }) => {
+                self.transaction_state = SmsTransactionState::Sending { destination: None };
             }
             // TS 27.005 § 3.5.1: the argument shape must match the active <mode>.
             (MessageFormat::Text, SendSmsArgs::Pdu { .. }) => {
@@ -587,7 +588,7 @@ impl SmsService {
     ) -> ExecutionResult {
         let sms_result = match command {
             SmsCommand::SendSms(args) => self.handle_wait_for_send_sms(*args, network_service),
-            SmsCommand::StoreSms(len, stat) => self.handle_wait_for_store_sms(*len, *stat),
+            SmsCommand::StoreSms(_, stat) => self.handle_wait_for_store_sms(*stat),
             SmsCommand::ReadSms(index) => self.handle_read_sms(sim, *index),
             SmsCommand::DeleteSms(index) => self.handle_delete_sms(sim, *index),
             SmsCommand::SendSmsAck => self.handle_send_sms_ack(SmsAck::Success),

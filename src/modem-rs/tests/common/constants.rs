@@ -111,8 +111,11 @@ pub const SMS_RECEIVER: &str = "12345";
 pub const TEXT_SMS_BODY_HEX: &str = "48656C6C6F1A";
 pub const TEXT_SMS_BODY: &str = "Hello";
 pub const TEST_SMS_TEXT: &str = "Hello World";
-pub const TEST_SMS_TEXT_UCS2_HEX: &str = "1600480065006C006C006F00200057006F0072006C0064";
-pub const TEST_SMS_UCS2_TPDU_LEN: &str = "38";
+pub const TEST_SMS_GSM7_PACKED_HEX: &str = "0BC8329BFD065DDF723619";
+pub const TEST_SMS_GSM7_TPDU_LEN: &str = "26";
+pub const TEST_SMS_UNICODE_TEXT: &str = "👋";
+pub const TEST_SMS_UCS2_PACKED_HEX: &str = "04D83DDC4B";
+pub const TEST_SMS_UCS2_TPDU_LEN: &str = "20";
 pub const INVALID_SMS_PDU_HEX: &str = "0001000A8100000000001A";
 
 // Network/Call Constants

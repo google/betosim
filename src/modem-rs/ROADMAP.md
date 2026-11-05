@@ -325,6 +325,15 @@ features in the Rust version.
   - [x] Add the logic for generating and sending SMS status reports.
 - [x] **Improve Error Handling:**
   - [x] Use more specific CMS (Cellular Messaging Service) error codes.
+- [x] **Implement Concatenated SMS delivery (3GPP TS 23.040 § 9.2.3.24.1):**
+  - [x] Segment network-originated messages into 153-septet / 67 UCS-2 code-unit
+        parts carrying an 8-bit reference User Data Header (`00 03`), with
+        TP-UDHI set.
+  - [x] Apply TS 27.005 § 3.4.1 stop-and-wait to every `+CMT` source, so the
+        parts of a concatenated message are released one `AT+CNMA` at a time.
+  - Text-mode AT+CMGS has no UDH syntax, so an over-long payload is rejected
+    with CMS 305; PDU-mode AT+CMGS already forwards TE-supplied concatenation
+    UDHs.
 
 ### STK Service (`src/stk_service.rs`)
 

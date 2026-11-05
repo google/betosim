@@ -25,8 +25,11 @@ use crate::types::TypeOfAddress;
 pub(crate) mod bcd;
 pub(crate) mod cbs;
 mod charset;
+mod segment;
 
 pub use cbs::{CBS_CONTENT_LEN, CBS_HEADER_LEN, CBS_PDU_LEN, CbsPdu};
+use charset::DataCodingScheme;
+pub(crate) use segment::TextMessage;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
@@ -80,6 +83,9 @@ const SMS_STATUS_SUCCESS: u8 = 0x00;
 const SMS_DELIVER_PDU_TYPE: u8 = 0x24;
 /// PDU Type for SMS-DELIVER with User Data Header (UDHI set)
 const SMS_DELIVER_UDHI_PDU_TYPE: u8 = 0x64;
+
+/// Default Protocol Identifier (3GPP TS 23.040 § 9.2.3.9: Short message type 0)
+const TP_PID_DEFAULT: u8 = 0x00;
 
 /// Represents a parsed SMS-SUBMIT (outgoing) PDU.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,45 +290,6 @@ fn parse_pdu_nom(input: &[u8]) -> IResult<&[u8], SubmitPdu> {
     ))
 }
 
-/// 3GPP TS 23.038 § 4: SMS Data Coding Scheme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DataCodingScheme(u8);
-
-impl DataCodingScheme {
-    const CODING_GROUP_MASK: u8 = 0xC0;
-    const GENERAL_CODING_GROUP: u8 = 0x00;
-    const AUTO_DELETION_GROUP: u8 = 0x40;
-    const RESERVED_CODING_GROUP: u8 = 0x80;
-    const MWI_GROUP_MASK: u8 = 0xF0;
-    const MWI_DISCARD_7BIT: u8 = 0xC0;
-    const MWI_STORE_7BIT: u8 = 0xD0;
-    const MWI_STORE_UCS2: u8 = 0xE0;
-    const DATA_CODING_MESSAGE_CLASS: u8 = 0xF0;
-    const ALPHABET_MASK: u8 = 0x0C;
-    const ALPHABET_7BIT: u8 = 0x00;
-    const MESSAGE_CLASS_8BIT_MASK: u8 = 0x04;
-
-    pub const fn from_raw(dcs: u8) -> Self {
-        Self(dcs)
-    }
-
-    pub const fn uses_gsm_7bit(self) -> bool {
-        let dcs = self.0;
-        match dcs & Self::CODING_GROUP_MASK {
-            Self::GENERAL_CODING_GROUP | Self::AUTO_DELETION_GROUP => {
-                (dcs & Self::ALPHABET_MASK) == Self::ALPHABET_7BIT
-            }
-            Self::RESERVED_CODING_GROUP => false,
-            _ => match dcs & Self::MWI_GROUP_MASK {
-                Self::MWI_DISCARD_7BIT | Self::MWI_STORE_7BIT => true,
-                Self::MWI_STORE_UCS2 => false,
-                Self::DATA_CODING_MESSAGE_CLASS => (dcs & Self::MESSAGE_CLASS_8BIT_MASK) == 0,
-                _ => false,
-            },
-        }
-    }
-}
-
 pub(crate) fn encode_timestamp_bcd(timestamp: &Zoned) -> [u8; 7] {
     let utc = timestamp.with_time_zone(TimeZone::UTC);
     [
@@ -351,34 +318,53 @@ pub fn encode_address(number: &str) -> Vec<u8> {
     once(address_len_digits).chain(once(address_type)).chain(bcd_digits).collect()
 }
 
-/// Creates an SMS-DELIVER PDU from sender number and plain text, encoded in
-/// UCS-2. Returns the hex-encoded PDU string.
-pub fn create_deliver_pdu_ucs2(sender: &str, text: &str) -> String {
-    let rx_pdu_type = 0x24; // SMS-DELIVER, SRI=1, MMS=1
-    let scts = get_current_timestamp_bcd();
+/// Represents a framed SMS-DELIVER PDU ready for wire serialization or delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeliverPdu {
+    sender: String,
+    scts_bcd: [u8; 7],
+    user_data: segment::EncodedUserData,
+}
 
-    // 1. OA Address
-    let address_bytes = encode_address(sender);
-
-    // 2. User Data (UCS-2)
-    let utf16_chars: Vec<u16> = text.encode_utf16().collect();
-    let mut ud_bytes = Vec::with_capacity(1 + utf16_chars.len() * 2);
-    ud_bytes.push((utf16_chars.len() * 2) as u8); // UDL (length of user data in bytes for UCS2)
-    for &ch in &utf16_chars {
-        ud_bytes.push((ch >> 8) as u8);
-        ud_bytes.push((ch & 0xFF) as u8);
+impl DeliverPdu {
+    fn new(sender: String, scts_bcd: [u8; 7], user_data: segment::EncodedUserData) -> Self {
+        Self { sender, scts_bcd, user_data }
     }
 
-    let bytes: Vec<u8> = std::iter::once(0x00) // 1. SCA (default)
-        .chain(std::iter::once(rx_pdu_type)) // 2. PDU-Type
-        .chain(address_bytes.iter().copied()) // 3. OA
-        .chain(std::iter::once(0x00)) // 4. PID (SmsDefault)
-        .chain(std::iter::once(0x08)) // 5. DCS (UCS-2)
-        .chain(scts) // 6. SCTS
-        .chain(ud_bytes.iter().copied()) // 7. User Data (UDL + UD)
-        .collect();
+    fn to_bytes(&self) -> Vec<u8> {
+        let address_bytes = encode_address(&self.sender);
+        let pdu_type =
+            if self.user_data.has_udh() { SMS_DELIVER_UDHI_PDU_TYPE } else { SMS_DELIVER_PDU_TYPE };
+        [
+            [PDU_SCA_DEFAULT, pdu_type].as_slice(),
+            address_bytes.as_slice(),
+            [TP_PID_DEFAULT, self.user_data.dcs().as_u8()].as_slice(),
+            self.scts_bcd.as_slice(),
+            [self.user_data.udl()].as_slice(),
+            self.user_data.payload(),
+        ]
+        .concat()
+    }
 
-    hex::encode_upper(bytes)
+    fn to_hex(&self) -> String {
+        hex::encode_upper(self.to_bytes())
+    }
+}
+
+/// Creates SMS-DELIVER PDUs from sender number and plain text, segmenting
+/// into concatenated parts with UDH if necessary per 3GPP TS 23.040 § 9.2.3.24.1.
+/// Returns the hex-encoded PDU strings.
+pub(crate) fn create_deliver_pdus<F>(
+    sender: &str,
+    text: &str,
+    scts_bcd: [u8; 7],
+    next_reference: F,
+) -> Result<Vec<String>, EncodeError>
+where
+    F: FnOnce() -> u8,
+{
+    let pdus = segment::TextMessage::new(text).to_deliver_pdus(sender, scts_bcd, next_reference)?;
+    Ok(pdus.into_iter().map(|pdu| pdu.to_hex()).collect())
 }
 
 pub(crate) fn try_decode_hex(pdu: &[u8]) -> Option<Vec<u8>> {
@@ -695,5 +681,46 @@ mod tests {
         let processed = super::process_outgoing_sms(b"0001000081000000", None, 0, &scts);
         assert!(processed.to.is_none());
         assert!(processed.pdu.starts_with(b"00240081"));
+    }
+
+    #[test]
+    fn test_create_deliver_pdu_gsm7() {
+        let scts = [0x22, 0x01, 0x01, 0x12, 0x00, 0x00, 0x00];
+        let pdus = super::create_deliver_pdus("123456", "hello", scts, || 0).unwrap();
+        assert_eq!(pdus, vec!["0024068121436500002201011200000005E8329BFD06"]);
+    }
+
+    #[test]
+    fn test_create_deliver_pdu_ucs2() {
+        let scts = [0x22, 0x01, 0x01, 0x12, 0x00, 0x00, 0x00];
+        let pdus = super::create_deliver_pdus("123456", "Hello 🚀", scts, || 0).unwrap();
+        assert_eq!(
+            pdus,
+            vec!["002406812143650008220101120000001000480065006C006C006F0020D83DDE80"]
+        );
+    }
+
+    #[test]
+    fn test_create_deliver_pdus_sets_udhi() {
+        let scts = [0x22, 0x01, 0x01, 0x12, 0x00, 0x00, 0x00];
+
+        // Single-part GSM-7 message: no UDHI (PDU type 0x24)
+        let single_pdus = super::create_deliver_pdus("123456", "Hello", scts, || 1).unwrap();
+        assert_eq!(single_pdus.len(), 1);
+        let first_single = single_pdus.first().expect("single pdu");
+        assert!(first_single.starts_with("0024"), "expected 0024 without UDHI: {first_single}");
+
+        // Multi-part GSM-7 message (200 chars > 160): UDHI set (PDU type 0x64)
+        let long_text = "A".repeat(200);
+        let multi_pdus = super::create_deliver_pdus("123456", &long_text, scts, || 42).unwrap();
+        assert_eq!(multi_pdus.len(), 2);
+        let part1 = multi_pdus.first().expect("part 1");
+        let part2 = multi_pdus.get(1).expect("part 2");
+        assert!(part1.starts_with("0064"), "part 1 UDHI: {part1}");
+        assert!(part2.starts_with("0064"), "part 2 UDHI: {part2}");
+        // Verify UDH in part 1 has ref 42 (0x2A), total 2, seq 1: 0500032A0201
+        assert!(part1.contains("0500032A0201"));
+        // Verify UDH in part 2 has ref 42 (0x2A), total 2, seq 2: 0500032A0202
+        assert!(part2.contains("0500032A0202"));
     }
 }

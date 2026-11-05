@@ -110,6 +110,133 @@ pub(super) fn gsm7_ext_to_char(code: u8) -> Option<char> {
     GSM7_EXTENSION_MAP.iter().find(|(_, c)| *c == code).map(|&(ch, _)| ch)
 }
 
+/// Returns the number of septets required to encode `ch` in 3GPP TS 23.038 GSM 7-bit,
+/// or `None` if `ch` is outside the GSM 7-bit alphabet.
+fn gsm7_char_cost(ch: char) -> Option<usize> {
+    if char_to_gsm7_basic(ch).is_some() {
+        Some(1)
+    } else if char_to_gsm7_ext(ch).is_some() {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// 3GPP TS 23.038 § 4 Data Coding Scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DataCodingScheme(u8);
+
+impl DataCodingScheme {
+    pub const GSM_7BIT_DEFAULT: Self = Self(0x00);
+    pub const UCS2: Self = Self(0x08);
+
+    const CODING_GROUP_MASK: u8 = 0xC0;
+    const GENERAL_CODING_GROUP: u8 = 0x00;
+    const AUTO_DELETION_GROUP: u8 = 0x40;
+    const RESERVED_CODING_GROUP: u8 = 0x80;
+    const MWI_GROUP_MASK: u8 = 0xF0;
+    const MWI_DISCARD_7BIT: u8 = 0xC0;
+    const MWI_STORE_7BIT: u8 = 0xD0;
+    const MWI_STORE_UCS2: u8 = 0xE0;
+    const DATA_CODING_MESSAGE_CLASS: u8 = 0xF0;
+    const ALPHABET_MASK: u8 = 0x0C;
+    const ALPHABET_7BIT: u8 = 0x00;
+    const MESSAGE_CLASS_8BIT_MASK: u8 = 0x04;
+
+    pub const fn from_raw(dcs: u8) -> Self {
+        Self(dcs)
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        self.0
+    }
+
+    pub const fn uses_gsm_7bit(self) -> bool {
+        let dcs = self.0;
+        match dcs & Self::CODING_GROUP_MASK {
+            Self::GENERAL_CODING_GROUP | Self::AUTO_DELETION_GROUP => {
+                (dcs & Self::ALPHABET_MASK) == Self::ALPHABET_7BIT
+            }
+            Self::RESERVED_CODING_GROUP => false,
+            _ => match dcs & Self::MWI_GROUP_MASK {
+                Self::MWI_DISCARD_7BIT | Self::MWI_STORE_7BIT => true,
+                Self::MWI_STORE_UCS2 => false,
+                Self::DATA_CODING_MESSAGE_CLASS => (dcs & Self::MESSAGE_CLASS_8BIT_MASK) == 0,
+                _ => false,
+            },
+        }
+    }
+}
+
+/// Target character alphabet for SMS text encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Alphabet {
+    Gsm7,
+    Ucs2,
+}
+
+/// Maximum TP-User-Data payload size in octets per 3GPP TS 23.040 § 9.2.3.24.
+const MAX_TP_UD_OCTETS: usize = 140;
+/// Total octets in an 8-bit reference concatenated SMS UDH (`[UDHL=0x05, IEI=0x00, IEDL=0x03, ref, total, seq]`).
+pub(super) const CONCAT_UDH_OCTETS: usize = 6;
+/// Number of 7-bit septets occupied by the 6-octet (48-bit) concatenation UDH (`ceil(48 / 7) = 7`, leaving 1 fill bit).
+pub(super) const CONCAT_UDH_SEPTETS: usize = (CONCAT_UDH_OCTETS * 8).div_ceil(7);
+/// Maximum GSM 7-bit septets in an unsegmented SMS (`(140 * 8) / 7 = 160`).
+const GSM7_MAX_UNSEGMENTED_SEPTETS: usize = (MAX_TP_UD_OCTETS * 8) / 7;
+/// Maximum UTF-16 code units in an unsegmented UCS-2 SMS (`140 / 2 = 70`).
+const UCS2_MAX_UNSEGMENTED_CHARS: usize = MAX_TP_UD_OCTETS / 2;
+/// Maximum GSM 7-bit septets per concatenated SMS segment (`160 - 7 = 153`).
+const GSM7_MAX_CONCAT_SEPTETS: usize = GSM7_MAX_UNSEGMENTED_SEPTETS - CONCAT_UDH_SEPTETS;
+/// Maximum UTF-16 code units per concatenated UCS-2 SMS segment (`(140 - 6) / 2 = 67`).
+const UCS2_MAX_CONCAT_CHARS: usize = (MAX_TP_UD_OCTETS - CONCAT_UDH_OCTETS) / 2;
+
+impl Alphabet {
+    /// Classifies `text` into the most compact supported alphabet.
+    ///
+    /// Returns `Alphabet::Gsm7` if every character is in the 3GPP TS 23.038 GSM 7-bit
+    /// default alphabet or extension table, else `Alphabet::Ucs2`.
+    pub fn classify(text: &str) -> Self {
+        if text.chars().all(|ch| gsm7_char_cost(ch).is_some()) { Self::Gsm7 } else { Self::Ucs2 }
+    }
+
+    pub const fn dcs(self) -> DataCodingScheme {
+        match self {
+            Self::Gsm7 => DataCodingScheme::GSM_7BIT_DEFAULT,
+            Self::Ucs2 => DataCodingScheme::UCS2,
+        }
+    }
+
+    pub const fn max_unsegmented_capacity(self) -> usize {
+        match self {
+            Self::Gsm7 => GSM7_MAX_UNSEGMENTED_SEPTETS,
+            Self::Ucs2 => UCS2_MAX_UNSEGMENTED_CHARS,
+        }
+    }
+
+    pub(super) const fn max_concat_segment_capacity(self) -> usize {
+        match self {
+            Self::Gsm7 => GSM7_MAX_CONCAT_SEPTETS,
+            Self::Ucs2 => UCS2_MAX_CONCAT_CHARS,
+        }
+    }
+
+    pub(super) fn char_cost(self, ch: char) -> usize {
+        match self {
+            Self::Gsm7 => gsm7_char_cost(ch).unwrap_or(1),
+            Self::Ucs2 => ch.len_utf16(),
+        }
+    }
+
+    pub fn measure(self, text: &str) -> usize {
+        text.chars().map(|ch| self.char_cost(ch)).sum()
+    }
+}
+
+/// Encodes a UTF-8 string into UCS-2 (UTF-16BE) bytes.
+pub(super) fn encode_ucs2_bytes(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(u16::to_be_bytes).collect()
+}
+
 /// Encodes a UTF-8 string into GSM 7-bit default alphabet septets (including extension table).
 /// Returns `None` if `text` contains any character outside the 3GPP TS 23.038 alphabet.
 pub(super) fn encode_gsm7_septets(text: &str) -> Option<Vec<u8>> {
@@ -161,6 +288,12 @@ pub(super) fn pack_septets_with_fill(septets: &[u8], fill_bits: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_encode_ucs2_bytes() {
+        let bytes = encode_ucs2_bytes("AB");
+        assert_eq!(bytes, vec![0x00, b'A', 0x00, b'B']);
+    }
 
     #[test]
     fn test_encode_gsm7_septets_basic() {

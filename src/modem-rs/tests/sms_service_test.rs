@@ -454,17 +454,33 @@ fn test_incoming_sms_pdu_mode_plain_text() {
     when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
 
     // Set PDU Mode
-    when_at_command_sent(&mut world, "A", "AT+CMGF=0");
-    then_response_is(&mut world, "A", "OK");
+    world.send_and_expect_ok("A", "AT+CMGF=0");
 
     // Trigger incoming SMS with plain text
     when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, TEST_SMS_TEXT);
 
-    // Expect +CMT response header with TPDU length 38
-    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: ,{TEST_SMS_UCS2_TPDU_LEN}"));
+    // Expect +CMT response header with the GSM 7-bit TPDU length
+    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: ,{TEST_SMS_GSM7_TPDU_LEN}"));
 
-    // Expect the PDU line containing the UCS-2 encoded "Hello World"
-    then_wait_for_response_containing(&mut world, "A", TEST_SMS_TEXT_UCS2_HEX);
+    // Expect the PDU line containing the GSM 7-bit packed "Hello World"
+    then_wait_for_response_containing(&mut world, "A", TEST_SMS_GSM7_PACKED_HEX);
+}
+
+#[test]
+fn test_incoming_sms_pdu_mode_unicode_text() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    // Set PDU Mode
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+
+    // Trigger incoming SMS with unicode emoji text "👋", which is outside the
+    // GSM 7-bit default alphabet and must fall back to UCS-2.
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, TEST_SMS_UNICODE_TEXT);
+
+    then_wait_for_response_containing(&mut world, "A", &format!("+CMT: ,{TEST_SMS_UCS2_TPDU_LEN}"));
+    then_wait_for_response_containing(&mut world, "A", TEST_SMS_UCS2_PACKED_HEX);
 }
 
 #[test]
@@ -474,8 +490,7 @@ fn test_sms_send_abort() {
     when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
 
     // Set PDU Mode
-    when_at_command_sent(&mut world, "A", "AT+CMGF=0");
-    then_response_is(&mut world, "A", "OK");
+    world.send_and_expect_ok("A", "AT+CMGF=0");
 
     // Start SMS send (PDU mode)
     when_at_command_sent(&mut world, "A", &format!("AT+CMGS={TEST_SMS_TPDU_LEN}"));
@@ -506,8 +521,7 @@ fn test_sms_pdu_error_when_sim_absent() {
     then_wait_for_response_containing(&mut world, "A", "+CPIN: ABSENT");
 
     // Set PDU Mode
-    when_at_command_sent(&mut world, "A", "AT+CMGF=0");
-    then_response_is(&mut world, "A", "OK");
+    world.send_and_expect_ok("A", "AT+CMGF=0");
 
     // Start SMS store (PDU mode)
     // AT+CMGW=<length>
@@ -1146,4 +1160,204 @@ fn test_incoming_pdu_injection_serialized_until_cnma_ack() {
 
     then_wait_for_response_containing(&mut world, "A", &format!("+CMT: ,{TEST_SMS_TPDU_LEN}"));
     then_response_is(&mut world, "A", TEST_SMS_PDU);
+}
+
+#[test]
+fn test_incoming_sms_concatenated_pdu_mode() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+
+    // 200 GSM-7 characters exceed one TPDU, so the network segments the message
+    // into 153 + 47 septets (3GPP TS 23.040 § 9.2.3.24.1).
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"A".repeat(200));
+
+    // Part 1: TP-UDHI set (PDU type 0x64) and a "05 00 03 <ref> 02 01" UDH.
+    let first = then_wait_for_response_containing(&mut world, "A", "0064");
+    // UDH = UDHL 05, IEI 00, IEDL 03, reference 01, total 02, sequence 01.
+    assert!(first.contains("050003010201"), "part 1 UDH: {first}");
+
+    // Stop-and-wait: part 2 is withheld until the TE acknowledges part 1.
+    then_no_response(&mut world, "A");
+    world.send_and_expect_ok("A", "AT+CNMA");
+
+    let second = then_wait_for_response_containing(&mut world, "A", "0064");
+    assert!(second.contains("050003010202"), "part 2 UDH: {second}");
+}
+
+#[test]
+fn test_incoming_sms_concatenated_text_mode() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    // Text mode cannot express a UDH, but each part is still its own TPDU and
+    // therefore its own +CMT.
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"A".repeat(200));
+    then_wait_for_response_containing(&mut world, "A", &"A".repeat(153));
+
+    world.send_and_expect_ok("A", "AT+CNMA");
+    then_wait_for_response_containing(&mut world, "A", &"A".repeat(47));
+}
+
+#[test]
+fn test_incoming_sms_at_capacity_is_not_segmented() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+
+    // Exactly 160 septets still fits a single TPDU: no UDH, PDU type stays 0x24.
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"A".repeat(160));
+    let pdu = then_wait_for_response_containing(&mut world, "A", "0024");
+    assert!(pdu.starts_with("0024"), "single-part message must not set TP-UDHI: {pdu}");
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_incoming_sms_unicode_segmented() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    // 71 UCS-2 characters -> 67 + 4, since a part with a UDH holds 67 units.
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"你".repeat(71));
+    then_wait_for_response_containing(&mut world, "A", &"你".repeat(67));
+
+    world.send_and_expect_ok("A", "AT+CNMA");
+    then_wait_for_response_containing(&mut world, "A", &"你".repeat(4));
+}
+
+#[test]
+fn test_incoming_sms_concat_reference_differs_per_message() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+
+    // Two multi-part messages must use different concatenation references so the
+    // receiver does not merge them.
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"A".repeat(200));
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"B".repeat(200));
+
+    // Message A Part 1: ref 01, total 02, seq 01
+    let a1 = then_wait_for_response_containing(&mut world, "A", "0064");
+    assert!(a1.contains("050003010201"), "Message A part 1 UDH: {a1}");
+    world.send_and_expect_ok("A", "AT+CNMA");
+
+    // Message A Part 2: ref 01, total 02, seq 02
+    let a2 = then_wait_for_response_containing(&mut world, "A", "0064");
+    assert!(a2.contains("050003010202"), "Message A part 2 UDH: {a2}");
+    world.send_and_expect_ok("A", "AT+CNMA");
+
+    // Message B Part 1: ref 02, total 02, seq 01
+    let b1 = then_wait_for_response_containing(&mut world, "A", "0064");
+    assert!(b1.contains("050003020201"), "Message B part 1 UDH: {b1}");
+    world.send_and_expect_ok("A", "AT+CNMA");
+
+    // Message B Part 2: ref 02, total 02, seq 02
+    let b2 = then_wait_for_response_containing(&mut world, "A", "0064");
+    assert!(b2.contains("050003020202"), "Message B part 2 UDH: {b2}");
+    world.send_and_expect_ok("A", "AT+CNMA");
+}
+
+#[test]
+fn test_incoming_sms_beyond_concatenation_limit_dropped() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+
+    // More than 255 parts cannot be addressed by an 8-bit concatenation
+    // reference, so nothing is delivered.
+    when_incoming_sms_received(&mut world, "A", TEST_PHONE_NUMBER, &"A".repeat(255 * 153 + 1));
+    then_no_response(&mut world, "A");
+}
+
+#[test]
+fn test_text_sms_gsm7_packing_limit_exact_160_chars() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    when_at_command_sent(&mut world, "A", "AT+CMGS=\"12345\"");
+    then_prompt_is(&mut world, "A", "> ");
+
+    let payload = format!("{}1A", hex::encode("A".repeat(160)));
+    when_hex_bytes_sent(&mut world, "A", &payload);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+}
+
+#[test]
+fn test_text_sms_gsm7_packing_limit_exceeded_161_chars() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMEE=1");
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    when_at_command_sent(&mut world, "A", "AT+CMGS=\"12345\"");
+    then_prompt_is(&mut world, "A", "> ");
+
+    let payload = format!("{}1A", hex::encode("A".repeat(161)));
+    when_hex_bytes_sent(&mut world, "A", &payload);
+    then_response_is(&mut world, "A", "+CMS ERROR: 305");
+}
+
+#[test]
+fn test_text_sms_gsm7_packing_limit_extension_chars_80() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    when_at_command_sent(&mut world, "A", "AT+CMGS=\"12345\"");
+    then_prompt_is(&mut world, "A", "> ");
+
+    // 80 curly braces = 80 * 2 = 160 septets
+    let payload = format!("{}1A", hex::encode("{".repeat(80)));
+    when_hex_bytes_sent(&mut world, "A", &payload);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+}
+
+#[test]
+fn test_text_sms_ucs2_packing_limits() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_voice_registration_set(&mut world, "A", RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", "AT+CMEE=1");
+    world.send_and_expect_ok("A", "AT+CMGF=1");
+
+    // 35 rocket emojis = 35 * 2 = 70 UTF-16 code units (fits in 70-unit UCS-2 capacity)
+    when_at_command_sent(&mut world, "A", "AT+CMGS=\"12345\"");
+    then_prompt_is(&mut world, "A", "> ");
+
+    let payload_70 = format!("{}1A", hex::encode("🚀".repeat(35)));
+    when_hex_bytes_sent(&mut world, "A", &payload_70);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+
+    // 36 rocket emojis = 36 * 2 = 72 UTF-16 code units (exceeds 70-unit capacity -> CMS ERROR 305)
+    when_at_command_sent(&mut world, "A", "AT+CMGS=\"12345\"");
+    then_prompt_is(&mut world, "A", "> ");
+
+    let payload_72 = format!("{}1A", hex::encode("🚀".repeat(36)));
+    when_hex_bytes_sent(&mut world, "A", &payload_72);
+    then_response_is(&mut world, "A", "+CMS ERROR: 305");
 }

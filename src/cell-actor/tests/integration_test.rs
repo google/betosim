@@ -224,8 +224,8 @@ async fn test_receive_sms_action_forwarding() {
     world
         .then_guest_receives_lowercase_packet_framing(
             1,
-            "+cmt: ,26\r\n002406812143650008",
-            "0a00680065006c006c006f\r\n",
+            "+cmt: ,21\r\n002406812143650000",
+            "05e8329bfd06\r\n",
         )
         .await;
 }
