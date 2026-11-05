@@ -281,20 +281,14 @@ impl Command {
             Link::Patch(args) => {
                 if let Some(rssi) = args.rssi {
                     let chip_kind = chip_kind_to_proto(args.chip_kind);
-                    let sender_ids = Self::resolve_chip_ids(
+                    let links = Self::get_matching_links(
                         client,
+                        chip_kind,
                         args.sender,
                         args.sender_name.as_deref(),
-                        chip_kind,
-                    )?;
-                    let receiver_ids = Self::resolve_chip_ids(
-                        client,
                         args.receiver,
                         args.receiver_name.as_deref(),
-                        chip_kind,
                     )?;
-
-                    let links = Self::get_links(client, &sender_ids, &receiver_ids, chip_kind)?;
 
                     let reqs: Vec<GrpcRequest> = links
                         .into_iter()
@@ -326,21 +320,14 @@ impl Command {
                 }
             }
             Link::Delete(args) => {
-                let chip_kind = chip_kind_to_proto(args.chip_kind);
-                let sender_ids = Self::resolve_chip_ids(
+                let links = Self::get_matching_links(
                     client,
+                    chip_kind_to_proto(args.chip_kind),
                     args.sender,
                     args.sender_name.as_deref(),
-                    chip_kind,
-                )?;
-                let receiver_ids = Self::resolve_chip_ids(
-                    client,
                     args.receiver,
                     args.receiver_name.as_deref(),
-                    chip_kind,
                 )?;
-
-                let links = Self::get_links(client, &sender_ids, &receiver_ids, chip_kind)?;
 
                 let reqs: Vec<GrpcRequest> = links
                     .into_iter()
@@ -399,6 +386,20 @@ impl Command {
         Ok(resolved_ids)
     }
 
+    /// Resolve sender/receiver chips and return the matching Links.
+    fn get_matching_links<T: GrpcMethodExecutor>(
+        client: &T,
+        chip_kind: ChipKind,
+        sender: Option<u32>,
+        sender_name: Option<&str>,
+        receiver: Option<u32>,
+        receiver_name: Option<&str>,
+    ) -> Result<Vec<model::Link>> {
+        let sender_ids = Self::resolve_chip_ids(client, sender, sender_name, chip_kind)?;
+        let receiver_ids = Self::resolve_chip_ids(client, receiver, receiver_name, chip_kind)?;
+        Self::get_links(client, &sender_ids, &receiver_ids, chip_kind)
+    }
+
     /// Get Links matching the set of sender and receiver IDs.
     fn get_links<T: GrpcMethodExecutor>(
         client: &T,
@@ -429,8 +430,8 @@ mod tests {
     use netsim_proto::{
         common::ChipKind,
         frontend::{
-            CreateDeviceRequest, CreateLinkRequest, ListDeviceResponse, ListLinkResponse,
-            PatchLinkRequest,
+            CreateDeviceRequest, CreateLinkRequest, DeleteLinkRequest, ListDeviceResponse,
+            ListLinkResponse, PatchLinkRequest,
         },
         model::{
             Chip as ChipProto, ChipCreate as ChipCreateProto, Device as DeviceProto,
@@ -444,9 +445,9 @@ mod tests {
         args::{
             AdvertiseMode, BeaconBleAdvertiseData, BeaconBleScanResponseData, BeaconBleSettings,
             BeaconCreateBle, BeaconCreateUwb, BeaconPatch, BeaconPatchBle, Capture, Command,
-            Devices, GetCapture, Interval, Link, LinkCreate, LinkPatch, ListCapture, Move,
-            NetsimArgs, OnOffState, ParsableBytes, PatchCapture, Radio, RadioType, StreamCapture,
-            TxPower, TxPowerLevel,
+            Devices, GetCapture, Interval, Link, LinkCreate, LinkDelete, LinkPatch, ListCapture,
+            Move, NetsimArgs, OnOffState, ParsableBytes, PatchCapture, Radio, RadioType,
+            StreamCapture, TxPower, TxPowerLevel,
         },
         error::Error,
     };
@@ -491,7 +492,7 @@ mod tests {
         mock_responses: Vec<Result<GrpcResponse>>,
         expected_requests: Vec<GrpcRequest>,
     ) {
-        let mut command_struct = NetsimArgs::parse_from(command.split_whitespace()).command;
+        let command_struct = NetsimArgs::parse_from(command.split_whitespace()).command;
         assert_eq!(command_struct, expected_command);
         let client = MockClient::new(mock_responses);
         let requests = command_struct.get_requests(&client).unwrap();
@@ -1164,6 +1165,39 @@ mod tests {
                 ..Default::default()
             }),
             id: 55,
+            ..Default::default()
+        })];
+
+        test_link_command(cmd, expected_cmd, responses, expected_reqs);
+    }
+
+    #[test]
+    fn test_link_delete_with_ids() {
+        let cmd = "netsim-cli link delete bt --sender 1000 --receiver 1001";
+        let expected_cmd = Command::Link(Link::Delete(LinkDelete {
+            chip_kind: ArgsChipKind::Bluetooth,
+            sender: Some(1000),
+            receiver: Some(1001),
+            sender_name: None,
+            receiver_name: None,
+        }));
+        // Mock responses:
+        // 1. resolve_chip_ids(1000) -> immediate
+        // 2. resolve_chip_ids(1001) -> immediate
+        // 3. get_links -> ListLink
+        let mut link_proto = LinkProto::new();
+        link_proto.id = 55;
+        link_proto.kind = ChipKind::BLUETOOTH.into();
+        link_proto.sender_id = 1000;
+        link_proto.receiver_id = 1001;
+
+        let list_link_response =
+            ListLinkResponse { links: vec![link_proto.clone()], ..Default::default() };
+        let responses = vec![Ok(GrpcResponse::ListLink(list_link_response))];
+
+        let expected_reqs = vec![GrpcRequest::DeleteLink(DeleteLinkRequest {
+            id: 55,
+            link: MessageField::some(link_proto),
             ..Default::default()
         })];
 
