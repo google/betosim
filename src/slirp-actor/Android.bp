@@ -103,6 +103,7 @@ rust_test_host {
         "general_tests",
     ],
     srcs: [
+        "tests/actor_bdd_test.rs",
         "tests/arp_icmp_test.rs",
         "tests/backend_perf_test.rs",
         "tests/backend_test.rs",
@@ -126,6 +127,7 @@ rust_test_host {
         "tests/tcp_state_test.rs",
         "tests/test_driver.rs",
         "tests/tftp_test.rs",
+        "tests/world.rs",
     ],
     features: [
         "cuttlefish",

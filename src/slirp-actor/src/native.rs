@@ -33,8 +33,12 @@ pub(crate) async fn run_native_slirp_loop(
     let (guest_packet_sender, mut guest_packet_receiver) = mpsc::channel::<Bytes>(CHANNEL_CAPACITY);
 
     let mut slirp_engine = slirp::Slirp::new(config.clone());
+    // JoinSet aborts all spawned child tasks on Drop, ensuring slirp_task,
+    // host_task, and downlink_task are cleaned up even if run_native_slirp_loop
+    // is cancelled mid-await.
+    let mut child_tasks = tokio::task::JoinSet::new();
 
-    let slirp_task = tokio::spawn(async move {
+    child_tasks.spawn(async move {
         info!("slirp task started");
         while let Some(request) = slirp_request_receiver.recv().await {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -67,11 +71,11 @@ pub(crate) async fn run_native_slirp_loop(
         config,
     );
 
-    let host_task = tokio::spawn(async move {
+    child_tasks.spawn(async move {
         host.run().await;
     });
 
-    let downlink_task = tokio::spawn(async move {
+    child_tasks.spawn(async move {
         while let Some(packet) = guest_packet_receiver.recv().await {
             if downlink_tx.send(packet).is_err() {
                 break;
@@ -85,9 +89,7 @@ pub(crate) async fn run_native_slirp_loop(
         }
     }
 
-    downlink_task.abort();
-    host_task.abort();
-    slirp_task.abort();
+    child_tasks.abort_all();
 }
 
 #[cfg(test)]
@@ -113,5 +115,23 @@ mod tests {
         drop(uplink_tx);
         let result = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_native_slirp_loop_aborts_children_on_cancel() {
+        let (downlink_tx, mut downlink_rx) = mpsc::unbounded_channel::<Bytes>();
+        let (_uplink_tx, uplink_rx) = mpsc::unbounded_channel::<Bytes>();
+
+        let loop_handle =
+            tokio::spawn(run_native_slirp_loop(slirp::Config::default(), downlink_tx, uplink_rx));
+        tokio::task::yield_now().await;
+
+        // Abort the parent loop while _uplink_tx is still held open; JoinSet::drop
+        // must abort downlink_task, host_task, and slirp_task so downlink_rx closes.
+        loop_handle.abort();
+        let closed = tokio::time::timeout(Duration::from_secs(2), downlink_rx.recv())
+            .await
+            .expect("downlink_rx should close promptly when native loop is aborted");
+        assert!(closed.is_none());
     }
 }

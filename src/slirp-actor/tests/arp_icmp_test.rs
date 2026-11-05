@@ -94,6 +94,7 @@ fn create_icmp_dest_unreachable_packet() -> bytes::Bytes {
 // -----------------------------------------------------------------------------
 
 async fn run_arp_gateway_resolution_test(backend: SlirpBackend) {
+    // Scenario: Guest resolves SLIRP gateway MAC via ARP request to 10.0.2.2
     // Given a Slirp driver running the specified backend
     let mut driver = SlirpTestDriver::new(backend, None).await;
 
@@ -117,6 +118,7 @@ async fn test_arp_gateway_resolution() {
 // -----------------------------------------------------------------------------
 
 async fn run_arp_dns_resolution_test(backend: SlirpBackend) {
+    // Scenario: Guest resolves SLIRP DNS server MAC via ARP request to 10.0.2.3
     // Given a Slirp driver running the specified backend
     let mut driver = SlirpTestDriver::new(backend, None).await;
 
@@ -140,6 +142,7 @@ async fn test_arp_dns_resolution() {
 // -----------------------------------------------------------------------------
 
 async fn run_icmp_dest_unreachable_test(backend: SlirpBackend) {
+    // Scenario: Guest sends ICMP Destination Unreachable packet to gateway
     // Given a Slirp driver running the specified backend
     let mut driver = SlirpTestDriver::new(backend, None).await;
 
@@ -205,6 +208,7 @@ fn create_icmp_echo_request_packet() -> bytes::Bytes {
 }
 
 async fn run_icmp_echo_request_test(backend: SlirpBackend) {
+    // Scenario: Guest sends ICMP Echo Request packet through SLIRP
     // Given a Slirp driver running the specified backend
     let mut driver = SlirpTestDriver::new(backend, None).await;
 

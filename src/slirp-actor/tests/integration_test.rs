@@ -14,7 +14,10 @@
 
 pub mod packet_helpers;
 pub mod test_driver;
+pub mod world;
 
+#[cfg(test)]
+mod actor_bdd_test;
 #[cfg(test)]
 mod arp_icmp_test;
 #[cfg(test)]
@@ -92,6 +95,8 @@ impl Context<SlirpActor> for MockContext {
 
 #[tokio::test]
 async fn test_slirp_actor_lifecycle() {
+    // Scenario: SlirpActor initializes on client registration and handles packet
+    // input
     // Given a SlirpActor
     let (tx_out, _rx_out) = mpsc::unbounded_channel::<bytes::Bytes>();
     let mut actor = SlirpActor::new(Default::default(), None, None).await;
@@ -137,6 +142,9 @@ async fn test_slirp_actor_lifecycle() {
 
 #[tokio::test]
 async fn test_slirp_mac_learning_and_switching() {
+    // Scenario: SlirpActor learns source MAC on uplink and switches unicast and
+    // broadcast downlink frames
+    // Given a SlirpActor with two registered clients
     let (tx_out1, mut rx_out1) = mpsc::unbounded_channel::<bytes::Bytes>();
     let (tx_out2, mut rx_out2) = mpsc::unbounded_channel::<bytes::Bytes>();
     let mut actor = SlirpActor::new(Default::default(), None, None).await;
@@ -255,6 +263,8 @@ async fn run_slirp_backend_lifecycle_test(backend: slirp_actor::SlirpBackend) {
 
 #[tokio::test]
 async fn test_slirp_backend_lifecycle() {
+    // Scenario: SlirpActor initializes and accepts packets for requested
+    // SlirpBackend variants (CFfi falls back to Native on cuttlefish builds)
     for backend in [slirp_actor::SlirpBackend::CFfi, slirp_actor::SlirpBackend::Native] {
         run_slirp_backend_lifecycle_test(backend).await;
     }
@@ -262,12 +272,17 @@ async fn test_slirp_backend_lifecycle() {
 
 #[tokio::test]
 async fn test_switch_backend() {
+    // Scenario: SlirpActor updates backend type on SwitchBackend action
+    // Given a SlirpActor with default configuration
     let mut actor = SlirpActor::new(Default::default(), None, None).await;
     let mut ctx = MockContext;
 
+    // When SwitchBackend(Native) is dispatched
     let result = actor
         .handle_action(None, SlirpReq::SwitchBackend(slirp_actor::SlirpBackend::Native), &mut ctx)
         .await;
+
+    // Then the backend switches to Native
     assert!(result.is_ok());
     assert_eq!(actor.backend(), slirp_actor::SlirpBackend::Native);
 }
@@ -342,6 +357,8 @@ async fn run_slirp_backend_icmp_ping_test(backend: slirp_actor::SlirpBackend) {
 
 #[tokio::test]
 async fn test_slirp_backend_icmp_ping() {
+    // Scenario: Both CFfi and Native backend configurations (with CFfi falling back
+    // to Native on cuttlefish builds) accept ICMPv4 Echo Request frames
     for backend in [slirp_actor::SlirpBackend::CFfi, slirp_actor::SlirpBackend::Native] {
         run_slirp_backend_icmp_ping_test(backend).await;
     }
@@ -349,6 +366,8 @@ async fn test_slirp_backend_icmp_ping() {
 
 #[tokio::test]
 async fn test_static_ip_allocation_and_reclamation() {
+    // Scenario: Static IPv4/IPv6 lease pool allocates, deduplicates, reclaims, and
+    // bounds leases
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use netsim_model::ChipId;
@@ -419,6 +438,8 @@ async fn test_static_ip_allocation_and_reclamation() {
 
 #[tokio::test]
 async fn test_downlink_arp_and_broadcast_scoping() {
+    // Scenario: Downlink ARP, broadcast, unknown unicast, and IPv6 Neighbor
+    // Solicitation frames respect client isolation scoping
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use netsim_model::{ChipId, PacketSink};
