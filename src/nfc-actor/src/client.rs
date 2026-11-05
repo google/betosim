@@ -100,8 +100,15 @@ impl ChipClient for NfcClient {
     }
 
     async fn reset(&self, id: ChipId) -> Result<Chip, ClientError> {
-        // Not implemented
-        self.read(id).await
+        match self
+            .client
+            .perform_action(Some(id), crate::nfc_actor::NfcAction::Reset { id })
+            .err_into::<ClientError>()
+            .await?
+        {
+            crate::nfc_actor::NfcActionResult::Chip(chip) => Ok(*chip),
+            _ => Err(ClientError::Recv("Unexpected action result for reset".into())),
+        }
     }
 
     async fn get_global_stats(&self) -> Result<Option<Vec<u8>>, ClientError> {

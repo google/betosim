@@ -91,11 +91,14 @@ pub struct ChipState {
     pub id: ChipId,
     pub device_id: device_api::DeviceId,
     pub(crate) chip: netsim_model::Chip,
+    pub(crate) initial_chip: netsim_model::Chip,
     pub enabled: Arc<AtomicBool>,
     pub casimir_device_id: u16,
     pub nfc_writer: WriteHalf<DuplexStream>,
     pub tx_count: Arc<AtomicU64>,
     pub rx_count: Arc<AtomicU64>,
+    pub(crate) p2p_tx_count: Arc<AtomicU64>,
+    pub(crate) p2p_rx_count: Arc<AtomicU64>,
     pub mode: Arc<AtomicU8>,
 }
 
@@ -172,6 +175,9 @@ impl NfcActor {
 pub enum NfcAction {
     Generic(netsim_model::ChipRequest),
     GetStatistics,
+    Reset {
+        id: ChipId,
+    },
     CreateControlChannel {
         respond_to: tokio::sync::oneshot::Sender<
             Result<(tokio::io::DuplexStream, u16), crate::error::NfcError>,
@@ -183,6 +189,7 @@ pub enum NfcAction {
 pub enum NfcActionResult {
     Ok,
     Statistics(Box<[netsim_model::NetsimRadioStats]>),
+    Chip(Box<netsim_model::Chip>),
 }
 
 #[cfg(test)]
@@ -265,11 +272,14 @@ mod tests {
             id: ChipId(42),
             device_id: device_api::DeviceId(1),
             chip: Default::default(),
+            initial_chip: Default::default(),
             enabled: Arc::new(AtomicBool::new(true)),
             casimir_device_id: 1,
             nfc_writer,
             tx_count: Arc::new(AtomicU64::new(0)),
             rx_count: Arc::new(AtomicU64::new(0)),
+            p2p_tx_count: Arc::new(AtomicU64::new(0)),
+            p2p_rx_count: Arc::new(AtomicU64::new(0)),
             mode: Arc::new(AtomicU8::new(NfcMode::Idle.as_u8())),
         };
 

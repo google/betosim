@@ -40,6 +40,10 @@ impl ActorLifecycle for NfcActor {
     }
 
     async fn on_stream(&mut self, id: Self::Id, message: Bytes, _ctx: &mut DynContext<Self>) {
+        if !self.get_chip(&id).is_some_and(|s| s.enabled.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return;
+        }
         let Some(&b0) = message.first() else {
             return;
         };
@@ -205,11 +209,14 @@ mod tests {
                 id: chip_id,
                 device_id: DeviceId(1),
                 chip: Default::default(),
+                initial_chip: Default::default(),
                 enabled: Arc::new(AtomicBool::new(true)),
                 casimir_device_id: 1,
                 nfc_writer,
                 tx_count: Arc::new(AtomicU64::new(0)),
                 rx_count: Arc::new(AtomicU64::new(0)),
+                p2p_tx_count: Arc::new(AtomicU64::new(0)),
+                p2p_rx_count: Arc::new(AtomicU64::new(0)),
                 mode: chip_mode.clone(),
             },
         );
@@ -309,5 +316,52 @@ mod tests {
         // 15. Stream and task closed
         actor.on_stream_closed(chip_id, &mut ctx).await;
         actor.on_task_closed(chip_id, &mut ctx).await;
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_disabled_chip_drops_stream() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats.clone());
+        let mut ctx = DummyContext;
+        let chip_id = ChipId(2);
+
+        let (nfc_io, _peer) = tokio::io::duplex(1024);
+        let (_reader, nfc_writer) = tokio::io::split(nfc_io);
+        let chip_mode = Arc::new(AtomicU8::new(NfcMode::Idle.as_u8()));
+        actor.active_chips.insert(
+            chip_id,
+            ChipState {
+                id: chip_id,
+                device_id: DeviceId(1),
+                chip: Default::default(),
+                initial_chip: Default::default(),
+                enabled: Arc::new(AtomicBool::new(false)),
+                casimir_device_id: 2,
+                nfc_writer,
+                tx_count: Arc::new(AtomicU64::new(0)),
+                rx_count: Arc::new(AtomicU64::new(0)),
+                p2p_tx_count: Arc::new(AtomicU64::new(0)),
+                p2p_rx_count: Arc::new(AtomicU64::new(0)),
+                mode: chip_mode.clone(),
+            },
+        );
+
+        let cmd = CoreInitCommand { feature_enable: FeatureEnable {} };
+        actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().expect("encode")), &mut ctx).await;
+        assert_eq!(stats.get(NfcApi::AdapterEnable), 0);
+
+        actor.on_stream(chip_id, nci_data_packet(0, &[1, 2, 3]), &mut ctx).await;
+        assert_eq!(stats.get(NfcApi::TagTransceive), 0);
+        assert_eq!(stats.to_proto().nci_errors(), 0);
+    }
+
+    fn nci_data_packet(conn_id: u8, payload: &[u8]) -> Bytes {
+        let mut packet = Vec::with_capacity(3 + payload.len());
+        packet.push(conn_id & 0x0f);
+        packet.push(0x00);
+        packet.push(u8::try_from(payload.len()).expect("payload fits in u8"));
+        packet.extend_from_slice(payload);
+        Bytes::from(packet)
     }
 }

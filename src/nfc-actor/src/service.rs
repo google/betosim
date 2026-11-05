@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -126,15 +126,27 @@ impl ActorService for NfcActor {
         let casimir_to_device = self.casimir_to_device.clone();
         let device_client = self.device_client.clone();
         let nfc_stats_rf = self.nfc_stats.clone();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let enabled_rf = enabled.clone();
+        let p2p_tx_count = Arc::new(AtomicU64::new(0));
+        let p2p_rx_count = Arc::new(AtomicU64::new(0));
+        let p2p_tx_count_rf = p2p_tx_count.clone();
+        let p2p_rx_count_rf = p2p_rx_count.clone();
         let casimir_device_id = scene_client
             .add_device(move |id, scene_rf_tx| {
                 casimir_to_device.lock().insert(id, device_id);
                 let (egress_rf_tx, mut egress_rf_rx) = unbounded_channel();
                 let mut device = casimir::Device::nci(id, casimir_rx, casimir_tx, egress_rf_tx);
                 let nfc_stats_rf_tx = nfc_stats_rf.clone();
+                let enabled_rf_tx = enabled_rf.clone();
+                let p2p_tx_count_egress = p2p_tx_count_rf.clone();
                 tokio::spawn(async move {
                     while let Some(packet) = egress_rf_rx.recv().await {
+                        if !enabled_rf_tx.load(Ordering::Acquire) {
+                            continue;
+                        }
                         nfc_stats_rf_tx.incr_rf_taps_tx();
+                        p2p_tx_count_egress.fetch_add(1, Ordering::Relaxed);
                         if scene_rf_tx.send(packet).is_err() {
                             nfc_stats_rf_tx.incr_rf_error();
                             break;
@@ -144,8 +156,13 @@ impl ActorService for NfcActor {
                 let (ingress_rf_tx, mut ingress_rf_rx) = unbounded_channel();
                 let controller_ingress_rf_tx = std::mem::replace(&mut device.rf_tx, ingress_rf_tx);
                 let map_clone = casimir_to_device.clone();
+                let enabled_rf_rx = enabled_rf.clone();
+                let p2p_rx_count_ingress = p2p_rx_count_rf.clone();
                 tokio::spawn(async move {
                     while let Some(packet) = ingress_rf_rx.recv().await {
+                        if !enabled_rf_rx.load(Ordering::Acquire) {
+                            continue;
+                        }
                         if packet.sender() == id
                             || is_within_nfc_proximity(
                                 packet.sender(),
@@ -157,6 +174,7 @@ impl ActorService for NfcActor {
                         {
                             if packet.sender() != id {
                                 nfc_stats_rf.incr_rf_taps_rx();
+                                p2p_rx_count_ingress.fetch_add(1, Ordering::Relaxed);
                             }
                             if controller_ingress_rf_tx.send(packet).is_err() {
                                 nfc_stats_rf.incr_rf_error();
@@ -178,7 +196,6 @@ impl ActorService for NfcActor {
         // Bridge Casimir -> Guest
         let (nfc_reader, nfc_writer) = tokio::io::split(nfc_io);
         let mut stream = FramedRead::new(nfc_reader, NciCodec);
-        let enabled = Arc::new(AtomicBool::new(true));
         let enabled_clone = enabled.clone();
         let chip_id_clone = chip_id;
         let nfc_stats_clone = self.nfc_stats.clone();
@@ -186,7 +203,7 @@ impl ActorService for NfcActor {
         let rx_count = Arc::new(AtomicU64::new(0));
         let tx_count_clone = tx_count.clone();
         let rx_count_clone = rx_count.clone();
-        let mode = Arc::new(std::sync::atomic::AtomicU8::new(NfcMode::Idle.as_u8()));
+        let mode = Arc::new(AtomicU8::new(NfcMode::Idle.as_u8()));
         let mode_clone = mode.clone();
 
         let task_1 = Box::pin(async move {
@@ -243,7 +260,11 @@ impl ActorService for NfcActor {
 
         // Bridge Guest -> Casimir
         let nfc_stats_rx = self.nfc_stats.clone();
+        let enabled_rx = enabled.clone();
         let packet_stream = packet_stream.inspect(move |bytes| {
+            if !enabled_rx.load(Ordering::Acquire) {
+                return;
+            }
             if let &[b0, _, _, ..] = bytes.as_ref() {
                 match NciMessageType::from_header_byte(b0) {
                     Some(NciMessageType::Data) => {
@@ -272,17 +293,22 @@ impl ActorService for NfcActor {
             radio: netsim_model::Radio { state: Some(true), ..Default::default() },
         }));
 
+        let initial_chip = chip.clone();
+
         self.active_chips.insert(
             chip_id,
             ChipState {
                 id: chip_id,
                 device_id,
                 chip,
+                initial_chip,
                 enabled,
                 casimir_device_id,
                 nfc_writer,
                 tx_count,
                 rx_count,
+                p2p_tx_count,
+                p2p_rx_count,
                 mode,
             },
         );
@@ -389,14 +415,29 @@ impl ActorService for NfcActor {
                     .map(|(id, state)| {
                         let mut radio_stats = netsim_model::NetsimRadioStats::default();
                         radio_stats.id = id.0;
-                        radio_stats.name = format!("nfc-{}", id.0);
+                        radio_stats.name = state.chip.name.clone();
                         radio_stats.kind = netsim_model::RadioKind::Nfc;
                         radio_stats.tx_count = state.tx_count.load(Ordering::Relaxed);
                         radio_stats.rx_count = state.rx_count.load(Ordering::Relaxed);
+                        radio_stats.p2p_tx_count = state.p2p_tx_count.load(Ordering::Relaxed);
+                        radio_stats.p2p_rx_count = state.p2p_rx_count.load(Ordering::Relaxed);
                         radio_stats
                     })
                     .collect();
                 Ok(crate::nfc_actor::NfcActionResult::Statistics(stats))
+            }
+            NfcAction::Reset { id } => {
+                let state = self
+                    .get_chip_mut(&id)
+                    .ok_or_else(|| NfcError::Chip(ChipError::ChipNotFound(id)))?;
+                state.chip = state.initial_chip.clone();
+                state.enabled.store(state.chip.enabled, Ordering::Release);
+                state.tx_count.store(0, Ordering::Relaxed);
+                state.rx_count.store(0, Ordering::Relaxed);
+                state.p2p_tx_count.store(0, Ordering::Relaxed);
+                state.p2p_rx_count.store(0, Ordering::Relaxed);
+                state.set_mode(NfcMode::Idle);
+                Ok(crate::nfc_actor::NfcActionResult::Chip(Box::new(state.chip.clone())))
             }
             NfcAction::CreateControlChannel { respond_to } => {
                 info!("NfcActor: Received CreateControlChannel action");
@@ -581,5 +622,76 @@ mod tests {
         // handle_delete non-existent chip
         let del_res = actor.handle_delete(ChipId(999), &mut ctx).await;
         assert!(del_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_nfc_actor_reset_chip_restores_initial_state() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(crate::stats::NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats.clone());
+        let mut ctx = DummyContext;
+
+        let chip_id = ChipId(42);
+        let (nfc_io, _peer) = tokio::io::duplex(64);
+        let (_rx, nfc_writer) = tokio::io::split(nfc_io);
+
+        let mut initial_chip = netsim_model::Chip::default();
+        initial_chip.id = 42;
+        initial_chip.name = "initial-nfc-42".to_string();
+        initial_chip.enabled = true;
+
+        let mut mutated_chip = initial_chip.clone();
+        mutated_chip.name = "mutated-nfc-42".to_string();
+        mutated_chip.enabled = false;
+
+        let state = ChipState {
+            id: chip_id,
+            device_id: device_api::DeviceId(1),
+            chip: mutated_chip,
+            initial_chip,
+            enabled: Arc::new(AtomicBool::new(false)),
+            casimir_device_id: 1,
+            nfc_writer,
+            tx_count: Arc::new(AtomicU64::new(10)),
+            rx_count: Arc::new(AtomicU64::new(20)),
+            p2p_tx_count: Arc::new(AtomicU64::new(5)),
+            p2p_rx_count: Arc::new(AtomicU64::new(7)),
+            mode: Arc::new(AtomicU8::new(NfcMode::Poll.as_u8())),
+        };
+        actor.active_chips.insert(chip_id, state);
+
+        let action_res =
+            actor.handle_action(Some(chip_id), NfcAction::Reset { id: chip_id }, &mut ctx).await;
+        assert!(action_res.is_ok());
+
+        let restored_chip = match action_res.unwrap() {
+            crate::nfc_actor::NfcActionResult::Chip(c) => *c,
+            _ => panic!("Expected Chip result"),
+        };
+        assert_eq!(restored_chip.name, "initial-nfc-42");
+        assert!(restored_chip.enabled);
+
+        let chip_state = actor.get_chip(&chip_id).expect("chip must exist");
+        assert_eq!(chip_state.chip.name, "initial-nfc-42");
+        assert!(chip_state.chip.enabled);
+        assert!(chip_state.enabled.load(Ordering::Acquire));
+        assert_eq!(chip_state.tx_count.load(Ordering::Relaxed), 0);
+        assert_eq!(chip_state.rx_count.load(Ordering::Relaxed), 0);
+        assert_eq!(chip_state.p2p_tx_count.load(Ordering::Relaxed), 0);
+        assert_eq!(chip_state.p2p_rx_count.load(Ordering::Relaxed), 0);
+        assert_eq!(chip_state.mode(), NfcMode::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_nfc_actor_reset_non_existent_chip_fails() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(crate::stats::NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats);
+        let mut ctx = DummyContext;
+
+        let err_res = actor
+            .handle_action(Some(ChipId(999)), NfcAction::Reset { id: ChipId(999) }, &mut ctx)
+            .await;
+        assert!(matches!(err_res, Err(NfcError::Chip(ChipError::ChipNotFound(ChipId(999))))));
     }
 }
