@@ -156,7 +156,7 @@ impl<'a> TcpBuilder<'a> {
                     options_and_payload,
                     &src.octets(),
                     &dst.octets(),
-                    6,
+                    crate::IP_P_TCP,
                 )
             }
             (IpAddr::V6(src), IpAddr::V6(dst)) => {
@@ -165,7 +165,7 @@ impl<'a> TcpBuilder<'a> {
                     options_and_payload,
                     &src.octets(),
                     &dst.octets(),
-                    6,
+                    crate::IP_P_TCP,
                 )
             }
             _ => return None,

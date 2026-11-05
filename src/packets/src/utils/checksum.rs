@@ -16,6 +16,8 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use crate::{IP_P_ICMPV6, IP_P_TCP, IP_P_UDP};
+
 /// Calculates the IPv4 checksum.
 ///
 /// The checksum is calculated by summing the 16-bit words of the data,
@@ -40,7 +42,7 @@ pub(crate) fn pseudo_header_checksum_parts(
     payload: &[u8],
     src_octets: &[u8],
     dst_octets: &[u8],
-    protocol: u16,
+    protocol: u8,
 ) -> u16 {
     let total_len = (header.len() + payload.len()) as u32;
     let sum = sum_slice(src_octets)
@@ -56,14 +58,14 @@ fn pseudo_header_checksum(
     packet: &[u8],
     src_octets: &[u8],
     dst_octets: &[u8],
-    protocol: u16,
+    protocol: u8,
 ) -> u16 {
     pseudo_header_checksum_parts(packet, &[], src_octets, dst_octets, protocol)
 }
 
 /// Calculates the TCP checksum for IPv4.
 pub fn tcp_checksum(tcp_packet: &[u8], src_addr: Ipv4Addr, dst_addr: Ipv4Addr) -> u16 {
-    pseudo_header_checksum(tcp_packet, &src_addr.octets(), &dst_addr.octets(), 6)
+    pseudo_header_checksum(tcp_packet, &src_addr.octets(), &dst_addr.octets(), IP_P_TCP)
 }
 
 /// Calculates the UDP checksum for IPv4.
@@ -72,13 +74,13 @@ pub fn udp_checksum(udp_packet: &[u8], src_addr: Ipv4Addr, dst_addr: Ipv4Addr) -
         udp_packet,
         &src_addr.octets(),
         &dst_addr.octets(),
-        17,
+        IP_P_UDP,
     ))
 }
 
 /// Calculates the TCP checksum for IPv6.
 pub fn tcp_checksum_v6(tcp_packet: &[u8], src_addr: Ipv6Addr, dst_addr: Ipv6Addr) -> u16 {
-    pseudo_header_checksum(tcp_packet, &src_addr.octets(), &dst_addr.octets(), 6)
+    pseudo_header_checksum(tcp_packet, &src_addr.octets(), &dst_addr.octets(), IP_P_TCP)
 }
 
 /// Calculates the UDP checksum for IPv6.
@@ -87,13 +89,13 @@ pub fn udp_checksum_v6(udp_packet: &[u8], src_addr: Ipv6Addr, dst_addr: Ipv6Addr
         udp_packet,
         &src_addr.octets(),
         &dst_addr.octets(),
-        17,
+        IP_P_UDP,
     ))
 }
 
 /// Calculates the ICMPv6 checksum using the IPv6 pseudo-header.
 pub fn icmpv6_checksum(icmpv6_packet: &[u8], src_addr: Ipv6Addr, dst_addr: Ipv6Addr) -> u16 {
-    pseudo_header_checksum(icmpv6_packet, &src_addr.octets(), &dst_addr.octets(), 58)
+    pseudo_header_checksum(icmpv6_packet, &src_addr.octets(), &dst_addr.octets(), IP_P_ICMPV6)
 }
 
 fn sum_slice(data: &[u8]) -> u64 {

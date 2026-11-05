@@ -105,7 +105,7 @@ impl<'a> UdpBuilder<'a> {
                     payload_slice,
                     &src.octets(),
                     &dst.octets(),
-                    17,
+                    crate::IP_P_UDP,
                 ),
             ),
             (IpAddr::V6(src), IpAddr::V6(dst)) => crate::utils::checksum::normalize_udp_checksum(
@@ -114,7 +114,7 @@ impl<'a> UdpBuilder<'a> {
                     payload_slice,
                     &src.octets(),
                     &dst.octets(),
-                    17,
+                    crate::IP_P_UDP,
                 ),
             ),
             _ => return None,

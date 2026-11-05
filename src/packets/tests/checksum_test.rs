@@ -38,7 +38,7 @@ fn test_ipv4_checksum() {
 fn test_ipv4_checksum_odd_length() {
     let data = [0x01, 0x02, 0x03];
     let cksum = ipv4_checksum(&data);
-    assert_ne!(cksum, 0);
+    assert_eq!(cksum, 0xfbfd);
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn test_tcp_checksum_v4() {
         0x10, 0x00, 0x00, 0x00, 0x00,
     ];
     let cksum = tcp_checksum(&tcp_packet, src, dst);
-    assert_ne!(cksum, 0);
+    assert_eq!(cksum, 0x89f4);
 
     let mut tcp_with_cksum = tcp_packet;
     tcp_with_cksum[16..18].copy_from_slice(&cksum.to_be_bytes());
@@ -64,7 +64,7 @@ fn test_udp_checksum_v4() {
     let mut udp_packet =
         vec![0x04, 0xd2, 0x04, 0xd3, 0x00, 0x0d, 0x00, 0x00, b'h', b'e', b'l', b'l', b'o'];
     let cksum = udp_checksum(&udp_packet, src, dst);
-    assert_ne!(cksum, 0);
+    assert_eq!(cksum, 0x9e5a);
 
     udp_packet[6..8].copy_from_slice(&cksum.to_be_bytes());
     // For UDP, a valid packet with checksum verified returns u16::MAX (0 is normalized to u16::MAX)
@@ -93,7 +93,7 @@ fn test_tcp_checksum_v6() {
         0x10, 0x00, 0x00, 0x00, 0x00,
     ];
     let cksum = tcp_checksum_v6(&tcp_packet, src, dst);
-    assert_ne!(cksum, 0);
+    assert_eq!(cksum, 0xb1d3);
 
     let mut tcp_with_cksum = tcp_packet;
     tcp_with_cksum[16..18].copy_from_slice(&cksum.to_be_bytes());
@@ -107,7 +107,7 @@ fn test_udp_checksum_v6() {
     let mut udp_packet =
         vec![0x04, 0xd2, 0x04, 0xd3, 0x00, 0x0d, 0x00, 0x00, b'w', b'o', b'r', b'l', b'd'];
     let cksum = udp_checksum_v6(&udp_packet, src, dst);
-    assert_ne!(cksum, 0);
+    assert_eq!(cksum, 0xab4e);
 
     udp_packet[6..8].copy_from_slice(&cksum.to_be_bytes());
     // For UDP, a valid packet with checksum verified returns u16::MAX (0 is normalized to u16::MAX)
@@ -120,7 +120,7 @@ fn test_icmpv6_checksum() {
     let dst = "ff02::1".parse::<Ipv6Addr>().unwrap();
     let mut icmpv6_packet = vec![128, 0, 0, 0, 0, 1, 0, 1, b'p', b'i', b'n', b'g'];
     let cksum = icmpv6_checksum(&icmpv6_packet, src, dst);
-    assert_ne!(cksum, 0);
+    assert_eq!(cksum, 0xa360);
 
     icmpv6_packet[2..4].copy_from_slice(&cksum.to_be_bytes());
     assert_eq!(icmpv6_checksum(&icmpv6_packet, src, dst), 0);

@@ -144,51 +144,6 @@ impl TcpHeader {
     pub fn urg(&self) -> bool {
         (self.flags() & flags::URG) != 0
     }
-
-    /// Calculates and updates the TCP checksum.
-    pub fn update_checksum(&mut self, src_ip: [u8; 4], dst_ip: [u8; 4], payload: &[u8]) {
-        self.checksum = U16::new(0);
-        let mut sum: u32 = 0;
-
-        // Pseudo-header
-        // Source IP
-        for &chunk in src_ip.as_chunks::<2>().0 {
-            sum += u32::from(u16::from_be_bytes(chunk));
-        }
-        // Dest IP
-        for &chunk in dst_ip.as_chunks::<2>().0 {
-            sum += u32::from(u16::from_be_bytes(chunk));
-        }
-        // Zero + Protocol (6 for TCP)
-        sum += 6;
-        // TCP Length (Header + Data)
-        let tcp_len = self.header_length() + payload.len();
-        sum += tcp_len as u32;
-
-        // TCP Header
-        let header_bytes = self.as_bytes();
-        let (header_chunks, header_remainder) = header_bytes.as_chunks::<2>();
-        for &chunk in header_chunks {
-            sum += u32::from(u16::from_be_bytes(chunk));
-        }
-        if let &[last] = header_remainder {
-            sum += (last as u32) << 8;
-        }
-
-        // Payload
-        let (payload_chunks, payload_remainder) = payload.as_chunks::<2>();
-        for &chunk in payload_chunks {
-            sum += u32::from(u16::from_be_bytes(chunk));
-        }
-        if let &[last] = payload_remainder {
-            sum += (last as u32) << 8;
-        }
-
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-        self.checksum = U16::new(!sum as u16);
-    }
 }
 
 #[cfg(test)]
