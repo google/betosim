@@ -929,7 +929,9 @@ fn wrap_dhcp_packet(dhcp_packet: &DhcpPacket, guest_mac: MacAddr) -> Bytes {
 
 #[test]
 fn test_save_restore_integration() {
-    let config = Config::default();
+    let mut config = Config::default();
+    config.dns_servers = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+    let expected_dns_dest: SocketAddr = "127.0.0.1:53".parse().unwrap();
     let mut slirp_a = Slirp::new(config.clone());
 
     // 1. Populate DHCP State (Lease)
@@ -1058,7 +1060,12 @@ fn test_save_restore_integration() {
         slirp_a.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_dns)));
     assert_eq!(responses_dns.len(), 2, "Should return EstablishConnection and WriteToConnection");
     let udp_conn_id = match &responses_dns[0] {
-        SlirpResponse::EstablishConnection(id, _) => *id,
+        SlirpResponse::EstablishConnection(id, ConnectionArgs::Udp(args)) => {
+            assert_eq!(args.destination, expected_dns_dest);
+            assert_eq!(args.guest_ip, IpAddr::V4(config.guest_ipv4));
+            assert_eq!(args.guest_port, 12345);
+            *id
+        }
         _ => panic!("Expected EstablishConnection"),
     };
 
@@ -1117,7 +1124,7 @@ fn test_save_restore_integration() {
             SlirpResponse::EstablishConnection(id, ConnectionArgs::Udp(args)) => {
                 has_udp = true;
                 assert_eq!(id, udp_conn_id);
-                assert_eq!(args.destination, "8.8.8.8:53".parse().unwrap());
+                assert_eq!(args.destination, expected_dns_dest);
                 assert_eq!(args.guest_ip, IpAddr::V4(config.guest_ipv4));
                 assert_eq!(args.guest_port, 12345);
             }
@@ -1221,6 +1228,22 @@ fn test_save_restore_integration() {
     let (udp_header_reply, udp_payload_reply) = UdpHeader::parse(ip_payload_reply).unwrap();
     assert_eq!(udp_header_reply.source_port.get(), 53);
     assert_eq!(udp_payload_reply, dns_reply);
+
+    // D. Verify guest->gateway:53 uplink on the restored UDP flow
+    let post_restore_dns_responses =
+        slirp_b.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_dns)));
+    assert_eq!(
+        post_restore_dns_responses.len(),
+        1,
+        "Should return exactly one response forwarding guest DNS to host"
+    );
+    match &post_restore_dns_responses[0] {
+        SlirpResponse::WriteToConnection(id, data) => {
+            assert_eq!(*id, udp_conn_id);
+            assert_eq!(&data[..], dns_query);
+        }
+        other => panic!("Expected WriteToConnection, got {other:?}"),
+    }
 }
 
 #[test]

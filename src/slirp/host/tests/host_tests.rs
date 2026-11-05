@@ -57,17 +57,6 @@ fn create_udp_packet(
 
 #[tokio::test]
 async fn test_host_save_restore() {
-    // Slirp rewrites the guest's DNS query to 8.8.8.8:53, so this test needs a
-    // route to external DNS. A UDP connect() only resolves the route, it sends
-    // nothing, so skip where there is no egress rather than time out.
-    if std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|socket| socket.connect("8.8.8.8:53"))
-        .is_err()
-    {
-        eprintln!("skipping test_host_save_restore: no route to external DNS");
-        return;
-    }
-
     // 1. Create channels
     let (slirp_request_sender, mut slirp_request_receiver) = mpsc::channel(100);
     let (slirp_response_sender, slirp_response_receiver) = mpsc::channel(100);
@@ -110,27 +99,19 @@ async fn test_host_save_restore() {
     // Wait for the host loop to start
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 4. Send a UDP DNS packet to Slirp to trigger flow creation
-    let dns_payload = [
-        0x12, 0x34, // TXID
-        0x01, 0x00, // Flags (RD=1)
-        0x00, 0x01, // Questions = 1
-        0x00, 0x00, // Answers = 0
-        0x00, 0x00, // Authority = 0
-        0x00, 0x00, // Additional = 0
-        6, b'g', b'o', b'o', b'g', b'l', b'e', 3, b'c', b'o', b'm', 0, // Null terminator
-        0x00, 0x01, // Type A
-        0x00, 0x01, // Class IN
-    ];
-    let dns_packet = create_udp_packet(
+    // 4. A bound silent loopback socket: any reply would race with Reset, and
+    // an unbound port would raise ConnectionRefused.
+    let passive_udp_listener = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let expected_dest = passive_udp_listener.local_addr().unwrap();
+    let udp_packet = create_udp_packet(
         config.guest_ipv4,
-        config.host_ipv4, // gateway (dns proxy will intercept)
+        config.host_ipv4,
         12345,
-        53, // DNS port
-        &dns_payload,
+        expected_dest.port(),
+        b"ping",
     );
 
-    slirp_request_sender.send(SlirpRequest::Packet(dns_packet)).await.unwrap();
+    slirp_request_sender.send(SlirpRequest::Packet(udp_packet.clone())).await.unwrap();
 
     // 5. Verify host receives EstablishConnection for the initial flow
     let resp1 = tokio::time::timeout(Duration::from_millis(2000), test_response_receiver.recv())
@@ -140,7 +121,7 @@ async fn test_host_save_restore() {
 
     let initial_conn_id = match resp1 {
         SlirpResponse::EstablishConnection(id, ConnectionArgs::Udp(args)) => {
-            assert_eq!(args.destination, "8.8.8.8:53".parse().unwrap()); // translated to external DNS
+            assert_eq!(args.destination, expected_dest);
             assert_eq!(args.guest_ip, IpAddr::V4(config.guest_ipv4));
             assert_eq!(args.guest_port, 12345);
             id
@@ -148,13 +129,26 @@ async fn test_host_save_restore() {
         _ => panic!("Expected EstablishConnection, got {resp1:?}"),
     };
 
-    // Ignore the subsequent WriteToConnection response (forwarding the packet
-    // payload)
+    // 5b. Verify host receives WriteToConnection response (forwarding the packet payload)
     let resp2 = tokio::time::timeout(Duration::from_millis(2000), test_response_receiver.recv())
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(resp2, SlirpResponse::WriteToConnection(_, _)));
+    match resp2 {
+        SlirpResponse::WriteToConnection(conn_id, data) => {
+            assert_eq!(conn_id, initial_conn_id);
+            assert_eq!(&data[..], b"ping");
+        }
+        _ => panic!("Expected WriteToConnection, got {resp2:?}"),
+    }
+
+    let mut recv_buf = [0u8; 64];
+    let (len, _) =
+        tokio::time::timeout(Duration::from_secs(2), passive_udp_listener.recv_from(&mut recv_buf))
+            .await
+            .expect("Expected passive_udp_listener to receive initial UDP payload")
+            .unwrap();
+    assert_eq!(&recv_buf[..len], b"ping");
 
     // 6. Call save_state() via the handle!
     let state_bytes = handle.save_state().await.unwrap();
@@ -183,15 +177,42 @@ async fn test_host_save_restore() {
     match resp_restore {
         SlirpResponse::EstablishConnection(id, ConnectionArgs::Udp(args)) => {
             assert_eq!(id, initial_conn_id); // must match the original connection ID!
-            assert_eq!(args.destination, "8.8.8.8:53".parse().unwrap());
+            assert_eq!(args.destination, expected_dest);
             assert_eq!(args.guest_ip, IpAddr::V4(config.guest_ipv4));
             assert_eq!(args.guest_port, 12345);
         }
         _ => panic!("Expected restored EstablishConnection, got {resp_restore:?}"),
     }
 
+    // C. Verify that the restored flow's data path works end-to-end
+    slirp_request_sender.send(SlirpRequest::Packet(udp_packet)).await.unwrap();
+
+    let resp_post_restore =
+        tokio::time::timeout(Duration::from_secs(2), test_response_receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    match resp_post_restore {
+        SlirpResponse::WriteToConnection(conn_id, data) => {
+            assert_eq!(conn_id, initial_conn_id);
+            assert_eq!(&data[..], b"ping");
+        }
+        _ => panic!("Expected WriteToConnection on restored flow, got {resp_post_restore:?}"),
+    }
+
+    let (len, _) =
+        tokio::time::timeout(Duration::from_secs(2), passive_udp_listener.recv_from(&mut recv_buf))
+            .await
+            .expect("Expected passive_udp_listener to receive restored UDP payload")
+            .unwrap();
+    assert_eq!(&recv_buf[..len], b"ping");
+
     // Ensure no more unexpected messages are pending
     tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        test_response_receiver.try_recv().is_err(),
+        "Expected no stray responses on test_response_receiver"
+    );
 }
 
 #[tokio::test]
