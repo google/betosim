@@ -82,6 +82,26 @@ alias(
     actual = "//src/daemon:netsimd",
 )
 
+platform(
+    name = "windows_x64_clang_cl",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+        "@rules_cc//cc/private/toolchain:clang-cl",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+platform(
+    name = "windows_arm64_clang_cl",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:aarch64",
+        "@rules_cc//cc/private/toolchain:clang-cl",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "compile_install_task_test",
     srcs = [

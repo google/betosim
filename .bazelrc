@@ -24,14 +24,17 @@ build --host_platform='@host_platform//:host'
 # Standalone / GitHub checkout configuration
 common:standalone --ignore_dev_dependency
 common:standalone --lockfile_mode=off
+# BCR yanked 1.34.6 (archive had 1.34.5 sources lacking CVE-2025-62408 fix), which MODULE.bazel still pins.
+common:standalone --allow_yanked_versions=c-ares@1.34.6
 common:standalone --define=standalone=true
 common:standalone --repo_env=NETSIM_STANDALONE=1
 common:standalone --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=0
 build:standalone --host_platform='@platforms//host'
 build:standalone --cxxopt=-std=c++20
 build:standalone --host_cxxopt=-std=c++20
-build:standalone --force_pic
-build:standalone --@rules_rust//rust/settings:experimental_use_cc_common_link
+
+# Host ares.h (e.g. Homebrew on Intel macOS) leaks into gRPC's layering_check.
+build:standalone --define grpc_no_ares=true
 build:standalone --workspace_status_command="python3 scripts/version_stamp.py"
 
 # Credential helper for the GCS-hosted hermetic SDK archives (see
@@ -74,6 +77,12 @@ build --proto_toolchain_for_cc=@protobuf//:cc_toolchain
 # Deliberately not enabled on Windows, where the emulator notes it breaks gRPC.
 build:linux --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
 build:macos --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
+
+# rules_rust cc_common_link produces process_wrapper.exe.exe on Windows.
+build:linux --force_pic
+build:linux --@rules_rust//rust/settings:experimental_use_cc_common_link
+build:macos --force_pic
+build:macos --@rules_rust//rust/settings:experimental_use_cc_common_link
 
 # Python launcher settings for @pdl-compiler//:pdl_cxx_generator, which
 # rootcanal's *_cxx_gen genrules run as a tool. Mirrors build/bazel/tool.bazelrc;
@@ -152,6 +161,24 @@ build:win_arm64 --platforms=@goldfish_build//platforms:windows_aarch64
 build:linux --workspace_status_command="../../prebuilts/python/linux-x86/bin/python3 scripts/version_stamp.py"
 build:macos --workspace_status_command="../../prebuilts/python/darwin-x86/bin/python3 scripts/version_stamp.py"
 build:windows --workspace_status_command="../../prebuilts/python/windows-x86/python scripts/version_stamp.py"
+
+common:standalone_windows --config=standalone
+common:standalone_windows --repo_env=BAZEL_LLVM="C:/Program Files/LLVM"
+build:standalone_windows --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
+# clang-cl ignores build:standalone's GNU-style -std=c++20.
+build:standalone_windows --copt=-Wno-unknown-argument --host_copt=-Wno-unknown-argument
+build:standalone_windows --features=static_link_msvcrt
+build:standalone_windows --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-feature=+crt-static
+build:standalone_windows --workspace_status_command="python scripts/version_stamp.py"
+build:standalone_windows --shell_executable="C:/Program Files/Git/bin/bash.exe"
+common:standalone_windows_x64 --config=standalone_windows
+build:standalone_windows_x64 --extra_execution_platforms=//:windows_x64_clang_cl
+build:standalone_windows_x64 --extra_toolchains=@@rules_cc++cc_configure_extension+local_config_cc//:cc-toolchain-x64_windows-clang-cl
+common:standalone_windows_arm64 --config=standalone_windows
+build:standalone_windows_arm64 --extra_execution_platforms=//:windows_arm64_clang_cl
+build:standalone_windows_arm64 --extra_toolchains=@@rules_cc++cc_configure_extension+local_config_cc//:cc-toolchain-arm64_windows-clang-cl
+# rules_cc's clang-cl arm64 config does not pass --target.
+build:standalone_windows_arm64 --copt=--target=aarch64-pc-windows-msvc --host_copt=--target=aarch64-pc-windows-msvc
 
 # User local overrides
 try-import %workspace%/user.bazelrc

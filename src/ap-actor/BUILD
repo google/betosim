@@ -96,6 +96,14 @@ rust_cxx_bridge(
 cc_library(
     name = "ap_actor_cxx",
     srcs = [":ap_actor_bridge"],
+    # GNU ld scans each archive once, so under -c opt it drops these cxx bridge symbols.
+    linkopts = select({
+        "@platforms//os:linux": [
+            "-Wl,--undefined=cxxbridge1$rust_vec$u8$new",
+            "-Wl,--undefined=cxxbridge1$slice$ptr",
+        ],
+        "//conditions:default": [],
+    }),
     # Linked statically for the same reason as :hostap_crypto_shim above.
     linkstatic = True,
     deps = [

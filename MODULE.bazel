@@ -34,36 +34,24 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_pkg", version = "1.1.0")
 bazel_dep(name = "rules_foreign_cc", version = "0.13.0")
-bazel_dep(name = "protobuf", version = "33.5")
-single_version_override(
-    module_name = "protobuf",
-    patch_strip = 1,
-    patches = ["//cargo/build:protobuf_win_arm64.patch"],
-)
 
+# Patches live in registry/modules/protobuf/33.5/patches/ so they apply under
+# --config=standalone (--ignore_dev_dependency).
+bazel_dep(name = "protobuf", version = "33.5")
 bazel_dep(name = "boringssl", version = "0.20251124.0")
 
 bazel_dep(name = "glib", version = "2.82.2.bcr.5.aemu", dev_dependency = True)
 
+# Patches live in registry/modules/cxx.rs/1.0.175/patches/ so they apply under
+# --config=standalone (--ignore_dev_dependency).
 bazel_dep(name = "cxx.rs", version = "1.0.175")
-single_version_override(
-    module_name = "cxx.rs",
-    patch_strip = 1,
-    patches = ["//cargo/build:cxx.patch"],
-)
 
 # repo_name override needed by @grpc
 bazel_dep(name = "protoc-gen-validate", version = "1.3.0", repo_name = "com_envoyproxy_protoc_gen_validate")
-bazel_dep(name = "grpc", version = "1.81.1")
-single_version_override(
-    module_name = "grpc",
-    patch_strip = 1,
-    patches = [
-        "//cargo/build:grpc_aemu_no-macos-universal-binary.patch",
-        "//cargo/build:grpc_null-function-check.patch",
-    ],
-)
 
+# Patches live in registry/modules/grpc/1.81.1/patches/ so they apply under
+# --config=standalone (--ignore_dev_dependency).
+bazel_dep(name = "grpc", version = "1.81.1")
 bazel_dep(name = "c-ares", version = "1.34.6")
 
 # @rootcanal's BUILD file depends on @fmt, resolved through netsim's repo
@@ -79,11 +67,11 @@ bazel_dep(name = "grpc-java", version = "1.82.0")
 #
 # Building with whatever compiler happens to be installed on the build machine
 # turned out to be very brittle. macOS picked up the bot's Xcode 14.3 libc++
-# (needing cargo/build/cxx.patch), and Windows fell back to MSVC cl.exe instead
-# of clang-cl, which silently ignored -std=c++20, could not resolve /FI paths
-# relative to the execroot, and rejected the clang-style -Wno-* flags used by
-# third-party BUILD files this project does not own. The hermetic toolchain
-# eliminates that entire class of problem.
+# (needing registry/modules/cxx.rs/1.0.175/patches/cxx.patch), and Windows fell
+# back to MSVC cl.exe instead of clang-cl, which silently ignored -std=c++20,
+# could not resolve /FI paths relative to the execroot, and rejected the
+# clang-style -Wno-* flags used by third-party BUILD files this project does
+# not own. The hermetic toolchain eliminates that entire class of problem.
 #
 # The extension only reads tags from the root module, so both the version_file
 # and clang tags have to be declared here rather than inherited.

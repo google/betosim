@@ -1,0 +1,36 @@
+diff --git a/model/controller/dual_mode_controller.h b/model/controller/dual_mode_controller.h
+index 56916b9..0602f90 100644
+--- a/model/controller/dual_mode_controller.h
++++ b/model/controller/dual_mode_controller.h
+@@ -16,7 +16,6 @@
+ 
+ #pragma once
+ 
+-#include <unistd.h>
+ 
+ #include <cstdint>
+ #include <functional>
+diff --git a/model/hci/h4_data_channel_packetizer.cc b/model/hci/h4_data_channel_packetizer.cc
+index aa8edbe..2065837 100644
+--- a/model/hci/h4_data_channel_packetizer.cc
++++ b/model/hci/h4_data_channel_packetizer.cc
+@@ -17,7 +17,6 @@
+ #include "h4_data_channel_packetizer.h"
+ 
+ #include <string.h>  // for strerror, size_t
+-#include <unistd.h>  // for ssize_t
+ 
+ #include <cerrno>       // for errno, EAGAIN, ECONNRESET
+ #include <cstdint>      // for uint8_t
+diff --git a/model/setup/test_command_handler.h b/model/setup/test_command_handler.h
+index 751016e..b01c8f6 100644
+--- a/model/setup/test_command_handler.h
++++ b/model/setup/test_command_handler.h
+@@ -16,7 +16,6 @@
+ 
+ #pragma once
+ 
+-#include <unistd.h>
+ 
+ #include <cstdint>
+ #include <memory>

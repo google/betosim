@@ -268,6 +268,8 @@ def _lrc_impl(module_ctx):
             name = "rootcanal",
             remote = "https://android.googlesource.com/platform/tools/rootcanal",
             commit = "eb9752a1aa72d347a164bfb03ba223b0f6aee5ba",
+            patches = ["@netsim//cargo/build:rootcanal_windows.patch"],
+            patch_args = ["-p1"],
         )
         _empty_repo(
             name = "libslirp",

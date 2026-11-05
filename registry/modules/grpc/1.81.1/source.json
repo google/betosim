@@ -1,0 +1,11 @@
+{
+    "integrity": "sha256-SK4NBfhyBhEtnpFEqSMZHuHkghQacGhuxY3IbQtA/dw=",
+    "strip_prefix": "grpc-1.81.1",
+    "url": "https://github.com/grpc/grpc/archive/refs/tags/v1.81.1.tar.gz",
+    "patch_strip": 1,
+    "patches": {
+        "grpc_no-macos-universal-binary.patch": "sha256-4goaY43Y0miqp/1FpL68djzH8B1qf7WyO8/k5hxSBw4=",
+        "grpc_null-function-check.patch": "sha256-dU6zKlT6gHsgVFt4sZaKhZe7zeBi1GEySfobgYkBiTA=",
+        "grpc_no-upb-gen-includes.patch": "sha256-Hj92HbnNEQ+oUAcqYDxshTIWStDHomMAWrh7SFNIXmw="
+    }
+}
