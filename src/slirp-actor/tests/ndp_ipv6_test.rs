@@ -106,7 +106,8 @@ async fn run_ipv6_router_solicitation_test(backend: SlirpBackend) {
 
     let (_, eth_payload) =
         EthernetFrame::parse(&reply).expect("Failed to parse reply Ethernet frame");
-    let (_, ip_payload) = Ipv6Header::parse(eth_payload).expect("Failed to parse IPv6 header");
+    let (ip_hdr, ip_payload) = Ipv6Header::parse(eth_payload).expect("Failed to parse IPv6 header");
+    assert_eq!(Ipv6Addr::from(ip_hdr.source_addr), GATEWAY_LINK_LOCAL);
     let (icmpv6, icmpv6_payload) =
         Icmpv6Header::parse(ip_payload).expect("Failed to parse ICMPv6 header");
     assert_eq!(icmpv6.ra_fields().0, RA_CUR_HOP_LIMIT, "Expected cur_hop_limit == 64");

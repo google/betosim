@@ -1548,7 +1548,7 @@ fn test_ndp_router_solicitation_unicast_source() {
 
     let (ipv6_header_reply, ipv6_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
     assert_eq!(ipv6_header_reply.next_header, IP_P_ICMPV6);
-    assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), config.host_ipv6);
+    assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), crate::ndp::GATEWAY_LINK_LOCAL_IPV6);
     assert_eq!(Ipv6Addr::from(ipv6_header_reply.dest_addr), GUEST_LINK_LOCAL_IPV6);
     assert_eq!(usize::from(ipv6_header_reply.payload_length.get()), ipv6_payload.len());
 
@@ -1586,7 +1586,11 @@ fn test_ndp_router_solicitation_unicast_source() {
     assert!(rest.is_empty());
 
     assert_eq!(
-        netsim_packets::icmpv6_checksum(ipv6_payload, config.host_ipv6, GUEST_LINK_LOCAL_IPV6),
+        netsim_packets::icmpv6_checksum(
+            ipv6_payload,
+            crate::ndp::GATEWAY_LINK_LOCAL_IPV6,
+            GUEST_LINK_LOCAL_IPV6
+        ),
         0
     );
 }
@@ -1619,7 +1623,10 @@ fn test_ndp_router_solicitation_unspecified_source() {
     let (ipv6_header_reply_unspec, _) = Ipv6Header::ref_from_prefix(rest).unwrap();
     assert_eq!(ipv6_header_reply_unspec.next_header, IP_P_ICMPV6);
     assert_eq!(ipv6_header_reply_unspec.hop_limit, netsim_packets::NDP_HOP_LIMIT);
-    assert_eq!(Ipv6Addr::from(ipv6_header_reply_unspec.source_addr), config.host_ipv6);
+    assert_eq!(
+        Ipv6Addr::from(ipv6_header_reply_unspec.source_addr),
+        crate::ndp::GATEWAY_LINK_LOCAL_IPV6
+    );
     assert_eq!(
         Ipv6Addr::from(ipv6_header_reply_unspec.dest_addr),
         crate::ndp::ALL_NODES_MULTICAST_V6
@@ -1678,7 +1685,7 @@ fn test_ndp_periodic_router_advertisement() {
     assert_eq!(ipv6_header_reply.next_header, IP_P_ICMPV6);
     assert_eq!(ipv6_header_reply.hop_limit, netsim_packets::NDP_HOP_LIMIT);
     assert_eq!(usize::from(ipv6_header_reply.payload_length.get()), ipv6_payload.len());
-    assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), config.host_ipv6);
+    assert_eq!(Ipv6Addr::from(ipv6_header_reply.source_addr), crate::ndp::GATEWAY_LINK_LOCAL_IPV6);
     assert_eq!(Ipv6Addr::from(ipv6_header_reply.dest_addr), crate::ndp::ALL_NODES_MULTICAST_V6);
 
     let (icmpv6_header_reply, rest) = Icmpv6Header::ref_from_prefix(ipv6_payload).unwrap();
@@ -1701,7 +1708,7 @@ fn test_ndp_periodic_router_advertisement() {
     assert_eq!(
         netsim_packets::icmpv6_checksum(
             ipv6_payload,
-            config.host_ipv6,
+            crate::ndp::GATEWAY_LINK_LOCAL_IPV6,
             crate::ndp::ALL_NODES_MULTICAST_V6
         ),
         0

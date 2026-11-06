@@ -111,7 +111,7 @@ impl NdpReply {
         Self::RouterAdvertisement {
             src_mac: config.gateway_mac,
             dst_mac,
-            src_ip: config.host_ipv6,
+            src_ip: GATEWAY_LINK_LOCAL_IPV6,
             dst_ip,
             prefix,
             prefix_len: SLAAC_PREFIX_LEN,

@@ -181,7 +181,7 @@ fn test_handle_ndp_packet_router_solicitation_unicast() {
 
     assert_eq!(src_mac, config.gateway_mac);
     assert_eq!(dst_mac, GUEST_MAC);
-    assert_eq!(src_ip, config.host_ipv6);
+    assert_eq!(src_ip, GATEWAY_LINK_LOCAL_IPV6);
     assert_eq!(dst_ip, GUEST_LINK_LOCAL);
     assert_eq!(prefix, Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0).octets());
     assert_eq!(prefix_len, SLAAC_PREFIX_LEN);
@@ -299,7 +299,7 @@ fn test_encode_router_advertisement() {
     assert_eq!(eth.ethertype.get(), ether_type::IPV6);
 
     let (ip_hdr, ip_payload) = Ipv6Header::ref_from_prefix(rest).unwrap();
-    assert_eq!(Ipv6Addr::from(ip_hdr.source_addr), config.host_ipv6);
+    assert_eq!(Ipv6Addr::from(ip_hdr.source_addr), GATEWAY_LINK_LOCAL_IPV6);
     assert_eq!(Ipv6Addr::from(ip_hdr.dest_addr), ALL_NODES_MULTICAST_V6);
     assert_eq!(ip_hdr.next_header, IP_P_ICMPV6);
     assert_eq!(ip_hdr.hop_limit, NDP_HOP_LIMIT);
@@ -331,7 +331,7 @@ fn test_encode_router_advertisement() {
     assert_eq!(rdnss.dns_servers, [config.host_ipv6.octets()]);
     assert!(rest.is_empty());
 
-    assert_eq!(icmpv6_checksum(ip_payload, config.host_ipv6, ALL_NODES_MULTICAST_V6), 0);
+    assert_eq!(icmpv6_checksum(ip_payload, GATEWAY_LINK_LOCAL_IPV6, ALL_NODES_MULTICAST_V6), 0);
 }
 
 #[test]
