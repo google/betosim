@@ -356,30 +356,11 @@ async fn run_chip_bridge(
     info!("Duplex bridge closed for chip {chip_id}");
 }
 
-/// Orchestrates the Cuttlefish packet forwarder connector daemon.
-async fn run_netsimd_connector(args: &Args, connector_instance: u16) -> Result<(), String> {
-    let Some(fd_startup_str) = args.fd_startup_str.as_deref() else {
-        return Err("Failed to start netsimd forwarder, missing `-s` arg".to_string());
-    };
-
-    let dual_fd_config: DualFdConfig = serde_json::from_str(fd_startup_str)
-        .map_err(|e| format!("Could not parse startup info JSON: {e}"))?;
-
-    let Some(target) = resolve_connector_target(
-        common::util::ini_file::get_ws_server_address(connector_instance),
-        common::util::ini_file::get_tcp_server_address(connector_instance),
-    ) else {
-        return Err(format!(
-            "No primary netsimd ws or tcp port found for instance {connector_instance}"
-        ));
-    };
-
-    info!("Starting in Connector mode to {target:?}");
-
+async fn run_connector_loop(
+    mut listener: impl TransportListener,
+    target: ConnectorTarget,
+) -> Result<(), String> {
     let mut join_set = JoinSet::new();
-
-    let mut listener = DualFdListener::new(dual_fd_config)
-        .map_err(|e| format!("Failed to create DualFdListener: {e}"))?;
 
     loop {
         tokio::select! {
@@ -405,7 +386,6 @@ async fn run_netsimd_connector(args: &Args, connector_instance: u16) -> Result<(
                     if let Err(e) = res {
                         return Err(format!("Bridge task panicked: {e}"));
                     }
-                    return Err("A guest radio transport disconnected".to_string());
                 }
             }
         }
@@ -415,9 +395,36 @@ async fn run_netsimd_connector(args: &Args, connector_instance: u16) -> Result<(
     Err("Connector forwarder disconnected unexpectedly from guest FDs".to_string())
 }
 
+/// Orchestrates the Cuttlefish packet forwarder connector daemon.
+async fn run_netsimd_connector(args: &Args, connector_instance: u16) -> Result<(), String> {
+    let Some(fd_startup_str) = args.fd_startup_str.as_deref() else {
+        return Err("Failed to start netsimd forwarder, missing `-s` arg".to_string());
+    };
+
+    let dual_fd_config: DualFdConfig = serde_json::from_str(fd_startup_str)
+        .map_err(|e| format!("Could not parse startup info JSON: {e}"))?;
+
+    let Some(target) = resolve_connector_target(
+        common::util::ini_file::get_ws_server_address(connector_instance),
+        common::util::ini_file::get_tcp_server_address(connector_instance),
+    ) else {
+        return Err(format!(
+            "No primary netsimd ws or tcp port found for instance {connector_instance}"
+        ));
+    };
+
+    info!("Starting in Connector mode to {target:?}");
+
+    let listener = DualFdListener::new(dual_fd_config)
+        .map_err(|e| format!("Failed to create DualFdListener: {e}"))?;
+
+    run_connector_loop(listener, target).await
+}
+
 #[cfg(test)]
 mod tests {
     use common::util::net::bind_tcp_loopback;
+    use grpc_server::ChannelTransportListener;
     use netsim_model::{ChipInfo, ChipKind};
     use tokio::sync::mpsc;
 
@@ -536,5 +543,125 @@ mod tests {
         let args = Args { connector_instance: Some(1), logtostderr: true, ..Default::default() };
         let result = run_connector_mode_if_requested(&args).await;
         assert!(matches!(result, Some(RunResult::InitializationError(_))));
+    }
+
+    fn make_loopback_guest_transport(
+        device_name: &str,
+        kind: ChipKind,
+        guid: &str,
+    ) -> (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>, (ChipInfo, String, PacketStream, PacketSink))
+    {
+        let (guest_in_tx, guest_in_rx) = mpsc::channel(4);
+        let (guest_out_tx, guest_out_rx) = mpsc::channel(4);
+        let stream: PacketStream =
+            Box::pin(futures::stream::unfold(guest_in_rx, |mut rx| async move {
+                rx.recv().await.map(|item| (Ok(item), rx))
+            }));
+        let sink: PacketSink =
+            Box::pin(futures::sink::unfold(guest_out_tx, |tx, item: Bytes| async move {
+                tx.send(item)
+                    .await
+                    .map_err(|e| packet_stream::PacketStreamError::Io(io::Error::other(e)))?;
+                Ok(tx)
+            }));
+
+        let mut chip_info = ChipInfo::new(device_name, kind);
+        if let Some(chip) = &mut chip_info.chip {
+            chip.loopback = true;
+        }
+
+        (guest_in_tx, guest_out_rx, (chip_info, guid.to_string(), stream, sink))
+    }
+
+    #[tokio::test]
+    async fn test_connector_keeps_running_after_guest_radio_disconnect() {
+        let ws_listener = bind_tcp_loopback(0).unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap().to_string();
+        let (_runner, device_client) = device_actor::new();
+        let ws_handle = tokio::spawn(websocket_server::server::run(ws_listener, device_client));
+
+        let (accept_tx, accept_rx) = mpsc::channel(8);
+        let listener = ChannelTransportListener {
+            rx: accept_rx,
+            local_addr: StreamAddress::Fd { in_fd: 0, out_fd: None },
+        };
+
+        let mut loop_handle =
+            tokio::spawn(run_connector_loop(listener, ConnectorTarget::WebSocket(ws_addr)));
+
+        // 1. Given: send CELLULAR guest 1 and BLUETOOTH sibling; round-trip one packet on each.
+        let (cell1_in_tx, mut cell1_out_rx, cell1_guest) =
+            make_loopback_guest_transport("cvd-2", ChipKind::CELLULAR, "dualfd-cellular");
+        let (bt_in_tx, mut bt_out_rx, bt_guest) =
+            make_loopback_guest_transport("cvd-2", ChipKind::BLUETOOTH, "dualfd-bt");
+
+        accept_tx.send(cell1_guest).await.expect("send cell1 guest");
+        accept_tx.send(bt_guest).await.expect("send bt guest");
+
+        let cell1_payload = Bytes::from_static(b"cell-1");
+        cell1_in_tx.send(cell1_payload.clone()).await.expect("send cell1 packet");
+        let cell1_echo = tokio::time::timeout(Duration::from_secs(5), cell1_out_rx.recv())
+            .await
+            .expect("timeout waiting for cell1 echo")
+            .expect("cell1 stream closed unexpectedly");
+        assert_eq!(cell1_echo, cell1_payload);
+
+        let bt1_payload = Bytes::from_static(b"bt-1");
+        bt_in_tx.send(bt1_payload.clone()).await.expect("send bt1 packet");
+        let bt1_echo = tokio::time::timeout(Duration::from_secs(5), bt_out_rx.recv())
+            .await
+            .expect("timeout waiting for bt1 echo")
+            .expect("bt stream closed unexpectedly");
+        assert_eq!(bt1_echo, bt1_payload);
+
+        // 2. When: guest RIL drops (guest EOF); output stream closes.
+        drop(cell1_in_tx);
+        let cell1_eof = tokio::time::timeout(Duration::from_secs(5), cell1_out_rx.recv())
+            .await
+            .expect("timeout waiting for cell1 EOF");
+        assert!(cell1_eof.is_none(), "expected cell1 output stream to terminate upon guest EOF");
+
+        // 3. Then: connector loop remains running.
+        // Pre-fix: run_connector_loop exits immediately on any radio EOF.
+        // Post-fix: run_connector_loop stays alive to service reconnections.
+        let liveness = tokio::time::timeout(Duration::from_millis(300), &mut loop_handle).await;
+        assert!(
+            liveness.is_err(),
+            "connector loop exited unexpectedly after guest radio disconnect: {:?}",
+            liveness.unwrap()
+        );
+
+        // 4. When / Then: cellular guest reconnects with same guid and can round-trip packets.
+        let (cell2_in_tx, mut cell2_out_rx, cell2_guest) =
+            make_loopback_guest_transport("cvd-2", ChipKind::CELLULAR, "dualfd-cellular");
+        accept_tx.send(cell2_guest).await.expect("send cell2 guest");
+
+        let cell2_payload = Bytes::from_static(b"cell-2");
+        cell2_in_tx.send(cell2_payload.clone()).await.expect("send cell2 packet");
+        let cell2_echo = tokio::time::timeout(Duration::from_secs(5), cell2_out_rx.recv())
+            .await
+            .expect("timeout waiting for cell2 echo")
+            .expect("cell2 stream closed unexpectedly");
+        assert_eq!(cell2_echo, cell2_payload);
+
+        // 5. Then: sibling BLUETOOTH bridge is still alive and responds to packets.
+        let bt2_payload = Bytes::from_static(b"bt-2");
+        bt_in_tx.send(bt2_payload.clone()).await.expect("send bt2 packet");
+        let bt2_echo = tokio::time::timeout(Duration::from_secs(5), bt_out_rx.recv())
+            .await
+            .expect("timeout waiting for bt2 echo")
+            .expect("bt stream closed unexpectedly");
+        assert_eq!(bt2_echo, bt2_payload);
+
+        // 6. Teardown
+        drop(cell2_in_tx);
+        drop(bt_in_tx);
+        let bt_eof = tokio::time::timeout(Duration::from_secs(5), bt_out_rx.recv())
+            .await
+            .expect("timeout waiting for bt EOF");
+        assert!(bt_eof.is_none());
+
+        loop_handle.abort();
+        ws_handle.abort();
     }
 }
