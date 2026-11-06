@@ -15,7 +15,7 @@
 use std::{fs::File, io::Write};
 
 use bytes::Bytes;
-use netsim_packets::{EthernetFrame, Ipv4Header, UdpHeader};
+use netsim_packets::{EthernetFrame, Ipv4Header, TFTP_PORT, UdpHeader};
 use tempfile::TempDir;
 use zerocopy::FromBytes;
 
@@ -262,4 +262,33 @@ fn test_tftp_security_traversal() {
     let (opcode, err_code, _) = parse_tftp_packet(packet);
     assert_eq!(opcode, 5); // ERROR
     assert_eq!(err_code, 2); // Access violation
+}
+
+#[test]
+fn test_tftp_malformed_rrq() {
+    const CLIENT_PORT: u16 = 23456;
+    const OP_RRQ: u16 = 1;
+    const OP_ERROR: u16 = 5;
+    const ERR_ILLEGAL_OP: u16 = 4;
+
+    let tmp_dir = TempDir::new().unwrap();
+    let config = Config { tftp_root: Some(tmp_dir.path().to_path_buf()), ..Config::default() };
+    let mut slirp = Slirp::new(config);
+
+    for malformed_payload in [
+        // Missing null terminator after filename
+        [&OP_RRQ.to_be_bytes()[..], b"test.txt"].concat(),
+        // Null-terminated filename, but missing null terminator after mode
+        [&OP_RRQ.to_be_bytes()[..], b"test.txt\0octet"].concat(),
+    ] {
+        let responses = inject_udp_packet(&mut slirp, &malformed_payload, CLIENT_PORT, TFTP_PORT);
+        assert_eq!(responses.len(), 1);
+        let SlirpResponse::Packet(packet) = &responses[0] else {
+            panic!("Expected Packet response");
+        };
+        let (opcode, err_code, data) = parse_tftp_packet(packet);
+        assert_eq!(opcode, OP_ERROR);
+        assert_eq!(err_code, ERR_ILLEGAL_OP);
+        assert_eq!(data, b"Malformed RRQ\0");
+    }
 }

@@ -132,19 +132,7 @@ impl TftpManager {
         };
 
         // Parse filename and mode (null-terminated strings)
-        let Some((filename, remaining)) = parse_null_terminated_string(payload) else {
-            self.send_error(
-                responses,
-                config,
-                src_addr,
-                TFTP_PORT,
-                ERR_ILLEGAL_OP,
-                "Malformed RRQ",
-                guest_mac,
-            );
-            return;
-        };
-        let Some((mode, _)) = parse_null_terminated_string(remaining) else {
+        let Some((filename, mode)) = parse_rrq_payload(payload) else {
             self.send_error(
                 responses,
                 config,
@@ -423,6 +411,12 @@ fn parse_null_terminated_string(payload: &[u8]) -> Option<(&str, &[u8])> {
     let null_idx = payload.iter().position(|&b| b == 0)?;
     let s = std::str::from_utf8(payload.get(..null_idx)?).ok()?;
     Some((s, payload.get(null_idx + 1..)?))
+}
+
+fn parse_rrq_payload(payload: &[u8]) -> Option<(&str, &str)> {
+    let (filename, remaining) = parse_null_terminated_string(payload)?;
+    let (mode, _) = parse_null_terminated_string(remaining)?;
+    Some((filename, mode))
 }
 
 fn validate_and_resolve_path(root: &Path, filename: &str) -> Result<PathBuf, String> {
