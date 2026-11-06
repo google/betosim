@@ -72,16 +72,40 @@ impl ActorLifecycle for NfcActor {
             // Control Packet
             if let Ok(packet) = ControlPacket::decode_full(&message) {
                 match packet.specialize() {
-                    Ok(ControlPacketChild::CorePacket(core_pkt)) => {
-                        if let Ok(CorePacketChild::CoreInitCommand(_)) = core_pkt.specialize() {
+                    Ok(ControlPacketChild::CorePacket(core_pkt)) => match core_pkt.specialize() {
+                        Ok(CorePacketChild::CoreInitCommand(_)) => {
                             self.nfc_stats.incr(NfcApi::AdapterEnable);
                         }
-                    }
+                        Ok(CorePacketChild::CoreResetCommand(_)) => {
+                            if let Some(state) = self.get_chip(&id) {
+                                state.set_mode(NfcMode::Idle);
+                            }
+                        }
+                        _ => {}
+                    },
                     Ok(ControlPacketChild::RfPacket(rf_pkt)) => match rf_pkt.specialize() {
-                        Ok(RfPacketChild::RfDiscoverCommand(_)) => {
+                        Ok(RfPacketChild::RfDiscoverCommand(cmd)) => {
                             self.nfc_stats.incr(NfcApi::AdapterEnableReaderMode);
                             if let Some(state) = self.get_chip(&id) {
-                                state.set_mode(NfcMode::Poll);
+                                let has_listen = cmd.configurations.iter().any(|c| {
+                                    matches!(
+                                        NfcMode::from_rf_technology_and_mode(c.technology_and_mode),
+                                        NfcMode::Listen
+                                    )
+                                });
+                                let has_poll = cmd.configurations.iter().any(|c| {
+                                    matches!(
+                                        NfcMode::from_rf_technology_and_mode(c.technology_and_mode),
+                                        NfcMode::Poll
+                                    )
+                                });
+                                if has_listen && !has_poll {
+                                    state.set_mode(NfcMode::Listen);
+                                } else if has_poll
+                                    && (!has_listen || state.mode() != NfcMode::Listen)
+                                {
+                                    state.set_mode(NfcMode::Poll);
+                                }
                             }
                         }
                         Ok(RfPacketChild::RfDiscoverSelectCommand(_)) => {
@@ -104,7 +128,9 @@ impl ActorLifecycle for NfcActor {
                                     self.nfc_stats.incr(NfcApi::TagClose);
                                     if let Some(state) = self.get_chip(&id) {
                                         if cmd.deactivation_type == DeactivationType::Discovery {
-                                            state.set_mode(NfcMode::Poll);
+                                            if state.mode() != NfcMode::Listen {
+                                                state.set_mode(NfcMode::Poll);
+                                            }
                                         } else {
                                             state.set_mode(NfcMode::Idle);
                                         }
@@ -354,6 +380,99 @@ mod tests {
         actor.on_stream(chip_id, nci_data_packet(0, &[1, 2, 3]), &mut ctx).await;
         assert_eq!(stats.get(NfcApi::TagTransceive), 0);
         assert_eq!(stats.to_proto().nci_errors(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_discover_and_deactivate_listen_mode() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats.clone());
+        let mut ctx = DummyContext;
+        let chip_id = ChipId(3);
+
+        let (nfc_io, _peer) = tokio::io::duplex(1024);
+        let (_reader, nfc_writer) = tokio::io::split(nfc_io);
+        let chip_mode = Arc::new(AtomicU8::new(NfcMode::Idle.as_u8()));
+        actor.active_chips.insert(
+            chip_id,
+            ChipState {
+                id: chip_id,
+                device_id: DeviceId(1),
+                chip: Default::default(),
+                initial_chip: Default::default(),
+                enabled: Arc::new(AtomicBool::new(true)),
+                casimir_device_id: 3,
+                nfc_writer,
+                tx_count: Arc::new(AtomicU64::new(0)),
+                rx_count: Arc::new(AtomicU64::new(0)),
+                p2p_tx_count: Arc::new(AtomicU64::new(0)),
+                p2p_rx_count: Arc::new(AtomicU64::new(0)),
+                mode: chip_mode.clone(),
+            },
+        );
+
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Idle.as_u8());
+
+        let cmd = RfSetListenModeRoutingCommand { more_to_follow: 0, routing_entries: vec![] };
+        actor.on_stream(chip_id, Bytes::from(cmd.encode_to_vec().unwrap()), &mut ctx).await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Listen.as_u8());
+
+        let hybrid_cmd = RfDiscoverCommand {
+            configurations: vec![
+                DiscoverConfiguration {
+                    technology_and_mode: RfTechnologyAndMode::NfcAPassivePollMode,
+                    discovery_frequency: 1,
+                },
+                DiscoverConfiguration {
+                    technology_and_mode: RfTechnologyAndMode::NfcAPassiveListenMode,
+                    discovery_frequency: 1,
+                },
+            ],
+        };
+        actor.on_stream(chip_id, Bytes::from(hybrid_cmd.encode_to_vec().unwrap()), &mut ctx).await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Listen.as_u8());
+
+        let deact_disc = RfDeactivateCommand { deactivation_type: DeactivationType::Discovery };
+        actor.on_stream(chip_id, Bytes::from(deact_disc.encode_to_vec().unwrap()), &mut ctx).await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Listen.as_u8());
+
+        let reset_cmd = CoreResetCommand { reset_type: ResetType::ResetConfig };
+        actor.on_stream(chip_id, Bytes::from(reset_cmd.encode_to_vec().unwrap()), &mut ctx).await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Idle.as_u8());
+
+        actor.on_stream(chip_id, Bytes::from(hybrid_cmd.encode_to_vec().unwrap()), &mut ctx).await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Poll.as_u8());
+
+        let pure_listen_cmd = RfDiscoverCommand {
+            configurations: vec![DiscoverConfiguration {
+                technology_and_mode: RfTechnologyAndMode::NfcAPassiveListenMode,
+                discovery_frequency: 1,
+            }],
+        };
+        actor
+            .on_stream(chip_id, Bytes::from(pure_listen_cmd.encode_to_vec().unwrap()), &mut ctx)
+            .await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Listen.as_u8());
+
+        let pure_poll_cmd = RfDiscoverCommand {
+            configurations: vec![DiscoverConfiguration {
+                technology_and_mode: RfTechnologyAndMode::NfcAPassivePollMode,
+                discovery_frequency: 1,
+            }],
+        };
+        actor
+            .on_stream(chip_id, Bytes::from(pure_poll_cmd.encode_to_vec().unwrap()), &mut ctx)
+            .await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Poll.as_u8());
+
+        actor
+            .on_stream(chip_id, Bytes::from(pure_listen_cmd.encode_to_vec().unwrap()), &mut ctx)
+            .await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Listen.as_u8());
+
+        let deact_idle = RfDeactivateCommand { deactivation_type: DeactivationType::IdleMode };
+        actor.on_stream(chip_id, Bytes::from(deact_idle.encode_to_vec().unwrap()), &mut ctx).await;
+        assert_eq!(chip_mode.load(Ordering::Acquire), NfcMode::Idle.as_u8());
     }
 
     fn nci_data_packet(conn_id: u8, payload: &[u8]) -> Bytes {

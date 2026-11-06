@@ -44,6 +44,26 @@ impl NfcMode {
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
+
+    #[must_use]
+    pub(crate) fn from_rf_technology_and_mode(
+        tech_mode: casimir::packets::nci::RfTechnologyAndMode,
+    ) -> Self {
+        use casimir::packets::nci::RfTechnologyAndMode::*;
+        match tech_mode {
+            NfcAPassiveListenMode
+            | NfcBPassiveListenMode
+            | NfcFPassiveListenMode
+            | NfcActiveListenMode
+            | ProprietaryListenMode(_) => Self::Listen,
+            NfcAPassivePollMode
+            | NfcBPassivePollMode
+            | NfcFPassivePollMode
+            | NfcActivePollMode
+            | NfcVPassivePollMode
+            | ProprietaryPollMode(_) => Self::Poll,
+        }
+    }
 }
 
 impl From<NfcMode> for u8 {
@@ -105,13 +125,13 @@ pub struct ChipState {
 impl ChipState {
     /// Loads the current NFC operating mode.
     pub fn mode(&self) -> NfcMode {
-        NfcMode::try_from(self.mode.load(std::sync::atomic::Ordering::Relaxed))
+        NfcMode::try_from(self.mode.load(std::sync::atomic::Ordering::Acquire))
             .unwrap_or(NfcMode::Idle)
     }
 
     /// Stores a new NFC operating mode.
     pub fn set_mode(&self, mode: NfcMode) {
-        self.mode.store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+        self.mode.store(mode.as_u8(), std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -245,6 +265,26 @@ mod tests {
         assert_eq!(NfcMode::try_from(3), Err(3));
 
         assert_eq!(NfcMode::default(), NfcMode::Idle);
+    }
+
+    #[test]
+    fn test_from_rf_technology_and_mode() {
+        use casimir::packets::nci::{RfTechnologyAndMode, RfTechnologyAndMode::*};
+
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcAPassiveListenMode), NfcMode::Listen);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcBPassiveListenMode), NfcMode::Listen);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcFPassiveListenMode), NfcMode::Listen);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcActiveListenMode), NfcMode::Listen);
+        let prop_listen = RfTechnologyAndMode::try_from(0xf0).unwrap();
+        assert_eq!(NfcMode::from_rf_technology_and_mode(prop_listen), NfcMode::Listen);
+
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcAPassivePollMode), NfcMode::Poll);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcBPassivePollMode), NfcMode::Poll);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcFPassivePollMode), NfcMode::Poll);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcActivePollMode), NfcMode::Poll);
+        assert_eq!(NfcMode::from_rf_technology_and_mode(NfcVPassivePollMode), NfcMode::Poll);
+        let prop_poll = RfTechnologyAndMode::try_from(0x70).unwrap();
+        assert_eq!(NfcMode::from_rf_technology_and_mode(prop_poll), NfcMode::Poll);
     }
 
     #[test]

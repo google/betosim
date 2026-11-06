@@ -875,3 +875,36 @@ async fn test_nfc_client_p2p_stats_and_chip_name_preserved_and_reset() {
 
     world.shutdown().await;
 }
+
+/// Scenario: 2-device HCE APDU exchange increments card_emulation_count
+#[tokio::test]
+async fn test_hce_apdu_exchange_increments_card_emulation_count() {
+    // Given a reader chip and an HCE chip in proximity, both with listen mode routing
+    let mut world = NfcClientWorld::new().await;
+    world.given_two_chips_with_listen_routing(CHIP_1, CHIP_2).await;
+
+    // When the reader exchanges a SELECT AID C-APDU and 90 00 R-APDU with the HCE chip
+    world.when_hce_apdu_exchanged(CHIP_1, CHIP_2).await;
+
+    // Then card emulation stats count the HCE side and tag stats count the reader side
+    world.then_hce_stats_incremented();
+
+    world.shutdown().await;
+}
+
+/// Scenario: HCE chip entering hybrid discovery from Idle transitions to Listen
+/// mode on RF activation notification and increments card_emulation_count
+#[tokio::test]
+async fn test_hce_hybrid_discovery_from_idle_activates_listen_mode() {
+    // Given a reader chip and an HCE chip starting hybrid discovery from Idle
+    let mut world = NfcClientWorld::new().await;
+    world.given_two_chips_in_hybrid_discovery_from_idle(CHIP_1, CHIP_2).await;
+
+    // When the reader exchanges a SELECT AID C-APDU and 90 00 R-APDU with the HCE chip
+    world.when_hce_apdu_exchanged(CHIP_1, CHIP_2).await;
+
+    // Then card emulation stats count the HCE side and tag stats count the reader side
+    world.then_hce_stats_incremented();
+
+    world.shutdown().await;
+}

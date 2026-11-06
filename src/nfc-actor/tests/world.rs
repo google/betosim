@@ -23,10 +23,12 @@ use std::{
 use actor_framework::{ActorClient, ActorLifecycle, ActorService, Context};
 use bytes::Bytes;
 use casimir::packets::nci::{
-    CoreInitCommand, CoreInitResponse, CoreResetCommand, CoreResetNotification, CoreResetResponse,
-    DeactivationType, DiscoverConfiguration, FeatureEnable, ResetType, RfDeactivateCommand,
-    RfDeactivateResponse, RfDiscoverCommand, RfDiscoverResponse, RfSetListenModeRoutingCommand,
-    RfSetListenModeRoutingResponse, RfTechnologyAndMode, Status,
+    ConfigParameter, ConfigParameterId, ControlPacket, ControlPacketChild, CoreInitCommand,
+    CoreInitResponse, CoreResetCommand, CoreResetNotification, CoreResetResponse,
+    CoreSetConfigCommand, CoreSetConfigResponse, DataPacket, DeactivationType,
+    DiscoverConfiguration, FeatureEnable, MessageType, ResetType, RfDeactivateCommand,
+    RfDeactivateResponse, RfDiscoverCommand, RfDiscoverResponse, RfPacketChild,
+    RfSetListenModeRoutingCommand, RfSetListenModeRoutingResponse, RfTechnologyAndMode, Status,
 };
 use device_actor::DeviceActor;
 use futures::{StreamExt, future::BoxFuture};
@@ -319,7 +321,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RF_FLUSH_SETTLE_DELAY: Duration = Duration::from_millis(30);
 const NCI_DROP_OBSERVATION_WINDOW: Duration = Duration::from_millis(100);
 const CASIMIR_POLL_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
+const ORIGIN_METERS: f32 = 0.0;
+const CONTACTLESS_PROXIMITY_METERS: f32 = 0.02;
+const LA_SEL_INFO_ISO_DEP: u8 = 0x20;
 const APDU_OK_RESPONSE_DATA_PACKET: [u8; 5] = [0x00, 0x00, 0x02, 0x90, 0x00];
+const C_APDU_SELECT_AID_DATA_PACKET: [u8; 15] =
+    [0x00, 0x00, 0x0C, 0x00, 0xA4, 0x04, 0x00, 0x07, 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
 
 pub(crate) struct NfcClientWorld {
     client: NfcClient,
@@ -762,5 +769,155 @@ impl NfcClientWorld {
             "expected p2p_rx_count == 0 for chip {chip_id}, got {}",
             stats.p2p_rx_count
         );
+    }
+
+    async fn start_hce_and_reader_discovery(&mut self, reader_id: ChipId, hce_id: ChipId) {
+        let set_config_cmd = CoreSetConfigCommand {
+            parameters: vec![ConfigParameter {
+                id: ConfigParameterId::LaSelInfo,
+                value: vec![LA_SEL_INFO_ISO_DEP],
+            }],
+        };
+        self.send_raw_nci(hce_id, Self::encode_nci_packet(set_config_cmd)).await;
+        let cfg_rsp_bytes = self.recv_nci_packet(hce_id).await;
+        let cfg_rsp = CoreSetConfigResponse::decode_full(&cfg_rsp_bytes)
+            .expect("decode CoreSetConfigResponse for HCE chip");
+        assert_eq!(cfg_rsp.status, Status::Ok);
+
+        let hce_discover_cmd = RfDiscoverCommand {
+            configurations: vec![
+                DiscoverConfiguration {
+                    technology_and_mode: RfTechnologyAndMode::NfcAPassivePollMode,
+                    discovery_frequency: 1,
+                },
+                DiscoverConfiguration {
+                    technology_and_mode: RfTechnologyAndMode::NfcAPassiveListenMode,
+                    discovery_frequency: 1,
+                },
+            ],
+        };
+        self.send_raw_nci(hce_id, Self::encode_nci_packet(hce_discover_cmd)).await;
+        let hce_rsp_bytes = self.recv_nci_packet(hce_id).await;
+        let hce_rsp = RfDiscoverResponse::decode_full(&hce_rsp_bytes)
+            .expect("decode RfDiscoverResponse for HCE chip");
+        assert_eq!(hce_rsp.status, Status::Ok);
+
+        let reader_discover_cmd = RfDiscoverCommand {
+            configurations: vec![DiscoverConfiguration {
+                technology_and_mode: RfTechnologyAndMode::NfcAPassivePollMode,
+                discovery_frequency: 1,
+            }],
+        };
+        self.send_raw_nci(reader_id, Self::encode_nci_packet(reader_discover_cmd)).await;
+        let reader_rsp_bytes = self.recv_nci_packet(reader_id).await;
+        let reader_rsp = RfDiscoverResponse::decode_full(&reader_rsp_bytes)
+            .expect("decode RfDiscoverResponse for reader chip");
+        assert_eq!(reader_rsp.status, Status::Ok);
+    }
+
+    async fn setup_two_chips_proximity_and_core(&mut self, chip1: ChipId, chip2: ChipId) {
+        self.given_chip_at(chip1, DeviceId(chip1.0), ORIGIN_METERS, ORIGIN_METERS, ORIGIN_METERS)
+            .await;
+        self.given_chip_at(
+            chip2,
+            DeviceId(chip2.0),
+            CONTACTLESS_PROXIMITY_METERS,
+            ORIGIN_METERS,
+            ORIGIN_METERS,
+        )
+        .await;
+
+        self.given_nci_core_initialized(chip1).await;
+        self.given_nci_core_initialized(chip2).await;
+    }
+
+    pub(crate) async fn given_two_chips_with_listen_routing(
+        &mut self,
+        reader_id: ChipId,
+        hce_id: ChipId,
+    ) {
+        self.setup_two_chips_proximity_and_core(reader_id, hce_id).await;
+        self.given_nci_listen_mode_routing_configured(reader_id).await;
+        self.given_nci_listen_mode_routing_configured(hce_id).await;
+        self.start_hce_and_reader_discovery(reader_id, hce_id).await;
+    }
+
+    pub(crate) async fn given_two_chips_in_hybrid_discovery_from_idle(
+        &mut self,
+        reader_id: ChipId,
+        hce_id: ChipId,
+    ) {
+        self.setup_two_chips_proximity_and_core(reader_id, hce_id).await;
+        self.start_hce_and_reader_discovery(reader_id, hce_id).await;
+    }
+
+    async fn recv_nci_data_packet(&mut self, chip_id: ChipId) -> Option<Bytes> {
+        let deadline = tokio::time::Instant::now() + PACKET_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let rx = self.packet_receivers.get_mut(&chip_id)?;
+            if let Ok(Some(bytes)) = tokio::time::timeout(remaining, rx.recv()).await {
+                if DataPacket::decode_full(&bytes).is_ok_and(|pkt| pkt.mt == MessageType::Data) {
+                    return Some(bytes);
+                }
+            } else {
+                return None;
+            }
+        }
+        None
+    }
+
+    pub(crate) async fn when_hce_apdu_exchanged(&mut self, reader_id: ChipId, hce_id: ChipId) {
+        tokio::time::timeout(PACKET_TIMEOUT, async {
+            loop {
+                let bytes = self.recv_nci_packet(reader_id).await;
+                if let Ok(pkt) = ControlPacket::decode_full(&bytes)
+                    && let Ok(ControlPacketChild::RfPacket(rf_pkt)) = pkt.specialize()
+                    && let Ok(RfPacketChild::RfIntfActivatedNotification(ntf)) = rf_pkt.specialize()
+                {
+                    assert_eq!(
+                        ntf.activation_rf_technology_and_mode,
+                        RfTechnologyAndMode::NfcAPassivePollMode
+                    );
+                    break;
+                }
+            }
+            loop {
+                let bytes = self.recv_nci_packet(hce_id).await;
+                if let Ok(pkt) = ControlPacket::decode_full(&bytes)
+                    && let Ok(ControlPacketChild::RfPacket(rf_pkt)) = pkt.specialize()
+                    && let Ok(RfPacketChild::RfIntfActivatedNotification(ntf)) = rf_pkt.specialize()
+                {
+                    assert_eq!(
+                        ntf.activation_rf_technology_and_mode,
+                        RfTechnologyAndMode::NfcAPassiveListenMode
+                    );
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for RF interface activation");
+
+        self.send_raw_nci(reader_id, Bytes::from_static(&C_APDU_SELECT_AID_DATA_PACKET)).await;
+
+        let capdu =
+            self.recv_nci_data_packet(hce_id).await.expect("HCE chip must receive C-APDU data");
+        assert_eq!(capdu.as_ref(), &C_APDU_SELECT_AID_DATA_PACKET);
+
+        self.send_raw_nci(hce_id, Bytes::from_static(&APDU_OK_RESPONSE_DATA_PACKET)).await;
+
+        let rapdu =
+            self.recv_nci_data_packet(reader_id).await.expect("Reader must receive R-APDU data");
+        assert_eq!(rapdu.as_ref(), &APDU_OK_RESPONSE_DATA_PACKET);
+    }
+
+    pub(crate) fn then_hce_stats_incremented(&self) {
+        let stats = self.client.stats();
+        assert_eq!(stats.get(NfcApi::CardEmulationProcessCommandApdu), 1);
+        assert_eq!(stats.get(NfcApi::CardEmulationSendResponseApdu), 1);
+        assert_eq!(stats.to_proto().card_emulation_count(), 2);
+        assert_eq!(stats.get(NfcApi::TagTransceive), 1);
+        assert_eq!(stats.to_proto().tag_emulation_count(), 2);
     }
 }

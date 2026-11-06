@@ -22,10 +22,14 @@ use std::{
 
 use actor_framework::{ActorService, DynContext};
 use bytes::{Bytes, BytesMut};
+use casimir::packets::nci::{
+    ControlPacket, ControlPacketChild, DeactivationReason, DeactivationType, RfPacketChild,
+};
 use device_actor::DeviceClient;
 use futures::{SinkExt, StreamExt};
 use netsim_model::{ChipCreate, ChipError, ChipId, ChipUpdate, DeviceId};
 use parking_lot::Mutex;
+use pdl_runtime::Packet;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_util::codec::{Decoder, FramedRead};
 use tracing::{error, info};
@@ -82,6 +86,25 @@ async fn is_within_nfc_proximity(
             src_ent.pose.position.distance(&dst_ent.pose.position) <= PROXIMITY_THRESHOLD_METERS
         }
         _ => true, // Fallback: allow missing positions to bypass spatial filtering
+    }
+}
+
+fn mode_from_notification(packet: &ControlPacket) -> Option<NfcMode> {
+    if let Ok(ControlPacketChild::RfPacket(rf_pkt)) = packet.specialize() {
+        match rf_pkt.specialize() {
+            Ok(RfPacketChild::RfIntfActivatedNotification(ntf)) => {
+                Some(NfcMode::from_rf_technology_and_mode(ntf.activation_rf_technology_and_mode))
+            }
+            Ok(RfPacketChild::RfDeactivateNotification(ntf))
+                if ntf.deactivation_type == DeactivationType::IdleMode
+                    && ntf.deactivation_reason != DeactivationReason::DhRequest =>
+            {
+                Some(NfcMode::Idle)
+            }
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 
@@ -217,7 +240,7 @@ impl ActorService for NfcActor {
                             match NciMessageType::from_header_byte(b0) {
                                 Some(NciMessageType::Data) => {
                                     nfc_stats_clone.incr_nci_data_tx();
-                                    match NfcMode::try_from(mode_clone.load(Ordering::Relaxed)) {
+                                    match NfcMode::try_from(mode_clone.load(Ordering::Acquire)) {
                                         Ok(NfcMode::Listen) => {
                                             nfc_stats_clone
                                                 .incr(NfcApi::CardEmulationProcessCommandApdu);
@@ -236,6 +259,11 @@ impl ActorService for NfcActor {
                                 }
                                 Some(NciMessageType::Notification) => {
                                     nfc_stats_clone.incr_nci_notifications_tx();
+                                    if let Ok(packet) = ControlPacket::decode_full(&bytes)
+                                        && let Some(mode) = mode_from_notification(&packet)
+                                    {
+                                        mode_clone.store(mode.as_u8(), Ordering::Release);
+                                    }
                                     rx_count_clone.fetch_add(1, Ordering::Relaxed);
                                 }
                                 _ => {}
@@ -693,5 +721,54 @@ mod tests {
             .handle_action(Some(ChipId(999)), NfcAction::Reset { id: ChipId(999) }, &mut ctx)
             .await;
         assert!(matches!(err_res, Err(NfcError::Chip(ChipError::ChipNotFound(ChipId(999))))));
+    }
+
+    #[test]
+    fn test_mode_from_notification() {
+        use casimir::packets::nci::{
+            BitRate, RfDeactivateNotification, RfDiscoveryId, RfInterfaceType,
+            RfIntfActivatedNotification, RfProtocolType, RfTechnologyAndMode,
+        };
+
+        let make_activated = |tech_mode: RfTechnologyAndMode| -> ControlPacket {
+            let ntf = RfIntfActivatedNotification {
+                rf_discovery_id: RfDiscoveryId::from_index(0),
+                rf_interface: RfInterfaceType::IsoDep,
+                rf_protocol: RfProtocolType::IsoDep,
+                activation_rf_technology_and_mode: tech_mode,
+                max_data_packet_payload_size: 255,
+                initial_number_of_credits: 1,
+                rf_technology_specific_parameters: vec![],
+                data_exchange_rf_technology_and_mode: tech_mode,
+                data_exchange_transmit_bit_rate: BitRate::BitRate106KbitS,
+                data_exchange_receive_bit_rate: BitRate::BitRate106KbitS,
+                activation_parameters: vec![],
+            };
+            ControlPacket::decode_full(&ntf.encode_to_vec().unwrap()).unwrap()
+        };
+
+        let make_deactivate = |deactivation_type: DeactivationType,
+                               deactivation_reason: DeactivationReason|
+         -> ControlPacket {
+            let ntf = RfDeactivateNotification { deactivation_type, deactivation_reason };
+            ControlPacket::decode_full(&ntf.encode_to_vec().unwrap()).unwrap()
+        };
+
+        let listen_pkt = make_activated(RfTechnologyAndMode::NfcAPassiveListenMode);
+        assert_eq!(mode_from_notification(&listen_pkt), Some(NfcMode::Listen));
+
+        let poll_pkt = make_activated(RfTechnologyAndMode::NfcAPassivePollMode);
+        assert_eq!(mode_from_notification(&poll_pkt), Some(NfcMode::Poll));
+
+        let idle_pkt =
+            make_deactivate(DeactivationType::IdleMode, DeactivationReason::EndpointRequest);
+        assert_eq!(mode_from_notification(&idle_pkt), Some(NfcMode::Idle));
+
+        let dh_req_pkt = make_deactivate(DeactivationType::IdleMode, DeactivationReason::DhRequest);
+        assert_eq!(mode_from_notification(&dh_req_pkt), None);
+
+        let disc_pkt =
+            make_deactivate(DeactivationType::Discovery, DeactivationReason::EndpointRequest);
+        assert_eq!(mode_from_notification(&disc_pkt), None);
     }
 }
