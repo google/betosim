@@ -86,3 +86,36 @@ rust_test_host {
         "liburl",
     ],
 }
+
+rust_test_host {
+    name: "libnetsim_next_http_proxy_integration_tests",
+    crate_name: "http_proxy_tests",
+    edition: "2024",
+    crate_root: "tests/mod.rs",
+    test_suites: [
+        "general_tests",
+    ],
+    srcs: [
+        "tests/integration_test.rs",
+        "tests/mod.rs",
+        "tests/world.rs",
+    ],
+    features: [
+        "cuttlefish",
+        "testing",
+    ],
+    lints: "none",
+    rustlibs: [
+        "libbase64_rust",
+        "libbytes",
+        "libnetsim_next_http_proxy_testing",
+        "libnetsim_next_packets_testing",
+        "libnetsim_next_slirp_testing",
+        "libparking_lot",
+        "libpercent_encoding",
+        "libthiserror",
+        "libtokio",
+        "libtracing",
+        "liburl",
+    ],
+}

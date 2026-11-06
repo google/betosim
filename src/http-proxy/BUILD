@@ -22,7 +22,6 @@ netsim_rust_library(
     crate_name = "http_proxy",
     crate_root = "src/lib.rs",
     edition = "2024",
-    enable_integration_test = False,
     deps = [
         "//src/packets",
         "//src/slirp",

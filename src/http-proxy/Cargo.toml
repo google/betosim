@@ -19,6 +19,10 @@ edition = "2024"
 autobenches = false
 autotests = false
 
+[[test]]
+name = "integration_test"
+path = "tests/mod.rs"
+
 [lib]
 crate-type = ["staticlib", "lib"]
 path = "src/lib.rs"
@@ -42,3 +46,6 @@ tokio = { version = "1.32.0", features = [
 ] }
 tracing = "0.1"
 url = "2.5"
+
+[dev-dependencies]
+tokio = { version = "1.32.0", features = ["time"] }
