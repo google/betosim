@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use http::header::{HeaderName, ToStrError};
+use http::header::ToStrError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,8 +33,8 @@ pub(crate) enum ServerError {
     Utf8(#[from] std::str::Utf8Error),
     #[error("Invalid path: {0}")]
     InvalidPath(String),
-    #[error("Missing header: {0}")]
-    MissingHeader(HeaderName),
+    #[error(transparent)]
+    Handshake(#[from] common::util::websocket::HandshakeError),
     #[error("Handshake failed: {0}")]
     HandshakeFailed(String),
     #[error("Device actor error: {0}")]

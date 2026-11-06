@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
+use common::util::websocket::forward_binary;
 use device_actor::DeviceClient;
 use http_body_util::Full;
 use hyper::{Request, Response, StatusCode};
@@ -29,7 +30,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
-    capture_stream::{Handshake, forward, switching_protocols},
+    capture_stream::{Handshake, switching_protocols},
     server::{client_error_status, error_response},
 };
 
@@ -132,7 +133,7 @@ pub(super) async fn upgrade(
     tokio::spawn(async move {
         if let Ok(upgraded) = on_upgrade.await {
             info!("BLE stream opened for {name} (device {device_id})");
-            forward(TokioIo::new(upgraded), packet_rx).await;
+            forward_binary(TokioIo::new(upgraded), packet_rx).await;
             info!("BLE stream closed for {name} (device {device_id})");
         }
         let _ = cleanup_client.delete(device_id).await;

@@ -22,6 +22,7 @@ use std::{io, net::TcpStream as StdTcpStream, pin::Pin, time::Duration};
 
 use base64::Engine;
 use bytes::{Bytes, BytesMut};
+use common::util::websocket::{accept_key, headers_contain_token};
 use futures::{Sink, Stream, sink::unfold};
 use http::{
     StatusCode,
@@ -38,8 +39,6 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 use tungstenite::{Message, WebSocket, protocol::Role};
-
-use crate::handshake::generate_websocket_accept;
 
 const MAX_HTTP_RESPONSE_SIZE: usize = 2048;
 const MAX_RESPONSE_HEADERS: usize = 64;
@@ -241,12 +240,18 @@ fn verify_upgrade(response: &httparse::Response, key: &str) -> Result<(), Client
     if code != StatusCode::SWITCHING_PROTOCOLS.as_u16() {
         return Err(ClientError::Rejected(code));
     }
-    if !header_contains_token(response.headers, UPGRADE.as_str(), "websocket")
-        || !header_contains_token(response.headers, CONNECTION.as_str(), "upgrade")
-    {
+    if !headers_contain_token(
+        response.headers.iter().map(|h| (h.name, h.value)),
+        UPGRADE.as_str(),
+        "websocket",
+    ) || !headers_contain_token(
+        response.headers.iter().map(|h| (h.name, h.value)),
+        CONNECTION.as_str(),
+        "upgrade",
+    ) {
         return Err(ClientError::InvalidAccept);
     }
-    let expected = generate_websocket_accept(key);
+    let expected = accept_key(key);
     response
         .headers
         .iter()
@@ -256,13 +261,6 @@ fn verify_upgrade(response: &httparse::Response, key: &str) -> Result<(), Client
         })
         .then_some(())
         .ok_or(ClientError::InvalidAccept)
-}
-
-fn header_contains_token(headers: &[httparse::Header], name: &str, token: &str) -> bool {
-    headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).any(|h| {
-        std::str::from_utf8(h.value)
-            .is_ok_and(|val| val.split(',').any(|part| part.trim().eq_ignore_ascii_case(token)))
-    })
 }
 
 /// Reads binary messages on a blocking thread until the server closes or the

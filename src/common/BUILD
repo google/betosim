@@ -27,9 +27,12 @@ netsim_rust_library(
         "@tempfile",
     ],
     deps = [
+        "@base64",
+        "@bytes",
         "@chrono",
         "@libc",
         "@protobuf-json-mapping",
+        "@ring",
         "@socket2",
         "@thiserror",
         "@tokio",

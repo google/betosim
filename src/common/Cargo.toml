@@ -23,12 +23,15 @@ crate-type = ["staticlib", "lib"]
 doctest = false
 
 [dependencies]
+base64 = "0.22"
+bytes = "1.5"
 chrono = { version = "0.4.19", default-features = false, features = ["now"] }
 libc = "0.2.150"
 protobuf-json-mapping = "3.2.0"
+ring = "0.17.2"
 socket2 = "0.5"
 thiserror = "1.0"
-tokio = { version = "1.0", features = ["net", "rt", "sync"] }
+tokio = { version = "1.0", features = ["io-util", "macros", "net", "rt", "sync"] }
 tracing = "0.1"
 tracing-log = "0.1"
 tracing-subscriber = { version = "0.3", features = [

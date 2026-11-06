@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     error::ServerError,
-    handshake::{handle_websocket_handshake, write_http_response},
+    handshake::{handle_websocket_handshake, handshake_error_response, write_http_response},
     transport::{RegisteredDevice, run_loopback, run_websocket_transport, setup_virtual_chip},
 };
 
@@ -197,7 +197,16 @@ async fn perform_handshake(
         return Err(ServerError::InvalidPath(path_str.to_string()));
     };
 
-    let response = handle_websocket_handshake(&req)?;
+    let response = match handle_websocket_handshake(&req) {
+        Ok(response) => response,
+        Err(ServerError::Handshake(err)) => {
+            if let Ok(error_response) = handshake_error_response(&err) {
+                let _ = write_http_response(&mut stream, error_response).await;
+            }
+            return Err(ServerError::Handshake(err));
+        }
+        Err(err) => return Err(err),
+    };
 
     // Write the upgrade response
     write_http_response(&mut stream, response).await?;
