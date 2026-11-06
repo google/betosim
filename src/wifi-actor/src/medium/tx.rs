@@ -286,10 +286,8 @@ impl Medium {
                 flooded = !targets.is_empty();
             }
             if targets.is_empty() {
-                return Err(WifiError::Internal(Box::from(format!(
-                    "Dropped packet from {} to {}",
-                    source.addr, dest_addr
-                ))));
+                debug!("Dropped packet from {} to {}: no reachable target", source.addr, dest_addr);
+                return Ok(false);
             }
         }
 

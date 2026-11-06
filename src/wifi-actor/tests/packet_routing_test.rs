@@ -16,7 +16,7 @@ use bytes::Bytes;
 use netsim_packets::FrameDirection;
 use tracing::info;
 
-use crate::world::World;
+use crate::world::{World, recv_next_tx_info_ack};
 
 // ============================================================================
 // Feature: Wi-Fi Direct (Peer-to-Peer)
@@ -788,29 +788,6 @@ async fn test_secure_network_dhcp_broadcast() {
     }
 }
 
-async fn recv_next_tx_info_ack(chip: &mut crate::world::ChipChannels) -> bool {
-    const HWSIM_TX_STAT_ACK: u32 = 1 << 2;
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
-    tokio::pin!(timeout);
-
-    loop {
-        tokio::select! {
-            Some(bytes) = chip.stream_rx.recv() => {
-                if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
-                    && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::TxInfoFrame
-                    && let Ok(attrs) = netsim_packets::HwsimAttrSet::parse(&hwsim_msg.attributes)
-                    && let Some(flags) = attrs.flags
-                {
-                    return (flags & HWSIM_TX_STAT_ACK) != 0;
-                }
-            }
-            _ = &mut timeout => {
-                panic!("Timeout waiting for TxInfoFrame on chip {}", chip.id);
-            }
-        }
-    }
-}
-
 #[tokio::test]
 async fn test_hwsim_tx_stat_ack_conditional() {
     let mut world = World::new().await;
@@ -863,6 +840,34 @@ async fn test_hwsim_tx_stat_ack_conditional() {
         !recv_next_tx_info_ack(&mut world.chips[0]).await,
         "Expected no ACK when peer is disabled"
     );
+}
+
+/// Scenario: An in-flight unicast frame transmitted after AP deletion receives a
+/// TX NACK and does not increment wifi_stats.other_errors.
+///
+/// Given a single-station topology connected to an AP
+/// And baseline global stats have been captured
+/// And chip RX queue has been drained
+/// When the AP is deleted
+/// And the chip transmits data addressed to the deleted AP
+/// Then the chip receives a TX NACK
+/// And wifi_stats.other_errors is not incremented
+#[tokio::test]
+async fn test_ap_deletion_undelivered_unicast_tx_nack_no_other_errors() {
+    // Given
+    let mut world = World::new().await;
+    let ap_id = world.given_an_ap().await;
+    let _chip = world.given_a_chip(1).await;
+    world.when_global_stats_are_captured().await;
+    world.when_chip_rx_is_drained(0).await;
+
+    // When
+    world.when_ap_is_deleted(ap_id).await;
+    world.when_chip_transmits_data_to_slirp(0).await;
+
+    // Then
+    world.then_chip_receives_tx_nack(0).await;
+    world.then_other_errors_increased_by(0).await;
 }
 
 #[tokio::test]

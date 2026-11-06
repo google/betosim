@@ -248,6 +248,62 @@ mod tests {
     }
 
     #[test]
+    fn test_transmit_unknown_unicast_single_station_returns_ok_false() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use netsim_packets::{FrameType, HwsimFrame, Ieee80211, Ieee80211ToAp, MacAddress};
+
+        use crate::{
+            DebugArgs,
+            medium::{types::Station, utils::create_hwsim_msg_from_frame},
+            stats::{SystemClock, WifiStats},
+        };
+
+        let key_store = Arc::new(ap_actor::SharedKeyStore::new());
+        let clock = Arc::new(SystemClock);
+        let wifi_stats = WifiStats::new(clock);
+        let debug = Arc::new(DebugArgs::default());
+
+        let mut medium = Medium::new(key_store, wifi_stats, debug);
+        let client_id = 1;
+        let src_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let unknown_dest = MacAddress::new([0x00, 0x00, 0x00, 0x00, 0x00, 0xFE]);
+        let bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        medium.add(client_id);
+        medium.stations.insert(src_mac, Station::new(client_id, src_mac, src_mac));
+
+        let to_ds_frame = Ieee80211ToAp {
+            version: 0,
+            ftype: FrameType::Data,
+            stype: 0,
+            destination: unknown_dest,
+            source: src_mac,
+            bssid,
+            duration_id: 0,
+            seq_ctrl: 0,
+            qos_ctrl: None,
+            protected: 0,
+            order: 0,
+            more_frags: 0,
+            retry: 0,
+            pm: 0,
+            more_data: 0,
+            payload: vec![0xAB; 64],
+        };
+        let ieee80211: Ieee80211 = to_ds_frame.try_into().unwrap();
+        let msg = create_hwsim_msg_from_frame(&ieee80211, &bssid, 2412, Some(&src_mac)).unwrap();
+        let frame = HwsimFrame::parse(&msg).unwrap();
+
+        let mut out_queue: Vec<(u32, Bytes)> = Vec::new();
+        let res = medium.transmit(&frame, &ieee80211, &mut out_queue);
+
+        assert!(!res.unwrap());
+        assert!(out_queue.is_empty());
+    }
+
+    #[test]
     fn test_parse_action_frame() {
         use std::sync::Arc;
 

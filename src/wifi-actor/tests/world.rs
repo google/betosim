@@ -42,6 +42,29 @@ pub struct ChipChannels {
     pub sink_tx: mpsc::Sender<Bytes>,     // Input to Actor (Sink)
 }
 
+pub async fn recv_next_tx_info_ack(chip: &mut ChipChannels) -> bool {
+    const HWSIM_TX_STAT_ACK: u32 = 1 << 2;
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            Some(bytes) = chip.stream_rx.recv() => {
+                if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
+                    && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::TxInfoFrame
+                    && let Ok(attrs) = netsim_packets::HwsimAttrSet::parse(&hwsim_msg.attributes)
+                    && let Some(flags) = attrs.flags
+                {
+                    return (flags & HWSIM_TX_STAT_ACK) != 0;
+                }
+            }
+            _ = &mut timeout => {
+                panic!("Timeout waiting for TxInfoFrame on chip {}", chip.id);
+            }
+        }
+    }
+}
+
 pub struct World {
     pub wifi_client: wifi_actor::WifiClient,
     pub ap_client: ApClient,
@@ -981,6 +1004,31 @@ impl World {
         assert_eq!(
             final_stats.frame_errors(),
             self.baseline_stats.as_ref().unwrap().frame_errors() + expected_increase
+        );
+    }
+
+    pub async fn when_ap_is_deleted(&mut self, ap_id: u32) {
+        self.ap_client.destroy_ap(ap_id).await.unwrap();
+    }
+
+    pub async fn when_chip_rx_is_drained(&mut self, chip_idx: usize) {
+        while self.chips[chip_idx].stream_rx.try_recv().is_ok() {}
+    }
+
+    pub async fn then_chip_receives_tx_nack(&mut self, chip_idx: usize) {
+        let acked = recv_next_tx_info_ack(&mut self.chips[chip_idx]).await;
+        assert!(
+            !acked,
+            "Expected TxInfoFrame NACK (HWSIM_TX_STAT_ACK cleared), but frame was ACKed"
+        );
+    }
+
+    pub async fn then_other_errors_increased_by(&mut self, expected_increase: i32) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let final_stats = self.wifi_client.get_global_stats_proto().await.unwrap();
+        assert_eq!(
+            final_stats.other_errors(),
+            self.baseline_stats.as_ref().unwrap().other_errors() + expected_increase
         );
     }
 
