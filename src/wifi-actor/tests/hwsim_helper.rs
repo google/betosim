@@ -13,7 +13,88 @@
 // limitations under the License.
 
 use bytes::Bytes;
-use netsim_packets::{FrameDirection, HwsimFrame, HwsimMsg, Ieee80211, MacAddress};
+use netsim_packets::{
+    DataSubType, FrameControl, FrameDirection, FrameType, HwsimFrame, HwsimMsg, Ieee80211,
+    Ieee80211ToAp, MacAddr, MacAddress, MacHeader3Addr, SequenceControl,
+};
+use zerocopy::IntoBytes;
+
+pub fn build_to_ds_nullfunc_hwsim(
+    sta_mac: [u8; 6],
+    hwsim_addr: [u8; 6],
+    bssid: [u8; 6],
+    freq: u32,
+) -> Bytes {
+    let null_frame = Ieee80211ToAp {
+        version: 0,
+        ftype: FrameType::Data,
+        stype: u8::from(DataSubType::Nodata),
+        destination: MacAddress::new(bssid),
+        source: MacAddress::new(sta_mac),
+        bssid: MacAddress::new(bssid),
+        duration_id: 0,
+        seq_ctrl: 0,
+        qos_ctrl: None,
+        protected: 0,
+        order: 0,
+        more_frags: 0,
+        retry: 0,
+        pm: 0,
+        more_data: 0,
+        payload: vec![],
+    };
+    let ieee80211: Ieee80211 = null_frame.try_into().expect("Failed to build ToDS NullFunc");
+    let msg = wifi_actor::create_hwsim_msg_from_frame(
+        &ieee80211,
+        &MacAddress::new(bssid),
+        freq,
+        Some(&MacAddress::new(hwsim_addr)),
+    )
+    .expect("Failed to wrap NullFunc in HwsimMsg");
+    Bytes::from(msg.encode_to_vec().expect("Failed to encode NullFunc HwsimMsg"))
+}
+
+pub fn build_to_ds_data_hwsim(
+    eth_frame: &[u8],
+    bssid: [u8; 6],
+    hwsim_addr: [u8; 6],
+    freq: u32,
+) -> Bytes {
+    let raw = wrap_ethernet_in_hwsim(eth_frame, &bssid, &bssid, &hwsim_addr, freq)
+        .expect("Failed to wrap Ethernet frame in HwsimMsg");
+    Bytes::from(raw)
+}
+
+pub fn build_ibss_data_hwsim(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    bssid: [u8; 6],
+    hwsim_addr: [u8; 6],
+    freq: u32,
+    payload: &[u8],
+) -> Bytes {
+    let ibss_fc = (FrameType::Data as u16) << 2 | u16::from(u8::from(DataSubType::Data)) << 4;
+    let header = MacHeader3Addr {
+        frame_control: FrameControl::new(ibss_fc),
+        duration_id: zerocopy::U16::new(0),
+        addr1: MacAddr::new(dst_mac),
+        addr2: MacAddr::new(src_mac),
+        addr3: MacAddr::new(bssid),
+        sequence_control: SequenceControl::new(0),
+    };
+    let mut frame_bytes = Vec::with_capacity(header.as_bytes().len() + payload.len());
+    frame_bytes.extend_from_slice(header.as_bytes());
+    frame_bytes.extend_from_slice(payload);
+    let ieee80211 = Ieee80211::decode(&frame_bytes).expect("Failed to decode IBSS data frame");
+    let msg = wifi_actor::create_hwsim_msg_from_frame(
+        &ieee80211,
+        &MacAddress::new(dst_mac),
+        freq,
+        Some(&MacAddress::new(hwsim_addr)),
+    )
+    .expect("Failed to wrap IBSS data frame in HwsimMsg");
+    Bytes::from(msg.encode_to_vec().expect("Failed to encode IBSS HwsimMsg"))
+}
 
 /// Wraps an Ethernet II frame (as bytes) into a HwsimMsg suitable for injection
 /// into the Wifi actor.

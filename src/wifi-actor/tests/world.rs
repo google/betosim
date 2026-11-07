@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use actor_framework::ResourceActor;
 use ap_actor::{ApActor, ApClient};
@@ -28,7 +28,7 @@ use netsim_packets::{
 };
 use slirp_actor::SlirpActor;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tracing::{error, info, warn};
 use wifi_actor::WifiActor;
 use zerocopy::{FromBytes, IntoBytes};
@@ -69,6 +69,8 @@ pub struct World {
     pub wifi_client: wifi_actor::WifiClient,
     pub ap_client: ApClient,
     pub chips: Vec<ChipChannels>,
+    raw_chips: HashMap<u32, ChipChannels>,
+    mock_gateway: Option<MockGateway>,
     // Injector for AP packets
     pub ap_injector: mpsc::UnboundedSender<Bytes>,
     pub device_action_rx: mpsc::UnboundedReceiver<DeviceAction>,
@@ -92,6 +94,13 @@ impl World {
 
     pub async fn new_with_gateway(gateway: Box<dyn wifi_actor::GatewayTrait>) -> Self {
         Self::new_internal(Some(gateway)).await
+    }
+
+    pub async fn new_with_mock_gateway() -> Self {
+        let gw = MockGateway::new();
+        let mut world = Self::new_internal(Some(Box::new(gw.clone()))).await;
+        world.mock_gateway = Some(gw);
+        world
     }
 
     #[cfg(target_os = "linux")]
@@ -209,6 +218,8 @@ impl World {
             wifi_client,
             ap_client: spying_ap_client,
             chips: Vec::new(),
+            raw_chips: HashMap::new(),
+            mock_gateway: None,
             ap_injector,
             device_action_rx: device_rx,
             baseline_stats: None,
@@ -253,7 +264,12 @@ impl World {
         id
     }
 
-    pub async fn given_a_chip(&mut self, id_val: u32) -> u32 {
+    async fn create_chip_channels(
+        &mut self,
+        chip_id: u32,
+        device_id: u32,
+        mac: [u8; 6],
+    ) -> ChipChannels {
         let (stream_tx, stream_rx) = mpsc::channel(128);
         let (sink_tx, sink_rx) = mpsc::channel(128);
 
@@ -269,7 +285,7 @@ impl World {
             manufacturer: "google".to_string(),
             product_name: "test".to_string(),
             kind: netsim_model::ChipKind::WIFI,
-            device_id: DeviceId(1),
+            device_id: DeviceId(device_id),
             variant: Some(netsim_model::ChipVariant::Wifi(netsim_model::Wifi {
                 radio: Default::default(),
             })),
@@ -279,11 +295,14 @@ impl World {
         let params =
             ChipCreate { packet_stream: Some(packet_stream), packet_sink: Some(packet_sink), chip };
 
-        self.wifi_client.create(ChipId(id_val), params).await.expect("Failed to create chip");
-        let created_id = id_val;
+        self.wifi_client.create(ChipId(chip_id), params).await.expect("Failed to create chip");
 
-        let src_mac = [0x00, 0x00, 0x00, 0x00, 0x00, created_id as u8];
-        let chip = ChipChannels { id: created_id, mac: src_mac, stream_rx, sink_tx };
+        ChipChannels { id: chip_id, mac, stream_rx, sink_tx }
+    }
+
+    pub async fn given_a_chip(&mut self, id_val: u32) -> u32 {
+        let src_mac = [0x00, 0x00, 0x00, 0x00, 0x00, id_val as u8];
+        let chip = self.create_chip_channels(id_val, 1, src_mac).await;
 
         // Register chip by sending dummy packet
 
@@ -296,7 +315,7 @@ impl World {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         self.chips.push(chip);
-        created_id
+        id_val
     }
 
     #[cfg(target_os = "linux")]
@@ -1080,6 +1099,303 @@ impl World {
         assert_eq!(chip_stats.p2p_rx_count, expected);
     }
 
+    pub async fn given_default_open_ap(&mut self) {
+        let ap_config = ap_actor::ApConfig {
+            ssid: "AndroidWifi".to_string(),
+            bssid: ap_actor::expected_default_ap_bssid(),
+            channel: 1,
+            beacon_interval: 50,
+            wpa_passphrase: None,
+            ..Default::default()
+        };
+        self.ap_client
+            .create_ap(Some(0), ap_config)
+            .await
+            .expect("Failed to create default open AP (ID 0)");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    pub async fn given_raw_chip(&mut self, id_val: u32, sta_mac: [u8; 6]) {
+        let chip = self.create_chip_channels(id_val, id_val, sta_mac).await;
+        self.raw_chips.insert(id_val, chip);
+    }
+
+    pub async fn given_raw_chip_registered_with_nullfunc(
+        &mut self,
+        id_val: u32,
+        sta_mac: [u8; 6],
+        hwsim_addr: [u8; 6],
+        bssid: [u8; 6],
+        freq: u32,
+    ) {
+        self.given_raw_chip(id_val, sta_mac).await;
+        self.when_raw_chip_sends_nullfunc(id_val, hwsim_addr, bssid, freq).await;
+        self.when_raw_chip_rx_drained(id_val);
+    }
+
+    pub async fn given_raw_chip_registered_with_data(
+        &mut self,
+        id_val: u32,
+        sta_mac: [u8; 6],
+        hwsim_addr: [u8; 6],
+        dst_mac: [u8; 6],
+        bssid: [u8; 6],
+        freq: u32,
+    ) {
+        self.given_raw_chip(id_val, sta_mac).await;
+        self.when_raw_chip_sends_to_ds_data(
+            id_val,
+            hwsim_addr,
+            dst_mac,
+            bssid,
+            freq,
+            b"RegisterChip",
+        )
+        .await;
+        self.when_raw_chip_rx_drained(id_val);
+    }
+
+    pub fn when_raw_chip_rx_drained(&mut self, id_val: u32) {
+        if let Some(chip) = self.raw_chips.get_mut(&id_val) {
+            while chip.stream_rx.try_recv().is_ok() {}
+        }
+    }
+
+    pub async fn when_raw_chip_sends_nullfunc(
+        &mut self,
+        id_val: u32,
+        hwsim_addr: [u8; 6],
+        bssid: [u8; 6],
+        freq: u32,
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let sta_mac = chip.mac;
+        let nullfunc =
+            crate::hwsim_helper::build_to_ds_nullfunc_hwsim(sta_mac, hwsim_addr, bssid, freq);
+        chip.sink_tx.send(nullfunc).await.expect("Failed to send NullFunc");
+        assert!(
+            recv_next_tx_info_ack(chip).await,
+            "Expected TxInfoFrame ACK on NullFunc from chip {id_val}"
+        );
+    }
+
+    pub async fn when_raw_chip_sends_to_ds_data(
+        &mut self,
+        id_val: u32,
+        hwsim_addr: [u8; 6],
+        dst_mac: [u8; 6],
+        bssid: [u8; 6],
+        freq: u32,
+        payload: &[u8],
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let eth = Self::create_ethernet_frame(&chip.mac, &dst_mac, payload);
+        let uplink = crate::hwsim_helper::build_to_ds_data_hwsim(&eth, bssid, hwsim_addr, freq);
+        chip.sink_tx.send(uplink).await.expect("Failed to send ToDS data");
+        assert!(
+            recv_next_tx_info_ack(chip).await,
+            "Expected TxInfoFrame ACK on ToDS data from chip {id_val}"
+        );
+    }
+
+    pub async fn when_raw_chip_sends_ibss_data(
+        &mut self,
+        id_val: u32,
+        hwsim_addr: [u8; 6],
+        dst_mac: [u8; 6],
+        bssid: [u8; 6],
+        freq: u32,
+        payload: &[u8],
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let ibss = crate::hwsim_helper::build_ibss_data_hwsim(
+            chip.mac, dst_mac, bssid, hwsim_addr, freq, payload,
+        );
+        chip.sink_tx.send(ibss).await.expect("Failed to send IBSS data");
+        assert!(
+            !recv_next_tx_info_ack(chip).await,
+            "Expected unacked TxInfoFrame on multi-peer unknown-unicast flood from chip {id_val}"
+        );
+    }
+
+    pub fn when_gateway_injects_downlink(
+        &self,
+        src_mac: &[u8; 6],
+        dst_mac: &[u8; 6],
+        payload: &[u8],
+    ) {
+        let gw = self.mock_gateway.as_ref().expect("MockGateway not configured");
+        let eth = Self::create_ethernet_frame(src_mac, dst_mac, payload);
+        gw.inject_downlink_ethernet(eth);
+    }
+
+    pub async fn when_witness_chip_observes_beacons(
+        &mut self,
+        id_val: u32,
+        expected_bssid: [u8; 6],
+        expected_rx_hwsim: [u8; 6],
+        count: usize,
+    ) {
+        for _ in 0..count {
+            self.then_raw_chip_receives_beacon(id_val, expected_bssid, expected_rx_hwsim).await;
+        }
+    }
+
+    pub async fn then_raw_chip_receives_beacon(
+        &mut self,
+        id_val: u32,
+        expected_bssid: [u8; 6],
+        expected_rx_hwsim: [u8; 6],
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let timeout = tokio::time::sleep(std::time::Duration::from_millis(800));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
+                        && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::Frame
+                        && let Ok(frame) = netsim_packets::HwsimFrame::parse(&hwsim_msg)
+                        && frame.ieee80211.is_mgmt()
+                        && frame.ieee80211.stype() == netsim_packets::management_subtype::BEACON
+                    {
+                        assert_eq!(
+                            frame.ieee80211.get_bssid(),
+                            Some(MacAddress::new(expected_bssid)),
+                            "Beacon BSSID mismatch on chip {id_val}"
+                        );
+                        assert_eq!(
+                            frame.attrs.receiver,
+                            Some(MacAddress::new(expected_rx_hwsim)),
+                            "Beacon receiver hwsim mismatch on chip {id_val}"
+                        );
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!("Timeout waiting for AP Beacon on chip {id_val}");
+                }
+            }
+        }
+    }
+
+    pub async fn then_raw_chip_receives_downlink(
+        &mut self,
+        id_val: u32,
+        expected_payload: &[u8],
+        expected_dst_mac: [u8; 6],
+        expected_rx_hwsim: [u8; 6],
+        expected_freq: Option<u32>,
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let timeout = tokio::time::sleep(std::time::Duration::from_millis(800));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
+                        && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::Frame
+                        && let Ok(frame) = netsim_packets::HwsimFrame::parse(&hwsim_msg)
+                        && let Ok(eth) = crate::hwsim_helper::unwrap_hwsim_to_ethernet(&bytes)
+                        && eth.len() >= expected_payload.len()
+                        && eth.windows(expected_payload.len()).any(|w| w == expected_payload)
+                    {
+                        let mut dst_mac = [0u8; 6];
+                        dst_mac.copy_from_slice(&eth[0..6]);
+                        assert_eq!(
+                            dst_mac, expected_dst_mac,
+                            "Downlink destination MAC mismatch on chip {id_val}"
+                        );
+                        assert_eq!(
+                            frame.attrs.receiver,
+                            Some(MacAddress::new(expected_rx_hwsim)),
+                            "Downlink receiver hwsim mismatch on chip {id_val}"
+                        );
+                        if let Some(freq) = expected_freq {
+                            assert_eq!(
+                                frame.attrs.freq,
+                                Some(freq),
+                                "Downlink frequency mismatch on chip {id_val}"
+                            );
+                        }
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!(
+                        "Timeout waiting for downlink payload {:?} on chip {id_val}",
+                        std::str::from_utf8(expected_payload).unwrap_or("<binary>")
+                    );
+                }
+            }
+        }
+    }
+
+    pub async fn then_raw_chip_receives_ibss_data(
+        &mut self,
+        id_val: u32,
+        expected_payload: &[u8],
+        expected_dst_mac: [u8; 6],
+        expected_rx_hwsim: [u8; 6],
+        expected_freq: u32,
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let timeout = tokio::time::sleep(std::time::Duration::from_millis(800));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(bytes) = chip.stream_rx.recv() => {
+                    if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
+                        && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::Frame
+                        && let Ok(frame) = netsim_packets::HwsimFrame::parse(&hwsim_msg)
+                        && frame.ieee80211.is_data()
+                        && !frame.ieee80211.is_to_ap()
+                        && !frame.ieee80211.is_from_ds()
+                        && frame.ieee80211.get_payload() == expected_payload
+                    {
+                        assert_eq!(
+                            frame.ieee80211.get_destination(),
+                            MacAddress::new(expected_dst_mac),
+                            "IBSS destination MAC mismatch on chip {id_val}"
+                        );
+                        assert_eq!(
+                            frame.attrs.receiver,
+                            Some(MacAddress::new(expected_rx_hwsim)),
+                            "IBSS receiver hwsim mismatch on chip {id_val}"
+                        );
+                        assert_eq!(
+                            frame.attrs.freq,
+                            Some(expected_freq),
+                            "IBSS frequency mismatch on chip {id_val}"
+                        );
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!(
+                        "Timeout waiting for IBSS payload {:?} on chip {id_val}",
+                        std::str::from_utf8(expected_payload).unwrap_or("<binary>")
+                    );
+                }
+            }
+        }
+    }
+
+    pub async fn then_raw_chip_receives_no_frames(&mut self, id_val: u32) {
+        let _ = self.wifi_client.list().await.expect("Failed to list chips");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        assert!(
+            chip.stream_rx.try_recv().is_err(),
+            "Expected no frames on chip {id_val}, but found a frame"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     pub fn given_mock_clock_millis(&self, millis: u64) {
         self.mock_clock.store(millis);
@@ -1136,14 +1452,29 @@ impl World {
     }
 }
 
+const MOCK_GATEWAY_STREAM_ID: ChipId = ChipId(u32::MAX - 1);
+
 #[derive(Clone, Debug)]
 pub struct MockGateway {
-    pub outgoing_packets: Arc<std::sync::Mutex<Vec<(netsim_model::ChipId, bytes::Bytes)>>>,
+    pub outgoing_packets: Arc<std::sync::Mutex<Vec<(ChipId, Bytes)>>>,
+    incoming_tx: mpsc::UnboundedSender<Bytes>,
+    incoming_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<Bytes>>>>,
 }
 
 impl MockGateway {
     pub fn new() -> Self {
-        Self { outgoing_packets: Arc::new(std::sync::Mutex::new(Vec::new())) }
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        Self {
+            outgoing_packets: Arc::new(std::sync::Mutex::new(Vec::new())),
+            incoming_tx,
+            incoming_rx: Arc::new(std::sync::Mutex::new(Some(incoming_rx))),
+        }
+    }
+
+    fn inject_downlink_ethernet(&self, eth_frame: Vec<u8>) {
+        self.incoming_tx
+            .send(Bytes::from(eth_frame))
+            .expect("Failed to inject downlink Ethernet frame into MockGateway");
     }
 }
 
@@ -1151,32 +1482,40 @@ impl MockGateway {
 impl wifi_actor::GatewayTrait for MockGateway {
     async fn send_80211(
         &self,
-        chip_id: netsim_model::ChipId,
+        chip_id: ChipId,
         ieee80211: &Ieee80211,
     ) -> Result<usize, wifi_actor::WifiError> {
         let bytes = ieee80211
             .encode_to_vec()
             .map_err(|e| wifi_actor::WifiError::Frame(Box::from(e.to_string())))?;
         let len = bytes.len();
-        self.outgoing_packets.lock().unwrap().push((chip_id, bytes::Bytes::from(bytes)));
+        self.outgoing_packets.lock().unwrap().push((chip_id, Bytes::from(bytes)));
         Ok(len)
     }
 
-    fn should_handle(&self, _chip_id: netsim_model::ChipId) -> bool {
-        false
+    fn should_handle(&self, chip_id: ChipId) -> bool {
+        chip_id == MOCK_GATEWAY_STREAM_ID
     }
 
     fn handle_incoming(
         &self,
-        _chip_id: netsim_model::ChipId,
-        _packet: bytes::Bytes,
-        _medium: &mut wifi_actor::Medium,
+        _chip_id: ChipId,
+        packet: Bytes,
+        medium: &mut wifi_actor::Medium,
         _shared_keys: &ap_actor::SharedKeyStore,
-        _out_queue: &mut Vec<(u32, bytes::Bytes)>,
+        out_queue: &mut Vec<(u32, Bytes)>,
     ) {
+        medium
+            .process_ieee8023_response(&packet, out_queue)
+            .expect("MockGateway failed to process IEEE 802.3 downlink response");
     }
 
-    async fn on_start(&mut self, _ctx: &mut actor_framework::DynContext<WifiActor>) {}
+    async fn on_start(&mut self, ctx: &mut actor_framework::DynContext<WifiActor>) {
+        let rx = self.incoming_rx.lock().unwrap().take();
+        if let Some(rx) = rx {
+            ctx.add_stream(MOCK_GATEWAY_STREAM_ID, Box::pin(UnboundedReceiverStream::new(rx)));
+        }
+    }
 
     async fn on_chip_create(
         &mut self,

@@ -16,6 +16,7 @@ mod ftm_test;
 mod gateway_test;
 mod hwsim_helper;
 mod lifecycle_test;
+mod multiclient_nullfunc_test;
 mod packet_routing_test;
 mod pmsr_test;
 mod slirp_dual_mapping_test;

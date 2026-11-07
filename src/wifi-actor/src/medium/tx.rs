@@ -66,7 +66,7 @@ impl Medium {
         } else if dest_addr.is_multicast() {
             let mut visited = HashSet::new();
             for station in self.stations.values() {
-                if visited.insert((station.hwsim_addr, station.freq)) {
+                if visited.insert((station.client_id, station.hwsim_addr, station.freq)) {
                     targets.push(station.clone());
                 }
             }
@@ -279,7 +279,9 @@ impl Medium {
             if !via_infra_ap && dest_addr.bytes != [0; 6] {
                 let mut visited = HashSet::new();
                 for station in self.stations.values() {
-                    if station.client_id != source.client_id && visited.insert(station.hwsim_addr) {
+                    if station.client_id != source.client_id
+                        && visited.insert((station.client_id, station.hwsim_addr))
+                    {
                         targets.push(station.clone());
                     }
                 }
@@ -665,5 +667,106 @@ impl Medium {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashSet, sync::Arc};
+
+    use ap_actor::SharedKeyStore;
+    use netsim_packets::{
+        DataSubType, FrameControl, FrameType, HwsimFrame, Ieee80211, MacAddr, MacAddress,
+        MacHeader3Addr, SequenceControl,
+    };
+    use zerocopy::IntoBytes;
+
+    use crate::{
+        DebugArgs,
+        medium::{core::Medium, types::Station, utils::create_hwsim_msg_from_frame},
+        stats::{SystemClock, WifiStats},
+    };
+
+    const FREQ_2412: u32 = 2412;
+
+    fn test_medium() -> Medium {
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(SystemClock));
+        let debug = Arc::new(DebugArgs::default());
+        Medium::new(key_store, wifi_stats, debug)
+    }
+
+    #[test]
+    fn test_resolve_targets_multicast_dedup_by_client_and_radio() {
+        let mut medium = test_medium();
+        let shared_hwsim = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let sta_client1_wlan0 = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let sta_client1_p2p = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x01]);
+        let sta_client2_wlan0 = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x02, 0x00]);
+        let broadcast = MacAddress::new([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+
+        medium.add(1);
+        medium.stations.insert(sta_client1_wlan0, Station::new(1, sta_client1_wlan0, shared_hwsim));
+        medium.stations.insert(sta_client1_p2p, Station::new(1, sta_client1_p2p, shared_hwsim));
+
+        let single_client_targets = medium.resolve_targets(&broadcast);
+        assert_eq!(single_client_targets.len(), 1);
+        assert_eq!(single_client_targets[0].client_id, 1);
+
+        medium.add(2);
+        medium.stations.insert(sta_client2_wlan0, Station::new(2, sta_client2_wlan0, shared_hwsim));
+
+        let multi_client_targets = medium.resolve_targets(&broadcast);
+        let target_clients: HashSet<u32> =
+            multi_client_targets.iter().map(|s| s.client_id).collect();
+        assert_eq!(multi_client_targets.len(), 2);
+        assert_eq!(target_clients, HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn test_transmit_unknown_unicast_flood_dedup_by_client_and_radio() {
+        let mut medium = test_medium();
+        let shared_hwsim = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let sta_client1 = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let sta_client2_wlan0 = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x02, 0x00]);
+        let sta_client2_p2p = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x02, 0x01]);
+        let sta_client3 = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x03, 0x00]);
+
+        medium.add(1);
+        medium.stations.insert(sta_client1, Station::new(1, sta_client1, shared_hwsim));
+
+        medium.add(2);
+        medium.stations.insert(sta_client2_wlan0, Station::new(2, sta_client2_wlan0, shared_hwsim));
+        medium.stations.insert(sta_client2_p2p, Station::new(2, sta_client2_p2p, shared_hwsim));
+
+        medium.add(3);
+        medium.stations.insert(sta_client3, Station::new(3, sta_client3, shared_hwsim));
+
+        let unlearned_dest = MacAddress::new([0x02, 0x15, 0xb2, 0x99, 0x99, 0x99]);
+        let ibss_fc = (FrameType::Data as u16) << 2 | u16::from(u8::from(DataSubType::Data)) << 4;
+        let header = MacHeader3Addr {
+            frame_control: FrameControl::new(ibss_fc),
+            duration_id: zerocopy::U16::new(0),
+            addr1: MacAddr::new(unlearned_dest.bytes),
+            addr2: MacAddr::new(sta_client1.bytes),
+            addr3: MacAddr::new(sta_client1.bytes),
+            sequence_control: SequenceControl::new(0),
+        };
+        let ieee80211 = Ieee80211::decode(header.as_bytes()).unwrap();
+        let msg = create_hwsim_msg_from_frame(
+            &ieee80211,
+            &unlearned_dest,
+            FREQ_2412,
+            Some(&shared_hwsim),
+        )
+        .unwrap();
+        let frame = HwsimFrame::parse(&msg).unwrap();
+
+        let mut out_queue = Vec::new();
+        let acked = medium.transmit(&frame, &ieee80211, &mut out_queue).unwrap();
+        assert!(!acked);
+        let dest_clients: HashSet<u32> = out_queue.iter().map(|(c, _)| *c).collect();
+        assert_eq!(out_queue.len(), 2);
+        assert_eq!(dest_clients, HashSet::from([2, 3]));
     }
 }

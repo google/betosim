@@ -123,9 +123,16 @@ impl Medium {
         tx_state.infra_target = infra_target;
         tx_state.stations = stations;
 
+        let routing_frame = tx_state.get_ieee80211();
+        let is_hosted_to_ds_nodata = routing_frame.is_data()
+            && routing_frame.is_to_ap()
+            && routing_frame.stype() == u8::from(DataSubType::Nodata)
+            && !self.debug.debug_no_network
+            && self.enabled(client_id).unwrap_or(false)
+            && bssid.is_some_and(|b| self.key_store.has_bssid(&b));
         // Remember which AP this station is sending infrastructure frames to
         #[allow(clippy::collapsible_if)]
-        if tx_state.infra_target != InfraTarget::None {
+        if tx_state.infra_target != InfraTarget::None || is_hosted_to_ds_nodata {
             if let Some(b) = bssid {
                 if !b.is_multicast() {
                     self.key_store.set_station_bssid(src_mac, b);
@@ -236,5 +243,171 @@ impl Medium {
         }
 
         (infra_target, stations)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ap_actor::SharedKeyStore;
+    use bytes::Bytes;
+    use netsim_packets::{DataSubType, FrameType, Ieee80211, Ieee80211ToAp, MacAddress};
+
+    use crate::{
+        DebugArgs,
+        medium::{core::Medium, utils::create_hwsim_msg_from_frame},
+        stats::{SystemClock, WifiStats},
+    };
+
+    const FREQ_2412: u32 = 2412;
+
+    fn test_medium_with_debug(debug: DebugArgs) -> (Medium, Arc<SharedKeyStore>) {
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(SystemClock));
+        let medium = Medium::new(key_store.clone(), wifi_stats, Arc::new(debug));
+        (medium, key_store)
+    }
+
+    fn build_nodata_bytes(
+        sta_mac: &MacAddress,
+        target_bssid: &MacAddress,
+        hwsim_addr: &MacAddress,
+    ) -> Bytes {
+        let null_frame = Ieee80211ToAp {
+            version: 0,
+            ftype: FrameType::Data,
+            stype: u8::from(DataSubType::Nodata),
+            destination: *target_bssid,
+            source: *sta_mac,
+            bssid: *target_bssid,
+            duration_id: 0,
+            seq_ctrl: 0,
+            qos_ctrl: None,
+            protected: 0,
+            order: 0,
+            more_frags: 0,
+            retry: 0,
+            pm: 0,
+            more_data: 0,
+            payload: vec![],
+        };
+        let ieee: Ieee80211 = null_frame.try_into().unwrap();
+        let msg =
+            create_hwsim_msg_from_frame(&ieee, target_bssid, FREQ_2412, Some(hwsim_addr)).unwrap();
+        Bytes::from(msg.encode_to_vec().unwrap())
+    }
+
+    #[test]
+    fn test_resolve_tx_packet_hosted_to_ds_nodata_registers_bssid() {
+        let hosted_bssid = MacAddress::new([0x00, 0x13, 0x10, 0x85, 0xfe, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let hwsim_addr = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        let (mut medium, key_store) = test_medium_with_debug(DebugArgs::default());
+        key_store.add_bssid(hosted_bssid);
+        medium.add(1);
+
+        let bytes = build_nodata_bytes(&sta_mac, &hosted_bssid, &hwsim_addr);
+        medium.resolve_tx_packet(1, &bytes).unwrap();
+
+        assert_eq!(key_store.get_station_bssid(&sta_mac), Some(hosted_bssid));
+        assert_eq!(key_store.get_station_bssid(&hwsim_addr), Some(hosted_bssid));
+    }
+
+    #[test]
+    fn test_resolve_tx_packet_unhosted_to_ds_nodata_ignores_bssid() {
+        let hosted_bssid = MacAddress::new([0x00, 0x13, 0x10, 0x85, 0xfe, 0x01]);
+        let unhosted_bssid = MacAddress::new([0x00, 0x13, 0x10, 0x85, 0xfe, 0x02]);
+        let sta_mac = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let hwsim_addr = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        let (mut medium, key_store) = test_medium_with_debug(DebugArgs::default());
+        key_store.add_bssid(hosted_bssid);
+        medium.add(1);
+
+        let bytes = build_nodata_bytes(&sta_mac, &unhosted_bssid, &hwsim_addr);
+        medium.resolve_tx_packet(1, &bytes).unwrap();
+
+        assert_eq!(key_store.get_station_bssid(&sta_mac), None);
+        assert_eq!(key_store.get_station_bssid(&hwsim_addr), None);
+    }
+
+    #[test]
+    fn test_resolve_tx_packet_disabled_client_nodata_ignores_bssid() {
+        let hosted_bssid = MacAddress::new([0x00, 0x13, 0x10, 0x85, 0xfe, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let hwsim_addr = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        let (mut medium, key_store) = test_medium_with_debug(DebugArgs::default());
+        key_store.add_bssid(hosted_bssid);
+        medium.add(1);
+        medium.set_enabled(1, false);
+
+        let bytes = build_nodata_bytes(&sta_mac, &hosted_bssid, &hwsim_addr);
+        medium.resolve_tx_packet(1, &bytes).unwrap();
+
+        assert_eq!(key_store.get_station_bssid(&sta_mac), None);
+        assert_eq!(key_store.get_station_bssid(&hwsim_addr), None);
+    }
+
+    #[test]
+    fn test_resolve_tx_packet_no_network_nodata_ignores_bssid() {
+        let hosted_bssid = MacAddress::new([0x00, 0x13, 0x10, 0x85, 0xfe, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let hwsim_addr = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        let (mut medium, key_store) =
+            test_medium_with_debug(DebugArgs { debug_no_network: true, ..Default::default() });
+        key_store.add_bssid(hosted_bssid);
+        medium.add(1);
+
+        let bytes = build_nodata_bytes(&sta_mac, &hosted_bssid, &hwsim_addr);
+        medium.resolve_tx_packet(1, &bytes).unwrap();
+
+        assert_eq!(key_store.get_station_bssid(&sta_mac), None);
+        assert_eq!(key_store.get_station_bssid(&hwsim_addr), None);
+    }
+
+    #[test]
+    fn test_resolve_tx_packet_dropped_non_nodata_to_ds_ignores_bssid() {
+        let hosted_bssid = MacAddress::new([0x00, 0x13, 0x10, 0x85, 0xfe, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]);
+        let hwsim_addr = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let mdns_mac = MacAddress::new([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]);
+
+        let (mut medium, key_store) = test_medium_with_debug(DebugArgs {
+            debug_no_guest_to_host_mdns: true,
+            ..Default::default()
+        });
+        key_store.add_bssid(hosted_bssid);
+        medium.add(1);
+
+        let to_ap = Ieee80211ToAp {
+            version: 0,
+            ftype: FrameType::Data,
+            stype: u8::from(DataSubType::Data),
+            destination: mdns_mac,
+            source: sta_mac,
+            bssid: hosted_bssid,
+            duration_id: 0,
+            seq_ctrl: 0,
+            qos_ctrl: None,
+            protected: 0,
+            order: 0,
+            more_frags: 0,
+            retry: 0,
+            pm: 0,
+            more_data: 0,
+            payload: vec![0x12, 0x34],
+        };
+        let ieee: Ieee80211 = to_ap.try_into().unwrap();
+        let msg = create_hwsim_msg_from_frame(&ieee, &hosted_bssid, FREQ_2412, Some(&hwsim_addr))
+            .unwrap();
+        let bytes = Bytes::from(msg.encode_to_vec().unwrap());
+        medium.resolve_tx_packet(1, &bytes).unwrap();
+
+        assert_eq!(key_store.get_station_bssid(&sta_mac), None);
+        assert_eq!(key_store.get_station_bssid(&hwsim_addr), None);
     }
 }

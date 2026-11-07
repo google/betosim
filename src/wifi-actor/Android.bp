@@ -133,6 +133,7 @@ rust_test_host {
         "tests/hwsim_helper.rs",
         "tests/lifecycle_test.rs",
         "tests/mod.rs",
+        "tests/multiclient_nullfunc_test.rs",
         "tests/packet_routing_test.rs",
         "tests/pmsr_test.rs",
         "tests/slirp_dual_mapping_test.rs",
