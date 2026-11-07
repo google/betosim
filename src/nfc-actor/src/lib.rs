@@ -12,24 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod accessory;
 mod error;
 mod lifecycle;
 mod nfc_actor;
 mod scene;
 mod service;
 mod stats;
+mod t4at;
 
 mod client;
 
 // Re-export core types
 pub use ::casimir;
+pub use accessory::RfAccessory;
 use actor_framework::ResourceActor;
 pub use client::NfcClient;
 pub use error::NfcError;
+pub use netsim_model::NfcTagError;
 pub use nfc_actor::{NfcAction, NfcActionResult, NfcActor, NfcMode};
 pub use scene::SceneClient;
 pub use service::NciCodec;
 pub use stats::{NfcApi, NfcServiceStats, NfcStats};
+pub use t4at::T4atTag;
 
 /// Creates a new NFC actor framework instance and client.
 pub fn new() -> (ResourceActor<NfcActor>, NfcClient) {
