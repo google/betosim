@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, net::IpAddr};
+use std::net::IpAddr;
 
 use bytes::Bytes;
 use log::trace;
@@ -23,10 +23,7 @@ use netsim_packets::{
 };
 use zerocopy::FromBytes;
 
-use super::{
-    manager::{SendTcpPacketArgs, TcpManager},
-    state::TcpConnection,
-};
+use super::manager::{SendTcpPacketArgs, TcpConnections, TcpManager};
 use crate::{
     SlirpResponse,
     timers::{TimerEvent, TimerManager},
@@ -64,7 +61,7 @@ impl TcpManager {
         gateway_mac: MacAddr,
         args: &SendTcpPacketArgs,
         buffer: &mut Vec<u8>,
-        connections: &mut HashMap<u64, TcpConnection>,
+        connections: &mut TcpConnections,
     ) {
         trace!("send_tcp_packet: guest_mac={guest_mac}, gateway_mac={gateway_mac}, args={args:?}");
         let eth_header_len = 14;

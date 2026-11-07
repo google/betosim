@@ -13,14 +13,18 @@
 // limitations under the License.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    collections::{
+        HashMap, HashSet, VecDeque,
+        hash_map::{Entry, Iter},
+    },
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
+    ops::Deref,
     time::Duration,
 };
 
 use log::{debug, warn};
 use netsim_packets::MacAddr;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
     congestion::CongestionControl,
@@ -33,14 +37,104 @@ const DEFAULT_BUFFER_SIZE: usize = 2048;
 const BUFFER_POOL_CAPACITY: usize = 100;
 pub(crate) const MAX_DATA_RETRIES: u32 = 5;
 pub(crate) const MAX_SYN_RETRIES: u32 = 5;
+pub(super) const EPHEMERAL_PORT_START: u16 = 49152;
+const EPHEMERAL_PORT_END: u16 = u16::MAX;
 
 const fn default_gateway_ipv6() -> Ipv6Addr {
     Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 2)
 }
 
+pub(crate) struct TcpConnections {
+    map: HashMap<u64, TcpConnection>,
+    host_v4_counts: HashMap<SocketAddrV4, usize>,
+}
+
+impl TcpConnections {
+    fn new() -> Self {
+        Self { map: HashMap::new(), host_v4_counts: HashMap::new() }
+    }
+
+    fn increment_host_v4(&mut self, host_addr: SocketAddr) {
+        if let SocketAddr::V4(addr) = host_addr {
+            *self.host_v4_counts.entry(addr).or_insert(0) += 1;
+        }
+    }
+
+    fn decrement_host_v4(&mut self, host_addr: SocketAddr) {
+        if let SocketAddr::V4(addr) = host_addr
+            && let Entry::Occupied(mut entry) = self.host_v4_counts.entry(addr)
+        {
+            if *entry.get() > 1 {
+                *entry.get_mut() -= 1;
+            } else {
+                entry.remove();
+            }
+        }
+    }
+
+    pub(super) fn insert(&mut self, conn_id: u64, conn: TcpConnection) -> Option<TcpConnection> {
+        self.increment_host_v4(conn.host_addr);
+        let prev = self.map.insert(conn_id, conn);
+        if let Some(old) = &prev {
+            self.decrement_host_v4(old.host_addr);
+        }
+        prev
+    }
+
+    pub(super) fn remove(&mut self, conn_id: &u64) -> Option<TcpConnection> {
+        let removed = self.map.remove(conn_id);
+        if let Some(old) = &removed {
+            self.decrement_host_v4(old.host_addr);
+        }
+        removed
+    }
+
+    /// Mutable connection lookup; callers must not mutate `conn.host_addr`.
+    pub(super) fn get_mut(&mut self, conn_id: &u64) -> Option<&mut TcpConnection> {
+        self.map.get_mut(conn_id)
+    }
+
+    fn contains_host_v4(&self, addr: SocketAddrV4) -> bool {
+        self.host_v4_counts.contains_key(&addr)
+    }
+}
+
+impl Deref for TcpConnections {
+    type Target = HashMap<u64, TcpConnection>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl<'a> IntoIterator for &'a TcpConnections {
+    type Item = (&'a u64, &'a TcpConnection);
+    type IntoIter = Iter<'a, u64, TcpConnection>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter()
+    }
+}
+
+impl Serialize for TcpConnections {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.map.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TcpConnections {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map: HashMap<u64, TcpConnection> = HashMap::deserialize(deserializer)?;
+        let mut conns = Self::new();
+        for conn in map.values() {
+            conns.increment_host_v4(conn.host_addr);
+        }
+        conns.map = map;
+        Ok(conns)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TcpManager {
-    pub(crate) connections: HashMap<u64, TcpConnection>,
+    pub(crate) connections: TcpConnections,
     #[serde(skip)]
     pub(crate) buffer_pool: Vec<Vec<u8>>,
     pub(crate) next_conn_id: u64,
@@ -92,12 +186,12 @@ impl TcpManager {
             buffer_pool.push(vec![0; DEFAULT_BUFFER_SIZE]);
         }
         Self {
-            connections: HashMap::new(),
+            connections: TcpConnections::new(),
             buffer_pool,
             next_conn_id: 1,
             gateway_ip,
             gateway_ipv6,
-            next_virtual_port: 49152,
+            next_virtual_port: EPHEMERAL_PORT_START,
             guestfwd: Vec::new(),
             incoming_connections: HashSet::new(),
         }
@@ -456,17 +550,14 @@ impl TcpManager {
         let start_port = port;
 
         loop {
-            self.next_virtual_port =
-                if self.next_virtual_port == 65535 { 49152 } else { self.next_virtual_port + 1 };
+            self.next_virtual_port = if self.next_virtual_port == EPHEMERAL_PORT_END {
+                EPHEMERAL_PORT_START
+            } else {
+                self.next_virtual_port + 1
+            };
 
-            // Check if this port is already in use
-            let port_in_use = self.connections.values().any(|c| {
-                if let SocketAddr::V4(addr) = c.host_addr {
-                    *addr.ip() == gateway_ip && addr.port() == port
-                } else {
-                    false
-                }
-            });
+            let port_in_use =
+                self.connections.contains_host_v4(SocketAddrV4::new(gateway_ip, port));
 
             if !port_in_use {
                 port_allocated = true;

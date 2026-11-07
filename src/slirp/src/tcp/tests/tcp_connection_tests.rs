@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, Mutex},
 };
 
@@ -25,7 +25,7 @@ use crate::{
     clock::MockClock,
     packet::{IpPacket, NetworkPacket, ParsedPacket},
     tcp::{
-        manager::{MAX_DATA_RETRIES, MAX_SYN_RETRIES, TcpManager},
+        manager::{EPHEMERAL_PORT_START, MAX_DATA_RETRIES, MAX_SYN_RETRIES, TcpManager},
         state::State,
         tests::tcp_test_utils::{
             CreateTcpPacketArgs, MockHost, create_tcp_packet, process_responses,
@@ -516,4 +516,94 @@ async fn test_hostfwd_port_exhaustion() {
 
     assert!(!tcp_manager.connections.contains_key(&new_conn_id));
     assert!(responses.is_empty());
+}
+
+#[test]
+fn test_hostfwd_port_reuse_and_refcount() {
+    use std::{collections::VecDeque, time::Duration};
+
+    use netsim_packets::MacAddr;
+
+    use crate::tcp::{
+        congestion::CongestionControl,
+        state::{RecvSequenceSpace, SendSequenceSpace, TcpConnection},
+    };
+
+    let gateway_ip = Ipv4Addr::new(10, 0, 2, 2);
+    let mut tcp_manager = TcpManager::new(gateway_ip);
+    let mut timers = TimerManager::new(Box::new(MockClock::new()));
+    let mut responses = Vec::new();
+    let guest_mac = MacAddr::new([1, 2, 3, 4, 5, 6]);
+    let gateway_mac = MacAddr::new([10, 20, 30, 40, 50, 60]);
+    let shared_host_addr = SocketAddr::V4(SocketAddrV4::new(gateway_ip, EPHEMERAL_PORT_START));
+
+    let make_conn = |guest_port: u16, host_addr: SocketAddr| TcpConnection {
+        state: State::Established,
+        guest_mac,
+        gateway_mac,
+        guest_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 2), guest_port)),
+        host_addr,
+        send: SendSequenceSpace { iss: 0, una: 0, nxt: 0 },
+        recv: RecvSequenceSpace { nxt: 0 },
+        unacked: VecDeque::new(),
+        retransmission_timeout: Duration::from_secs(1),
+        retransmissions: 0,
+        mss: None,
+        srtt: Duration::ZERO,
+        rttvar: Duration::ZERO,
+        sent_packets: VecDeque::new(),
+        window_size: 8192,
+        send_window: 8192,
+        congestion_control: CongestionControl::new(536),
+        dup_acks: 0,
+        recv_window_scale: None,
+        sack_blocks: Vec::new(),
+        recv_buffer: Vec::new(),
+    };
+
+    tcp_manager.connections.insert(1, make_conn(10001, shared_host_addr));
+    tcp_manager.connections.insert(2, make_conn(10002, shared_host_addr));
+
+    tcp_manager.remove_connection(1);
+    let guest_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 3), 22));
+    tcp_manager.accept_incoming(&mut responses, &mut timers, 3, guest_addr, guest_mac, gateway_mac);
+    assert_eq!(
+        tcp_manager.connections.get(&3).unwrap().host_addr,
+        SocketAddr::V4(SocketAddrV4::new(gateway_ip, EPHEMERAL_PORT_START + 1))
+    );
+
+    let external_host_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 80));
+    tcp_manager.connections.insert(2, make_conn(10002, external_host_addr));
+    tcp_manager.next_virtual_port = EPHEMERAL_PORT_START;
+    tcp_manager.accept_incoming(&mut responses, &mut timers, 4, guest_addr, guest_mac, gateway_mac);
+    assert_eq!(tcp_manager.connections.get(&4).unwrap().host_addr, shared_host_addr);
+}
+
+#[test]
+fn test_hostfwd_serde_roundtrip_preserves_allocated_ports() {
+    use netsim_packets::MacAddr;
+
+    let gateway_ip = Ipv4Addr::new(10, 0, 2, 2);
+    let mut tcp_manager = TcpManager::new(gateway_ip);
+    let mut timers = TimerManager::new(Box::new(MockClock::new()));
+    let mut responses = Vec::new();
+    let guest_mac = MacAddr::new([1, 2, 3, 4, 5, 6]);
+    let gateway_mac = MacAddr::new([10, 20, 30, 40, 50, 60]);
+    let guest_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 3), 22));
+
+    tcp_manager.accept_incoming(&mut responses, &mut timers, 1, guest_addr, guest_mac, gateway_mac);
+    assert_eq!(
+        tcp_manager.connections.get(&1).unwrap().host_addr,
+        SocketAddr::V4(SocketAddrV4::new(gateway_ip, EPHEMERAL_PORT_START))
+    );
+
+    tcp_manager.next_virtual_port = EPHEMERAL_PORT_START;
+    let bytes = serde_json::to_vec(&tcp_manager).unwrap();
+    let mut restored: TcpManager = serde_json::from_slice(&bytes).unwrap();
+
+    restored.accept_incoming(&mut responses, &mut timers, 2, guest_addr, guest_mac, gateway_mac);
+    assert_eq!(
+        restored.connections.get(&2).unwrap().host_addr,
+        SocketAddr::V4(SocketAddrV4::new(gateway_ip, EPHEMERAL_PORT_START + 1))
+    );
 }
