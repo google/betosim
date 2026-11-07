@@ -1,0 +1,97 @@
+name: Bazel Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories
+        include:
+          - name: Linux x64
+            runner: ubuntu-latest
+            target: linux-x86_64
+            bazel_config: standalone
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            bazel_config: standalone
+          - name: macOS x64
+            runner: macos-26-intel
+            target: darwin-x86_64
+            bazel_config: standalone
+          - name: macOS arm64
+            runner: macos-latest
+            target: darwin-aarch64
+            bazel_config: standalone
+          - name: Windows x64
+            runner: windows-latest
+            target: windows_msvc-x86_64
+            bazel_config: standalone_windows_x64
+          - name: Windows arm64
+            runner: windows-11-arm
+            target: windows_msvc-aarch64
+            bazel_config: standalone_windows_arm64
+    env:
+      MSYS_NO_PATHCONV: 1
+      MSYS2_ARG_CONV_EXCL: "*"
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          bazelisk-cache: true
+          disk-cache: release
+          cache-save: ${{ github.event_name != 'pull_request' }}
+          repository-cache: |
+            - .bazelversion
+            - .bazelrc
+            - MODULE.bazel
+            - "**/*.bzl"
+            - cargo/build/**
+            - registry/**
+
+      # Pinned LLVM 22 avoids prfchwintrin.h _m_prefetchw clash with Windows SDK 10.0.26100 (LLVM PR #115099).
+      - name: Install LLVM 22
+        if: matrix.bazel_config == 'standalone_windows_x64'
+        shell: pwsh
+        run: |
+          choco install llvm --version=22.1.8 -y --force
+          clang-cl --version
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          bazel build --config=${{ matrix.bazel_config }} --config=release //:netsim_stripped //:netsimd_stripped
+
+      - name: Stage release binaries
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          echo "ARTIFACT=netsim-${{ matrix.target }}-${COMMIT_SHA::8}" >> "$GITHUB_ENV"
+          mkdir -p dist
+          cp -L bazel-bin/src/cli/_stripped/netsim* bazel-bin/src/daemon/_stripped/netsimd* dist/
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: dist/
+          if-no-files-found: error
