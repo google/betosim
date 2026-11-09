@@ -111,11 +111,11 @@ pub async fn run(
 
 /// HTTP REST API Server context holding handles to core actor clients.
 pub struct RestServer {
-    pub device_client: DeviceClient,
-    pub link_client: Arc<dyn LinkClient>,
-    pub ap_client: ApClient,
-    pub capture_client: CaptureClient,
-    pub version: String,
+    pub(crate) device_client: DeviceClient,
+    link_client: Arc<dyn LinkClient>,
+    pub(crate) ap_client: ApClient,
+    pub(crate) capture_client: CaptureClient,
+    version: String,
 }
 
 /// Hand-written because the actor client handles are not `Debug`; only the
@@ -163,7 +163,7 @@ impl From<StatusCode> for crate::RpcStatus {
 /// Builds an HTTP JSON [`ErrorResponse`](crate::ErrorResponse) following
 /// AIP-193 (`{"error":{"code":...,"message":...,"status":...}}`) with the given
 /// `status` and `message`.
-pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+pub(crate) fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     let body = serde_json::to_string(&crate::ErrorResponse {
         error: crate::ErrorStatus {
             code: i64::from(status.as_u16()),
@@ -187,7 +187,7 @@ fn json_status_response<T: Serialize>(status: StatusCode, val: &T) -> Response<F
 
 /// Serializes `val` to JSON with `200 OK` or returns `500 Internal Server Error`
 /// automatically.
-pub fn json_response<T: Serialize>(val: &T) -> Response<Full<Bytes>> {
+pub(crate) fn json_response<T: Serialize>(val: &T) -> Response<Full<Bytes>> {
     json_status_response(StatusCode::OK, val)
 }
 
@@ -218,7 +218,7 @@ impl HttpError {
     }
 
     /// Creates a `400 Bad Request` [`HttpError`] with the given `message`.
-    pub fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
@@ -547,10 +547,7 @@ impl RestServer {
     ///
     /// The error type is [`Infallible`] because every failure is reported as an
     /// HTTP status rather than by dropping the connection.
-    pub async fn serve(
-        &self,
-        req: Request<Incoming>,
-    ) -> Result<Response<ResponseBody>, Infallible> {
+    async fn serve(&self, req: Request<Incoming>) -> Result<Response<ResponseBody>, Infallible> {
         if req.method() == Method::GET {
             match req.uri().path().trim_end_matches('/') {
                 crate::path::CAPTURE => {

@@ -26,9 +26,9 @@ use crate::openapi::Route;
 
 pub mod ap_api;
 mod ble_stream;
-pub mod capture_api;
+mod capture_api;
 mod capture_stream;
-pub mod client;
+mod client;
 pub mod device_api;
 pub mod link_api;
 pub mod openapi;

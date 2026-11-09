@@ -14,7 +14,7 @@
 
 //! Capture REST API endpoints and data transfer models.
 
-pub use capture_actor::CaptureInfo;
+use capture_actor::CaptureInfo;
 use http_body_util::{StreamBody, combinators::BoxBody};
 use hyper::{
     Response, StatusCode,
@@ -26,8 +26,8 @@ use tokio::io::AsyncReadExt;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 
-pub use crate::{CaptureUpdate, ListCaptureResponse};
 use crate::{
+    CaptureUpdate, ListCaptureResponse,
     client::{NetsimRestClient, RestRequest},
     server::{HttpError, JsonResponse, RestServer, json_response, parse_json_body, path_id},
 };
