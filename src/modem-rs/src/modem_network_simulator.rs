@@ -30,6 +30,7 @@ use crate::{
     constants::{DEFAULT_FALLBACK_MSISDN, DEFAULT_MSISDN_PREFIX},
     metrics::{Metrics, MetricsSnapshot},
     modem::{ModemEffect, ModemEvent, ModemImpl},
+    modem_network::ModemOptions,
     network_service::RegistrationType,
     profiles::get_builtin_profile,
     time::{Clock, SystemClock},
@@ -264,16 +265,36 @@ impl ModemNetworkSimulator {
         quirks: Quirks,
         network_configs: Vec<CellNetworkConfig>,
     ) -> Result<(), ModemError> {
-        let profile = match sim_profile {
-            Some(xml) => crate::xml_profile::parse_xml_profile(&xml).map_err(|e| {
+        self.new_modem_with_options(
+            id,
+            sink,
+            ModemOptions {
+                sim_type,
+                sim_profile,
+                timezone_override: None,
+                quirks,
+                network_configs,
+            },
+        )
+    }
+
+    /// Creates a new modem instance with the given [`ModemOptions`].
+    pub fn new_modem_with_options(
+        &mut self,
+        id: ModemId,
+        sink: ModemSink,
+        options: ModemOptions,
+    ) -> Result<(), ModemError> {
+        let profile = match &options.sim_profile {
+            Some(xml) => crate::xml_profile::parse_xml_profile(xml).map_err(|e| {
                 ModemError::InvalidConfig(format!("Failed to parse SIM profile XML: {e}"))
             })?,
             None => {
-                let numeric_type = match sim_type {
+                let numeric_type = match options.sim_type {
                     Some(0) => crate::profiles::SIM_TYPE_DEFAULT,
                     Some(t) => t,
                     None => {
-                        if quirks.is_cuttlefish {
+                        if options.quirks.is_cuttlefish {
                             crate::profiles::SIM_TYPE_TEL_ALASKA
                         } else {
                             crate::profiles::SIM_TYPE_DEFAULT
@@ -286,7 +307,7 @@ impl ModemNetworkSimulator {
             }
         };
 
-        self.new_modem_with_profile(id, sink, Some(profile), sim_type, quirks, network_configs)
+        self.new_modem_internal(id, sink, Some(profile), options)
     }
 
     /// Creates a new modem instance with a specific SIM profile.
@@ -299,6 +320,23 @@ impl ModemNetworkSimulator {
         quirks: Quirks,
         network_configs: Vec<CellNetworkConfig>,
     ) -> Result<(), ModemError> {
+        self.new_modem_internal(
+            id,
+            sink,
+            profile,
+            ModemOptions { sim_type, quirks, network_configs, ..Default::default() },
+        )
+    }
+
+    fn new_modem_internal(
+        &mut self,
+        id: ModemId,
+        sink: ModemSink,
+        profile: Option<SimProfile>,
+        options: ModemOptions,
+    ) -> Result<(), ModemError> {
+        let ModemOptions { sim_type, sim_profile: _, timezone_override, quirks, network_configs } =
+            options;
         if self.modems.contains_key(&id) {
             return Err(ModemError::DuplicateModemId(id));
         }
@@ -325,7 +363,21 @@ impl ModemNetworkSimulator {
                 })?
             }
         };
-        let mut modem = ModemImpl::new(id, profile, quirks, self.clock.clone(), network_configs);
+        let clock = match timezone_override {
+            Some(ref tz_name) if !tz_name.is_empty() => match jiff::tz::TimeZone::get(tz_name) {
+                Ok(tz) => {
+                    Arc::new(crate::time::ZonedClock::new(self.clock.clone(), tz)) as Arc<dyn Clock>
+                }
+                Err(err) => {
+                    warn!(
+                        "Invalid timezone '{tz_name}' for modem {id}: {err}, using default clock"
+                    );
+                    self.clock.clone()
+                }
+            },
+            _ => self.clock.clone(),
+        };
+        let mut modem = ModemImpl::new(id, profile, quirks, clock, network_configs);
         // Override the default dummy number with a unique generated one to prevent
         // conflicts when launching multiple default emulators. Custom profiles are
         // preserved.
@@ -1434,5 +1486,25 @@ mod tests {
 
         let meta = simulator.get_sim_metadata(chip_id).unwrap();
         assert_eq!(meta.home_plmn.as_ref().map(crate::types::Plmn::as_str), Some("310260"));
+    }
+
+    #[test]
+    fn test_invalid_timezone_override_falls_back_to_default_clock() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut simulator = ModemNetworkSimulator::new(tx);
+        let chip_id: ModemId = 99;
+        let (_handler, sink) = MockModemHandler::new(false);
+
+        simulator
+            .new_modem_with_options(
+                chip_id,
+                sink,
+                ModemOptions {
+                    timezone_override: Some("Invalid/Zone".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("invalid timezone_override should fall back to default clock");
+        assert!(simulator.get_sim_metadata(chip_id).is_some());
     }
 }

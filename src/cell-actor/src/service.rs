@@ -18,7 +18,7 @@ use modem_rs::ModemSink;
 use netsim_model::{
     Cell, CellNetworkConfig, Chip, ChipCreate, ChipError, ChipId, ChipKind, ChipUpdate,
     ChipVariant, ChipVariantUpdate, MODEM_STATE_DOWN, MODEM_STATE_IDLE, MODEM_STATE_RINGING,
-    ModemAction, Quirks, Radio,
+    ModemAction, Radio,
 };
 use tracing::{debug, error, info};
 
@@ -65,6 +65,7 @@ impl CellActor {
                 },
                 sim_type: None,
                 sim_profile: None,
+                timezone_override: None,
                 quirks: info.quirks,
                 sms_count: info.sms_count,
                 rssi: info.rssi,
@@ -102,16 +103,17 @@ impl ActorService for CellActor {
             return Err(CellError::Chip(ChipError::ChipExists(chip_id.0)));
         }
 
-        let (sim_type, sim_profile, quirks, mut network_configs) = match params
-            .chip
-            .variant
-            .as_ref()
-        {
-            Some(ChipVariant::Cell(cell)) => {
-                (cell.sim_type, cell.sim_profile.clone(), cell.quirks, cell.network_configs.clone())
-            }
-            _ => (None, None, Quirks::default(), Vec::new()),
-        };
+        let (sim_type, sim_profile, timezone_override, quirks, mut network_configs) =
+            match params.chip.variant.as_ref() {
+                Some(ChipVariant::Cell(cell)) => (
+                    cell.sim_type,
+                    cell.sim_profile.clone(),
+                    cell.timezone_override.clone(),
+                    cell.quirks,
+                    cell.network_configs.clone(),
+                ),
+                _ => Default::default(),
+            };
 
         let mut sink = params.packet_sink.take().ok_or(CellError::MissingStreamSink)?;
         let stream = params.packet_stream.take().ok_or(CellError::MissingStreamSink)?;
@@ -166,13 +168,16 @@ impl ActorService for CellActor {
         ctx.add_stream(chip_id, Box::pin(stream));
 
         // 2. Add to Controller directly (Sync)
-        if let Err(e) = self.controller.add_modem(
+        if let Err(e) = self.controller.add_modem_with_options(
             chip_id.0,
             modem_sink,
-            sim_type,
-            sim_profile,
-            quirks,
-            network_configs,
+            modem_rs::modem_network::ModemOptions {
+                sim_type,
+                sim_profile,
+                timezone_override,
+                quirks,
+                network_configs,
+            },
         ) {
             if slirp_allocated {
                 let _ = self.slirp_client.release_lease(chip_id).await;

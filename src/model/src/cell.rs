@@ -35,6 +35,8 @@ pub struct CellNetworkConfig {
 pub struct CellCreate {
     pub sim_type: Option<i32>,
     pub sim_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_override: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_configs: Vec<CellNetworkConfig>,
 }
@@ -95,6 +97,9 @@ pub struct Cell {
     /// XML SIM ICC profile content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sim_profile: Option<String>,
+    /// Per-device IANA timezone override for the cellular modem (e.g. "America/Los_Angeles").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_override: Option<String>,
     /// Quirks for compatibility with different guest-side implementations.
     #[serde(default)]
     pub quirks: Quirks,
@@ -121,6 +126,7 @@ impl Default for Cell {
             state: "idle".to_string(),
             sim_type: None,
             sim_profile: None,
+            timezone_override: None,
             quirks: Quirks::default(),
             network_configs: Vec::new(),
             sms_count: 0,

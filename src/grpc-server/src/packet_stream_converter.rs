@@ -57,6 +57,7 @@ fn proto_to_device_info(proto: proto_startup::DeviceInfo) -> DeviceInfo {
         build_id: proto.build_id,
         variant: proto.variant,
         arch: proto.arch,
+        timezone: proto.timezone.filter(|s| !s.is_empty()),
     }
 }
 
@@ -174,5 +175,30 @@ mod tests {
         let chip_info = proto_to_chip_info(proto_info);
         let chip = chip_info.chip.expect("chip present");
         assert!(chip.bt_properties.is_none());
+    }
+
+    #[test]
+    fn test_proto_to_device_info_timezone_presence_and_empty_filter() {
+        let mut proto_info = proto_startup::ChipInfo::new();
+        proto_info.device_info = MessageField::some(proto_startup::DeviceInfo::new());
+        let chip_info = proto_to_chip_info(proto_info);
+        assert_eq!(chip_info.device_info.expect("device_info present").timezone, None);
+
+        let mut empty_tz_device = proto_startup::DeviceInfo::new();
+        empty_tz_device.timezone = Some(String::new());
+        let mut proto_empty = proto_startup::ChipInfo::new();
+        proto_empty.device_info = MessageField::some(empty_tz_device);
+        let empty_chip_info = proto_to_chip_info(proto_empty);
+        assert_eq!(empty_chip_info.device_info.expect("device_info present").timezone, None);
+
+        let mut tz_device = proto_startup::DeviceInfo::new();
+        tz_device.timezone = Some("America/New_York".to_string());
+        let mut proto_with_tz = proto_startup::ChipInfo::new();
+        proto_with_tz.device_info = MessageField::some(tz_device);
+        let tz_chip_info = proto_to_chip_info(proto_with_tz);
+        assert_eq!(
+            tz_chip_info.device_info.expect("device_info present").timezone.as_deref(),
+            Some("America/New_York")
+        );
     }
 }

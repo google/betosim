@@ -155,6 +155,10 @@ fn extract_device_info(
             has_device_info = true;
         }
     }
+    if let Some(val) = query_params.remove("timezone").filter(|s| !s.is_empty()) {
+        info.timezone = Some(val);
+        has_device_info = true;
+    }
 
     has_device_info.then_some(info)
 }
@@ -169,6 +173,11 @@ fn build_chip_variant(
         ChipVariant::Bluetooth(bt) => bt.address = address,
         ChipVariant::Uwb(uwb) => uwb.address = address,
         ChipVariant::Cell(cell) => {
+            cell.timezone_override = device_info
+                .and_then(|info| info.timezone.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             cell.quirks = Quirks::from_device_info(device_info);
         }
         ChipVariant::Wifi(_)

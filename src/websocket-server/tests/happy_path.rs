@@ -70,16 +70,17 @@ async fn test_per_radio_routes_all_kinds() {
     assert_eq!(nfc_req.chip.kind, ChipKind::NFC);
     assert!(matches!(nfc_req.chip.variant, Some(ChipVariant::Nfc(_))));
 
-    // Cellular route with emulator quirks
+    // Cellular route with emulator quirks and timezone query param
     let cell_idx = world
         .given_a_websocket_client_connected_at_path(
-            "/v1/websocket/cellular?name=cell-dev&device_kind=EMULATOR&sdk_version=36",
+            "/v1/websocket/cellular?name=cell-dev&device_kind=EMULATOR&sdk_version=36&timezone=America%2FLos_Angeles",
         )
         .await;
     let cell_req = world.add_request(cell_idx);
     assert_eq!(cell_req.chip.kind, ChipKind::CELLULAR);
     match &cell_req.chip.variant {
         Some(ChipVariant::Cell(cell)) => {
+            assert_eq!(cell.timezone_override.as_deref(), Some("America/Los_Angeles"));
             assert!(cell.quirks.goldfish_ril_37_or_earlier);
             assert!(!cell.quirks.is_cuttlefish);
             assert!(cell.quirks.auto_ctzv);
@@ -102,12 +103,16 @@ async fn test_per_radio_routes_all_kinds() {
     assert_eq!(eth_req.chip.kind, ChipKind::ETHERNET);
     assert!(matches!(eth_req.chip.variant, Some(ChipVariant::Ethernet(_))));
 
-    // Modem alias route for Cellular
+    // Modem alias route for Cellular (omits timezone query param)
     let modem_idx = world
         .given_a_websocket_client_connected_at_path("/v1/websocket/modem?name=modem-dev")
         .await;
     let modem_req = world.add_request(modem_idx);
     assert_eq!(modem_req.chip.kind, ChipKind::CELLULAR);
+    match &modem_req.chip.variant {
+        Some(ChipVariant::Cell(cell)) => assert_eq!(cell.timezone_override, None),
+        other => panic!("Expected Cell variant, got {other:?}"),
+    }
 
     // Verify bidirectional streaming on non-Bluetooth radio (Wi-Fi & UWB)
     for (idx, payload) in [(wifi_idx, &[0x80, 0x00, 0x01][..]), (uwb_idx, &[0x20, 0x01, 0x00][..])]

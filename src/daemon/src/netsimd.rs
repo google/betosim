@@ -180,9 +180,18 @@ async fn handle_new_connection(
                 Vec::new()
             };
 
+            let timezone_override = chip_info
+                .device_info
+                .as_ref()
+                .and_then(|d| d.timezone.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+
             Some(netsim_model::ChipVariant::Cell(netsim_model::Cell {
                 sim_type: chip.sim_type,
                 sim_profile: chip.sim_profile.clone(),
+                timezone_override,
                 quirks,
                 network_configs,
                 ..Default::default()

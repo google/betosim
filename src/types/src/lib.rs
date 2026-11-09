@@ -150,6 +150,9 @@ pub struct DeviceInfo {
     pub arch: String,
     /// Path to the AVD directory, if applicable.
     pub avd_path: String,
+    /// IANA timezone name for the device (e.g. "America/Los_Angeles").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 impl DeviceInfo {

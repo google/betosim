@@ -19,6 +19,15 @@ use crate::modem_network_simulator::NetworkEvent;
 pub use crate::types::ModemError;
 use crate::types::{ModemId, ModemInfo, ModemSink};
 
+#[derive(Debug, Default, Clone)]
+pub struct ModemOptions {
+    pub sim_type: Option<i32>,
+    pub sim_profile: Option<String>,
+    pub timezone_override: Option<String>,
+    pub quirks: Quirks,
+    pub network_configs: Vec<CellNetworkConfig>,
+}
+
 pub trait ModemNetworkInterface: Send + Sync {
     fn add_modem(
         &mut self,
@@ -29,6 +38,21 @@ pub trait ModemNetworkInterface: Send + Sync {
         quirks: Quirks,
         network_configs: Vec<CellNetworkConfig>,
     ) -> Result<(), ModemError>;
+    fn add_modem_with_options(
+        &mut self,
+        chip_id: ModemId,
+        sink: ModemSink,
+        options: ModemOptions,
+    ) -> Result<(), ModemError> {
+        self.add_modem(
+            chip_id,
+            sink,
+            options.sim_type,
+            options.sim_profile,
+            options.quirks,
+            options.network_configs,
+        )
+    }
     fn update_network_configs(
         &mut self,
         chip_id: ModemId,
@@ -54,6 +78,15 @@ impl ModemNetworkInterface for ModemNetworkSimulator {
         network_configs: Vec<CellNetworkConfig>,
     ) -> Result<(), ModemError> {
         self.new_modem(chip_id, sink, sim_type, sim_profile, quirks, network_configs)
+    }
+
+    fn add_modem_with_options(
+        &mut self,
+        chip_id: ModemId,
+        sink: ModemSink,
+        options: ModemOptions,
+    ) -> Result<(), ModemError> {
+        self.new_modem_with_options(chip_id, sink, options)
     }
 
     fn update_network_configs(

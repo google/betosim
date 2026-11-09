@@ -216,3 +216,43 @@ fn test_auto_ctzv_emitted_on_locked_sim_when_quirk_enabled() {
         "%CTZV: 26/06/15:19:30:45-28:1:America!Los_Angeles",
     );
 }
+
+// Scenario: Independent per-modem timezone clocks in one simulator
+//   Given modem "A" configured with timezone "America/New_York"
+//   And modem "B" configured with timezone "Asia/Tokyo"
+//   When external network time updates are received for "A" and "B"
+//   Then "A" emits "%CTZV: 26/06/15:19:30:45-16:1:America!New_York"
+//   And "B" emits "%CTZV: 26/06/15:19:30:45+36:0:Asia!Tokyo"
+//   When "AT+CCLK?" is sent to "A" and "B"
+//   Then "A" reports "+CCLK: \"26/06/15,19:30:45-16\""
+//   And "B" reports "+CCLK: \"26/06/15,19:30:45+36\""
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_per_modem_timezone_independence() {
+    let mut world = World::new();
+    let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
+    world.clock.set_zoned(zoned);
+
+    // Given modem "A" in America/New_York and modem "B" in Asia/Tokyo
+    world.given_modem_with_timezone("A", "America/New_York");
+    world.given_modem_with_timezone("B", "Asia/Tokyo");
+
+    // When external network time updates are triggered for both modems
+    when_network_time_updated(&mut world, "A");
+    when_network_time_updated(&mut world, "B");
+
+    // Then each modem emits NITZ formatted for its own configured timezone
+    then_response_is(&mut world, "A", "%CTZV: 26/06/15:19:30:45-16:1:America!New_York");
+    then_response_is(&mut world, "B", "%CTZV: 26/06/15:19:30:45+36:0:Asia!Tokyo");
+
+    // When querying AT+CCLK? on both modems
+    when_at_command_sent(&mut world, "A", "AT+CCLK?");
+    // Then "A" reports the America/New_York quarter-hour offset (-16)
+    then_response_is(&mut world, "A", "+CCLK: \"26/06/15,19:30:45-16\"");
+    then_response_is(&mut world, "A", "OK");
+
+    when_at_command_sent(&mut world, "B", "AT+CCLK?");
+    // And "B" reports the Asia/Tokyo quarter-hour offset (+36)
+    then_response_is(&mut world, "B", "+CCLK: \"26/06/15,19:30:45+36\"");
+    then_response_is(&mut world, "B", "OK");
+}

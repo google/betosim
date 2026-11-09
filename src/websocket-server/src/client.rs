@@ -119,6 +119,7 @@ pub fn build_packet_stream_path(chip_info: &ChipInfo, device_guid: &str) -> Stri
             ("variant", info.variant.as_str()),
             ("arch", info.arch.as_str()),
             ("avd_path", info.avd_path.as_str()),
+            ("timezone", info.timezone.as_deref().unwrap_or_default()),
         ] {
             if !value.is_empty() {
                 query.append_pair(key, value);

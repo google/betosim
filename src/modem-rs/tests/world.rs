@@ -87,6 +87,23 @@ impl World {
         given_modem(self, name);
     }
 
+    /// Creates a modem with the given name and IANA timezone.
+    pub fn given_modem_with_timezone(&mut self, name: &str, timezone: &str) {
+        let id = self.next_modem_id();
+        let (handler, sink) = MockModemHandler::new(false);
+        self.manager
+            .new_modem_with_options(
+                id,
+                sink,
+                modem_rs::modem_network::ModemOptions {
+                    timezone_override: Some(timezone.to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("Failed to create modem with timezone");
+        self.modems.insert(name.to_string(), (id, handler));
+    }
+
     pub fn given_data_modem(&mut self, name: &str) {
         given_data_modem(self, name);
     }

@@ -214,6 +214,7 @@ pub(crate) mod api {
                     crate::chip::ChipVariant::Cell(crate::cell::Cell {
                         sim_type: cell.sim_type,
                         sim_profile: cell.sim_profile,
+                        timezone_override: cell.timezone_override,
                         network_configs: cell.network_configs,
                         ..Default::default()
                     })
@@ -275,6 +276,7 @@ pub(crate) mod api {
                         ChipCreateVariant::Cell(crate::chip::CellCreate {
                             sim_type: cell.sim_type,
                             sim_profile: cell.sim_profile,
+                            timezone_override: cell.timezone_override,
                             network_configs: cell.network_configs,
                         })
                     }
@@ -317,6 +319,8 @@ pub struct DeviceInfo {
     pub variant: String,
     pub arch: String,
     pub avd_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 impl From<netsim_types::DeviceInfo> for DeviceInfo {
@@ -330,6 +334,7 @@ impl From<netsim_types::DeviceInfo> for DeviceInfo {
             variant: info.variant,
             arch: info.arch,
             avd_path: info.avd_path,
+            timezone: info.timezone,
         }
     }
 }

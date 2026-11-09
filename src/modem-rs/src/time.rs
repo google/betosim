@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use jiff::Zoned;
+use jiff::{Zoned, tz::TimeZone};
 use parking_lot::RwLock;
 
 /// A trait that abstracts away the concept of "now" for testability.
@@ -93,5 +93,62 @@ impl Clock for MockClock {
 
     fn clone_box(&self) -> Arc<dyn Clock> {
         Arc::new(self.clone())
+    }
+}
+
+/// A clock wrapper that converts `now_zoned()` into a specific [`TimeZone`].
+#[derive(Clone)]
+pub(crate) struct ZonedClock {
+    inner: Arc<dyn Clock>,
+    time_zone: TimeZone,
+}
+
+impl std::fmt::Debug for ZonedClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZonedClock").field("time_zone", &self.time_zone).finish_non_exhaustive()
+    }
+}
+
+impl ZonedClock {
+    pub(crate) fn new(inner: Arc<dyn Clock>, time_zone: TimeZone) -> Self {
+        Self { inner, time_zone }
+    }
+}
+
+impl Clock for ZonedClock {
+    fn now(&self) -> Instant {
+        self.inner.now()
+    }
+
+    fn now_zoned(&self) -> Zoned {
+        self.inner.now_zoned().with_time_zone(self.time_zone.clone())
+    }
+
+    fn clone_box(&self) -> Arc<dyn Clock> {
+        Arc::new(self.clone())
+    }
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zoned_clock_converts_timezones_independently() {
+        let base_clock = Arc::new(MockClock::default());
+        let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
+        base_clock.set_zoned(zoned);
+
+        let ny_clock =
+            ZonedClock::new(base_clock.clone(), TimeZone::get("America/New_York").unwrap());
+        let tokyo_clock = ZonedClock::new(base_clock.clone(), TimeZone::get("Asia/Tokyo").unwrap());
+
+        assert_eq!(ny_clock.now_zoned().time_zone().iana_name(), Some("America/New_York"));
+        assert_eq!(ny_clock.now_zoned().hour(), 15);
+        assert_eq!(ny_clock.now_zoned().minute(), 30);
+
+        assert_eq!(tokyo_clock.now_zoned().time_zone().iana_name(), Some("Asia/Tokyo"));
+        assert_eq!(tokyo_clock.now_zoned().hour(), 4);
+        assert_eq!(tokyo_clock.now_zoned().day(), 16);
     }
 }
