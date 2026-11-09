@@ -317,7 +317,7 @@ def _lrc_impl(module_ctx):
 
     local_repository(
         name = "casimir",
-        path = "{}/packages/modules/Nfc/libnfc-nci/tools/casimir".format(workspace_root),
+        path = "{}/external/rust/casimir".format(workspace_root),
     )
     local_repository(
         name = "rootcanal",
