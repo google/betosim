@@ -210,6 +210,11 @@ The system supports two distinct provisioning flows:
 - **RQ-POL-02**: **Lazy Startup Policy**: The system shall allow a "Startup
   Grace Period" (default: 15s) where the idle timer is suppressed, allowing time
   for the first emulator to connect before self-terminating.
+- **RQ-POL-03**: **Keepalive Lease Policy**: The system shall support
+  control-plane keepalive leases. Holding at least one active keepalive lease
+  shall suppress both startup and idle shutdown timers. Releasing the last
+  active keepalive lease when no non-builtin devices remain shall trigger the
+  idle shutdown timer.
 
 ### 4.6 Statistics & Reporting
 
@@ -284,6 +289,7 @@ Verification is performed via the standard Netsim testing strategy:
 | **RQ-OBS-02**   | Track active count                | `list_device_test.rs`    | List devices populated                                    | **Full**    |
 | **RQ-POL-01**   | Idle Timeout                      | `actor_shutdown_test.rs` | Server shuts down after idle timeout                      | **Full**    |
 | **RQ-POL-02**   | Startup Timeout                   | `actor_shutdown_test.rs` | Server shuts down on startup timeout                      | **Full**    |
+| **RQ-POL-03**   | Keepalive Lease Policy            | `actor_shutdown_test.rs` | Server stays alive with keepalive; shuts down when released | **Full**    |
 | **RQ-STATS-01**   | Track active devices              | `list_device_test.rs`    | List devices populated                                    | **Full**    |
 | **RQ-STATS-02**   | Track peak concurrent devices     | `stats_lifecycle_test.rs`| Stats persistence on shutdown                             | **Full**    |
 | **RQ-STATS-03**   | Track session duration            | `stats_lifecycle_test.rs`| Stats persistence on shutdown                             | **Full**    |

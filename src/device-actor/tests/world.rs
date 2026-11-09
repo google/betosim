@@ -2043,4 +2043,48 @@ impl World {
         let chip = device.chips.iter().find(|c| c.id == chip_id.0).unwrap();
         assert_eq!(chip.name, expected_name);
     }
+
+    /// BDD Step: When I acquire a keepalive lease.
+    pub async fn when_acquire_keepalive(&self) -> u64 {
+        self.client.acquire_keepalive().await.unwrap()
+    }
+
+    /// BDD Step: When I release a keepalive lease.
+    pub async fn when_release_keepalive(&self, id: u64) {
+        self.client.release_keepalive(id).await.unwrap()
+    }
+
+    /// BDD Step: Given a running DeviceActor configured with startup and idle timeouts.
+    pub async fn given_actor_with_timeouts(
+        startup_timeout: Option<std::time::Duration>,
+        idle_timeout: Option<std::time::Duration>,
+    ) -> Self {
+        let chip_clients = Self::create_default_chip_clients();
+        let link_client = Self::create_default_link_client();
+        Self::with_clients_and_timeout(
+            chip_clients,
+            link_client,
+            startup_timeout,
+            idle_timeout,
+            None,
+        )
+        .await
+    }
+
+    /// BDD Step: Then the actor remains alive after waiting for `duration`.
+    pub async fn then_actor_should_remain_alive_for(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+        assert!(
+            !self.is_actor_finished(),
+            "Server should remain alive, but actor finished prematurely"
+        );
+    }
+
+    /// BDD Step: Then acquiring a new keepalive lease fails (e.g. after shutdown).
+    pub async fn then_acquire_keepalive_fails(&self) {
+        assert!(
+            self.client.acquire_keepalive().await.is_err(),
+            "New keepalive acquire must fail after shutdown"
+        );
+    }
 }

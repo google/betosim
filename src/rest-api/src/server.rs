@@ -312,6 +312,7 @@ fn device_error_status(err: &DeviceError) -> StatusCode {
         | DeviceError::AmbiguousEmptyMatch { .. }
         | DeviceError::DuplicateChip { .. }
         | DeviceError::MismatchedChipKind { .. } => StatusCode::BAD_REQUEST,
+        DeviceError::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
         DeviceError::ActorCommunicationError(inner) => client_error_status(inner),
         DeviceError::ResetErrors { .. } => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -572,6 +573,11 @@ impl RestServer {
                     )
                     .await
                     .map(Either::Left));
+                }
+                crate::path::KEEPALIVE => {
+                    return Ok(crate::keepalive::upgrade(&self.device_client, req)
+                        .await
+                        .map(Either::Left));
                 }
                 _ => {}
             }

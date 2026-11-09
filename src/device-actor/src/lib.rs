@@ -28,6 +28,7 @@ pub mod client;
 pub use actor_framework::{ResourceActor, ResourceClient};
 pub use client::DeviceClient;
 pub use device_actor::DeviceActor;
+pub use device_api::{DeviceAction, DeviceActionResult};
 pub use error::DeviceError;
 
 /// Creates a new Device actor runner and its client.

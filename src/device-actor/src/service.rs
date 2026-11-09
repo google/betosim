@@ -105,8 +105,12 @@ impl InternalDevice {
 }
 
 impl DeviceActor {
+    fn has_active_clients(&self) -> bool {
+        self.devices.values().any(|d| !d.device.builtin) || !self.keepalives.is_empty()
+    }
+
     fn update_idle_state(&mut self, ctx: &mut DynContext<Self>) {
-        let has_active_devices = self.devices.values().any(|d| !d.device.builtin);
+        let has_active_devices = self.has_active_clients();
 
         if has_active_devices {
             self.has_seen_device = true;
@@ -894,7 +898,7 @@ impl DeviceActor {
 
     /// Callback for startup timeout
     pub(crate) fn on_startup_timeout(&mut self, ctx: &mut dyn Context<Self>) {
-        let has_active_devices = self.devices.values().any(|d| !d.device.builtin);
+        let has_active_devices = self.has_active_clients();
         if !self.has_seen_device && !has_active_devices {
             info!(
                 "DeviceActor: Startup timeout reached (no devices connected), initiating shutdown"
@@ -906,7 +910,7 @@ impl DeviceActor {
 
     /// Callback for idle timeout
     pub(crate) fn on_idle_timeout(&mut self, ctx: &mut dyn Context<Self>) {
-        let has_active_devices = self.devices.values().any(|d| !d.device.builtin);
+        let has_active_devices = self.has_active_clients();
         if !has_active_devices {
             info!("DeviceActor: Idle timeout reached, initiating shutdown");
             self.trigger_shutdown(ctx);
@@ -917,6 +921,7 @@ impl DeviceActor {
     /// Helper utility to initiate graceful shutdown, ensuring stats are
     /// flushed.
     fn trigger_shutdown(&mut self, ctx: &mut dyn Context<Self>) {
+        self.shutting_down = true;
         let stats_task = self.stats_write_task.take();
         if let Some(client) = self.self_client.clone() {
             tokio::spawn(async move {
@@ -1377,6 +1382,22 @@ impl ActorService for DeviceActor {
                     Err(e) => Err(e),
                 }
             }
+            DeviceAction::AcquireKeepalive => {
+                if self.shutting_down {
+                    return Err(DeviceError::ShuttingDown);
+                }
+                let id = self.next_keepalive_id;
+                self.next_keepalive_id += 1;
+                self.keepalives.insert(id);
+                self.update_idle_state(ctx);
+                Ok(DeviceActionResult::KeepaliveId(id))
+            }
+            DeviceAction::ReleaseKeepalive(id) => {
+                if self.keepalives.remove(&id) {
+                    self.update_idle_state(ctx);
+                }
+                Ok(DeviceActionResult::Success)
+            }
         }
     }
 
@@ -1630,5 +1651,62 @@ mod tests {
             resolve_chip_updates(id, &internal_device, &devices, disambiguated_update).unwrap();
         assert!(resolved.contains_key(&1));
         assert!(!resolved.contains_key(&0));
+    }
+
+    struct DummyContext;
+    impl Context<DeviceActor> for DummyContext {
+        fn set_interval(&mut self, _duration: std::time::Duration) {
+            unimplemented!()
+        }
+        fn add_stream(&mut self, _id: DeviceId, _stream: actor_framework::BoxStream) {
+            unimplemented!()
+        }
+        fn remove_stream(&mut self, _id: DeviceId) {
+            unimplemented!()
+        }
+        fn add_typed_stream(&mut self, _id: usize, _stream: actor_framework::BoxTypedStream<()>) {
+            unimplemented!()
+        }
+        fn remove_typed_stream(&mut self, _id: usize) {
+            unimplemented!()
+        }
+        fn spawn(&mut self, _id: DeviceId, _task: futures::future::BoxFuture<'static, DeviceId>) {
+            unimplemented!()
+        }
+        fn abort(&mut self, _id: DeviceId) {
+            unimplemented!()
+        }
+        fn shutdown(&mut self) {}
+        fn run_later(
+            &mut self,
+            _duration: std::time::Duration,
+            _f: actor_framework::TimerCallback<DeviceActor>,
+        ) -> actor_framework::TimerKey {
+            unimplemented!()
+        }
+        fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acquire_keepalive_rejected_when_shutting_down() {
+        let mut actor = DeviceActor::new(
+            HashMap::new(),
+            Arc::new(AtomicU32::new(1)),
+            None,
+            Box::new(link_api::MockLinkClient::new()),
+            None,
+            None,
+            "test".to_string(),
+            None,
+            None,
+            Arc::new(netsim_model::FrontendStats::default()),
+        );
+        let mut ctx = DummyContext;
+        actor.on_startup_timeout(&mut ctx);
+
+        let result = actor.handle_action(None, DeviceAction::AcquireKeepalive, &mut ctx).await;
+        assert!(matches!(result, Err(DeviceError::ShuttingDown)));
     }
 }

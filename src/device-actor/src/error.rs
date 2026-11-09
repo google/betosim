@@ -46,6 +46,8 @@ pub enum DeviceError {
     ActorCommunicationError(#[from] ClientError),
     #[error("Chip kind not supported: {0}")]
     ChipKindNotSupported(String),
+    #[error("DeviceActor is shutting down")]
+    ShuttingDown,
     #[error(
         "Multiple errors during reset: {device_delete_errors:?} {chip_reset_errors:?} {link_client_error:?}"
     )]

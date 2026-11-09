@@ -104,3 +104,78 @@ async fn test_server_shuts_down_after_idle_timeout_when_last_device_removed() {
 
     world.then_actor_should_shutdown().await;
 }
+
+// Scenario: Server stays alive while keepalive lease is held
+//   Given a running Device Actor with startup and idle timeouts
+//   When a keepalive lease is acquired
+//   Then the server stays alive past both timeouts
+#[tokio::test]
+async fn test_server_stays_alive_with_keepalive() {
+    // Given a running Device Actor with startup and idle timeouts
+    let world = World::given_actor_with_timeouts(
+        Some(Duration::from_millis(50)),
+        Some(Duration::from_millis(50)),
+    )
+    .await;
+
+    // When a keepalive lease is acquired
+    let _id = world.when_acquire_keepalive().await;
+
+    // Then the server stays alive past both timeouts
+    world.then_actor_should_remain_alive_for(Duration::from_millis(150)).await;
+}
+
+// Scenario: Server shuts down after idle timeout when last keepalive is released
+//   Given a running Device Actor with a keepalive lease and no devices
+//   When the keepalive lease is released
+//   Then the server shuts down after the idle timeout
+#[tokio::test]
+async fn test_server_shuts_down_after_idle_timeout_when_last_keepalive_released() {
+    // Given a running Device Actor with startup and idle timeouts
+    let world = World::given_actor_with_timeouts(
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_millis(50)),
+    )
+    .await;
+
+    // When the keepalive lease is acquired and then released
+    let id = world.when_acquire_keepalive().await;
+    world.when_release_keepalive(id).await;
+
+    // Then the server stays alive briefly before the idle timeout elapses
+    world.then_actor_should_remain_alive_for(Duration::from_millis(10)).await;
+
+    // And the server shuts down after the idle timeout
+    world.then_actor_should_shutdown().await;
+
+    // And acquiring a new keepalive lease fails after shutdown
+    world.then_acquire_keepalive_fails().await;
+}
+
+// Scenario: Server stays alive when keepalive is released if an active device exists
+//   Given a running Device Actor with a keepalive lease and an active device
+//   When the keepalive lease is released
+//   Then the server stays alive until the active device is also deleted
+#[tokio::test]
+async fn test_server_stays_alive_when_keepalive_released_with_active_device() {
+    // Given a running Device Actor with a keepalive lease and an active device
+    let world = World::given_actor_with_timeouts(
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_millis(50)),
+    )
+    .await;
+    let keepalive_id = world.when_acquire_keepalive().await;
+    let device_id = world.when_add_chip("guid-1", "chip-1").await;
+
+    // When the keepalive lease is released
+    world.when_release_keepalive(keepalive_id).await;
+
+    // Then the server stays alive while the active device exists
+    world.then_actor_should_remain_alive_for(Duration::from_millis(100)).await;
+
+    // When the active device is deleted
+    world.when_delete_device(device_id).await;
+
+    // Then the server shuts down after the idle timeout
+    world.then_actor_should_shutdown().await;
+}

@@ -30,6 +30,7 @@ mod capture_api;
 mod capture_stream;
 mod client;
 pub mod device_api;
+mod keepalive;
 pub mod link_api;
 pub mod openapi;
 pub mod server;
@@ -60,6 +61,9 @@ pub mod path {
     /// WebSocket streaming BLE baseband sniffer packets:
     /// `GET /v1/ble/sniff?x=<f32>&y=<f32>&z=<f32>`.
     pub const BLE_SNIFF: &str = "/v1/ble/sniff";
+    /// HTTP connection upgrade keeping `netsimd` alive while open:
+    /// `GET /v1/keepalive` with `Connection: Upgrade` and `Upgrade: netsim-keepalive`.
+    pub const KEEPALIVE: &str = "/v1/keepalive";
 }
 
 include!(concat!(env!("OUT_DIR"), "/openapi_generated.rs"));

@@ -409,6 +409,19 @@ async fn test_client_error_mapping_internal_server_error() {
     }
 }
 
+#[tokio::test]
+async fn test_client_error_mapping_service_unavailable() {
+    let err: ClientError =
+        actor_framework::FrameworkError::ServiceError(device_actor::DeviceError::ShuttingDown)
+            .into();
+    assert_eq!(client_error_status(&err), StatusCode::SERVICE_UNAVAILABLE, "for error: {err}");
+    let (status, body) = collect_error_response(err).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body.error.code, 503);
+    assert_eq!(body.error.status, RpcStatus::Unavailable);
+    assert!(!body.error.message.is_empty());
+}
+
 #[test]
 fn test_rpc_status_from_status_code() {
     let expected = [

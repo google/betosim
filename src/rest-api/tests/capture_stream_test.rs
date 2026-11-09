@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! End-to-end tests for the `/v1/capture` WebSocket over a real socket.
+//! End-to-end tests for the `/v1/capture` WebSocket and `/v1/keepalive` HTTP
+//! upgrade over a real socket.
 
 use std::{net::SocketAddr, sync::Arc, time::SystemTime};
 
@@ -87,9 +88,20 @@ impl World {
         World { addr, capture_client, device_rx, _tasks: vec![capture_task, server_task] }
     }
 
+    /// Sends a raw HTTP request string and returns the socket and response head.
+    async fn send_raw_request(&self, request: &str) -> (TcpStream, String) {
+        let mut stream = TcpStream::connect(self.addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(timeout(IO_TIMEOUT, stream.read_u8()).await.unwrap().unwrap());
+        }
+        (stream, String::from_utf8(head).unwrap())
+    }
+
     /// Sends a request for `target` and returns the socket and response head.
     async fn request(&self, target: &str, upgrade: bool) -> (TcpStream, String) {
-        let mut stream = TcpStream::connect(self.addr).await.unwrap();
         let upgrade_headers = if upgrade {
             format!(
                 "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
@@ -99,13 +111,7 @@ impl World {
             String::new()
         };
         let request = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n{upgrade_headers}\r\n");
-        stream.write_all(request.as_bytes()).await.unwrap();
-
-        let mut head = Vec::new();
-        while !head.ends_with(b"\r\n\r\n") {
-            head.push(timeout(IO_TIMEOUT, stream.read_u8()).await.unwrap().unwrap());
-        }
-        (stream, String::from_utf8(head).unwrap())
+        self.send_raw_request(&request).await
     }
 
     async fn send_packet(&self, packet: &'static [u8]) {
@@ -148,6 +154,62 @@ impl World {
             }
             params
         })
+    }
+
+    /// Answers one `AcquireKeepalive` request on `device_rx` with `lease_id` and
+    /// awaits the `ReleaseKeepalive(lease_id)` call triggered on socket EOF.
+    fn given_keepalive_lease(&mut self, lease_id: u64) -> tokio::task::JoinHandle<()> {
+        let mut rx = std::mem::replace(&mut self.device_rx, mpsc::channel(1).1);
+        tokio::spawn(async move {
+            match timeout(IO_TIMEOUT, rx.recv()).await.unwrap().unwrap() {
+                actor_framework::ResourceRequest::Action {
+                    action: DeviceAction::AcquireKeepalive,
+                    respond_to,
+                    ..
+                } => {
+                    let _ = respond_to.send(Ok(DeviceActionResult::KeepaliveId(lease_id)));
+                }
+                other => panic!("Expected AcquireKeepalive, got {other:?}"),
+            }
+            match timeout(IO_TIMEOUT, rx.recv()).await.unwrap().unwrap() {
+                actor_framework::ResourceRequest::Action {
+                    action: DeviceAction::ReleaseKeepalive(id),
+                    respond_to,
+                    ..
+                } => {
+                    assert_eq!(id, lease_id);
+                    let _ = respond_to.send(Ok(DeviceActionResult::Success));
+                }
+                other => panic!("Expected ReleaseKeepalive({lease_id}), got {other:?}"),
+            }
+        })
+    }
+
+    async fn when_request_keepalive(&self) -> (TcpStream, String) {
+        let request = concat!(
+            "GET /v1/keepalive HTTP/1.1\r\n",
+            "Host: localhost\r\n",
+            "Connection: Upgrade\r\n",
+            "Upgrade: netsim-keepalive\r\n\r\n",
+        );
+        self.send_raw_request(request).await
+    }
+
+    fn then_switched_to_keepalive(&self, head: &str) {
+        assert_eq!(status_line(head), "HTTP/1.1 101 Switching Protocols");
+        assert!(head.to_ascii_lowercase().contains("upgrade: netsim-keepalive"));
+    }
+
+    async fn then_keepalive_released(&self, keepalive_task: tokio::task::JoinHandle<()>) {
+        timeout(IO_TIMEOUT, keepalive_task).await.unwrap().unwrap();
+    }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        for task in &self._tasks {
+            task.abort();
+        }
     }
 }
 
@@ -312,4 +374,24 @@ async fn test_ble_stream_errors() {
     assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request");
     let (_, head) = world.request("/v1/ble/sniff", false).await;
     assert_eq!(status_line(&head), "HTTP/1.1 400 Bad Request");
+}
+
+// Scenario: A client connects to /v1/keepalive, acquires a lease, and EOF releases it
+#[tokio::test]
+async fn test_keepalive_upgrade_acquires_and_eof_releases() {
+    // Given a running REST server expecting a keepalive lease
+    let mut world = World::new().await;
+    let keepalive_task = world.given_keepalive_lease(42);
+
+    // When the client requests a keepalive upgrade
+    let (stream, head) = world.when_request_keepalive().await;
+
+    // Then the server switches protocols to netsim-keepalive
+    world.then_switched_to_keepalive(&head);
+
+    // When the client closes the connection (EOF)
+    drop(stream);
+
+    // Then the keepalive lease is released
+    world.then_keepalive_released(keepalive_task).await;
 }

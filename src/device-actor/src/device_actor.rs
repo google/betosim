@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, atomic::AtomicU32},
 };
 
@@ -43,6 +43,9 @@ pub struct DeviceActor {
     pub(crate) last_modified: std::time::SystemTime,
     // Client to send messages to self (e.g. for periodic stats)
     pub(crate) self_client: Option<DeviceClient>,
+    pub(crate) keepalives: HashSet<u64>,
+    pub(crate) next_keepalive_id: u64,
+    pub(crate) shutting_down: bool,
 }
 
 impl DeviceActor {
@@ -78,6 +81,9 @@ impl DeviceActor {
             stats_interval: stats_interval.unwrap_or(std::time::Duration::from_secs(10)),
             last_modified: std::time::SystemTime::now(),
             self_client: None,
+            keepalives: HashSet::new(),
+            next_keepalive_id: 1,
+            shutting_down: false,
         }
     }
 

@@ -113,6 +113,34 @@ impl DeviceClient {
         }
     }
 
+    /// Acquires a control-plane keepalive lease, returning its lease ID.
+    pub async fn acquire_keepalive(&self) -> Result<u64, ClientError> {
+        debug!("Sending acquire keepalive request");
+        match self
+            .inner
+            .perform_action(None, DeviceAction::AcquireKeepalive)
+            .err_into::<ClientError>()
+            .await?
+        {
+            DeviceActionResult::KeepaliveId(id) => Ok(id),
+            _other => Err(ClientError::Recv("Unexpected action result".to_string())),
+        }
+    }
+
+    /// Releases a previously acquired control-plane keepalive lease.
+    pub async fn release_keepalive(&self, id: u64) -> Result<(), ClientError> {
+        debug!("Sending release keepalive request for id {}", id);
+        match self
+            .inner
+            .perform_action(None, DeviceAction::ReleaseKeepalive(id))
+            .err_into::<ClientError>()
+            .await?
+        {
+            DeviceActionResult::Success => Ok(()),
+            _other => Err(ClientError::Recv("Unexpected action result".to_string())),
+        }
+    }
+
     /// Notifies the device that one of its chips has been removed.
     ///
     /// This is used to maintain consistency between the device and its chips.

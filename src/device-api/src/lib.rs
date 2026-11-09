@@ -121,6 +121,10 @@ pub enum DeviceAction {
     /// This is primarily used internally by the actor for periodic saves
     /// and lifecycle events, but can be invoked externally if needed.
     SaveStats,
+    /// Acquires a control-plane keepalive lease, returning its lease ID.
+    AcquireKeepalive,
+    /// Releases a previously acquired control-plane keepalive lease.
+    ReleaseKeepalive(u64),
 }
 
 impl fmt::Debug for DeviceAction {
@@ -148,6 +152,10 @@ impl fmt::Debug for DeviceAction {
             DeviceAction::DeleteChip(chip_id) => {
                 f.debug_tuple("DeleteChip").field(chip_id).finish()
             }
+            DeviceAction::AcquireKeepalive => write!(f, "AcquireKeepalive"),
+            DeviceAction::ReleaseKeepalive(id) => {
+                f.debug_tuple("ReleaseKeepalive").field(id).finish()
+            }
         }
     }
 }
@@ -165,4 +173,5 @@ pub enum DeviceActionResult {
         device_id: DeviceId,
         chip_id: ChipId,
     },
+    KeepaliveId(u64),
 }
