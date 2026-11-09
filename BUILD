@@ -117,3 +117,13 @@ py_test(
     imports = ["scripts"],
     main = "scripts/tasks/compile_install_task_test.py",
 )
+
+py_test(
+    name = "err_code_sites_test",
+    srcs = [
+        "scripts/err_code_sites.py",
+        "scripts/err_code_sites_test.py",
+    ],
+    imports = ["scripts"],
+    main = "scripts/err_code_sites_test.py",
+)
