@@ -112,6 +112,7 @@ async fn test_delete_removes_chip_and_notifies_device() {
     // When the chip is deleted
     world.when_delete_chip(16).await;
     // Then the chip is removed from the actor and the device actor is notified
+    world.then_last_operation_succeeded();
     world.then_chip_count_is(0).await;
     world.then_chip_not_found(16).await;
     world.then_device_notified_chip_removed(16).await;

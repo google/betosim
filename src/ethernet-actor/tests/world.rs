@@ -488,7 +488,7 @@ impl World {
     }
 
     pub(crate) fn then_global_stats_reported(&self) -> &Self {
-        assert!(self.last_global_stats.is_some(), "expected global stats result");
+        assert_eq!(self.last_global_stats, Some(None), "expected empty global stats");
         self
     }
 }

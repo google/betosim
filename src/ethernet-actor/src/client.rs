@@ -30,67 +30,71 @@ impl std::fmt::Debug for EthernetClient {
     }
 }
 
+fn to_send_err(err: impl std::fmt::Display) -> ClientError {
+    ClientError::Send(err.to_string())
+}
+
 impl EthernetClient {
     pub(crate) fn new(client: ResourceClient<EthernetActor>) -> Self {
         Self { inner: Box::new(client) }
     }
 
     pub async fn list(&self) -> Result<Vec<Chip>, ClientError> {
-        self.inner.list().await.map_err(|e| ClientError::Send(e.to_string()))
+        self.inner.list().await.map_err(to_send_err)
     }
 }
 
 #[async_trait::async_trait]
 impl ChipClient for EthernetClient {
     async fn create(&self, id: ChipId, params: ChipCreate) -> Result<(), ClientError> {
-        self.inner
-            .create_with_id(id, params)
-            .await
-            .map(|_| ())
-            .map_err(|e| ClientError::Send(e.to_string()))
+        self.inner.create_with_id(id, params).await.map(|_| ()).map_err(to_send_err)
     }
 
     async fn read(&self, id: ChipId) -> Result<Chip, ClientError> {
         self.inner
             .get(id)
             .await
-            .map_err(|e| ClientError::Send(e.to_string()))?
+            .map_err(to_send_err)?
             .ok_or(ClientError::Chip(ChipError::ChipNotFound(id)))
     }
 
     async fn update(&self, id: ChipId, patch: ChipUpdate) -> Result<Chip, ClientError> {
-        self.inner.update(id, patch).await.map_err(|e| ClientError::Send(e.to_string()))
+        self.inner.update(id, patch).await.map_err(to_send_err)
     }
 
     async fn delete(&self, id: ChipId) -> Result<(), ClientError> {
-        self.inner.delete(id).await.map_err(|e| ClientError::Send(e.to_string()))
+        self.inner.delete(id).await.map_err(to_send_err)
     }
 
     async fn read_statistics(&self) -> Result<Box<[NetsimRadioStats]>, ClientError> {
-        match self.inner.perform_action(None, EthernetReq::GetStatistics).await {
-            Ok(EthernetResponse::Statistics(stats)) => Ok(stats),
-            Ok(_) => Err(ClientError::Recv("Unexpected action result".into())),
-            Err(e) => Err(ClientError::Send(e.to_string())),
+        match self
+            .inner
+            .perform_action(None, EthernetReq::GetStatistics)
+            .await
+            .map_err(to_send_err)?
+        {
+            EthernetResponse::Statistics(stats) => Ok(stats),
+            _ => Err(ClientError::Recv("Unexpected action result".into())),
         }
     }
 
     async fn read_count_for_testing(&self) -> Result<usize, ClientError> {
-        self.inner
-            .list()
-            .await
-            .map(|chips| chips.len())
-            .map_err(|e| ClientError::Send(e.to_string()))
+        self.inner.list().await.map(|chips| chips.len()).map_err(to_send_err)
     }
 
     async fn shutdown(&self) -> Result<(), ClientError> {
-        self.inner.shutdown().await.map_err(|e| ClientError::Send(e.to_string()))
+        self.inner.shutdown().await.map_err(to_send_err)
     }
 
     async fn reset(&self, id: ChipId) -> Result<Chip, ClientError> {
-        match self.inner.perform_action(Some(id), EthernetReq::Reset { id }).await {
-            Ok(EthernetResponse::Chip(chip)) => Ok(*chip),
-            Ok(_) => Err(ClientError::Recv("Unexpected action result for reset".into())),
-            Err(e) => Err(ClientError::Send(e.to_string())),
+        match self
+            .inner
+            .perform_action(Some(id), EthernetReq::Reset { id })
+            .await
+            .map_err(to_send_err)?
+        {
+            EthernetResponse::Chip(chip) => Ok(*chip),
+            _ => Err(ClientError::Recv("Unexpected action result for reset".into())),
         }
     }
 
@@ -117,7 +121,7 @@ mod tests {
         mock.expect_perform_action()
             .withf(|id, req| id.is_none() && matches!(req, EthernetReq::GetStatistics))
             .times(1)
-            .returning(|_, _| Ok(EthernetResponse::Chip(Box::new(Chip::default()))));
+            .returning(|_, _| Ok(EthernetResponse::Chip(Box::default())));
         let client = EthernetClient { inner: Box::new(mock) };
         let err = client.read_statistics().await.expect_err("expected Recv error");
         assert!(matches!(err, ClientError::Recv(_)), "unexpected error: {err:?}");
@@ -132,7 +136,7 @@ mod tests {
                     && matches!(req, EthernetReq::Reset { id } if *id == TEST_CHIP_ID)
             })
             .times(1)
-            .returning(|_, _| Ok(EthernetResponse::Statistics(Vec::new().into_boxed_slice())));
+            .returning(|_, _| Ok(EthernetResponse::Statistics(Box::default())));
         let client = EthernetClient { inner: Box::new(mock) };
         let err = client.reset(TEST_CHIP_ID).await.expect_err("expected Recv error");
         assert!(matches!(err, ClientError::Recv(_)), "unexpected error: {err:?}");

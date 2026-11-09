@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use netsim_model::ChipId;
+
 #[derive(Debug)]
 pub enum EthernetError {
     InvalidChipKind,
+    ChipNotFound(ChipId),
     Internal(String),
 }
 
@@ -22,6 +25,7 @@ impl std::fmt::Display for EthernetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EthernetError::InvalidChipKind => write!(f, "Invalid ChipKind for EthernetActor"),
+            EthernetError::ChipNotFound(id) => write!(f, "Chip {id} not found"),
             EthernetError::Internal(s) => write!(f, "Internal error: {s}"),
         }
     }

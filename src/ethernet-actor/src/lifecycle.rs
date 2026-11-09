@@ -29,14 +29,7 @@ impl ActorLifecycle for EthernetActor {
         disconnected_chip_id: ChipId,
         _ctx: &mut DynContext<Self>,
     ) {
-        info!("EthernetActor notified of disconnection for chip {disconnected_chip_id}");
-        self.chip_enabled.remove(&disconnected_chip_id);
-        if let Some(chip) = self.active_chips.remove(&disconnected_chip_id) {
-            let dc = self.device_client.clone();
-            let device_id = chip.device_id;
-            tokio::spawn(async move {
-                let _ = dc.notify_chip_removed(device_id, disconnected_chip_id).await;
-            });
-        }
+        info!(%disconnected_chip_id, "EthernetActor notified of chip disconnection");
+        self.remove_chip(disconnected_chip_id);
     }
 }

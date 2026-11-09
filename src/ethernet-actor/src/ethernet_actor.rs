@@ -28,15 +28,14 @@ use tokio_stream::StreamExt;
 
 use crate::error::EthernetError;
 
+#[must_use]
 fn is_chip_radio_enabled(chip: &Chip) -> bool {
-    if !chip.enabled {
-        return false;
-    }
-    match &chip.variant {
-        Some(ChipVariant::Ethernet(ethernet)) => ethernet.radio.state != Some(false),
-        Some(ChipVariant::CellularData(cellular)) => cellular.radio.state != Some(false),
-        _ => true,
-    }
+    chip.enabled
+        && match &chip.variant {
+            Some(ChipVariant::Ethernet(ethernet)) => ethernet.radio.state.unwrap_or(true),
+            Some(ChipVariant::CellularData(cellular)) => cellular.radio.state.unwrap_or(true),
+            _ => true,
+        }
 }
 
 #[derive(Debug)]
@@ -53,18 +52,30 @@ pub enum EthernetResponse {
 
 pub struct EthernetActor {
     slirp_client: SlirpClient,
-    pub(crate) active_chips: HashMap<ChipId, Chip>,
-    pub(crate) chip_enabled: HashMap<ChipId, Arc<AtomicBool>>,
-    pub(crate) device_client: device_actor::DeviceClient,
+    active_chips: HashMap<ChipId, Chip>,
+    chip_enabled: HashMap<ChipId, Arc<AtomicBool>>,
+    device_client: device_actor::DeviceClient,
 }
 
 impl EthernetActor {
+    #[must_use]
     pub fn new(slirp_client: SlirpClient, device_client: device_actor::DeviceClient) -> Self {
         Self {
             slirp_client,
             active_chips: HashMap::new(),
             chip_enabled: HashMap::new(),
             device_client,
+        }
+    }
+
+    pub(crate) fn remove_chip(&mut self, id: ChipId) {
+        self.chip_enabled.remove(&id);
+        if let Some(chip) = self.active_chips.remove(&id) {
+            let dc = self.device_client.clone();
+            let device_id = chip.device_id;
+            tokio::spawn(async move {
+                let _ = dc.notify_chip_removed(device_id, id).await;
+            });
         }
     }
 }
@@ -89,11 +100,8 @@ impl ActorService for EthernetActor {
         let chip_kind = params.chip.kind;
 
         match chip_kind {
-            ChipKind::CELLULAR_DATA => {
-                tracing::info!("Creating CELLULAR_DATA interface for chip {id}");
-            }
-            ChipKind::ETHERNET => {
-                tracing::info!("Creating ETHERNET interface for chip {id}");
+            ChipKind::CELLULAR_DATA | ChipKind::ETHERNET => {
+                tracing::info!(%id, ?chip_kind, "Creating network interface for chip");
             }
             _ => return Err(EthernetError::InvalidChipKind),
         }
@@ -107,8 +115,7 @@ impl ActorService for EthernetActor {
         self.active_chips.insert(id, chip);
 
         if let (Some(stream), Some(sink)) = (packet_stream, packet_sink) {
-            let (notifier_tx, notifier_rx) =
-                tokio::sync::mpsc::unbounded_channel::<netsim_model::ChipId>();
+            let (notifier_tx, notifier_rx) = tokio::sync::mpsc::unbounded_channel::<ChipId>();
 
             let uplink_enabled = Arc::clone(&enabled_flag);
             let gated_stream = stream.filter(move |_| uplink_enabled.load(Ordering::Relaxed));
@@ -154,10 +161,7 @@ impl ActorService for EthernetActor {
         update: Self::Update,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
-        let chip = self
-            .active_chips
-            .get_mut(&id)
-            .ok_or_else(|| EthernetError::Internal(format!("Chip {id} not found")))?;
+        let chip = self.active_chips.get_mut(&id).ok_or(EthernetError::ChipNotFound(id))?;
         update.apply(chip);
         if let Some(flag) = self.chip_enabled.get(&id) {
             flag.store(is_chip_radio_enabled(chip), Ordering::Relaxed);
@@ -170,15 +174,10 @@ impl ActorService for EthernetActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<(), Self::Error> {
-        self.chip_enabled.remove(&id);
-        if let Some(chip) = self.active_chips.remove(&id) {
+        if self.active_chips.contains_key(&id) {
             let _ = self.slirp_client.unregister(id.0).await;
-            let dc = self.device_client.clone();
-            let device_id = chip.device_id;
-            tokio::spawn(async move {
-                let _ = dc.notify_chip_removed(device_id, id).await;
-            });
         }
+        self.remove_chip(id);
         Ok(())
     }
 
@@ -189,15 +188,9 @@ impl ActorService for EthernetActor {
         _ctx: &mut DynContext<Self>,
     ) -> Result<Self::ActionResult, Self::Error> {
         match action {
-            EthernetReq::GetStatistics => {
-                let stats = Vec::new();
-                Ok(EthernetResponse::Statistics(stats.into_boxed_slice()))
-            }
+            EthernetReq::GetStatistics => Ok(EthernetResponse::Statistics(Box::default())),
             EthernetReq::Reset { id } => {
-                let chip = self
-                    .active_chips
-                    .get_mut(&id)
-                    .ok_or_else(|| EthernetError::Internal(format!("Chip {id} not found")))?;
+                let chip = self.active_chips.get_mut(&id).ok_or(EthernetError::ChipNotFound(id))?;
                 chip.enabled = true;
                 match &mut chip.variant {
                     Some(ChipVariant::Ethernet(ethernet)) => {
