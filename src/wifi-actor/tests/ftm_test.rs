@@ -22,6 +22,7 @@ use zerocopy::IntoBytes;
 
 use crate::world::World;
 
+/// Scenario: Direct FTM request handling computes RTT from 300m distance
 #[test]
 fn test_handle_ftm_request() {
     // Given: An initiator at (0,0,0) and a responder at (300,0,0).
@@ -94,6 +95,7 @@ fn test_handle_ftm_request() {
 
 const DISTANCE_M: f32 = 300.0;
 const EXPECTED_300M_RTT_PS: u64 = 2_001_384;
+const EXPECTED_600M_RTT_PS: u64 = 4_002_769;
 const RTT_TOLERANCE_PS: u64 = 100;
 const FTM_TRIGGER_START: u8 = 1;
 const FC_TYPE_SHIFT: u16 = 2;
@@ -156,4 +158,24 @@ async fn test_wifi_actor_ftm_request_interception() {
 
     // And: Responder receives nothing (interception/offload suppressed forwarding)
     world.then_chip_receives_nothing(1).await;
+}
+
+/// Scenario: FTM RTT measurement scales accurately with chip distance (600m)
+#[tokio::test]
+async fn test_ftm_request_rtt_scales_with_distance() {
+    let mut world = World::new().await;
+    let _chip0 = world.given_a_chip(1).await;
+    let _chip1 = world.given_a_chip(2).await;
+
+    // Given: Initiator at (0, 0, 0) and Responder at (0, 600, 0)
+    world.given_chip_position(0, Position { x: 0.0, y: 0.0, z: 0.0 }).await;
+    world.given_chip_position(1, Position { x: 0.0, y: 600.0, z: 0.0 }).await;
+
+    // When: Initiator transmits an FTM Request to Responder
+    world.when_chip_transmits_ftm_request(0, 1).await;
+
+    // Then: Initiator receives simulated FTM measurement responses with ~4,002,769 ps RTT
+    world
+        .then_chip_receives_ftm_measurement_rtt_ps(0, EXPECTED_600M_RTT_PS, RTT_TOLERANCE_PS)
+        .await;
 }

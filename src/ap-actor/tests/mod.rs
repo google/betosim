@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod acl_test;
 mod ap_control_test;
 mod association_test;
 mod beacon_test;
 mod creation_test;
 mod crypto_test;
 mod deauth_test;
+mod eap_auth_test;
 mod ftm_test;
 mod lifecycle_test;
 mod sae_handshake_test;

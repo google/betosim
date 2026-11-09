@@ -165,3 +165,80 @@ async fn test_update_chip_state() {
         panic!("Expected Wifi variant");
     }
 }
+
+// Feature: WifiClient List and RF State Control
+// Scenario: List provisioned chips and toggle RF state via WifiClient::set_rf_state
+//
+//   Given a World with two provisioned Wi-Fi chips
+//   When WifiClient::list is called
+//   Then both chip IDs are returned
+//   When WifiClient::set_rf_state disables Chip 1 and Chip 1 transmits a P2P frame to Chip 2
+//   Then Chip 1's state is disabled and Chip 2 receives nothing
+//   When WifiClient::set_rf_state re-enables Chip 1 and Chip 1 transmits a P2P frame to Chip 2
+//   Then Chip 1's state is enabled and Chip 2 receives the frame
+#[tokio::test]
+async fn test_wifi_client_list_and_set_rf_state() {
+    // Given
+    let mut world = World::new().await;
+    let chip1_id = world.given_a_chip(1).await;
+    let chip2_id = world.given_a_chip(2).await;
+
+    // When
+    let mut listed = world.when_wifi_client_lists_chips().await;
+    listed.sort_by_key(|c| c.0);
+
+    // Then
+    assert_eq!(listed, vec![ChipId(chip1_id), ChipId(chip2_id)]);
+
+    // When: Disable Chip 1 via WifiClient::set_rf_state
+    world.when_rf_state_is_set(chip1_id, false).await;
+    world.when_chip_transmits_unicast(0, 1, "DroppedWhileRfDisabled").await;
+
+    // Then: Chip 1 is disabled and P2P frame is dropped
+    world.then_chip_rf_state_is(chip1_id, false).await;
+    world.then_chip_receives_nothing(1).await;
+
+    // When: Re-enable Chip 1 via WifiClient::set_rf_state
+    world.when_rf_state_is_set(chip1_id, true).await;
+    world.when_chip_transmits_unicast(0, 1, "DeliveredAfterRfEnabled").await;
+
+    // Then: Chip 1 is enabled and P2P frame is delivered
+    world.then_chip_rf_state_is(chip1_id, true).await;
+    world.then_chip_receives_payload(1, "DeliveredAfterRfEnabled").await;
+}
+
+// Feature: Chip Reset
+// Scenario: Resetting a disabled chip with non-zero traffic counters restores default state and
+//   clears counters
+//
+//   Given a World with two chips that have exchanged bidirectional P2P traffic and Chip 1 disabled
+//     via set_rf_state
+//   When ChipClient::reset is called on Chip 1
+//   Then Chip 1's enabled and radio states are restored to default and its TX/RX counters are
+//     cleared to zero
+#[tokio::test]
+async fn test_chip_client_reset_restores_state_and_clears_stats() {
+    // Given
+    let mut world = World::new().await;
+    let chip1_id = world.given_a_chip(1).await;
+    let _chip2_id = world.given_a_chip(2).await;
+
+    world.when_chip_transmits_unicast(0, 1, "TxBeforeReset").await;
+    world.then_chip_receives_payload(1, "TxBeforeReset").await;
+    world.when_chip_transmits_unicast(1, 0, "RxBeforeReset").await;
+    world.then_chip_receives_payload(0, "RxBeforeReset").await;
+    world.then_chip_counters_are_non_zero(chip1_id).await;
+    world.when_rf_state_is_set(chip1_id, false).await;
+    world.then_chip_rf_state_is(chip1_id, false).await;
+
+    // When
+    world.when_chip_is_reset(chip1_id).await;
+
+    // Then
+    world.then_chip_rf_state_is_default(chip1_id).await;
+    world.then_chip_counters_are_zero(chip1_id).await;
+
+    // And: Chip 1 can transmit P2P traffic again after reset
+    world.when_chip_transmits_unicast(0, 1, "TrafficAfterReset").await;
+    world.then_chip_receives_payload(1, "TrafficAfterReset").await;
+}

@@ -12,62 +12,81 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::world::{MockGateway, World};
+use crate::world::World;
 
+// ============================================================================
+// Feature: Gateway (Slirp) Uplink Routing and RF State Gating
+// ============================================================================
+
+// Scenario: An enabled station routes ToDS data frames destined for the Internet to the Gateway
+// Given a Wifi World configured with a MockGateway, an active AP, and an enabled station chip
+// When the station transmits a ToDS data frame addressed to the Internet gateway
+// Then the MockGateway receives the 802.11 frame tagged with the station's ChipId
 #[tokio::test]
 async fn test_gateway_routing() {
-    // 1. Setup World with MockGateway
-    let mock_gateway = MockGateway::new();
-    let outgoing_packets = mock_gateway.outgoing_packets.clone();
-    let mut world = World::new_with_gateway(Box::new(mock_gateway)).await;
+    // Given: Setup World with MockGateway, AP, and Chip
+    let (mut world, mock_gateway, chip1_id) = World::given_mock_gateway_world().await;
 
-    // 2. Create AP
-    world.given_an_ap().await;
-
-    // 3. Create Chip
-    let chip1_id = world.given_a_chip(1).await;
-    outgoing_packets.lock().unwrap().clear();
-
-    // 3. Chip transmits data destined for Internet (ToDS)
-    // This helper sends a ToDS frame destined to a dummy "Gateway" MAC.
-    // The WifiActor should route this to the GatewayTrait implementation
-    // (MockGateway).
+    // When: Chip transmits data destined for Internet (ToDS)
     world.when_chip_transmits_data_to_slirp(0).await;
 
-    // 4. Verify Gateway received the packet
-    // Give it a moment to process
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Then: Verify Gateway received the packet
+    mock_gateway.wait_for_packet_count(1).await;
 
-    let packets = outgoing_packets.lock().unwrap();
-    assert_eq!(packets.len(), 1, "Gateway should have received 1 packet");
-
+    let packets = mock_gateway.outgoing_packets.lock().unwrap();
     let (cid, _frame) = &packets[0];
     assert_eq!(cid.0, chip1_id, "Packet should be from Chip 1");
-
-    // We can also verify contents of _frame if needed, but World helper sent
-    // known payload.
 }
 
+// Scenario: A disabled station drops unicast ToDS gateway traffic while allowing mDNS multicast
+// Given a Wifi World with a MockGateway, an active AP, and a chip disabled via ChipClient::update
+// When the chip transmits a unicast ToDS data frame to Slirp and an infrastructure mDNS multicast
+//   frame
+// Then the unicast ToDS frame is dropped while the mDNS multicast frame reaches the gateway
 #[tokio::test]
 async fn test_gateway_routing_blocked_when_disabled() {
-    let mock_gateway = MockGateway::new();
-    let outgoing_packets = mock_gateway.outgoing_packets.clone();
-    let mut world = World::new_with_gateway(Box::new(mock_gateway)).await;
-
-    world.given_an_ap().await;
-    world.given_a_chip(1).await;
+    // Given
+    let (mut world, mock_gateway, _chip1_id) = World::given_mock_gateway_world().await;
     world.given_chip_is_disabled(0).await;
-    outgoing_packets.lock().unwrap().clear();
 
+    // When: Unicast ToDS frame to Slirp while disabled
     world.when_chip_transmits_data_to_slirp(0).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    assert!(outgoing_packets.lock().unwrap().is_empty());
+    // Then: Unicast ToDS frame is blocked
+    mock_gateway.assert_no_packets_within(50).await;
 
+    // When: Infrastructure mDNS multicast frame
     world.when_chip_transmits_infra_mdns(0, "\x01\x02\x03\x04").await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    assert_eq!(outgoing_packets.lock().unwrap().len(), 1);
+    // Then: mDNS frame reaches the gateway
+    mock_gateway.wait_for_packet_count(1).await;
+}
+
+// Scenario: Disabling RF state via WifiClient::set_rf_state drops unicast ToDS SLIRP traffic
+//   (ag/43192696)
+// Given a Wifi World with a MockGateway, an active AP, and a provisioned station chip
+// When WifiClient::set_rf_state(false) disables the chip and the chip transmits a unicast ToDS
+//   data frame to Slirp
+// Then the MockGateway receives zero packets until WifiClient::set_rf_state(true) re-enables the
+//   chip
+#[tokio::test]
+async fn test_set_rf_state_disabled_drops_unicast_tods_slirp_traffic() {
+    // Given
+    let (mut world, mock_gateway, chip1_id) = World::given_mock_gateway_world().await;
+
+    // When: Disable RF state via WifiClient::set_rf_state and transmit unicast ToDS data to Slirp
+    world.when_rf_state_is_set(chip1_id, false).await;
+    world.when_chip_transmits_data_to_slirp(0).await;
+
+    // Then: Unicast ToDS SLIRP traffic is dropped
+    mock_gateway.assert_no_packets_within(50).await;
+
+    // When: Re-enable RF state via WifiClient::set_rf_state and retransmit
+    world.when_rf_state_is_set(chip1_id, true).await;
+    world.when_chip_transmits_data_to_slirp(0).await;
+
+    // Then: Unicast ToDS SLIRP traffic is forwarded once RF state is re-enabled
+    mock_gateway.wait_for_packet_count(1).await;
 }
 
 #[cfg(target_os = "linux")]

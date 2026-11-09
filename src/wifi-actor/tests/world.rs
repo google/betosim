@@ -35,6 +35,8 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use crate::hwsim_helper::wrap_ethernet_in_hwsim;
 
+pub const AP_BSSID: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+
 pub struct ChipChannels {
     pub id: u32,
     pub mac: [u8; 6],
@@ -109,6 +111,15 @@ impl World {
         let mut world = Self::new_with_gateway(Box::new(harness)).await;
         world.gateway_downlink_tx = Some(downlink_tx);
         world
+    }
+
+    pub async fn given_mock_gateway_world() -> (Self, MockGateway, u32) {
+        let mock_gateway = MockGateway::new();
+        let mut world = Self::new_with_gateway(Box::new(mock_gateway.clone())).await;
+        world.given_an_ap().await;
+        let chip_id = world.given_a_chip(1).await;
+        mock_gateway.clear();
+        (world, mock_gateway, chip_id)
     }
 
     async fn new_internal(gateway: Option<Box<dyn wifi_actor::GatewayTrait>>) -> Self {
@@ -241,7 +252,7 @@ impl World {
     async fn given_an_ap_with_passphrase(&mut self, passphrase: Option<String>) -> u32 {
         let ap_config = ap_actor::ApConfig {
             ssid: "TestAP".to_string(),
-            bssid: MacAddr::from([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            bssid: MacAddr::from(AP_BSSID),
             channel: 6,
             hw_mode: netsim_model::WifiMode::G,
             wpa_passphrase: passphrase,
@@ -307,9 +318,8 @@ impl World {
         // Register chip by sending dummy packet
 
         let dst_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // Dummy dst
-        let ap_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
         let eth = Self::create_ethernet_frame(&src_mac, &dst_mac, &[0x00; 64]);
-        let msg = wrap_ethernet_in_hwsim(&eth, &ap_mac, &dst_mac, &src_mac, 2412).unwrap();
+        let msg = wrap_ethernet_in_hwsim(&eth, &AP_BSSID, &dst_mac, &src_mac, 2412).unwrap();
         chip.sink_tx.send(Bytes::from(msg)).await.expect("Failed to register chip");
         // Wait for registration
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -334,11 +344,10 @@ impl World {
     ) {
         let src_mac = self.chips[sender_idx].mac;
         let dst_mac = self.chips[receiver_idx].mac;
-        let ap_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
 
         // Helper to construct and transmit a unicast Ethernet frame via Hwsim.
         let eth = Self::create_ethernet_frame(&src_mac, &dst_mac, payload.as_bytes());
-        let msg = wrap_ethernet_in_hwsim(&eth, &ap_mac, &dst_mac, &src_mac, 2412)
+        let msg = wrap_ethernet_in_hwsim(&eth, &AP_BSSID, &dst_mac, &src_mac, 2412)
             .expect("Sender failed to wrap");
 
         self.chips[sender_idx].sink_tx.send(Bytes::from(msg)).await.expect("Sender failed to send");
@@ -347,27 +356,23 @@ impl World {
     pub async fn when_chip_transmits_broadcast(&mut self, sender_idx: usize, payload: &str) {
         let src_mac = self.chips[sender_idx].mac;
         let dst_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // Broadcast
-        let ap_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
 
         let eth = Self::create_ethernet_frame(&src_mac, &dst_mac, payload.as_bytes());
-        let msg = wrap_ethernet_in_hwsim(&eth, &ap_mac, &dst_mac, &src_mac, 2412).unwrap();
+        let msg = wrap_ethernet_in_hwsim(&eth, &AP_BSSID, &dst_mac, &src_mac, 2412).unwrap();
 
         self.chips[sender_idx].sink_tx.send(Bytes::from(msg)).await.unwrap();
     }
 
     pub async fn when_infra_transmits_unicast(&mut self, receiver_idx: usize, payload: &str) {
-        let receiver_mac = self.chips[receiver_idx].mac;
-        let dst_mac = receiver_mac;
+        let dst_mac = self.chips[receiver_idx].mac;
 
         // Note: Receiver should already be registered by given_a_chip.
         // No need to send dummy frame here.
 
-        let src_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00]; // AP
-
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let eth = Self::create_ethernet_frame(&src_mac, &dst_mac, payload.as_bytes());
-        let bssid = MacAddress::new(src_mac);
+        let eth = Self::create_ethernet_frame(&AP_BSSID, &dst_mac, payload.as_bytes());
+        let bssid = MacAddress::new(AP_BSSID);
         let ieee80211 =
             Ieee80211::from_ieee8023(&Bytes::from(eth), bssid, FrameDirection::FromAp, 100)
                 .unwrap();
@@ -377,10 +382,8 @@ impl World {
     }
 
     pub async fn when_infra_transmits_unicast_to_mac(&mut self, dst_mac: [u8; 6], payload: &str) {
-        let src_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00]; // AP
-
-        let eth = Self::create_ethernet_frame(&src_mac, &dst_mac, payload.as_bytes());
-        let bssid = MacAddress::new(src_mac);
+        let eth = Self::create_ethernet_frame(&AP_BSSID, &dst_mac, payload.as_bytes());
+        let bssid = MacAddress::new(AP_BSSID);
         let ieee80211 =
             Ieee80211::from_ieee8023(&Bytes::from(eth), bssid, FrameDirection::FromAp, 100)
                 .unwrap();
@@ -390,11 +393,10 @@ impl World {
     }
 
     pub async fn when_infra_transmits_multicast(&mut self, payload: &str) {
-        let src_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00]; // AP
         let dst_mac = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // Broadcast/Multicast
 
-        let eth = Self::create_ethernet_frame(&src_mac, &dst_mac, payload.as_bytes());
-        let bssid = MacAddress::new(src_mac);
+        let eth = Self::create_ethernet_frame(&AP_BSSID, &dst_mac, payload.as_bytes());
+        let bssid = MacAddress::new(AP_BSSID);
         let ieee80211 =
             Ieee80211::from_ieee8023(&Bytes::from(eth), bssid, FrameDirection::FromAp, 100)
                 .unwrap();
@@ -414,7 +416,6 @@ impl World {
     ) {
         let sender_mac = self.chips[sender_idx].mac;
         let receiver_mac = self.chips[receiver_idx].mac;
-        let bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00]; // AP BSSID
 
         // Construct ToDS Frame
         let to_ds_frame = Ieee80211ToAp {
@@ -423,7 +424,7 @@ impl World {
             stype: 0,               // Data
             destination: MacAddress::new(receiver_mac),
             source: MacAddress::new(sender_mac),
-            bssid: MacAddress::new(bssid),
+            bssid: MacAddress::new(AP_BSSID),
             duration_id: 0,
             seq_ctrl: 0,
             qos_ctrl: None,
@@ -449,7 +450,7 @@ impl World {
         // For ToDS frames, the Hwsim Destination is the AP (BSSID).
         let msg = wifi_actor::create_hwsim_msg_from_frame(
             &ieee80211,
-            &MacAddress::new(bssid), // Dest Hwsim (AP)
+            &MacAddress::new(AP_BSSID), // Dest Hwsim (AP)
             2412,
             Some(&MacAddress::new(sender_mac)), // Src Hwsim
         )
@@ -461,15 +462,14 @@ impl World {
 
     async fn transmit_mgmt_to_ap(&mut self, sender_idx: usize, stype: u8, payload: &[u8]) {
         let sender_mac = self.chips[sender_idx].mac;
-        let bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
 
         let mgmt_frame = Ieee80211ToAp {
             version: 0,
             ftype: FrameType::Management,
             stype,
-            destination: MacAddress::new(bssid),
+            destination: MacAddress::new(AP_BSSID),
             source: MacAddress::new(sender_mac),
-            bssid: MacAddress::new(bssid),
+            bssid: MacAddress::new(AP_BSSID),
             duration_id: 0,
             seq_ctrl: 0,
             qos_ctrl: None,
@@ -486,7 +486,7 @@ impl World {
 
         let msg = wifi_actor::create_hwsim_msg_from_frame(
             &ieee80211,
-            &MacAddress::new(bssid),
+            &MacAddress::new(AP_BSSID),
             2412,
             Some(&MacAddress::new(sender_mac)),
         )
@@ -657,7 +657,6 @@ impl World {
     pub async fn when_chip_transmits_data_to_slirp(&mut self, sender_idx: usize) {
         let sender_mac = self.chips[sender_idx].mac;
         let internet_gateway = [0x00, 0x00, 0x00, 0x00, 0x00, 0xFE]; // Dummy Gateway
-        let bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00]; // AP BSSID
 
         // Construct ToDS Data Frame
         let to_ds_frame = Ieee80211ToAp {
@@ -666,7 +665,7 @@ impl World {
             stype: 0,               // Data
             destination: MacAddress::new(internet_gateway),
             source: MacAddress::new(sender_mac),
-            bssid: MacAddress::new(bssid),
+            bssid: MacAddress::new(AP_BSSID),
             duration_id: 0,
             seq_ctrl: 0,
             qos_ctrl: None,
@@ -683,7 +682,7 @@ impl World {
 
         let msg = wifi_actor::create_hwsim_msg_from_frame(
             &ieee80211,
-            &MacAddress::new(bssid), // Dest Hwsim (AP)
+            &MacAddress::new(AP_BSSID), // Dest Hwsim (AP)
             2412,
             Some(&MacAddress::new(sender_mac)), // Src Hwsim
         )
@@ -713,11 +712,8 @@ impl World {
 
         let eth = Self::create_ethernet_frame(&sender_mac, &mdns_multicast, payload.as_bytes());
 
-        // Infra Context: Use AP BSSID.
-        let ap_bssid = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
-
-        // The packet goes to the AP (dest_hwsim_addr = ap_bssid)
-        let msg = wrap_ethernet_in_hwsim(&eth, &ap_bssid, &ap_bssid, &sender_mac, 2412).unwrap();
+        // Infra Context: The packet goes to the AP (dest_hwsim_addr = AP_BSSID).
+        let msg = wrap_ethernet_in_hwsim(&eth, &AP_BSSID, &AP_BSSID, &sender_mac, 2412).unwrap();
         self.chips[sender_idx].sink_tx.send(Bytes::from(msg)).await.unwrap();
     }
 
@@ -748,9 +744,13 @@ impl World {
     }
 
     pub async fn then_chip_receives_nothing(&mut self, chip_idx: usize) {
+        self.then_chip_receives_nothing_within(chip_idx, 1000).await;
+    }
+
+    pub async fn then_chip_receives_nothing_within(&mut self, chip_idx: usize, wait_ms: u64) {
         let chip = &mut self.chips[chip_idx];
-        // Wait for a short duration to verify no packets are received.
-        let timeout = tokio::time::sleep(std::time::Duration::from_millis(1000));
+        // Wait for the requested duration to verify no data/management frames are received.
+        let timeout = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
         tokio::pin!(timeout);
 
         loop {
@@ -1450,6 +1450,280 @@ impl World {
             stats.max_download_throughput()
         );
     }
+
+    pub async fn given_a_chip_with_randomized_mac(
+        &mut self,
+        id_val: u32,
+        randomized_mac: [u8; 6],
+        hw_mac: [u8; 6],
+    ) -> u32 {
+        let created_id = self.given_a_chip(id_val).await;
+        let idx = self.chips.len() - 1;
+        self.chips[idx].mac = randomized_mac;
+
+        let dst_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0xFE];
+        let outgoing_eth = Self::create_ethernet_frame(&randomized_mac, &dst_mac, b"DualMapInit");
+        let hwsim_packet =
+            wrap_ethernet_in_hwsim(&outgoing_eth, &AP_BSSID, &AP_BSSID, &hw_mac, 2412)
+                .expect("Failed to wrap dual-mapping init packet");
+
+        self.chips[idx]
+            .sink_tx
+            .send(Bytes::from(hwsim_packet))
+            .await
+            .expect("Failed to send dual-mapping init packet");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if self.shared_keys.get_station_bssid(&MacAddress::new(randomized_mac)).is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Timed out waiting for randomized MAC mapping in SharedKeyStore"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        created_id
+    }
+
+    pub fn then_shared_keys_maps_mac_to_bssid(&self, mac: [u8; 6], expected_bssid: [u8; 6]) {
+        let mapped = self.shared_keys.get_station_bssid(&MacAddress::new(mac));
+        assert_eq!(
+            mapped,
+            Some(MacAddress::new(expected_bssid)),
+            "Expected MAC {:02X?} to map to BSSID {:02X?}",
+            mac,
+            expected_bssid
+        );
+    }
+
+    pub fn then_slirp_gateway_delivers_downlink_to_mac(
+        &self,
+        chip_idx: usize,
+        hw_mac: [u8; 6],
+        payload: &str,
+    ) {
+        let chip_id = self.chips[chip_idx].id;
+        let randomized_mac = self.chips[chip_idx].mac;
+        let mut medium = wifi_actor::Medium::new(
+            self.shared_keys.clone(),
+            wifi_actor::WifiStats::new(self.mock_clock.clone()),
+            Arc::new(wifi_actor::DebugArgs::default()),
+        );
+        medium.add(chip_id);
+        let reg_eth = Self::create_ethernet_frame(&randomized_mac, &AP_BSSID, b"Reg");
+        let reg_hwsim = wrap_ethernet_in_hwsim(&reg_eth, &AP_BSSID, &AP_BSSID, &hw_mac, 2412)
+            .expect("Failed to wrap station registration packet");
+        let _ = medium
+            .resolve_tx_packet(chip_id, &Bytes::from(reg_hwsim))
+            .expect("Failed to resolve station registration packet");
+
+        let gateway = wifi_actor::SlirpGateway::new(None);
+        let incoming_eth = Self::create_ethernet_frame(&AP_BSSID, &hw_mac, payload.as_bytes());
+        let mut out_queue = Vec::new();
+        wifi_actor::GatewayTrait::handle_incoming(
+            &gateway,
+            ChipId(0),
+            Bytes::from(incoming_eth),
+            &mut medium,
+            &self.shared_keys,
+            &mut out_queue,
+        );
+        assert!(
+            !out_queue.is_empty(),
+            "SlirpGateway::handle_incoming dropped downlink packet addressed to hw_mac {:02X?}",
+            hw_mac
+        );
+        let (target_chip_id, delivered_hwsim) = &out_queue[0];
+        assert_eq!(*target_chip_id, chip_id);
+        let unwrapped = crate::hwsim_helper::unwrap_hwsim_to_ethernet(delivered_hwsim)
+            .expect("Failed to unwrap SlirpGateway downlink HWSIM packet");
+        assert!(
+            unwrapped.windows(payload.len()).any(|w| w == payload.as_bytes()),
+            "Delivered SlirpGateway downlink frame did not contain expected payload"
+        );
+    }
+
+    pub async fn when_wifi_client_lists_chips(&self) -> Vec<ChipId> {
+        self.wifi_client
+            .list()
+            .await
+            .expect("Failed to list chips via WifiClient")
+            .into_iter()
+            .map(|c| ChipId(c.id))
+            .collect()
+    }
+
+    pub async fn when_rf_state_is_set(&self, chip_id: u32, enabled: bool) {
+        self.wifi_client
+            .set_rf_state(ChipId(chip_id), enabled)
+            .await
+            .expect("Failed to set RF state via WifiClient");
+    }
+
+    pub async fn when_chip_is_reset(&self, chip_id: u32) {
+        self.wifi_client.reset(ChipId(chip_id)).await.expect("Failed to reset chip");
+    }
+
+    pub async fn then_chip_rf_state_is(&self, chip_id: u32, expected: bool) {
+        let chip = self.wifi_client.read(ChipId(chip_id)).await.expect("Failed to read chip");
+        assert_eq!(chip.enabled, expected, "Unexpected chip.enabled state");
+        if let Some(netsim_model::ChipVariant::Wifi(wifi)) = chip.variant {
+            assert_eq!(wifi.radio.state, Some(expected), "Unexpected Wifi radio.state");
+        } else {
+            panic!("Expected Wifi chip variant");
+        }
+    }
+
+    pub async fn then_chip_rf_state_is_default(&self, chip_id: u32) {
+        let chip = self.wifi_client.read(ChipId(chip_id)).await.expect("Failed to read chip");
+        assert!(chip.enabled, "Expected chip.enabled == true after reset");
+        if let Some(netsim_model::ChipVariant::Wifi(wifi)) = chip.variant {
+            assert_eq!(wifi.radio.state, None, "Expected Wifi radio.state == None after reset");
+        } else {
+            panic!("Expected Wifi chip variant");
+        }
+    }
+
+    pub async fn then_chip_counters_are_non_zero(&self, chip_id: u32) {
+        let stats = self.wifi_client.read_statistics().await.expect("Failed to read statistics");
+        let chip_stats = stats.iter().find(|s| s.id == chip_id).expect("Chip stats not found");
+        assert!(chip_stats.tx_count > 0, "Expected tx_count > 0 before reset");
+        assert!(chip_stats.rx_count > 0, "Expected rx_count > 0 before reset");
+        assert!(chip_stats.p2p_tx_count > 0, "Expected p2p_tx_count > 0 before reset");
+        assert!(chip_stats.p2p_rx_count > 0, "Expected p2p_rx_count > 0 before reset");
+    }
+
+    pub async fn then_chip_counters_are_zero(&self, chip_id: u32) {
+        let stats = self.wifi_client.read_statistics().await.expect("Failed to read statistics");
+        let chip_stats = stats.iter().find(|s| s.id == chip_id).expect("Chip stats not found");
+        assert_eq!(chip_stats.rx_count, 0, "Expected rx_count == 0 after reset");
+        assert_eq!(chip_stats.tx_count, 0, "Expected tx_count == 0 after reset");
+        assert_eq!(chip_stats.p2p_rx_count, 0, "Expected p2p_rx_count == 0 after reset");
+        assert_eq!(chip_stats.p2p_tx_count, 0, "Expected p2p_tx_count == 0 after reset");
+    }
+
+    pub async fn given_chip_registers_virtual_macs(
+        &mut self,
+        chip_idx: usize,
+        peer_idx: usize,
+        macs_and_freqs: &[([u8; 6], u32)],
+    ) {
+        let hwsim_mac = self.chips[chip_idx].mac;
+        let peer_mac = self.chips[peer_idx].mac;
+        for (i, (sa_mac, freq)) in macs_and_freqs.iter().enumerate() {
+            let tag = format!("RegVirtualMac{i}");
+            let eth = Self::create_ethernet_frame(sa_mac, &peer_mac, tag.as_bytes());
+            let msg = wrap_ethernet_in_hwsim(&eth, &AP_BSSID, &peer_mac, &hwsim_mac, *freq)
+                .expect("Failed to wrap frame with custom SA on channel");
+            self.chips[chip_idx]
+                .sink_tx
+                .send(Bytes::from(msg))
+                .await
+                .expect("Failed to transmit frame with custom SA on channel");
+            self.then_chip_receives_payload(peer_idx, &tag).await;
+        }
+    }
+
+    pub async fn when_chip_sends_udp_to_host(
+        &mut self,
+        chip_idx: usize,
+        host_port: u16,
+        payload: &[u8],
+    ) {
+        use netsim_packets::test_utils::PacketBuilder;
+
+        let client_mac = self.chips[chip_idx].mac;
+        let client_ip = [10, 0, 2, 15];
+        let gateway_ip = [10, 0, 2, 2];
+        let gateway_mac = [0xde, 0xad, 0xbe, 0xef, 0x12, 0x35];
+
+        // Announce Guest MAC -> IP mapping to Slirp's ARP table via an ARP Request.
+        let arp_req = PacketBuilder::new([0xff; 6], client_mac, 0x0806)
+            .arp(1, client_mac, client_ip, [0; 6], gateway_ip)
+            .build();
+        let arp_hwsim = wrap_ethernet_in_hwsim(&arp_req, &AP_BSSID, &AP_BSSID, &client_mac, 2412)
+            .expect("Failed to wrap ARP request in HWSIM");
+        self.chips[chip_idx]
+            .sink_tx
+            .send(Bytes::from(arp_hwsim))
+            .await
+            .expect("Failed to send ARP request to sink_tx");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let eth_frame = PacketBuilder::new(gateway_mac, client_mac, 0x0800)
+            .ipv4(client_ip, gateway_ip, 17)
+            .udp(12345, host_port)
+            .payload(payload);
+
+        let hwsim_msg = wrap_ethernet_in_hwsim(&eth_frame, &AP_BSSID, &AP_BSSID, &client_mac, 2412)
+            .expect("Failed to wrap UDP frame in HWSIM");
+
+        self.chips[chip_idx]
+            .sink_tx
+            .send(Bytes::from(hwsim_msg))
+            .await
+            .expect("Failed to send UDP frame to sink_tx");
+    }
+
+    pub async fn then_chip_receives_udp_reply_handling_arp(
+        &mut self,
+        chip_idx: usize,
+        expected_reply: &[u8],
+    ) {
+        use netsim_packets::test_utils::PacketBuilder;
+
+        let client_mac = self.chips[chip_idx].mac;
+        let chip = &mut self.chips[chip_idx];
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(3));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(msg_bytes) = chip.stream_rx.recv() => {
+                    if let Ok(eth_frame) = crate::hwsim_helper::unwrap_hwsim_to_ethernet(&msg_bytes)
+                        && eth_frame.len() >= 14
+                    {
+                        let eth_type = u16::from_be_bytes([eth_frame[12], eth_frame[13]]);
+                        if eth_type == 0x0806 && eth_frame.len() >= 32 {
+                            let mut slirp_mac = [0u8; 6];
+                            slirp_mac.copy_from_slice(&eth_frame[22..28]);
+                            let mut slirp_ip = [0u8; 4];
+                            slirp_ip.copy_from_slice(&eth_frame[28..32]);
+                            let client_ip = [10, 0, 2, 15];
+
+                            let arp_reply = PacketBuilder::new(slirp_mac, client_mac, 0x0806)
+                                .arp(2, client_mac, client_ip, slirp_mac, slirp_ip)
+                                .payload(&[]);
+
+                            let hwsim_msg = wrap_ethernet_in_hwsim(
+                                &arp_reply,
+                                &AP_BSSID,
+                                &AP_BSSID,
+                                &client_mac,
+                                2412,
+                            )
+                            .expect("Failed to wrap ARP reply");
+
+                            chip.sink_tx
+                                .send(Bytes::from(hwsim_msg))
+                                .await
+                                .expect("Failed to send ARP reply");
+                        } else if eth_frame
+                            .windows(expected_reply.len())
+                            .any(|w| w == expected_reply)
+                        {
+                            return;
+                        }
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!("Guest chip {} did not receive UDP reply from Host via Slirp", chip.id);
+                }
+            }
+        }
+    }
 }
 
 const MOCK_GATEWAY_STREAM_ID: ChipId = ChipId(u32::MAX - 1);
@@ -1475,6 +1749,35 @@ impl MockGateway {
         self.incoming_tx
             .send(Bytes::from(eth_frame))
             .expect("Failed to inject downlink Ethernet frame into MockGateway");
+    }
+
+    pub fn clear(&self) {
+        self.outgoing_packets.lock().unwrap().clear();
+    }
+
+    pub async fn wait_for_packet_count(&self, expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if self.outgoing_packets.lock().unwrap().len() == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Timed out waiting for MockGateway packet count == {expected}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    pub async fn assert_no_packets_within(&self, wait_ms: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        while std::time::Instant::now() < deadline {
+            assert!(
+                self.outgoing_packets.lock().unwrap().is_empty(),
+                "MockGateway unexpectedly received a packet"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 }
 

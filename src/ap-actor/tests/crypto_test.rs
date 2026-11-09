@@ -18,14 +18,29 @@ use ap_actor::{
 };
 use netsim_packets::{Ieee80211, MacAddress};
 
+// ============================================================================
+// Feature: Hostapd Cryptographic Primitives and CCMP Interoperability
+// ============================================================================
+
+// Scenario: Generate random bytes via BoringSSL FFI
+// Given a requested byte length of 16
+// When RandBytes(16) is invoked
+// Then a 16-byte buffer is returned
 #[test]
 fn test_rand_bytes() {
+    // Given / When
     let bytes = RandBytes(16);
+    // Then
     assert_eq!(bytes.len(), 16);
 }
 
+// Scenario: Compute HMAC-SHA1 against RFC 2202 test vector
+// Given a 20-byte key of 0x0b and payload "Hi There"
+// When Hmac(DigestType::SHA1, ...) is invoked
+// Then the digest matches the RFC 2202 expected MAC
 #[test]
 fn test_hmac_sha1() {
+    // Given
     let key = vec![0x0b; 20];
     let data = b"Hi There".to_vec();
     // HMAC-SHA1("Hi There", 0x0b...0x0b) = b617318655057264e28bc0b6fb378c8ef146be00
@@ -33,12 +48,19 @@ fn test_hmac_sha1() {
         0xb6, 0x17, 0x31, 0x86, 0x55, 0x05, 0x72, 0x64, 0xe2, 0x8b, 0xc0, 0xb6, 0xfb, 0x37, 0x8c,
         0x8e, 0xf1, 0x46, 0xbe, 0x00,
     ];
+    // When
     let result = Hmac(DigestType::SHA1, &key, &data);
+    // Then
     assert_eq!(result, expected);
 }
 
+// Scenario: Compute SHA-256 digest against FIPS 180-2 test vector
+// Given input bytes "abc"
+// When Sha(DigestType::SHA256, ...) is invoked
+// Then the 32-byte digest matches the standard SHA-256 vector
 #[test]
 fn test_sha256() {
+    // Given
     let data = b"abc".to_vec();
     // SHA256("abc") =
     // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
@@ -47,13 +69,19 @@ fn test_sha256() {
         0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
         0x15, 0xad,
     ];
+    // When
     let result = Sha(DigestType::SHA256, &data);
+    // Then
     assert_eq!(result, expected);
 }
 
+// Scenario: Wrap and unwrap a 128-bit key using AES Key Wrap (RFC 3394)
+// Given RFC 3394 Test Vector 1 KEK and 16-byte plaintext key data
+// When AesWrap and AesUnwrap are called
+// Then the wrapped ciphertext matches RFC 3394 and unwrapping recovers the original plaintext
 #[test]
 fn test_aes_wrap_unwrap() {
-    // RFC 3394 Test Vector 1
+    // Given: RFC 3394 Test Vector 1
     // KEK = 000102030405060708090A0B0C0D0E0F
     // Plain = 00112233445566778899AABBCCDDEEFF
     // Cipher = 1FA68B0A8112B447 AEF34BD8FB5A7B82 9D3E862371D2CFE5
@@ -67,22 +95,30 @@ fn test_aes_wrap_unwrap() {
         0x82, 0x9d, 0x3e, 0x86, 0x23, 0x71, 0xd2, 0xcf, 0xe5,
     ];
 
+    // When
     let cipher = AesWrap(&kek, &plain);
+    // Then
     assert_eq!(cipher, expected_cipher, "AesWrap failed");
 
+    // When
     let unwrapped = AesUnwrap(&kek, &cipher);
+    // Then
     assert_eq!(unwrapped, plain, "AesUnwrap failed");
 }
 
+// Scenario: Encrypt an 802.11 CCMP frame via BoringSSL FFI and decrypt via SharedKeyStore
+// Given a 128-bit session key, a protected FromDS 802.11 Data frame header, and CCMP nonce/AAD
+// When the payload is encrypted with AesCcmEncrypt and passed to SharedKeyStore::try_decrypt
+// Then SharedKeyStore decrypts the frame and recovers the exact plaintext payload
 #[test]
 fn test_crypto_interop_boringssl_encrypt_rust_decrypt() {
-    // 1. Setup Keys and Data
+    // Given: Keys, Nonce, AAD, and Plaintext
     let key = vec![0xAB; 16]; // 128-bit key
     let nonce = vec![0x11; 13]; // 13-byte Nonce
     let aad = vec![0xAA, 0xBB, 0xCC]; // Some AAD
     let plain = b"InteropPayload".to_vec();
 
-    // 2. Encrypt using BoringSSL (via FFI)
+    // When: Encrypt using BoringSSL (via FFI)
     let mut ciphertext = Vec::new();
     let tag_len = 8; // CCMP uses 8-byte MIC
 

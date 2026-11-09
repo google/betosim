@@ -12,59 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_packets::{
-    ethernet::MacAddr,
-    ieee80211::{
-        FrameControl, Ieee80211, MacHeader3Addr, SequenceControl,
-        eapol::{
-            EAP_CODE_REQUEST, EAP_CODE_RESPONSE, EAP_CODE_SUCCESS, EAP_TYPE_IDENTITY,
-            EAPOL_TYPE_PACKET, EAPOL_TYPE_START, EapHeader, EapolHeader,
-        },
-    },
-    llc::{LlcSnapHeader, control_field, sap},
-};
-use zerocopy::{IntoBytes, U16};
+use netsim_packets::{EAP_CODE_RESPONSE, MacAddr};
 
-mod world;
-use ap_actor::netsim_model::WifiMode;
-use world::ApWorld;
-
-fn build_eapol_frame(
-    dest: MacAddr,
-    bssid: MacAddr,
-    version: u8,
-    packet_type: u8,
-    body: &[u8],
-) -> Vec<u8> {
-    let mut frame = Vec::new();
-    // 802.11 Header (Data)
-    let header = MacHeader3Addr::new(
-        FrameControl::new(0x0008), // Data
-        0,
-        bssid, // DA (AP)
-        dest,  // SA (Client)
-        bssid, // BSSID
-        SequenceControl::new(0),
-    );
-    frame.extend_from_slice(header.as_bytes());
-
-    // LLC
-    let llc = LlcSnapHeader::new(
-        sap::SNAP,
-        sap::SNAP,
-        control_field::UI,
-        [0x00, 0x00, 0x00],
-        netsim_packets::ether_type::EAPOL,
-    );
-    frame.extend_from_slice(llc.as_bytes());
-
-    // EAPOL Header
-    let eapol = EapolHeader::new(version, packet_type, body.len() as u16);
-    frame.extend_from_slice(eapol.as_bytes());
-    frame.extend_from_slice(body);
-
-    frame
-}
+use crate::world::ApWorld;
 
 // ============================================================================
 // Feature: WPA2-Enterprise (802.1X) Authentication
@@ -77,93 +27,110 @@ fn build_eapol_frame(
 // Then the AP sends EAP-Success
 #[tokio::test]
 async fn test_eap_mock_authentication_success() {
+    // Given: A registered AP with Enterprise (802.1X) enabled
     let mut world = ApWorld::new().await;
-
-    // Config with Enterprise Enabled
-    let config = ap_actor::ApConfig {
-        ssid: "EntAP".to_string(),
-        bssid: "02:00:00:00:00:10".parse().unwrap(),
-        channel: 36,
-        hw_mode: WifiMode::Ax,
-        wpa_passphrase: None,
-        beacon_interval: 100,
-        country_code: None,
-        dtim_period: 2,
-        hidden_ssid: false,
-        sae: false,
-        wmm_enabled: true,
-        enterprise_enabled: true,
-        mac_acl_mode: 0,
-        mac_acl_list: vec![],
-        ftm_responder_enabled: true,
-        position: ap_actor::Position::default(),
-    };
-
-    world.given_a_registered_ap_with_config(config).await;
+    world.given_an_enterprise_ap("EntAP").await;
 
     let client_mac: MacAddr = "02:00:00:00:11:11".try_into().unwrap();
-    let bssid: MacAddr = "02:00:00:00:00:10".try_into().unwrap();
 
-    let tx = world.tx_to_ap.as_mut().expect("Registered");
-    let rx = world.rx_from_ap.as_mut().expect("Registered");
+    // When: Station sends EAPOL-Start
+    world.when_station_sends_eapol_start(client_mac).await;
 
-    // 1. Send EAPOL-Start
-    let start_frame = build_eapol_frame(client_mac, bssid, 1, EAPOL_TYPE_START, &[]);
-    tx.send(bytes::Bytes::from(start_frame)).expect("Send Start");
+    // Then: Station receives EAP-Request/Identity
+    let req_id = world.then_station_receives_eap_request_identity().await;
 
-    // 2. Expect EAP-Request/Identity
-    let msg = world
-        .recv_frame(|frame, msg| {
-            // EAPOL Packet (0x888E)
-            if frame.stype() == netsim_packets::management_subtype::BEACON {
-                return false;
-            }
-            msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-        })
-        .await;
+    // When: Station responds with EAP-Response/Identity
+    world.when_station_sends_eap_response_identity(client_mac, req_id, b"User").await;
 
-    // Decode
-    let frame = Ieee80211::decode(&msg).expect("Decode 802.11");
-    // Verify it's EAPOL
-    // Skip 32 bytes (24 header + 8 LLC)
-    // Payload: EAPOL Header(4) + EAP Header(4) + Type(1)
-    let payload = &msg[32..];
-    let eapol_header = zerocopy::Ref::<&[u8], EapolHeader>::from_prefix(payload).unwrap().0;
-    assert_eq!(eapol_header.packet_type, EAPOL_TYPE_PACKET);
+    // Then: Station receives EAP-Success with incremented identifier
+    world.then_station_receives_eap_success(req_id.wrapping_add(1)).await;
+}
 
-    let eap_packet = &payload[4..];
-    let eap_header = zerocopy::Ref::<&[u8], EapHeader>::from_prefix(eap_packet).unwrap().0;
-    assert_eq!(eap_header.code, EAP_CODE_REQUEST);
+// Scenario: EAPOL-Start is ignored when Enterprise (802.1X) is disabled on the AP
+// Given a registered AP with enterprise_enabled set to false
+// When a Station sends an EAPOL-Start frame
+// Then the AP ignores the frame and sends no EAP-Request
+#[tokio::test]
+async fn test_eap_ignored_when_enterprise_disabled() {
+    // Given
+    let mut world = ApWorld::new().await;
+    let config = ApWorld::base_config("NonEntAP", "02:00:00:00:00:10");
+    world.given_a_registered_ap_with_config(config).await;
 
-    let eap_body = &eap_packet[4..];
-    assert_eq!(eap_body[0], EAP_TYPE_IDENTITY);
+    let client_mac: MacAddr = "02:00:00:00:11:22".try_into().unwrap();
 
-    let id = eap_header.id;
-    // 3. Send EAP-Response/Identity
-    let mut response_body = Vec::new();
-    let resp_header = EapHeader::new(EAP_CODE_RESPONSE, id, 5 + 4); // Type(1) + "User"
-    response_body.extend_from_slice(resp_header.as_bytes());
-    response_body.push(EAP_TYPE_IDENTITY);
-    response_body.extend_from_slice(b"User");
+    // When
+    world.when_station_sends_eapol_start(client_mac).await;
 
-    let resp_frame = build_eapol_frame(client_mac, bssid, 1, EAPOL_TYPE_PACKET, &response_body);
-    tx.send(bytes::Bytes::from(resp_frame)).expect("Send Response");
+    // Then
+    world.then_no_eap_or_auth_frame_is_received().await;
+}
 
-    // 4. Expect EAP-Success
-    let msg2 = world
-        .recv_frame(|frame, msg| {
-            // EAPOL Packet (0x888E)
-            if frame.stype() == netsim_packets::management_subtype::BEACON {
-                return false;
-            }
-            msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-        })
-        .await;
+// Scenario: Unsolicited EAP-Response without a prior EAPOL-Start session is rejected
+// Given a registered AP with Enterprise (802.1X) enabled and no active EAP session for the station
+// When the Station sends an EAP-Response/Identity without first initiating EAPOL-Start
+// Then the AP drops the packet and does not emit EAP-Success
+#[tokio::test]
+async fn test_eap_response_without_active_session_is_dropped() {
+    // Given
+    let mut world = ApWorld::new().await;
+    world.given_an_enterprise_ap("EntAPNoSession").await;
 
-    let payload2 = &msg2[32..];
-    let eap_packet2 = &payload2[4..];
-    let eap_header2 = zerocopy::Ref::<&[u8], EapHeader>::from_prefix(eap_packet2).unwrap().0;
+    let client_mac: MacAddr = "02:00:00:00:11:33".try_into().unwrap();
 
-    assert_eq!(eap_header2.code, EAP_CODE_SUCCESS);
-    assert_eq!(eap_header2.id, id.wrapping_add(1));
+    // When: Send EAP-Response/Identity without EAPOL-Start
+    world.when_station_sends_eap_response_identity(client_mac, 1, b"User").await;
+
+    // Then: No EAP-Success is sent
+    world.then_no_eap_or_auth_frame_is_received().await;
+}
+
+// Scenario: Unexpected non-Identity EAP-Response type (e.g. EAP-Nak) does not produce EAP-Success
+// Given a registered AP with Enterprise (802.1X) enabled and an active EAP-Request/Identity
+//   challenge
+// When the Station replies with an unexpected EAP type (Type 3 / Legacy Nak) instead of Identity
+// Then the AP does not complete authentication or send EAP-Success
+#[tokio::test]
+async fn test_eap_unexpected_response_type_does_not_succeed() {
+    // Given
+    let mut world = ApWorld::new().await;
+    world.given_an_enterprise_ap("EntAPBadType").await;
+
+    let client_mac: MacAddr = "02:00:00:00:11:44".try_into().unwrap();
+    world.when_station_sends_eapol_start(client_mac).await;
+    let req_id = world.then_station_receives_eap_request_identity().await;
+
+    // When: Station sends EAP-Response with Type 3 (Legacy Nak) instead of EAP_TYPE_IDENTITY (1)
+    world.when_station_sends_eap_packet(client_mac, EAP_CODE_RESPONSE, req_id, &[3, 0]).await;
+
+    // Then: AP does not emit EAP-Success
+    world.then_no_eap_or_auth_frame_is_received().await;
+}
+
+// Scenario: Malformed/truncated EAPOL-Packet shorter than EapHeader is safely dropped and session
+//   remains intact
+// Given a registered AP with Enterprise (802.1X) enabled and an active EAP session
+// When the Station transmits a truncated EAPOL-Packet body (2 bytes, shorter than EapHeader)
+//   followed by a valid EAP-Response/Identity
+// Then the AP drops the malformed packet without panicking and completes EAP-Success on the
+//   subsequent valid response
+#[tokio::test]
+async fn test_eap_truncated_packet_is_dropped() {
+    // Given
+    let mut world = ApWorld::new().await;
+    world.given_an_enterprise_ap("EntAPTruncated").await;
+
+    let client_mac: MacAddr = "02:00:00:00:11:55".try_into().unwrap();
+    world.when_station_sends_eapol_start(client_mac).await;
+    let req_id = world.then_station_receives_eap_request_identity().await;
+
+    // When: Station sends a truncated 2-byte EAPOL-Packet payload
+    world.when_station_sends_raw_eapol_packet(client_mac, &[EAP_CODE_RESPONSE, 1]).await;
+
+    // Then: No response frame is emitted for the truncated packet
+    world.then_no_eap_or_auth_frame_is_received().await;
+
+    // And: The active EAP session remains intact for a subsequent valid Identity response
+    world.when_station_sends_eap_response_identity(client_mac, req_id, b"User").await;
+    world.then_station_receives_eap_success(req_id.wrapping_add(1)).await;
 }

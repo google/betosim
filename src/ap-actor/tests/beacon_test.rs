@@ -174,7 +174,6 @@ async fn test_probe_response() {
     let mut frame = Vec::new();
     frame.extend_from_slice(header.as_bytes());
     // Body can be empty for our lax parser (Wildcard behavior)
-    let src_id = netsim_model::ChipId(123);
     tx.send(bytes::Bytes::from(frame)).expect("Send Probe Req");
 
     // Verify Response
@@ -191,9 +190,14 @@ async fn test_probe_response() {
     assert_eq!(&msg[10..16], &[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
 }
 
+// Scenario: Active Discovery (Probe Response) - Specific SSID Match
+// Given a registered AP with SSID "MatchAP"
+// When a Station sends a Probe Request targeting SSID "MatchAP"
+// Then the AP responds with a Probe Response frame
 #[tokio::test]
 async fn test_probe_response_ssid_match() {
     info!("Scenario: Active Discovery (Probe Response) - Specific SSID Match");
+    // Given
     let mut world = ApWorld::new().await;
     info!("Given a registered AP 'MatchAP'");
     world.given_a_registered_ap("MatchAP").await;
@@ -201,6 +205,7 @@ async fn test_probe_response_ssid_match() {
     let station_mac: MacAddr = "02:00:00:00:00:99".try_into().unwrap();
     let tx = world.tx_to_ap.as_mut().expect("AP registered");
 
+    // When
     info!("When a Station sends a Probe Request for 'MatchAP'");
     // FC: Mgmt(00), Probe Req(0100=4) -> 0x40
     let header = MacHeader3Addr::new(
@@ -220,18 +225,23 @@ async fn test_probe_response_ssid_match() {
     frame.push(7);
     frame.extend_from_slice(b"MatchAP");
 
-    let src_id = netsim_model::ChipId(123);
     tx.send(bytes::Bytes::from(frame)).expect("Send Probe Req");
 
+    // Then
     info!("Then the AP responds with a Probe Response");
     let msg =
         world.recv_frame(|frame, _| frame.stype() == management_subtype::PROBE_RESPONSE).await;
     assert_eq!(msg[0], 0x50);
 }
 
+// Scenario: Active Discovery - SSID Mismatch Ignored
+// Given a registered AP with SSID "MyAP"
+// When a Station sends a Probe Request for mismatched SSID "OtherAP"
+// Then the AP ignores the request and does not send a Probe Response
 #[tokio::test]
 async fn test_probe_response_ssid_mismatch() {
     info!("Scenario: Active Discovery - SSID Mismatch");
+    // Given
     let mut world = ApWorld::new().await;
     info!("Given a registered AP 'MyAP'");
     world.given_a_registered_ap("MyAP").await;
@@ -239,6 +249,7 @@ async fn test_probe_response_ssid_mismatch() {
     let station_mac: MacAddr = "02:00:00:00:00:88".try_into().unwrap();
     let tx = world.tx_to_ap.as_mut().expect("AP registered");
 
+    // When
     info!("When a Station sends a Probe Request for 'OtherAP'");
     // FC: Mgmt(00), Probe Req(0100=4) -> 0x40
     let header = MacHeader3Addr::new(
@@ -258,9 +269,9 @@ async fn test_probe_response_ssid_mismatch() {
     frame.push(7);
     frame.extend_from_slice(b"OtherAP");
 
-    let src_id = netsim_model::ChipId(123);
     tx.send(bytes::Bytes::from(frame)).expect("Send Probe Req");
 
+    // Then
     info!("Then the AP does NOT respond (ignores request)"); // No helper call
     let rx = world.rx_from_ap.as_mut().expect("AP registered");
 
@@ -284,9 +295,14 @@ async fn test_probe_response_ssid_mismatch() {
     }
 }
 
+// Scenario: Active Discovery - BSSID Mismatch Ignored
+// Given a registered AP with SSID "SpecificAP"
+// When a Station sends a unicast Probe Request for "SpecificAP" addressed to a wrong BSSID
+// Then the AP ignores the request and does not send a Probe Response
 #[tokio::test]
 async fn test_probe_response_bssid_mismatch() {
     info!("Scenario: Active Discovery - BSSID Mismatch");
+    // Given
     let mut world = ApWorld::new().await;
     info!("Given a registered AP 'SpecificAP'");
     world.given_a_registered_ap("SpecificAP").await;
@@ -294,7 +310,7 @@ async fn test_probe_response_bssid_mismatch() {
     let station_mac: MacAddr = "02:00:00:00:00:77".try_into().unwrap();
     let tx = world.tx_to_ap.as_mut().expect("AP registered");
 
-    // Send Probe Req with Correct SSID but Wrong BSSID (Unicast)
+    // When: Send Probe Req with Correct SSID but Wrong BSSID (Unicast)
     info!("When a Station sends a Probe Request for 'SpecificAP' to wrong BSSID");
 
     let wrong_bssid: MacAddr = "02:00:00:00:00:99".try_into().unwrap();
@@ -317,9 +333,9 @@ async fn test_probe_response_bssid_mismatch() {
     frame.push(10);
     frame.extend_from_slice(b"SpecificAP");
 
-    let src_id = netsim_model::ChipId(123);
     tx.send(bytes::Bytes::from(frame)).expect("Send Probe Req");
 
+    // Then
     info!("Then the AP does NOT respond");
     let rx = world.rx_from_ap.as_mut().expect("AP registered");
 
@@ -415,9 +431,16 @@ async fn test_create_ap_with_country_and_tim() {
     assert!(found_tim, "Beacon missing TIM IE");
 }
 
+// Scenario: Hidden SSID network suppresses SSID in Beacons and ignores wildcard Probe Requests
+// Given a registered AP configured with hidden_ssid set to true and SSID "HiddenAP"
+// When a Beacon is broadcast, a Wildcard Probe Request is sent, and a directed Probe Request
+//   for "HiddenAP" is sent
+// Then the Beacon carries an empty SSID IE, the Wildcard Probe Request is ignored, and the
+//   directed Probe Request receives a Probe Response
 #[tokio::test]
 async fn test_hidden_ssid() {
     info!("Scenario: Hidden SSID");
+    // Given
     let mut world = ApWorld::new().await;
 
     let config = ap_actor::ApConfig {
@@ -441,7 +464,7 @@ async fn test_hidden_ssid() {
 
     world.given_a_registered_ap_with_config(config).await;
 
-    // 1. Verify Beacon has Empty SSID
+    // Then 1: Verify Beacon has Empty SSID
     let rx = world.rx_from_ap.as_mut().expect("client registered");
     let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
@@ -470,7 +493,7 @@ async fn test_hidden_ssid() {
     }
     assert!(found_ssid, "Beacon missing SSID IE");
 
-    // 2. Wildcard Probe Request -> Should be IGNORED
+    // When 2: Wildcard Probe Request -> Should be IGNORED
     let tx = world.tx_to_ap.as_mut().expect("AP registered");
     let station_mac: MacAddr = "02:00:00:00:11:11".try_into().unwrap();
 
@@ -488,10 +511,9 @@ async fn test_hidden_ssid() {
     frame.push(0);
     frame.push(0);
 
-    let src_id = netsim_model::ChipId(123);
     tx.send(bytes::Bytes::from(frame)).expect("Send Wildcard Probe");
 
-    // Drain rx for a moment to ensure NO Probe Resp (0x50)
+    // Then 2: Drain rx for a moment to ensure NO Probe Resp (0x50)
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(500) {
         if let Ok(Some(msg)) =
@@ -508,7 +530,7 @@ async fn test_hidden_ssid() {
         }
     }
 
-    // 3. Specific Probe Request -> Should be ANSWERED
+    // When 3: Specific Probe Request -> Should be ANSWERED
     let mut frame2 = Vec::new();
     frame2.extend_from_slice(header.as_bytes());
     // SSID "HiddenAP"
@@ -518,15 +540,21 @@ async fn test_hidden_ssid() {
 
     tx.send(bytes::Bytes::from(frame2)).expect("Send Specific Probe");
 
+    // Then 3: Receive Probe Response
     let resp =
         world.recv_frame(|frame, _| frame.stype() == management_subtype::PROBE_RESPONSE).await;
 
     assert_eq!(resp[0], 0x50, "Expected Probe Response");
 }
 
+// Scenario: WMM Vendor Specific Information Element is broadcast when wmm_enabled is true
+// Given a registered Wi-Fi 6 AP with wmm_enabled set to true
+// When a Beacon frame is received
+// Then the Beacon includes the WMM Vendor Specific IE (OUI 00:50:f2, Type 2, Subtype 1, Version 1)
 #[tokio::test]
 async fn test_wmm_ie_presence() {
     info!("Scenario: WMM IE Presence");
+    // Given
     let mut world = ApWorld::new().await;
 
     let config = ap_actor::ApConfig {
@@ -550,14 +578,14 @@ async fn test_wmm_ie_presence() {
 
     world.given_a_registered_ap_with_config(config).await;
 
-    // Verify Beacon
+    // When: Receive Beacon
     let rx = world.rx_from_ap.as_mut().expect("client registered");
     let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
         .expect("Timeout")
         .expect("Beacon");
 
-    // Check for WMM Vendor Specific IE (OUI 00:50:f2, Type 2)
+    // Then: Check for WMM Vendor Specific IE (OUI 00:50:f2, Type 2)
     let mut offset = 36;
     let mut found_wmm = false;
 
@@ -591,22 +619,27 @@ async fn test_wmm_ie_presence() {
     assert!(found_wmm, "Beacon missing WMM IE");
 }
 
+// Scenario: Verify structural parity between Beacon and Probe Response frames
+// Given a registered WPA-secured AP "ParityAP"
+// When a Beacon frame is received and a Station sends a Probe Request for "ParityAP"
+// Then the Beacon and Probe Response share identical capability flags and IEs payload
 #[tokio::test]
 async fn test_beacon_and_probe_response_frame_structure_parity() {
     info!("Scenario: Verify structural parity between Beacon and Probe Response frames");
+    // Given
     let mut world = ApWorld::new().await;
     let bssid: MacAddr = "02:00:00:00:00:01".parse().unwrap();
     let station_mac: MacAddr = "02:00:00:00:00:77".parse().unwrap();
     world.given_a_registered_ap_with_wpa("ParityAP", "SecretKey123").await;
 
-    // 1. Receive Beacon frame
+    // When 1: Receive Beacon frame
     let rx = world.rx_from_ap.as_mut().expect("client registered");
     let beacon_msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
         .expect("Timeout receiving beacon")
         .expect("Beacon channel closed");
 
-    // 2. Send Probe Request to elicit Probe Response
+    // When 2: Send Probe Request to elicit Probe Response
     let tx = world.tx_to_ap.as_mut().expect("AP registered");
     let header = MacHeader3Addr::new(
         FrameControl::new(0x0040), // Mgmt(00), Probe Req(0100=4) -> 0x40
@@ -625,7 +658,7 @@ async fn test_beacon_and_probe_response_frame_structure_parity() {
     let probe_resp_msg =
         world.recv_frame(|frame, _| frame.stype() == management_subtype::PROBE_RESPONSE).await;
 
-    // Verify Beacon Header & Addressing
+    // Then: Verify Beacon & Probe Response Headers, Capabilities, and IEs
     let beacon_frame = Ieee80211::decode(&beacon_msg).expect("Decode Beacon");
     assert_eq!(beacon_frame.stype(), management_subtype::BEACON);
     assert_eq!(beacon_frame.get_addr1(), MacAddr::BROADCAST);

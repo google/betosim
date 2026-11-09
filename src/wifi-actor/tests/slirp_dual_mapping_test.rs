@@ -12,73 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use crate::world::{AP_BSSID, World};
 
-use ap_actor::SharedKeyStore;
-use netsim_model::ChipId;
-use netsim_packets::MacAddress;
-use wifi_actor::{DebugArgs, GatewayTrait, Medium, SlirpGateway, SystemClock, WifiStats};
+// ============================================================================
+// Feature: SLIRP Dual MAC Mapping (Randomized 802.11 SA vs HWSIM Transmitter MAC)
+// ============================================================================
 
+// Scenario: SlirpGateway delivers downlink traffic addressed to a station's HWSIM MAC when using a
+//   randomized 802.11 MAC
+// Given a Wifi World with an active AP and a station whose 802.11 SA (00:00:00:00:00:02) differs
+//   from its HWSIM MAC (00:00:00:00:00:03)
+// When the station transmits an uplink frame establishing the dual mapping and SlirpGateway
+//   receives a downlink Ethernet frame addressed to the HWSIM MAC
+// Then SharedKeyStore maps both MACs to the AP BSSID and SlirpGateway::handle_incoming resolves
+//   the BSSID and forwards the frame to the station without dropping it
 #[tokio::test]
 async fn test_slirp_does_not_drop_with_dual_mapping() {
-    // 1. Setup dependencies
-    let shared_keys = Arc::new(SharedKeyStore::new());
-    let clock = Arc::new(SystemClock);
-    let wifi_stats = WifiStats::new(clock);
-    let debug_args = Arc::new(DebugArgs::default());
-    let mut medium = Medium::new(shared_keys.clone(), wifi_stats, debug_args);
+    // Given: A World with an active AP and a station using a randomized 802.11 MAC
+    // distinct from its HWSIM hardware MAC.
+    let mut world = World::new().await;
+    world.given_an_ap().await;
 
-    // Add a BSSID to the store to simulate an active AP
-    let ap_bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
-    shared_keys.add_bssid(ap_bssid);
+    let randomized_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+    let hw_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
 
-    // Add a station to medium to receive the flooded packet
-    let sta_mac = MacAddress::new([0x00, 0x00, 0x00, 0x00, 0x00, 0x02]);
-    let station = wifi_actor::Station::new(1, sta_mac, sta_mac);
-    medium.stations.insert(sta_mac, station);
-    medium.add(1);
-    medium.set_enabled(1, true);
+    // When: The station transmits an uplink frame establishing the dual mapping in SharedKeyStore.
+    world.given_a_chip_with_randomized_mac(1, randomized_mac, hw_mac).await;
 
-    let gateway = SlirpGateway::new(None);
-
-    let src_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
-    let dest_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x02]; // Randomized MAC
-    let hw_mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x03]; // Hardware MAC
-
-    // Slirp response is addressed to the hardware MAC
-    let eth_frame = create_ethernet_frame(&src_mac, &hw_mac, b"Hello");
-    let packet = bytes::Bytes::from(eth_frame);
-
-    // Simulate an outgoing packet from the station to set up the dual mapping
-    let outgoing_eth = create_ethernet_frame(&dest_mac, &src_mac, b"Outgoing");
-    let hwsim_packet = super::hwsim_helper::wrap_ethernet_in_hwsim(
-        &outgoing_eth,
-        &ap_bssid.bytes,
-        &ap_bssid.bytes, // dest_hwsim_addr (receiver is AP)
-        &hw_mac,         // src_hwsim_addr (transmitter is Station's hardware MAC)
-        2412,            // freq
-    )
-    .expect("Failed to wrap ethernet in hwsim");
-
-    let _ = medium
-        .resolve_tx_packet(1, &bytes::Bytes::from(hwsim_packet))
-        .expect("Failed to resolve tx packet");
-
-    let mut out_queue = Vec::new();
-
-    // Simulate attempt
-    println!("Sending packet from Slirp...");
-    gateway.handle_incoming(ChipId(0), packet.clone(), &mut medium, &shared_keys, &mut out_queue);
-
-    assert!(!out_queue.is_empty(), "Packet dropped by SlirpGateway!");
-    println!("Packet successfully forwarded by SlirpGateway.");
-}
-
-fn create_ethernet_frame(src: &[u8; 6], dst: &[u8; 6], payload: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(dst);
-    bytes.extend_from_slice(src);
-    bytes.extend_from_slice(&[0x08, 0x00]); // IPv4
-    bytes.extend_from_slice(payload);
-    bytes
+    // Then: Both the randomized MAC and hardware MAC are mapped to the AP BSSID in SharedKeyStore,
+    // and SlirpGateway::handle_incoming resolves hw_mac via SharedKeyStore::get_station_bssid and
+    // delivers the downlink payload to the station without dropping.
+    world.then_shared_keys_maps_mac_to_bssid(randomized_mac, AP_BSSID);
+    world.then_shared_keys_maps_mac_to_bssid(hw_mac, AP_BSSID);
+    world.then_slirp_gateway_delivers_downlink_to_mac(0, hw_mac, "Hello Dual Mapping");
 }

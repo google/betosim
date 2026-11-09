@@ -53,6 +53,64 @@ async fn test_broadcast_flow_real() {
     world.then_chip_receives_payload(1, "Broadcast Message").await;
 }
 
+// Scenario: A Station registered with multiple virtual MACs on the same channel receives a single
+//   copy of a broadcast frame (medium/tx.rs:66-73, related to b/525133105)
+// Given a Wifi Medium with a Sender chip and a Receiver chip registered across 3 virtual MACs
+//   sharing the same hwsim_addr on channel 2412
+// When the Sender transmits a broadcast frame
+// Then the Receiver receives a single deduplicated copy (1 copy, not 3) and no further duplicates
+#[tokio::test]
+async fn test_virtual_mac_broadcast_deduplication() {
+    // Given: A Sender chip and a Receiver chip registered across 3 virtual MACs
+    // sharing the same hwsim_addr on channel 2412.
+    let mut world = World::new().await;
+    let _sender = world.given_a_chip(1).await;
+    let _receiver = world.given_a_chip(2).await;
+
+    world
+        .given_chip_registers_virtual_macs(
+            1,
+            0,
+            &[
+                ([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x02], 2412),
+                ([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x03], 2412),
+            ],
+        )
+        .await;
+
+    // When: Sender transmits a single broadcast frame.
+    world.when_chip_transmits_broadcast(0, "SingleBroadcastCopy").await;
+
+    // Then: Receiver receives a single copy (1 copy, not 3) and no further duplicates.
+    world.then_chip_receives_payload(1, "SingleBroadcastCopy").await;
+    world.then_chip_receives_nothing_within(1, 250).await;
+}
+
+// Scenario: A Station registered on multiple channels receives a single copy of a broadcast frame
+//   deduplicated by client_id / hwsim_addr (medium/tx.rs:66-73, b/525133105)
+// Given a Wifi Medium with a Sender chip and a Receiver chip registered on channels 2412 and 5180
+// When the Sender transmits a broadcast frame
+// Then the Receiver receives a single copy (1 copy, not 2) and no further duplicates
+#[tokio::test]
+#[ignore = "b/525133105: resolve_targets dedups by (hwsim_addr, freq)"]
+async fn test_multichannel_broadcast_deduplication_by_client_id() {
+    // Given: A Sender chip and a Receiver chip registered on both 2412 MHz and 5180 MHz.
+    let mut world = World::new().await;
+    let _sender = world.given_a_chip(1).await;
+    let _receiver = world.given_a_chip(2).await;
+
+    world
+        .given_chip_registers_virtual_macs(1, 0, &[([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x04], 5180)])
+        .await;
+
+    // When: Sender transmits a single broadcast frame.
+    world.when_chip_transmits_broadcast(0, "SingleMultiChannelBroadcast").await;
+
+    // Then: Receiver should receive a single copy across all channels, not duplicates.
+    world.then_chip_receives_payload(1, "SingleMultiChannelBroadcast").await;
+    world.then_chip_receives_nothing_within(1, 250).await;
+}
+
 // ============================================================================
 // Feature: Access Point Connectivity (Infrastructure)
 // ============================================================================

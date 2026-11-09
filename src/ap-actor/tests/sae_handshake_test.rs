@@ -13,12 +13,7 @@
 // limitations under the License.
 
 use ap_actor::SaeStateMachine;
-use netsim_model::WifiMode;
-use netsim_packets::{
-    AuthenticationFixedFields, FrameControl, Ieee80211, MacAddr, MacHeader3Addr, SequenceControl,
-    management_subtype,
-};
-use zerocopy::{IntoBytes, U16};
+use netsim_packets::{Ieee80211, MacAddr, management_subtype};
 
 use crate::world::ApWorld;
 
@@ -33,69 +28,18 @@ use crate::world::ApWorld;
 // Then the AP completes the handshake (sends Confirm)
 #[tokio::test]
 async fn test_sae_handshake_success() {
+    // Given
     let mut world = ApWorld::new().await;
-
-    // Config with SAE Enabled
-    let config = ap_actor::ApConfig {
-        ssid: "SaeAP".to_string(),
-        bssid: "02:00:00:00:00:01".parse().unwrap(),
-        channel: 36,
-        hw_mode: WifiMode::Ax,
-        wpa_passphrase: Some("password123".to_string()),
-        beacon_interval: 100,
-        country_code: None,
-        dtim_period: 2,
-        hidden_ssid: false,
-        sae: true,
-        wmm_enabled: true,
-        enterprise_enabled: false,
-        mac_acl_mode: 0,
-        mac_acl_list: vec![],
-        ftm_responder_enabled: true,
-        position: netsim_model::Position::default(),
-    };
-
-    world.given_a_registered_ap_with_config(config.clone()).await;
+    let ap_bssid = world.given_a_sae_ap("SaeAP", "password123").await;
 
     let client_mac: MacAddr = "02:00:00:00:00:02".try_into().unwrap();
-    let ap_bssid = config.bssid;
-
-    // Start Client-Side SAE State Machine to generate valid frames
     let mut client_sae = SaeStateMachine::new(&client_mac.bytes, &ap_bssid.bytes, b"password123");
 
-    // 1. Client Sends Commit
+    // When: Client sends SAE Commit (Seq 1)
     let commit_body = client_sae.build_commit().expect("Client Commit");
+    world.when_station_sends_sae_auth(client_mac, 1, 0, &commit_body).await;
 
-    // Construct Auth Frame (Seq 1)
-    let mut auth_frame = Vec::new();
-    let header = MacHeader3Addr::new(
-        FrameControl::new(0x00B0), // Mgmt, Auth
-        0,
-        ap_bssid,
-        client_mac,
-        ap_bssid,
-        SequenceControl::new(0),
-    );
-    auth_frame.extend_from_slice(header.as_bytes());
-
-    let fixed = AuthenticationFixedFields {
-        algorithm: U16::new(3), // SAE
-        sequence: U16::new(1),
-        status: U16::new(0),
-    };
-    auth_frame.extend_from_slice(fixed.as_bytes());
-    auth_frame.extend_from_slice(&commit_body);
-
-    let tx = world.tx_to_ap.as_ref().unwrap().clone();
-    let src_id = netsim_model::ChipId(200);
-    tx.send(bytes::Bytes::from(auth_frame)).unwrap();
-
-    // 2. Expect AP Commit (Seq 1 or 2? SAE is 1, but response usually has same seq
-    //    if strictly following Request/Response? No.
-    // 2. Expect AP Commit (Seq 1 or 2? SAE is 1, but response usually has same seq
-    //    if strictly following Request/Response? No.
-    // 802.11-2016: SAE Commit is Seq 1. Confirm is Seq 2.
-    // Both sides send Commit (Seq 1).
+    // Then: AP replies with SAE Commit (Seq 1)
     let msg1 = world
         .recv_frame(|frame, _| {
             if frame.stype() == management_subtype::BEACON {
@@ -108,37 +52,14 @@ async fn test_sae_handshake_success() {
     let frame1 = Ieee80211::decode(&msg1).unwrap();
     assert_eq!(frame1.stype(), management_subtype::AUTHENTICATION);
 
-    // Check it is SAE
-    // Skip Header(24) + Fixed(6)
     let body1 = &msg1[30..];
-    // AP should send Commit (Seq 1)
-    // Try to parse with Client SAE
     client_sae.parse_commit(body1).expect("Client failed to parse AP Commit");
 
-    // 3. Client Sends Confirm (Seq 2)
+    // When: Client sends SAE Confirm (Seq 2)
     let confirm_body = client_sae.build_confirm().expect("Client Confirm");
+    world.when_station_sends_sae_auth(client_mac, 2, 0, &confirm_body).await;
 
-    let mut confirm_frame = Vec::new();
-    let header2 = MacHeader3Addr::new(
-        FrameControl::new(0x00B0),
-        0,
-        ap_bssid,
-        client_mac,
-        ap_bssid,
-        SequenceControl::new(0),
-    );
-    confirm_frame.extend_from_slice(header2.as_bytes());
-    let fixed2 = AuthenticationFixedFields {
-        algorithm: U16::new(3),
-        sequence: U16::new(2),
-        status: U16::new(0),
-    };
-    confirm_frame.extend_from_slice(fixed2.as_bytes());
-    confirm_frame.extend_from_slice(&confirm_body);
-
-    tx.send(bytes::Bytes::from(confirm_frame)).unwrap();
-
-    // 4. Expect AP Confirm (Seq 2)
+    // Then: AP replies with SAE Confirm (Seq 2)
     let msg2 = world
         .recv_frame(|frame, _| {
             if frame.stype() == management_subtype::BEACON {
@@ -153,6 +74,42 @@ async fn test_sae_handshake_success() {
 
     let body2 = &msg2[30..];
     client_sae.parse_confirm(body2).expect("Client failed to parse AP Confirm");
+}
 
-    println!("SAE Handshake Integration Test Passed");
+// Scenario: SAE Confirm without a prior SAE Commit session is rejected
+// Given a registered AP with WPA3-SAE enabled and no active SAE session for the station
+// When a Station sends an out-of-order SAE Confirm (sequence 2) without a prior Commit
+// Then the AP ignores the frame and does not send an Authentication response
+#[tokio::test]
+async fn test_sae_confirm_without_prior_commit_is_rejected() {
+    // Given
+    let mut world = ApWorld::new().await;
+    world.given_a_sae_ap("SaeAPNoSession", "password123").await;
+
+    let client_mac: MacAddr = "02:00:00:00:00:03".try_into().unwrap();
+
+    // When: Send SAE Confirm (seq 2) with dummy confirm payload without prior Commit
+    world.when_station_sends_sae_auth(client_mac, 2, 0, &[0u8; 34]).await;
+
+    // Then: AP does not emit an SAE Confirm
+    world.then_no_eap_or_auth_frame_is_received().await;
+}
+
+// Scenario: SAE Commit with malformed/truncated payload is rejected
+// Given a registered AP with WPA3-SAE enabled
+// When a Station sends an SAE Commit (sequence 1) with a truncated/invalid body
+// Then the AP rejects the malformed Commit and sends no Authentication response
+#[tokio::test]
+async fn test_sae_commit_with_invalid_payload_is_rejected() {
+    // Given
+    let mut world = ApWorld::new().await;
+    world.given_a_sae_ap("SaeAPMalformed", "password123").await;
+
+    let client_mac: MacAddr = "02:00:00:00:00:04".try_into().unwrap();
+
+    // When: Send SAE Commit (seq 1) with truncated 4-byte payload
+    world.when_station_sends_sae_auth(client_mac, 1, 0, &[0x13, 0x00, 0xAA, 0xBB]).await;
+
+    // Then: AP does not emit an SAE Commit response
+    world.then_no_eap_or_auth_frame_is_received().await;
 }
