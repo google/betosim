@@ -532,8 +532,7 @@ impl NetsimDaemon {
 
         // Log where netsim artifacts are located
         info!("Artifacts: {:?}", netsimd_temp_dir());
-        // Log all args
-        info!("{args:#?}");
+        info!("{}", args.format_for_log());
 
         platform::preflight_check(&args)?;
 
@@ -617,7 +616,7 @@ impl NetsimDaemon {
             // Duplicating the previous two logs to be included in
             // netsim_stderr.log
             info!("netsim artifacts path: {:?}", netsimd_temp_dir());
-            info!("{args:#?}");
+            info!("{}", args.format_for_log());
         }
     }
 

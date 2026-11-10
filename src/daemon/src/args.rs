@@ -15,8 +15,19 @@
 use std::env;
 
 use clap::Parser;
+use serde::Serialize;
+use serde_json::Value;
 
-#[derive(Debug, Parser, Default)]
+const REDACTED_VALUE: &str = "<redacted>";
+
+fn serialize_redacted<T: ?Sized, S: serde::Serializer>(
+    _value: &T,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(REDACTED_VALUE)
+}
+
+#[derive(Debug, Parser, Default, Serialize)]
 pub struct Args {
     /// File descriptor start up info proto
     #[arg(short = 's', long, alias = "fd_startup_str")]
@@ -163,10 +174,11 @@ pub struct Args {
     /// Set the initial SSID for the default Access Point (defaults to
     /// 'AndroidWifi')
     #[command(flatten)]
+    #[serde(flatten)]
     pub wifi: WifiConfig,
 }
 
-#[derive(Debug, Default, Clone, clap::Args)]
+#[derive(Debug, Default, Clone, clap::Args, Serialize)]
 pub struct WifiConfig {
     /// Set the initial SSID for the default Access Point (defaults to
     /// 'AndroidWifi')
@@ -175,6 +187,7 @@ pub struct WifiConfig {
 
     /// Set the WPA passphrase for the default Access Point (optional)
     #[arg(long, alias = "wifi-password", help_heading = "WiFi Settings")]
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_redacted")]
     pub wifi_password: Option<String>,
 
     /// Set the initial radio channel for the default Access Point (defaults to
@@ -226,7 +239,8 @@ impl WifiConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ClapWifiMode {
     A,
     B,
@@ -308,6 +322,26 @@ impl Args {
     /// is unreachable in the current network namespace.
     pub fn validate_ambient_http_proxy(&mut self) {
         self.http_proxy = slirp_actor::validate_ambient_http_proxy(self.http_proxy.take());
+    }
+
+    /// Formats only non-default CLI arguments as a single-line summary for
+    /// startup logging, redacting `wifi_password`.
+    #[must_use]
+    pub(crate) fn format_for_log(&self) -> String {
+        let (Ok(Value::Object(map)), Ok(Value::Object(default_map))) =
+            (serde_json::to_value(self), serde_json::to_value(Self::default()))
+        else {
+            return "Args { <unavailable> }".to_string();
+        };
+        let mut entries: Vec<(String, Value)> =
+            map.into_iter().filter(|(key, val)| default_map.get(key) != Some(val)).collect();
+        if entries.is_empty() {
+            return "Args {}".to_string();
+        }
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        let parts: Vec<String> =
+            entries.into_iter().map(|(key, val)| format!("{key}: {val}")).collect();
+        format!("Args {{ {} }}", parts.join(", "))
     }
 }
 
@@ -428,5 +462,56 @@ mod tests {
         {
             assert_eq!(config_default.resolved_tap(), None);
         }
+    }
+
+    #[test]
+    fn test_format_for_log_defaults_only() {
+        assert_eq!(Args::default().format_for_log(), "Args {}");
+    }
+
+    #[test]
+    fn test_parse_from_no_flags_matches_default() {
+        let mut parsed = Args::parse_from(["netsimd"]);
+        parsed.http_proxy = None;
+        assert_eq!(parsed.format_for_log(), "Args {}");
+    }
+
+    #[test]
+    fn test_format_for_log_non_default_cli_flags() {
+        let mut args = Args::parse_from(["netsimd", "--logtostderr", "--instance", "7", "--dev"]);
+        args.http_proxy = None;
+        assert_eq!(args.format_for_log(), "Args { dev: true, instance: 7, logtostderr: true }");
+    }
+
+    #[test]
+    fn test_format_for_log_redacts_wifi_password() {
+        let mut args = Args::parse_from([
+            "netsimd",
+            "--wifi-ssid",
+            "OfficeAp",
+            "--wifi-password",
+            "s3cr3tPass",
+            "--wifi-mode",
+            "ac",
+        ]);
+        args.http_proxy = None;
+        let formatted = args.format_for_log();
+        assert_eq!(
+            formatted,
+            r#"Args { wifi_mode: "ac", wifi_password: "<redacted>", wifi_ssid: "OfficeAp" }"#
+        );
+        assert!(!formatted.contains("s3cr3tPass"));
+        assert!(!serde_json::to_string(&args).unwrap().contains("s3cr3tPass"));
+    }
+
+    #[test]
+    fn test_format_for_log_escapes_multiline_strings_to_single_line() {
+        let args = Args {
+            fd_startup_str: Some("{\n  \"devices\": []\n}".to_string()),
+            ..Default::default()
+        };
+        let formatted = args.format_for_log();
+        assert!(!formatted.contains('\n'));
+        assert!(formatted.contains(r#"fd_startup_str: "{\n  \"devices\": []\n}""#));
     }
 }
