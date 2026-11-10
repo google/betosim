@@ -473,6 +473,7 @@ pub(crate) fn from_proto_chip_update(c: ProtoChip) -> ChipUpdate {
     ChipUpdate {
         id: if c.id != 0 { Some(ChipId(c.id)) } else { None },
         name: if c.name.is_empty() { None } else { Some(c.name) },
+        kind: from_proto_chip_kind(c.kind.enum_value_or_default()),
         manufacturer: if c.manufacturer.is_empty() { None } else { Some(c.manufacturer) },
         product_name: if c.product_name.is_empty() { None } else { Some(c.product_name) },
         pose: PoseUpdate {
@@ -737,5 +738,22 @@ mod tests {
                 }))
             );
         }
+    }
+
+    #[test]
+    fn test_from_proto_chip_update_preserves_kind_without_radio_oneof() {
+        let mut chip = ProtoChip::new();
+        chip.kind = EnumOrUnknown::new(ProtoChipKind::BLUETOOTH);
+        let update = from_proto_chip_update(chip);
+        assert_eq!(update.kind, Some(ApiChipKind::BLUETOOTH));
+        assert_eq!(update.variant, None);
+    }
+
+    #[test]
+    fn test_from_proto_chip_update_maps_unspecified_kind_to_none() {
+        let mut chip = ProtoChip::new();
+        chip.kind = EnumOrUnknown::new(ProtoChipKind::UNSPECIFIED);
+        let update = from_proto_chip_update(chip);
+        assert_eq!(update.kind, None);
     }
 }

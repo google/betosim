@@ -1809,6 +1809,81 @@ impl World {
         *self.last_error.lock().unwrap() = res.err();
     }
 
+    /// BDD Step: When I patch a named chip with kind filter and manufacturer.
+    pub async fn when_patch_named_chip_kind_manufacturer(
+        &self,
+        device_id: DeviceId,
+        chip_name: &str,
+        kind: ChipKind,
+        manufacturer: &str,
+    ) {
+        self.when_update_device_chip(
+            device_id,
+            ChipUpdate {
+                name: Some(chip_name.to_string()),
+                kind: Some(kind),
+                manufacturer: Some(manufacturer.to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    /// BDD Step: When I patch a chip by kind selector and manufacturer.
+    pub async fn when_patch_chip_by_kind_manufacturer(
+        &self,
+        device_id: DeviceId,
+        kind: ChipKind,
+        manufacturer: &str,
+    ) {
+        self.when_update_device_chip(
+            device_id,
+            ChipUpdate {
+                kind: Some(kind),
+                manufacturer: Some(manufacturer.to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    /// BDD Step: When I try to patch a chip by kind selector.
+    pub async fn when_try_patch_chip_by_kind(&self, device_id: DeviceId, kind: ChipKind) {
+        self.when_try_update_device_chip(
+            device_id,
+            ChipUpdate { kind: Some(kind), ..Default::default() },
+        )
+        .await;
+    }
+
+    /// BDD Step: When I try to patch a chip by ID and explicit kind selector.
+    pub async fn when_try_patch_chip_by_id_and_kind(
+        &self,
+        device_id: DeviceId,
+        chip_id: ChipId,
+        kind: ChipKind,
+    ) {
+        self.when_try_update_device_chip(
+            device_id,
+            ChipUpdate { id: Some(chip_id), kind: Some(kind), ..Default::default() },
+        )
+        .await;
+    }
+
+    /// BDD Step: When I try to patch a chip with conflicting kind selector and variant.
+    pub async fn when_try_patch_chip_with_conflicting_kind_and_variant(
+        &self,
+        device_id: DeviceId,
+        kind: ChipKind,
+        variant: ChipVariantUpdate,
+    ) {
+        self.when_try_update_device_chip(
+            device_id,
+            ChipUpdate { kind: Some(kind), variant: Some(variant), ..Default::default() },
+        )
+        .await;
+    }
+
     /// BDD Step: When I patch device pose and chip.
     pub async fn when_patch_device_pose_and_chip(
         &self,

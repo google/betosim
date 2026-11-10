@@ -161,6 +161,7 @@ async fn test_update_chip_state() {
     let mut update = netsim_model::ChipUpdate {
         id: Some(ChipId(chip_id)),
         name: None,
+        kind: None,
         manufacturer: None,
         product_name: None,
         pose: Default::default(),

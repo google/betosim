@@ -481,7 +481,7 @@ async fn test_update_device_rejects_ambiguous_name_and_variant_for_duplicate_chi
 
 // Scenario: Update device rejects selectorless chip update
 //   Given a running Device Actor with a device
-//   When I update the device with a ChipUpdate lacking id, name, and variant
+//   When I update the device with a ChipUpdate lacking id, name, kind, and variant
 //   Then the operation fails with an InvalidInput error indicating at least
 //     one selector is required
 #[tokio::test]
@@ -491,14 +491,14 @@ async fn test_update_device_rejects_selectorless_update() {
     let device_name = "test-dev";
     let device_id = world.when_create_device(device_name).await;
 
-    // When I update the device with a ChipUpdate lacking id, name, and variant
+    // When I update the device with a ChipUpdate lacking id, name, kind, and variant
     let chip_update = ChipUpdate { id: None, name: None, variant: None, ..Default::default() };
     world.when_try_update_device_chip(device_id, chip_update).await;
 
     // Then the operation fails with an InvalidInput error indicating at least one selector is
     // required
     world.then_update_rejected_as_invalid_input(
-        "ChipUpdate requires at least one selector (id, name, or variant)",
+        "ChipUpdate requires at least one selector (id, name, kind, or variant)",
     );
 }
 
@@ -737,6 +737,143 @@ async fn test_patch_chip_id_mismatched_kind_error() {
 
     // Then the update fails with MismatchedChipKind
     world.then_error_is_mismatched_chip_kind(ChipKind::WIFI, ChipKind::BLUETOOTH);
+}
+
+// Scenario: Disambiguate identical chip names across kinds using explicit kind selector
+#[tokio::test]
+async fn test_patch_chip_disambiguate_shared_name_with_kind() {
+    // Given a device with Bluetooth and Wi-Fi chips sharing the name "cvd-1"
+    let world = World::new().await;
+    let (device_id, _) = world
+        .given_device_with_chips_sharing_name(
+            "guid-1",
+            "cvd-1",
+            &[ChipKind::BLUETOOTH, ChipKind::WIFI],
+        )
+        .await;
+
+    // When I update chip "cvd-1" specifying Wi-Fi kind selector and new manufacturer
+    world
+        .when_patch_named_chip_kind_manufacturer(
+            device_id,
+            "cvd-1",
+            ChipKind::WIFI,
+            MATCHED_MANUFACTURER,
+        )
+        .await;
+
+    // Then the Wi-Fi chip receives the updated manufacturer while Bluetooth chip remains unchanged
+    world.then_chip_of_kind_manufacturer_is(device_id, ChipKind::WIFI, MATCHED_MANUFACTURER).await;
+    world
+        .then_chip_of_kind_manufacturer_is(device_id, ChipKind::BLUETOOTH, DEFAULT_MANUFACTURER)
+        .await;
+}
+
+// Scenario: Match unique chip by explicit kind selector without radio payload
+#[tokio::test]
+async fn test_patch_chip_matches_unique_chip_by_kind_without_payload() {
+    // Given a device with distinct Bluetooth and UWB chips
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "bt-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "uwb-chip",
+            device_api::ChipCreateVariant::Uwb(Default::default()),
+        )
+        .await;
+
+    // When I update the UWB chip using only its kind selector and a new manufacturer
+    world
+        .when_patch_chip_by_kind_manufacturer(device_id, ChipKind::UWB, MATCHED_MANUFACTURER)
+        .await;
+
+    // Then the UWB chip receives the updated manufacturer while Bluetooth chip remains unchanged
+    world.then_chip_of_kind_manufacturer_is(device_id, ChipKind::UWB, MATCHED_MANUFACTURER).await;
+    world
+        .then_chip_of_kind_manufacturer_is(device_id, ChipKind::BLUETOOTH, DEFAULT_MANUFACTURER)
+        .await;
+}
+
+// Scenario: Empty chip name update with kind selector only fails when multiple chips of that kind exist
+#[tokio::test]
+async fn test_patch_chip_ambiguous_empty_name_with_kind_only_error() {
+    // Given a device with two Wi-Fi chips "wlan-0" and "wlan-1"
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "wlan-0",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "wlan-1",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await;
+
+    // When I update without a chip name or ID specifying only the Wi-Fi kind selector
+    world.when_try_patch_chip_by_kind(device_id, ChipKind::WIFI).await;
+
+    // Then the update fails with AmbiguousEmptyMatch for Wi-Fi
+    world.then_error_is_ambiguous_empty_match(ChipKind::WIFI);
+}
+
+// Scenario: Patching a chip by ID with mismatched explicit kind selector fails
+#[tokio::test]
+async fn test_patch_chip_id_mismatched_explicit_kind_error() {
+    // Given a device with a Bluetooth chip
+    let world = World::new().await;
+    let device_id = world.given_device_created("test-dev").await;
+    let bt_chip_id = world.given_first_chip_id(device_id).await;
+
+    // When I update the Bluetooth chip by ID with an explicit Wi-Fi kind selector
+    world.when_try_patch_chip_by_id_and_kind(device_id, bt_chip_id, ChipKind::WIFI).await;
+
+    // Then the update fails with MismatchedChipKind
+    world.then_error_is_mismatched_chip_kind(ChipKind::WIFI, ChipKind::BLUETOOTH);
+}
+
+// Scenario: Patching a chip with conflicting explicit kind selector and radio variant fails
+#[tokio::test]
+async fn test_patch_chip_conflicting_kind_and_variant_error() {
+    // Given a device with Bluetooth and Wi-Fi chips
+    let world = World::new().await;
+    let device_id = world
+        .given_device_with_chip(
+            "test-dev",
+            "bt-chip",
+            device_api::ChipCreateVariant::Beacon(Default::default()),
+        )
+        .await;
+    world
+        .given_chip_added_to_device(
+            device_id,
+            "wifi-chip",
+            device_api::ChipCreateVariant::Wifi(Default::default()),
+        )
+        .await;
+
+    // When I update specifying Bluetooth kind selector alongside a Wi-Fi variant payload
+    world
+        .when_try_patch_chip_with_conflicting_kind_and_variant(
+            device_id,
+            ChipKind::BLUETOOTH,
+            ChipVariantUpdate::Wifi(Default::default()),
+        )
+        .await;
+
+    // Then the update fails with MismatchedChipKind
+    world.then_error_is_mismatched_chip_kind(ChipKind::BLUETOOTH, ChipKind::WIFI);
 }
 
 // Scenario: Updating device pose broadcasts position and orientation to all chips

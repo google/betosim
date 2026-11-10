@@ -395,6 +395,8 @@ impl TryFrom<ChipKind> for ChipVariant {
 pub struct ChipUpdate {
     pub id: Option<ChipId>,
     pub name: Option<String>,
+    /// Radio kind selector used only to target chips; never applied to a chip.
+    pub kind: Option<ChipKind>,
     pub manufacturer: Option<String>,
     pub product_name: Option<String>,
     #[serde(default)]
@@ -405,11 +407,27 @@ pub struct ChipUpdate {
 }
 
 impl ChipUpdate {
+    #[must_use]
+    pub fn target_kind(&self) -> Option<ChipKind> {
+        self.kind
+            .filter(|&k| k != ChipKind::UNSPECIFIED)
+            .or_else(|| self.variant.as_ref().map(ChipVariantUpdate::kind))
+    }
+
     /// Replaces the fields on `Chip` with the fields on `ChipUpdate` if they
     /// are `Some`.
     pub fn apply(&self, chip: &mut Chip) {
-        let ChipUpdate { id, name, manufacturer, product_name, pose, variant, links, enabled } =
-            self;
+        let ChipUpdate {
+            id,
+            name,
+            kind: _,
+            manufacturer,
+            product_name,
+            pose,
+            variant,
+            links,
+            enabled,
+        } = self;
 
         if let Some(id) = id {
             chip.id = (*id).into();
@@ -444,6 +462,7 @@ impl ChipUpdate {
         let ChipUpdate {
             id: _,
             name: _,
+            kind: _,
             manufacturer,
             product_name,
             pose: _,
@@ -766,5 +785,77 @@ mod tests {
         assert_eq!(base.links, Some(vec![(ChipId(2), -70)]));
         assert_eq!(base.enabled, Some(false));
         assert_eq!(base.pose, initial_pose);
+    }
+
+    #[test]
+    fn test_chip_update_target_kind_returns_explicit_kind() {
+        let update = ChipUpdate { kind: Some(ChipKind::BLUETOOTH), ..Default::default() };
+        assert_eq!(update.target_kind(), Some(ChipKind::BLUETOOTH));
+    }
+
+    #[test]
+    fn test_chip_update_target_kind_falls_back_to_variant() {
+        let update = ChipUpdate {
+            variant: Some(ChipVariantUpdate::Wifi(Default::default())),
+            ..Default::default()
+        };
+        assert_eq!(update.target_kind(), Some(ChipKind::WIFI));
+    }
+
+    #[test]
+    fn test_chip_update_target_kind_prefers_explicit_kind_over_variant() {
+        let update = ChipUpdate {
+            kind: Some(ChipKind::UWB),
+            variant: Some(ChipVariantUpdate::Wifi(Default::default())),
+            ..Default::default()
+        };
+        assert_eq!(update.target_kind(), Some(ChipKind::UWB));
+    }
+
+    #[test]
+    fn test_chip_update_target_kind_unspecified_falls_back_to_variant() {
+        let update = ChipUpdate {
+            kind: Some(ChipKind::UNSPECIFIED),
+            variant: Some(ChipVariantUpdate::Nfc(Default::default())),
+            ..Default::default()
+        };
+        assert_eq!(update.target_kind(), Some(ChipKind::NFC));
+    }
+
+    #[test]
+    fn test_chip_update_target_kind_unspecified_alone_returns_none() {
+        let update = ChipUpdate { kind: Some(ChipKind::UNSPECIFIED), ..Default::default() };
+        assert_eq!(update.target_kind(), None);
+    }
+
+    #[test]
+    fn test_chip_update_target_kind_empty_returns_none() {
+        assert_eq!(ChipUpdate::default().target_kind(), None);
+    }
+
+    #[test]
+    fn test_chip_update_apply_does_not_overwrite_chip_kind() {
+        let mut chip = Chip::new_test_ble("bt-0");
+        let update = ChipUpdate {
+            kind: Some(ChipKind::WIFI),
+            manufacturer: Some("Updated".to_string()),
+            ..Default::default()
+        };
+        update.apply(&mut chip);
+        assert_eq!(chip.kind, ChipKind::BLUETOOTH);
+        assert_eq!(chip.manufacturer, "Updated");
+    }
+
+    #[test]
+    fn test_chip_update_merge_ignores_selector_kind() {
+        let mut base = ChipUpdate::default();
+        let incoming = ChipUpdate {
+            kind: Some(ChipKind::UWB),
+            manufacturer: Some("Updated".to_string()),
+            ..Default::default()
+        };
+        base.merge(incoming);
+        assert_eq!(base.kind, None);
+        assert_eq!(base.manufacturer.as_deref(), Some("Updated"));
     }
 }

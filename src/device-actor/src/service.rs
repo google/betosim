@@ -1110,9 +1110,16 @@ fn resolve_chip_updates(
     }
     let mut resolved_chip_updates: HashMap<usize, Vec<ChipUpdate>> = HashMap::new();
     for u in chips {
-        if u.id.is_none() && u.name.as_deref().unwrap_or("").is_empty() && u.variant.is_none() {
+        let target_kind = u.target_kind();
+        if let (Some(expected), Some(variant)) = (target_kind, &u.variant)
+            && expected != variant.kind()
+        {
+            return Err(DeviceError::MismatchedChipKind { expected, actual: variant.kind() });
+        }
+        if u.id.is_none() && u.name.as_deref().unwrap_or("").is_empty() && target_kind.is_none() {
             return Err(DeviceError::InvalidInput(
-                "ChipUpdate requires at least one selector (id, name, or variant)".to_string(),
+                "ChipUpdate requires at least one selector (id, name, kind, or variant)"
+                    .to_string(),
             ));
         }
         let target_idx = if let Some(chip_id) = u.id {
@@ -1128,22 +1135,20 @@ fn resolve_chip_updates(
                         existing_device.device.name.clone(),
                     )
                 })?;
-            if let Some(variant) = &u.variant {
-                let expected_kind = variant.kind();
-                if actual_kind != expected_kind {
-                    return Err(DeviceError::MismatchedChipKind {
-                        expected: expected_kind,
-                        actual: actual_kind,
-                    });
-                }
+            if let Some(expected_kind) = target_kind
+                && actual_kind != expected_kind
+            {
+                return Err(DeviceError::MismatchedChipKind {
+                    expected: expected_kind,
+                    actual: actual_kind,
+                });
             }
             idx
         } else {
             let name = u.name.as_deref().unwrap_or("");
-            let kind = u.variant.as_ref().map(|v| v.kind());
             DeviceActor::match_target_chip(
                 &existing_device.device.chips,
-                kind,
+                target_kind,
                 name,
                 &existing_device.device.name,
             )?
@@ -1515,7 +1520,7 @@ mod tests {
         assert!(matches!(
             &err,
             DeviceError::InvalidInput(msg)
-                if msg == "ChipUpdate requires at least one selector (id, name, or variant)"
+                if msg == "ChipUpdate requires at least one selector (id, name, kind, or variant)"
         ));
 
         let empty_name_update = vec![ChipUpdate {
@@ -1529,7 +1534,7 @@ mod tests {
         assert!(matches!(
             &err2,
             DeviceError::InvalidInput(msg)
-                if msg == "ChipUpdate requires at least one selector (id, name, or variant)"
+                if msg == "ChipUpdate requires at least one selector (id, name, kind, or variant)"
         ));
     }
 
@@ -1708,5 +1713,164 @@ mod tests {
 
         let result = actor.handle_action(None, DeviceAction::AcquireKeepalive, &mut ctx).await;
         assert!(matches!(result, Err(DeviceError::ShuttingDown)));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_matches_unique_chip_by_kind() {
+        let (id, internal_device, devices) = device_with_chips(vec![
+            Chip {
+                id: 10,
+                name: "bt-0".to_string(),
+                kind: ChipKind::BLUETOOTH,
+                ..Default::default()
+            },
+            Chip { id: 11, name: "wlan-0".to_string(), kind: ChipKind::WIFI, ..Default::default() },
+        ]);
+
+        let kind_only_update = vec![ChipUpdate {
+            kind: Some(ChipKind::WIFI),
+            manufacturer: Some("Updated".to_string()),
+            ..Default::default()
+        }];
+        let resolved =
+            resolve_chip_updates(id, &internal_device, &devices, kind_only_update).unwrap();
+        assert!(resolved.contains_key(&1));
+        assert!(!resolved.contains_key(&0));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_disambiguates_shared_name_by_kind() {
+        let (id, internal_device, devices) = device_with_chips(vec![
+            Chip {
+                id: 10,
+                name: "cvd-1".to_string(),
+                kind: ChipKind::BLUETOOTH,
+                ..Default::default()
+            },
+            Chip { id: 11, name: "cvd-1".to_string(), kind: ChipKind::WIFI, ..Default::default() },
+        ]);
+
+        let disambiguated_update = vec![ChipUpdate {
+            name: Some("cvd-1".to_string()),
+            kind: Some(ChipKind::WIFI),
+            manufacturer: Some("Updated".to_string()),
+            ..Default::default()
+        }];
+        let resolved =
+            resolve_chip_updates(id, &internal_device, &devices, disambiguated_update).unwrap();
+        assert!(resolved.contains_key(&1));
+        assert!(!resolved.contains_key(&0));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_rejects_ambiguous_kind_without_name_or_id() {
+        let (id, internal_device, devices) = device_with_chips(vec![
+            Chip { id: 10, name: "wlan-0".to_string(), kind: ChipKind::WIFI, ..Default::default() },
+            Chip { id: 11, name: "wlan-1".to_string(), kind: ChipKind::WIFI, ..Default::default() },
+        ]);
+
+        let ambiguous_update = vec![ChipUpdate {
+            kind: Some(ChipKind::WIFI),
+            manufacturer: Some("Updated".to_string()),
+            ..Default::default()
+        }];
+        let err =
+            resolve_chip_updates(id, &internal_device, &devices, ambiguous_update).unwrap_err();
+        assert!(matches!(&err, DeviceError::AmbiguousEmptyMatch { kind: ChipKind::WIFI }));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_rejects_mismatched_id_and_kind() {
+        let (id, internal_device, devices) = device_with_chips(vec![Chip {
+            id: 10,
+            name: "bt-0".to_string(),
+            kind: ChipKind::BLUETOOTH,
+            ..Default::default()
+        }]);
+
+        let mismatched_update = vec![ChipUpdate {
+            id: Some(ChipId(10)),
+            kind: Some(ChipKind::WIFI),
+            ..Default::default()
+        }];
+        let err =
+            resolve_chip_updates(id, &internal_device, &devices, mismatched_update).unwrap_err();
+        assert!(matches!(
+            &err,
+            DeviceError::MismatchedChipKind {
+                expected: ChipKind::WIFI,
+                actual: ChipKind::BLUETOOTH,
+            }
+        ));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_rejects_conflicting_kind_and_variant() {
+        let (id, internal_device, devices) = device_with_chips(vec![
+            Chip {
+                id: 10,
+                name: "bt-0".to_string(),
+                kind: ChipKind::BLUETOOTH,
+                ..Default::default()
+            },
+            Chip { id: 11, name: "wlan-0".to_string(), kind: ChipKind::WIFI, ..Default::default() },
+        ]);
+
+        let conflicting_update = vec![ChipUpdate {
+            kind: Some(ChipKind::BLUETOOTH),
+            variant: Some(netsim_model::ChipVariantUpdate::Wifi(
+                netsim_model::WifiUpdate::default(),
+            )),
+            ..Default::default()
+        }];
+        let err =
+            resolve_chip_updates(id, &internal_device, &devices, conflicting_update).unwrap_err();
+        assert!(matches!(
+            &err,
+            DeviceError::MismatchedChipKind {
+                expected: ChipKind::BLUETOOTH,
+                actual: ChipKind::WIFI,
+            }
+        ));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_rejects_unspecified_kind_without_other_selector() {
+        let (id, internal_device, devices) = device_with_chips(vec![Chip {
+            id: 10,
+            name: "bt-0".to_string(),
+            kind: ChipKind::BLUETOOTH,
+            ..Default::default()
+        }]);
+
+        let unspecified_update =
+            vec![ChipUpdate { kind: Some(ChipKind::UNSPECIFIED), ..Default::default() }];
+        let err =
+            resolve_chip_updates(id, &internal_device, &devices, unspecified_update).unwrap_err();
+        assert!(matches!(
+            &err,
+            DeviceError::InvalidInput(msg)
+                if msg == "ChipUpdate requires at least one selector (id, name, kind, or variant)"
+        ));
+    }
+
+    #[test]
+    fn test_resolve_chip_updates_allows_unspecified_kind_with_variant() {
+        let (id, internal_device, devices) = device_with_chips(vec![Chip {
+            id: 10,
+            name: "bt-0".to_string(),
+            kind: ChipKind::BLUETOOTH,
+            ..Default::default()
+        }]);
+
+        let update = vec![ChipUpdate {
+            kind: Some(ChipKind::UNSPECIFIED),
+            variant: Some(netsim_model::ChipVariantUpdate::Bluetooth(
+                netsim_model::BluetoothUpdate::default(),
+            )),
+            ..Default::default()
+        }];
+        let resolved = resolve_chip_updates(id, &internal_device, &devices, update).unwrap();
+        assert!(resolved.contains_key(&0));
     }
 }
