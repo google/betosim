@@ -14,7 +14,7 @@
 
 use device_api::DeviceAction;
 use netsim_model::{ChipClient, ChipId};
-use wifi_actor::WifiClient;
+use wifi_actor::{WifiClient, err::Code};
 
 use crate::world::World;
 
@@ -56,6 +56,38 @@ async fn test_delete_chip() {
     // Then
     let chip = world.wifi_client.read(ChipId(chip_id)).await;
     assert!(chip.is_err());
+}
+
+/// Scenario: Sink task closing after chip deletion records LifecycleTaskClosedDeleteFailed
+// TODO(b/582873927): pins pre-fix behavior; update when the delete guard lands.
+#[tokio::test]
+async fn test_sink_task_closed_after_chip_delete_records_error_stat() {
+    // Given
+    let mut world = World::with_error_stats().await;
+    let chip_id = world.given_a_chip(5).await;
+
+    // When
+    world.when_chip_is_deleted_keeping_stream_open(chip_id).await;
+
+    // Then
+    world.then_chip_is_not_found(chip_id).await;
+    world.then_error_stats_are(&[(Code::LifecycleTaskClosedDeleteFailed as u32, 1)]).await;
+}
+
+/// Scenario: Closing a non-chip gateway stream records LifecycleStreamClosedDeleteFailed
+// TODO(b/582873927): pins pre-fix behavior; update when the delete guard lands.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_non_chip_stream_closed_records_error_stat() {
+    // Given
+    let mut world = World::with_tap_gateway_error_stats().await;
+    let _chip_id = world.given_a_chip(6).await;
+
+    // When
+    world.when_gateway_downlink_stream_closed();
+
+    // Then
+    world.then_error_stats_are(&[(Code::LifecycleStreamClosedDeleteFailed as u32, 1)]).await;
 }
 
 // Feature: Sink Closure Notification

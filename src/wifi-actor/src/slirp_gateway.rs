@@ -108,7 +108,11 @@ impl GatewayTrait for SlirpGateway {
 
         // Extract the original destination MAC (which is the station)
         let Some(dest_mac_bytes) = packet.first_chunk::<6>() else {
-            warn!("SLIRP_PKT: packet too short ({} bytes)", packet.len());
+            warn!(
+                code = crate::err::Code::SlirpPktTooShort as u32,
+                "SLIRP_PKT: packet too short ({} bytes)",
+                packet.len()
+            );
             return;
         };
         let dest_mac = netsim_packets::MacAddress::new(*dest_mac_bytes);
@@ -137,7 +141,11 @@ impl GatewayTrait for SlirpGateway {
         }
 
         let Some(bssid) = shared_keys.get_station_bssid(&dest_mac) else {
-            tracing::warn!("Dropping unicast packet to unknown station {}", dest_mac);
+            tracing::warn!(
+                code = crate::err::Code::SlirpUnicastUnknownStation as u32,
+                "Dropping unicast packet to unknown station {}",
+                dest_mac
+            );
             return;
         };
 
@@ -190,7 +198,11 @@ impl GatewayTrait for SlirpGateway {
             }));
 
         if let Err(error) = client.register(SLIRP_ID.0, stream, sink, None, false).await {
-            warn!(%error, "Failed to register with SlirpActor");
+            warn!(
+                code = crate::err::Code::SlirpRegisterFailed as u32,
+                %error,
+                "Failed to register with SlirpActor"
+            );
         }
 
         // Add downlink stream to context
@@ -208,5 +220,120 @@ impl GatewayTrait for SlirpGateway {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+    use crate::{DebugArgs, MockClock, WifiStats};
+
+    #[test]
+    fn test_handle_incoming_packet_too_short_records_error_stat() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(MockClock::new()));
+        let debug = Arc::new(DebugArgs::default());
+        let mut medium = Medium::new(Arc::clone(&key_store), wifi_stats, debug);
+        let gateway = SlirpGateway::new(None);
+        let mut out_queue = Vec::new();
+
+        tracing::subscriber::with_default(subscriber, || {
+            gateway.handle_incoming(
+                SLIRP_ID,
+                bytes::Bytes::from_static(&[0x01, 0x02, 0x03]),
+                &mut medium,
+                &key_store,
+                &mut out_queue,
+            );
+        });
+
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::SlirpPktTooShort as u32, 1)]);
+    }
+
+    #[test]
+    fn test_handle_incoming_unknown_station_records_error_stat() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(MockClock::new()));
+        let debug = Arc::new(DebugArgs::default());
+        let mut medium = Medium::new(Arc::clone(&key_store), wifi_stats, debug);
+        let gateway = SlirpGateway::new(None);
+        let mut out_queue = Vec::new();
+        let mut frame = vec![0u8; 60];
+        frame[..6].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+
+        tracing::subscriber::with_default(subscriber, || {
+            gateway.handle_incoming(
+                SLIRP_ID,
+                bytes::Bytes::from(frame),
+                &mut medium,
+                &key_store,
+                &mut out_queue,
+            );
+        });
+
+        assert_eq!(
+            table.snapshot(),
+            vec![(crate::err::Code::SlirpUnicastUnknownStation as u32, 1)]
+        );
+    }
+
+    struct NoopContext;
+
+    impl actor_framework::Context<WifiActor> for NoopContext {
+        fn set_interval(&mut self, _duration: std::time::Duration) {}
+        fn add_stream(&mut self, _id: ChipId, _stream: actor_framework::BoxStream) {}
+        fn remove_stream(&mut self, _id: ChipId) {}
+        fn add_typed_stream(
+            &mut self,
+            _id: usize,
+            _stream: actor_framework::BoxTypedStream<bytes::Bytes>,
+        ) {
+        }
+        fn remove_typed_stream(&mut self, _id: usize) {}
+        fn spawn(&mut self, _id: ChipId, _task: futures::future::BoxFuture<'static, ChipId>) {}
+        fn abort(&mut self, _id: ChipId) {}
+        fn shutdown(&mut self) {}
+        fn run_later(
+            &mut self,
+            _duration: std::time::Duration,
+            _f: actor_framework::TimerCallback<WifiActor>,
+        ) -> actor_framework::TimerKey {
+            unimplemented!()
+        }
+        fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {}
+    }
+
+    #[tokio::test]
+    async fn test_on_start_register_failed_records_error_stat() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let (slirp_runner, slirp_client) = slirp_actor::new();
+        drop(slirp_runner);
+
+        let mut gateway = SlirpGateway::new(Some(slirp_client));
+        let mut ctx = NoopContext;
+
+        tracing::instrument::WithSubscriber::with_subscriber(
+            gateway.on_start(&mut ctx),
+            subscriber,
+        )
+        .await;
+
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::SlirpRegisterFailed as u32, 1)]);
     }
 }

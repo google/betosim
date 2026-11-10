@@ -52,7 +52,11 @@ impl ActorLifecycle for WifiActor {
                 )
                 .await
             {
-                error!(%error, "Failed to register with AP client");
+                error!(
+                    code = crate::err::Code::LifecycleApClientRegisterFailed as u32,
+                    %error,
+                    "Failed to register with AP client"
+                );
             }
             self.to_ap = Some(ap_uplink_tx);
         }
@@ -62,7 +66,11 @@ impl ActorLifecycle for WifiActor {
 
             tokio::spawn(async move {
                 if let Err(error) = crate::mdns_forwarder::run_mdns_forwarder(mdns_tx).await {
-                    tracing::error!(%error, "mDNS Forwarder failed");
+                    tracing::error!(
+                        code = crate::err::Code::LifecycleMdnsForwarderFailed as u32,
+                        %error,
+                        "mDNS Forwarder failed"
+                    );
                 }
             });
         }
@@ -99,7 +107,11 @@ impl ActorLifecycle for WifiActor {
         info!("Stream closed for chip {id}");
         ctx.abort(id);
         if let Err(error) = self.handle_delete_impl(id, ctx).await {
-            error!(%error, "Failed to delete chip {id} after stream closed");
+            error!(
+                code = crate::err::Code::LifecycleStreamClosedDeleteFailed as u32,
+                %error,
+                "Failed to delete chip {id} after stream closed"
+            );
         }
     }
 
@@ -107,7 +119,11 @@ impl ActorLifecycle for WifiActor {
         info!("Sink task closed for chip {id}");
         ctx.remove_stream(id);
         if let Err(error) = self.handle_delete_impl(id, ctx).await {
-            error!(%error, "Failed to delete chip {id} after sink task closed");
+            error!(
+                code = crate::err::Code::LifecycleTaskClosedDeleteFailed as u32,
+                %error,
+                "Failed to delete chip {id} after sink task closed"
+            );
         }
     }
 
@@ -130,4 +146,50 @@ where
 {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     (tx, UnboundedReceiverStream::new(rx))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use actor_framework::ResourceActor;
+    use ap_actor::{ApActor, ApClient, SharedKeyStore};
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+    use crate::{MockClock, err::Code};
+
+    #[tokio::test]
+    async fn test_on_start_ap_client_register_failed_records_error_stat() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let (ap_runner, ap_base) = ResourceActor::<ApActor>::new(1);
+        drop(ap_runner);
+        let ap_client = Arc::new(ApClient::new(ap_base));
+
+        let (_dev_runner, dev_base) = ResourceActor::<device_actor::DeviceActor>::new(1);
+        let device_client = device_actor::DeviceClient::new(Box::new(dev_base));
+
+        let actor = WifiActor::new(
+            Some(ap_client),
+            None,
+            device_client,
+            None,
+            Arc::new(SharedKeyStore::new()),
+            Arc::new(MockClock::new()),
+            false,
+        );
+        let (wifi_runner, wifi_client) = crate::new();
+        tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+            wifi_runner.run(actor),
+            subscriber,
+        ));
+
+        let _ = wifi_client.get_global_stats_proto().await.unwrap();
+
+        assert_eq!(table.snapshot(), vec![(Code::LifecycleApClientRegisterFailed as u32, 1)]);
+    }
 }

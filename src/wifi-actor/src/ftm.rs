@@ -43,7 +43,10 @@ pub fn handle_ftm_request(
     // 2. Calculate Distance & RTT
     let distance = calculate_distance(initiator_pos, responder_pos);
     if distance <= 0.0 {
-        warn!("FTM distance is zero or invalid, using minimal RTT");
+        warn!(
+            code = crate::err::Code::FtmInvalidDistance as u32,
+            "FTM distance is zero or invalid, using minimal RTT"
+        );
     }
 
     // Time of Flight (seconds) = distance / c
@@ -148,5 +151,76 @@ impl AddrHelpers for Ieee80211 {
     }
     fn get_structure_addr3(&self) -> netsim_packets::MacAddress {
         self.get_addr3()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+    use netsim_packets::{FrameControl, MacAddress, MacHeader3Addr, SequenceControl};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+    use crate::err::Code;
+
+    const ACTION_FRAME_CONTROL: u16 = 0x00D0;
+    const FTM_TRIGGER_START: u8 = 1;
+    const INITIATOR_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const RESPONDER_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+
+    fn build_test_ftm_request() -> Ieee80211 {
+        let header = MacHeader3Addr {
+            frame_control: FrameControl::new(ACTION_FRAME_CONTROL),
+            duration_id: zerocopy::U16::new(0),
+            addr1: MacAddress::from(RESPONDER_MAC),
+            addr2: MacAddress::from(INITIATOR_MAC),
+            addr3: MacAddress::from(RESPONDER_MAC),
+            sequence_control: SequenceControl::new(0),
+        };
+        let mut frame_bytes = Vec::new();
+        frame_bytes.extend_from_slice(header.as_bytes());
+        frame_bytes.extend_from_slice(&[
+            category::PUBLIC,
+            public_action::FTM_REQUEST,
+            FTM_TRIGGER_START,
+        ]);
+        Ieee80211::decode(&frame_bytes).expect("valid FTM request frame")
+    }
+
+    #[test]
+    fn handle_ftm_request_zero_distance_records_invalid_distance_error() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let packet = build_test_ftm_request();
+        let origin = Position::default();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let responses =
+                handle_ftm_request(&packet, &origin, &origin).expect("co-located FTM succeeds");
+            assert_eq!(responses.len(), 2);
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::FtmInvalidDistance as u32, 1)]);
+    }
+
+    #[test]
+    fn handle_ftm_request_positive_distance_records_no_error_stats() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let packet = build_test_ftm_request();
+        let origin = Position::default();
+        let peer = Position { x: 3.0, y: 4.0, z: 0.0 };
+
+        tracing::subscriber::with_default(subscriber, || {
+            let responses =
+                handle_ftm_request(&packet, &origin, &peer).expect("positive-distance FTM");
+            assert_eq!(responses.len(), 2);
+        });
+
+        assert!(table.snapshot().is_empty());
     }
 }

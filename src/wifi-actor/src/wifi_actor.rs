@@ -93,7 +93,10 @@ impl WifiActor {
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = if_name;
-                warn!("TAP Configured but not supported on this OS. Falling back to Slirp.");
+                warn!(
+                    code = crate::err::Code::TapNotSupportedFallback as u32,
+                    "TAP Configured but not supported on this OS. Falling back to Slirp."
+                );
                 Box::new(SlirpGateway::new(slirp_client)) as Box<dyn GatewayTrait>
             }
         } else {

@@ -76,15 +76,25 @@ pub(crate) async fn run_mdns_forwarder(tx: UnboundedSender<Bytes>) -> Result<(),
                     debug!("Received {} bytes from {:?}", packet.len(), socket_addr_v4);
                     let ethernet_frame = create_mdns_frame(packet, *socket_addr_v4.ip());
                     if tx.send(Bytes::from(ethernet_frame)).is_err() {
-                        warn!("Failed to send packet to channel (receiver closed)");
+                        warn!(
+                            code = crate::err::Code::MdnsTxSendFailed as u32,
+                            "Failed to send packet to channel (receiver closed)"
+                        );
                         break;
                     }
                 } else {
-                    warn!("Forwarding mDNS from IPv6 is not supported: {:?}", src_addr);
+                    warn!(
+                        code = crate::err::Code::MdnsIpv6NotSupported as u32,
+                        "Forwarding mDNS from IPv6 is not supported: {:?}", src_addr
+                    );
                 }
             }
             Err(error) => {
-                warn!(?error, "recv_from failed");
+                warn!(
+                    code = crate::err::Code::MdnsSocketRecvFailed as u32,
+                    ?error,
+                    "recv_from failed"
+                );
             }
         }
     }

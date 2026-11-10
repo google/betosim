@@ -17,6 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 use actor_framework::ResourceActor;
 use ap_actor::{ApActor, ApClient};
 use bytes::Bytes;
+use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
 use device_actor::DeviceActor;
 use device_api::{DeviceAction, DeviceId};
 use netsim_model::{ChipClient, ChipCreate, ChipId, ChipUpdate, PoseUpdate, Position};
@@ -79,6 +80,7 @@ pub struct World {
     pub baseline_stats: Option<netsim_proto::stats::WifiStats>,
     pub mock_clock: std::sync::Arc<wifi_actor::MockClock>,
     pub shared_keys: std::sync::Arc<ap_actor::SharedKeyStore>,
+    pub error_stats: std::sync::Arc<ErrorStatsTable>,
     #[cfg(target_os = "linux")]
     pub gateway_downlink_tx: Option<mpsc::UnboundedSender<Bytes>>,
 }
@@ -123,6 +125,26 @@ impl World {
     }
 
     async fn new_internal(gateway: Option<Box<dyn wifi_actor::GatewayTrait>>) -> Self {
+        Self::new_internal_with_error_stats(gateway, false).await
+    }
+
+    pub async fn with_error_stats() -> Self {
+        Self::new_internal_with_error_stats(None, true).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn with_tap_gateway_error_stats() -> Self {
+        let (harness, downlink_tx) = TapDownlinkHarness::new();
+        let mut world = Self::new_internal_with_error_stats(Some(Box::new(harness)), true).await;
+        world.gateway_downlink_tx = Some(downlink_tx);
+        world
+    }
+
+    async fn new_internal_with_error_stats(
+        gateway: Option<Box<dyn wifi_actor::GatewayTrait>>,
+        record_error_stats: bool,
+    ) -> Self {
+        use tracing_subscriber::layer::SubscriberExt;
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         // Setup dependencies
         let slirp_actor_impl = SlirpActor::new(Default::default(), None, None).await;
@@ -209,8 +231,18 @@ impl World {
             )
         };
 
+        let error_stats = Arc::new(ErrorStatsTable::new());
         let (wifi_runner, wifi_client) = wifi_actor::new();
-        tokio::spawn(wifi_runner.run(wifi_actor_impl));
+        if record_error_stats {
+            let subscriber = tracing_subscriber::registry()
+                .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
+            tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+                wifi_runner.run(wifi_actor_impl),
+                subscriber,
+            ));
+        } else {
+            tokio::spawn(wifi_runner.run(wifi_actor_impl));
+        }
 
         // Wait for registration to capture the injector
         let ap_injector = match tokio::time::timeout(
@@ -236,6 +268,7 @@ impl World {
             baseline_stats: None,
             mock_clock,
             shared_keys,
+            error_stats,
             #[cfg(target_os = "linux")]
             gateway_downlink_tx: None,
         }
@@ -1028,6 +1061,30 @@ impl World {
 
     pub async fn when_ap_is_deleted(&mut self, ap_id: u32) {
         self.ap_client.destroy_ap(ap_id).await.unwrap();
+    }
+
+    pub async fn when_chip_is_deleted_keeping_stream_open(&mut self, chip_id: u32) {
+        self.wifi_client.delete(ChipId(chip_id)).await.expect("Failed to delete chip");
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn when_gateway_downlink_stream_closed(&mut self) {
+        self.gateway_downlink_tx = None;
+    }
+
+    pub async fn then_chip_is_not_found(&self, chip_id: u32) {
+        let chip = self.wifi_client.read(ChipId(chip_id)).await;
+        assert!(chip.is_err());
+    }
+
+    pub async fn then_error_stats_are(&mut self, expected: &[(u32, u32)]) {
+        let start = std::time::Instant::now();
+        while self.error_stats.snapshot() != expected
+            && start.elapsed() < std::time::Duration::from_secs(2)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(self.error_stats.snapshot(), expected);
     }
 
     pub async fn when_chip_rx_is_drained(&mut self, chip_idx: usize) {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod client;
+pub mod err;
 pub(crate) mod error;
 pub(crate) mod ftm;
 pub(crate) mod gateway;

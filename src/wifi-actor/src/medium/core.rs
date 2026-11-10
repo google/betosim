@@ -131,7 +131,10 @@ impl Medium {
             Station::new(client_id, src_addr, hwsim_addr)
         });
         if !self.contains_client(client_id) {
-            warn!("Client {client_id} is missing");
+            warn!(
+                code = crate::err::Code::MediumClientMissing as u32,
+                "Client {client_id} is missing"
+            );
             self.add(client_id);
         }
         Ok(())
@@ -186,7 +189,10 @@ impl Medium {
         if let Some(c) = self.clients.get_mut(&client_id) {
             c.p2p_tx_count += 1;
         } else {
-            warn!("client {client_id} is missing for incr_p2p_tx");
+            warn!(
+                code = crate::err::Code::MediumP2pTxClientMissing as u32,
+                "client {client_id} is missing for incr_p2p_tx"
+            );
         }
     }
 
@@ -194,7 +200,10 @@ impl Medium {
         if let Some(c) = self.clients.get_mut(&client_id) {
             c.p2p_rx_count += 1;
         } else {
-            warn!("client {client_id} is missing for incr_p2p_rx");
+            warn!(
+                code = crate::err::Code::MediumP2pRxClientMissing as u32,
+                "client {client_id} is missing for incr_p2p_rx"
+            );
         }
     }
 
@@ -352,5 +361,123 @@ mod tests {
         let wifi_api_stats = proto_stats.wifi_api_stats.unwrap();
         let rtt_stats = wifi_api_stats.wifi_rtt_manager.unwrap();
         assert_eq!(rtt_stats.start_ranging, Some(1));
+    }
+
+    const MISSING_UPSERT_CLIENT_ID: u32 = 77;
+    const MISSING_P2P_TX_CLIENT_ID: u32 = 88;
+    const MISSING_P2P_RX_CLIENT_ID: u32 = 89;
+    const STATION_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x11];
+    const UNKNOWN_STATION_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x22];
+    const BSSID_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+    fn new_error_stats_medium() -> Medium {
+        use crate::stats::SystemClock;
+
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(SystemClock));
+        let debug = Arc::new(DebugArgs::default());
+        Medium::new(key_store, wifi_stats, debug)
+    }
+
+    fn record_error_stats(f: impl FnOnce()) -> Vec<(u32, u32)> {
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        tracing::subscriber::with_default(subscriber, f);
+        table.snapshot()
+    }
+
+    fn to_ds_data_hwsim_msg() -> netsim_packets::HwsimMsg {
+        use netsim_packets::{FrameType, Ieee80211, Ieee80211ToAp};
+
+        use crate::medium::utils::create_hwsim_msg_from_frame;
+
+        let src_mac = MacAddress::new(STATION_MAC);
+        let bssid = MacAddress::new(BSSID_MAC);
+        let to_ds = Ieee80211ToAp {
+            version: 0,
+            ftype: FrameType::Data,
+            stype: 0,
+            destination: MacAddress::new(UNKNOWN_STATION_MAC),
+            source: src_mac,
+            bssid,
+            duration_id: 0,
+            seq_ctrl: 0,
+            qos_ctrl: None,
+            protected: 0,
+            order: 0,
+            more_frags: 0,
+            retry: 0,
+            pm: 0,
+            more_data: 0,
+            payload: vec![0u8; 16],
+        };
+        let ieee80211: Ieee80211 = to_ds.try_into().unwrap();
+        create_hwsim_msg_from_frame(&ieee80211, &bssid, 2412, Some(&src_mac)).unwrap()
+    }
+
+    #[test]
+    fn test_upsert_station_for_missing_client_records_medium_client_missing() {
+        use crate::err::Code;
+
+        let mut medium = new_error_stats_medium();
+        let msg = to_ds_data_hwsim_msg();
+        let frame = HwsimFrame::parse(&msg).unwrap();
+
+        let snapshot = record_error_stats(|| {
+            medium.upsert_station(MISSING_UPSERT_CLIENT_ID, &frame).unwrap();
+        });
+
+        assert_eq!(snapshot, vec![(Code::MediumClientMissing as u32, 1)]);
+    }
+
+    #[test]
+    fn test_incr_p2p_tx_for_missing_client_records_medium_p2p_tx_client_missing() {
+        use crate::err::Code;
+
+        let mut medium = new_error_stats_medium();
+
+        let snapshot = record_error_stats(|| medium.incr_p2p_tx(MISSING_P2P_TX_CLIENT_ID));
+
+        assert_eq!(snapshot, vec![(Code::MediumP2pTxClientMissing as u32, 1)]);
+    }
+
+    #[test]
+    fn test_incr_p2p_rx_for_missing_client_records_medium_p2p_rx_client_missing() {
+        use crate::err::Code;
+
+        let mut medium = new_error_stats_medium();
+
+        let snapshot = record_error_stats(|| medium.incr_p2p_rx(MISSING_P2P_RX_CLIENT_ID));
+
+        assert_eq!(snapshot, vec![(Code::MediumP2pRxClientMissing as u32, 1)]);
+    }
+
+    #[test]
+    fn test_ieee8023_response_to_unknown_station_records_medium_unicast_unknown_station() {
+        use bytes::Bytes;
+        use netsim_packets::{EthernetFrame, MacAddr, ether_type};
+        use zerocopy::IntoBytes;
+
+        use crate::err::Code;
+
+        let mut medium = new_error_stats_medium();
+        let eth = EthernetFrame::new(
+            MacAddr::new(UNKNOWN_STATION_MAC),
+            MacAddr::new(STATION_MAC),
+            ether_type::IPV4,
+        );
+        let mut eth_bytes = eth.as_bytes().to_vec();
+        eth_bytes.resize(60, 0);
+        let mut out_queue = Vec::new();
+
+        let snapshot = record_error_stats(|| {
+            medium.process_ieee8023_response(&Bytes::from(eth_bytes), &mut out_queue).unwrap();
+        });
+
+        assert_eq!(snapshot, vec![(Code::MediumUnicastUnknownStation as u32, 1)]);
     }
 }

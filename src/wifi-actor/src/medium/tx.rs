@@ -141,7 +141,11 @@ impl Medium {
         }
 
         let Some(bssid) = self.key_store.get_station_bssid(&dest_mac) else {
-            tracing::warn!("Dropping unicast packet to unknown station {}", dest_mac);
+            tracing::warn!(
+                code = crate::err::Code::MediumUnicastUnknownStation as u32,
+                "Dropping unicast packet to unknown station {}",
+                dest_mac
+            );
             return Ok(());
         };
 
@@ -245,7 +249,11 @@ impl Medium {
             match Ieee80211::decode(&encrypted_bytes) {
                 Ok(decoded) => Some(decoded),
                 Err(error) => {
-                    tracing::error!(%error, "Failed to decode encrypted frame");
+                    tracing::error!(
+                        code = crate::err::Code::TxEncryptedFrameDecodeFailed as u32,
+                        %error,
+                        "Failed to decode encrypted frame"
+                    );
                     None
                 }
             }

@@ -187,16 +187,39 @@ impl WifiStats {
     }
 
     pub(crate) fn log_and_incr_err_count(&mut self, error: &WifiError) {
-        warn!(%error);
         match error {
-            WifiError::Hostapd(_) => self.counts.hostapd_error += 1,
-            WifiError::Network(_) => self.counts.network_error += 1,
-            WifiError::Client(_) => self.counts.client_error += 1,
-            WifiError::Frame(_) => self.counts.frame_error += 1,
-            WifiError::Transmission(_) => self.counts.transmission_error += 1,
-            WifiError::Chip(_) => self.counts.other_error += 1,
-            WifiError::Other(_) => self.counts.other_error += 1,
-            WifiError::Internal(_) => self.counts.other_error += 1,
+            WifiError::Hostapd(_) => {
+                warn!(code = crate::err::Code::StatsHostapdError as u32, %error);
+                self.counts.hostapd_error += 1;
+            }
+            WifiError::Network(_) => {
+                warn!(code = crate::err::Code::StatsNetworkError as u32, %error);
+                self.counts.network_error += 1;
+            }
+            WifiError::Client(_) => {
+                warn!(code = crate::err::Code::StatsClientError as u32, %error);
+                self.counts.client_error += 1;
+            }
+            WifiError::Frame(_) => {
+                warn!(code = crate::err::Code::StatsFrameError as u32, %error);
+                self.counts.frame_error += 1;
+            }
+            WifiError::Transmission(_) => {
+                warn!(code = crate::err::Code::StatsTransmissionError as u32, %error);
+                self.counts.transmission_error += 1;
+            }
+            WifiError::Chip(_) => {
+                warn!(code = crate::err::Code::StatsChipError as u32, %error);
+                self.counts.other_error += 1;
+            }
+            WifiError::Other(_) => {
+                warn!(code = crate::err::Code::StatsOtherError as u32, %error);
+                self.counts.other_error += 1;
+            }
+            WifiError::Internal(_) => {
+                warn!(code = crate::err::Code::StatsInternalError as u32, %error);
+                self.counts.other_error += 1;
+            }
         }
     }
 
@@ -375,7 +398,12 @@ impl ThroughputValues {
 
 #[cfg(test)]
 mod tests {
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+    use netsim_model::ChipError;
+    use tracing_subscriber::layer::SubscriberExt;
+
     use super::*;
+    use crate::err::Code;
 
     #[test]
     fn test_wifi_stats_initial_state() {
@@ -608,5 +636,50 @@ mod tests {
         let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
         assert!(wifi.max_download_throughput() > 0.0);
         assert!(wifi.max_upload_throughput() > 0.0);
+    }
+
+    #[test]
+    fn test_wifi_stats_log_and_incr_err_count_populates_error_stats_table() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let mut stats = WifiStats::new(Arc::new(MockClock::new()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            stats.log_and_incr_err_count(&WifiError::Hostapd("hostapd error".into()));
+            stats.log_and_incr_err_count(&WifiError::Network("network error".into()));
+            stats.log_and_incr_err_count(&WifiError::Client("client error".into()));
+            stats.log_and_incr_err_count(&WifiError::Frame("frame error".into()));
+            stats.log_and_incr_err_count(&WifiError::Transmission("tx error".into()));
+            stats
+                .log_and_incr_err_count(&WifiError::Chip(ChipError::Internal("chip error".into())));
+            stats.log_and_incr_err_count(&WifiError::Other("other error".into()));
+            stats.log_and_incr_err_count(&WifiError::Internal("internal error".into()));
+        });
+
+        let snapshot = table.snapshot();
+        assert_eq!(
+            snapshot,
+            vec![
+                (Code::StatsFrameError as u32, 1),
+                (Code::StatsNetworkError as u32, 1),
+                (Code::StatsClientError as u32, 1),
+                (Code::StatsHostapdError as u32, 1),
+                (Code::StatsTransmissionError as u32, 1),
+                (Code::StatsChipError as u32, 1),
+                (Code::StatsOtherError as u32, 1),
+                (Code::StatsInternalError as u32, 1),
+            ]
+        );
+
+        let ipc = stats.to_proto();
+        let wifi = ipc.wifi_stats.as_ref().expect("wifi_stats present");
+        assert_eq!(wifi.hostapd_errors(), 1);
+        assert_eq!(wifi.network_errors(), 1);
+        assert_eq!(wifi.client_errors(), 1);
+        assert_eq!(wifi.frame_errors(), 1);
+        assert_eq!(wifi.transmission_errors(), 1);
+        assert_eq!(wifi.other_errors(), 3);
     }
 }

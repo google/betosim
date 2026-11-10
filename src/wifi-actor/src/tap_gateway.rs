@@ -186,7 +186,11 @@ impl TapInterface {
                         }
                     }
                     Err(error) => {
-                        error!(%error, "TapGateway: Error reading from tap");
+                        error!(
+                            code = crate::err::Code::TapReadFailed as u32,
+                            %error,
+                            "TapGateway: Error reading from tap"
+                        );
                         break;
                     }
                 }
@@ -247,7 +251,11 @@ impl GatewayTrait for TapGateway {
         );
 
         let Some(dest_mac_bytes) = packet.first_chunk::<6>() else {
-            tracing::warn!("TAP_PKT: packet too short ({} bytes)", packet.len());
+            tracing::warn!(
+                code = crate::err::Code::TapPktTooShort as u32,
+                "TAP_PKT: packet too short ({} bytes)",
+                packet.len()
+            );
             return;
         };
         let dest_mac = netsim_packets::MacAddress::new(*dest_mac_bytes);
@@ -264,7 +272,11 @@ impl GatewayTrait for TapGateway {
         }
 
         let Some(bssid) = shared_keys.get_station_bssid(&dest_mac) else {
-            tracing::warn!("Dropping unicast packet to unknown station {}", dest_mac);
+            tracing::warn!(
+                code = crate::err::Code::TapUnicastUnknownStation as u32,
+                "Dropping unicast packet to unknown station {}",
+                dest_mac
+            );
             return;
         };
 
@@ -329,11 +341,13 @@ impl TapGateway {
                 nix::fcntl::OFlag::O_RDWR,
                 nix::sys::stat::Mode::empty(),
             ) {
-                error!(%error, "TAP configuration enabled, but failed to open /dev/net/tun");
                 error!(
-                    "Please ensure you have CAP_NET_ADMIN capabilities or access to /dev/net/tun."
+                    code = crate::err::Code::TapDevTunOpenFailed as u32,
+                    %error,
+                    "TAP configuration enabled, but failed to open /dev/net/tun. \
+                     Please ensure you have CAP_NET_ADMIN capabilities or access to /dev/net/tun. \
+                     If running locally, you may need 'sudo' or group membership."
                 );
-                error!("If running locally, you may need 'sudo' or group membership.");
                 // We do NOT panic here anymore, trusting netsimd to handle the
                 // pre-flight check failure.
             }
@@ -476,13 +490,21 @@ If using a TAP pool (e.g. cvd-etap), ensure the interfaces are created.
                 }
             }
             Err(error) => {
-                error!(%error, "Failed to attach TAP for chip {}", chip_id);
+                error!(
+                    code = crate::err::Code::TapAttachFailed as u32,
+                    %error,
+                    "Failed to attach TAP for chip {}",
+                    chip_id
+                );
             }
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (chip_id, ctx);
-            error!("TAP attach not supported on non-Unix");
+            error!(
+                code = crate::err::Code::TapAttachNotSupportedNonLinux as u32,
+                "TAP attach not supported on non-Unix"
+            );
         }
     }
 
@@ -674,5 +696,160 @@ mod tests {
             .expect("TAP reader stream closed unexpectedly");
         assert_eq!(received.len(), 1514);
         assert_eq!(received.as_ref(), eth_frame.as_slice());
+    }
+
+    #[test]
+    fn test_handle_incoming_packet_too_short_records_error_stat() {
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        use crate::{DebugArgs, MockClock, WifiStats, err::Code};
+
+        let gw = TapGateway::new("test-tap".to_string());
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(MockClock::new()));
+        let mut medium =
+            Medium::new(Arc::clone(&key_store), wifi_stats, Arc::new(DebugArgs::default()));
+        let mut out_queue = Vec::new();
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        tracing::subscriber::with_default(subscriber, || {
+            gw.handle_incoming(
+                ChipId(1 | TAP_FLAG),
+                bytes::Bytes::from_static(&[0x01, 0x02, 0x03]),
+                &mut medium,
+                &key_store,
+                &mut out_queue,
+            );
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::TapPktTooShort as u32, 1)]);
+    }
+
+    #[test]
+    fn test_handle_incoming_unknown_station_records_error_stat() {
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        use crate::{DebugArgs, MockClock, WifiStats, err::Code};
+
+        let gw = TapGateway::new("test-tap".to_string());
+        let key_store = Arc::new(SharedKeyStore::new());
+        let wifi_stats = WifiStats::new(Arc::new(MockClock::new()));
+        let mut medium =
+            Medium::new(Arc::clone(&key_store), wifi_stats, Arc::new(DebugArgs::default()));
+        let mut out_queue = Vec::new();
+        let mut frame = vec![0u8; 60];
+        frame[..6].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        tracing::subscriber::with_default(subscriber, || {
+            gw.handle_incoming(
+                ChipId(1 | TAP_FLAG),
+                bytes::Bytes::from(frame),
+                &mut medium,
+                &key_store,
+                &mut out_queue,
+            );
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::TapUnicastUnknownStation as u32, 1)]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_attach_exhausted_pool_records_error_stat() {
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use netsim_model::{ChipClient, ChipCreate};
+        use tokio_stream::wrappers::ReceiverStream;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        use crate::{MockClock, err::Code};
+
+        let mut gw = TapGateway::new("cvd-etap".to_string());
+        let pool_range = gw.pool_range.clone().expect("cvd-etap config has a pool range");
+        for i in pool_range {
+            gw.used_indices.insert(ChipId(i), i);
+        }
+
+        let (_dev_runner, dev_base) =
+            actor_framework::ResourceActor::<device_actor::DeviceActor>::new(1);
+        let device_client = device_actor::DeviceClient::new(Box::new(dev_base));
+
+        let actor = WifiActor::new_with_gateway(
+            None,
+            Box::new(gw),
+            device_client,
+            Arc::new(SharedKeyStore::new()),
+            Arc::new(MockClock::new()),
+            false,
+        );
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let (wifi_runner, wifi_client) = crate::new();
+        tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+            wifi_runner.run(actor),
+            subscriber,
+        ));
+
+        let (_sink_tx, sink_rx) = tokio::sync::mpsc::channel(4);
+        let (stream_tx, _stream_rx) = tokio::sync::mpsc::channel(4);
+        let packet_stream = Box::new(ReceiverStream::new(sink_rx));
+        let packet_sink =
+            Box::pin(futures::sink::unfold(stream_tx, |tx, item: bytes::Bytes| async move {
+                let _ = tx.send(item).await;
+                Ok::<_, std::io::Error>(tx)
+            }));
+        let params = ChipCreate {
+            packet_stream: Some(packet_stream),
+            packet_sink: Some(packet_sink),
+            chip: Default::default(),
+        };
+        wifi_client.create(ChipId(1), params).await.unwrap();
+
+        assert_eq!(table.snapshot(), vec![(Code::TapAttachFailed as u32, 1)]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_tap_reader_error_records_error_stat() {
+        use std::os::fd::OwnedFd;
+
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use futures::StreamExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        use crate::err::Code;
+
+        let sock =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let rx_file = std::fs::File::from(OwnedFd::from(sock));
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(async move {
+                let tap = Arc::new(TapInterface::from_file("tap_err0", rx_file).unwrap());
+                let mut stream = tap.into_reader_stream();
+                let next = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                    .await
+                    .expect("timed out waiting for TAP reader error");
+                assert!(next.is_none());
+            });
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::TapReadFailed as u32, 1)]);
     }
 }
