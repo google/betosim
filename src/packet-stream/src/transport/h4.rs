@@ -14,7 +14,7 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
-use tracing::warn;
+use tracing::{info, warn};
 
 /* H4 message type */
 const H4_CMD_TYPE: u8 = 1;
@@ -110,7 +110,7 @@ impl H4Codec {
         if let Some(pos) =
             src.windows(RESET_COMMAND.len()).position(|window| window == RESET_COMMAND)
         {
-            warn!("Recovered at index {}", pos);
+            info!("Recovered at index {}", pos);
             src.advance(pos);
             // Return a large value to force `decode` to return `Ok(None)`.
             // This restarts decoding with the now valid `src` buffer (starting with

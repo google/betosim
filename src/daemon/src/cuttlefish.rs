@@ -95,7 +95,7 @@ fn find_instance_network_config(
         Some(i) => i,
         None => {
             // Expected in forwarder mode where the device belongs to another deployment.
-            warn!("Could not match Cuttlefish device {device_name:?} in cuttlefish_config.json");
+            info!("Could not match Cuttlefish device {device_name:?} in cuttlefish_config.json");
             return None;
         }
     };
