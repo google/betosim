@@ -19,11 +19,23 @@ use netsim_model::{
     MAX_T4AT_NDEF_FILE_CAPACITY, MAX_T4AT_NDEF_MESSAGE_BYTES, NfcTag, NfcTagError, NfcTagProtocol,
     NfcTagUpdate, decode_ndef_hex, normalize_uid_hex,
 };
+use pdl_runtime::Packet;
 
 use crate::accessory::RfAccessory;
 
+const SW_INS_NOT_SUPPORTED: [u8; 2] = [0x6D, 0x00];
+
+// Casimir's `IsoDepT4ATSelectResponse.rats_response` excludes the leading ISO/IEC 14443-4 `TL`
+// length byte (starting at Byte 2: T0, TA(1), TB(1), TC(1), historical byte 0x80) because
+// `casimir::controller` prepends `TL` automatically when building the NCI activation payload.
+const DESFIRE_ATS_RESPONSE: [u8; 5] = [0x75, 0x77, 0x81, 0x02, 0x80];
+
 const NLEN_HEADER_BYTES: usize = 2;
 const RF_POWER_LEVEL_NOMINAL: u8 = 10;
+const SINGLE_SIZE_UID_LEN: usize = 4;
+const BIT_FRAME_SDD_SINGLE_SIZE_UID: u8 = 0x08;
+const BIT_FRAME_SDD_CASCADE_REQUIRED: u8 = 0x04;
+const INT_PROTOCOL_ISO_DEP: u8 = 0b01;
 
 /// Sans-I/O state machine emulating an NFC Forum Type 4A / DESFire tag.
 #[derive(Debug)]
@@ -96,6 +108,131 @@ impl T4atTag {
     pub fn uid_bytes(&self) -> &[u8] {
         &self.uid
     }
+
+    fn handle_poll_command(&mut self, cmd: &rf::PollCommand) -> Option<rf::RfPacket> {
+        if cmd.technology() != rf::Technology::NfcA {
+            return None;
+        }
+        if self.active_reader.is_some_and(|active| active != cmd.sender()) {
+            return None;
+        }
+        if self.active_reader == Some(cmd.sender()) {
+            self.active_reader = None;
+            self.reset_session_state();
+        }
+
+        let bit_frame_sdd = if self.uid.len() == SINGLE_SIZE_UID_LEN {
+            BIT_FRAME_SDD_SINGLE_SIZE_UID
+        } else {
+            BIT_FRAME_SDD_CASCADE_REQUIRED
+        };
+        self.rx_count = self.rx_count.saturating_add(1);
+        self.tx_count = self.tx_count.saturating_add(1);
+
+        let resp = rf::NfcAPollResponse {
+            sender: self.casimir_rf_id,
+            receiver: cmd.sender(),
+            protocol: rf::Protocol::IsoDep,
+            bitrate: rf::BitRate::BitRate106KbitS,
+            power_level: RF_POWER_LEVEL_NOMINAL,
+            nfcid1: self.uid.clone(),
+            int_protocol: INT_PROTOCOL_ISO_DEP,
+            bit_frame_sdd,
+        };
+        match resp.try_into() {
+            Ok(pkt) => Some(pkt),
+            Err(error) => {
+                tracing::debug!(%error, "failed to encode NfcAPollResponse");
+                None
+            }
+        }
+    }
+
+    fn handle_select_command(&mut self, cmd: &rf::IsoDepT4ATSelectCommand) -> Option<rf::RfPacket> {
+        if self.active_reader.is_some_and(|active| active != cmd.sender()) {
+            return None;
+        }
+        self.active_reader = Some(cmd.sender());
+        self.reset_session_state();
+        self.rx_count = self.rx_count.saturating_add(1);
+        self.tx_count = self.tx_count.saturating_add(1);
+
+        let resp = rf::IsoDepT4ATSelectResponse {
+            sender: self.casimir_rf_id,
+            receiver: cmd.sender(),
+            bitrate: rf::BitRate::BitRate106KbitS,
+            power_level: RF_POWER_LEVEL_NOMINAL,
+            rats_response: DESFIRE_ATS_RESPONSE.to_vec(),
+        };
+        match resp.try_into() {
+            Ok(pkt) => Some(pkt),
+            Err(error) => {
+                tracing::debug!(%error, "failed to encode IsoDepT4ATSelectResponse");
+                None
+            }
+        }
+    }
+
+    fn handle_deactivate_notification(
+        &mut self,
+        cmd: &rf::DeactivateNotification,
+    ) -> Option<rf::RfPacket> {
+        if self.active_reader == Some(cmd.sender()) {
+            self.rx_count = self.rx_count.saturating_add(1);
+            self.active_reader = None;
+            self.reset_session_state();
+        }
+        None
+    }
+
+    fn handle_data_command(&mut self, cmd: &rf::Data) -> Option<rf::RfPacket> {
+        if self.active_reader != Some(cmd.sender())
+            || cmd.technology() != rf::Technology::NfcA
+            || cmd.protocol() != rf::Protocol::IsoDep
+        {
+            return None;
+        }
+
+        self.rx_count = self.rx_count.saturating_add(1);
+
+        if cmd.data().is_empty() {
+            self.tx_count = self.tx_count.saturating_add(1);
+            let resp = rf::Data {
+                sender: self.casimir_rf_id,
+                receiver: cmd.sender(),
+                technology: rf::Technology::NfcA,
+                protocol: rf::Protocol::IsoDep,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: RF_POWER_LEVEL_NOMINAL,
+                data: Vec::new(),
+            };
+            return match resp.try_into() {
+                Ok(pkt) => Some(pkt),
+                Err(error) => {
+                    tracing::debug!(%error, "failed to encode 0-byte presence check response");
+                    None
+                }
+            };
+        }
+
+        self.tx_count = self.tx_count.saturating_add(1);
+        let resp = rf::Data {
+            sender: self.casimir_rf_id,
+            receiver: cmd.sender(),
+            technology: rf::Technology::NfcA,
+            protocol: rf::Protocol::IsoDep,
+            bitrate: rf::BitRate::BitRate106KbitS,
+            power_level: RF_POWER_LEVEL_NOMINAL,
+            data: SW_INS_NOT_SUPPORTED.to_vec(),
+        };
+        match resp.try_into() {
+            Ok(pkt) => Some(pkt),
+            Err(error) => {
+                tracing::debug!(%error, "failed to encode RF Data packet");
+                None
+            }
+        }
+    }
 }
 
 impl RfAccessory for T4atTag {
@@ -110,7 +247,35 @@ impl RfAccessory for T4atTag {
         {
             return None;
         }
-        None
+        let child = match packet.specialize() {
+            Ok(c) => c,
+            Err(error) => {
+                if packet.packet_type() == rf::RfPacketType::SelectCommand
+                    && packet.protocol() == rf::Protocol::IsoDep
+                    && packet.technology() == rf::Technology::NfcA
+                {
+                    let reparsed = packet
+                        .encode_to_vec()
+                        .ok()
+                        .and_then(|bytes| rf::IsoDepT4ATSelectCommand::decode_full(&bytes).ok());
+                    if let Some(cmd) = reparsed {
+                        return self.handle_select_command(&cmd);
+                    }
+                }
+                tracing::debug!(%error, "failed to specialize RF packet");
+                return None;
+            }
+        };
+
+        match child {
+            rf::RfPacketChild::PollCommand(cmd) => self.handle_poll_command(&cmd),
+            rf::RfPacketChild::IsoDepT4ATSelectCommand(cmd) => self.handle_select_command(&cmd),
+            rf::RfPacketChild::DeactivateNotification(cmd) => {
+                self.handle_deactivate_notification(&cmd)
+            }
+            rf::RfPacketChild::Data(cmd) => self.handle_data_command(&cmd),
+            _ => None,
+        }
     }
 
     fn deactivate_active_reader(&mut self, reason: rf::DeactivateReason) -> Option<rf::RfPacket> {
@@ -254,6 +419,229 @@ mod tests {
             tx_count: 0,
             rx_count: 0,
         }
+    }
+
+    struct T4atWorld {
+        tag: T4atTag,
+        last_action: Option<rf::RfPacket>,
+    }
+
+    impl T4atWorld {
+        fn given_formatted_tag(casimir_id: u16, uid_hex: &str, ndef_text: &str) -> Self {
+            let mut model = make_test_tag(true, false, ndef_text);
+            model.uid = uid_hex.to_string();
+            let tag = T4atTag::try_from_tag(&model, casimir_id).expect("valid tag");
+            Self { tag, last_action: None }
+        }
+
+        fn given_invisible_tag(casimir_id: u16, uid_hex: &str) -> Self {
+            let mut model = make_test_tag(true, false, "Hello");
+            model.uid = uid_hex.to_string();
+            model.visible = false;
+            let tag = T4atTag::try_from_tag(&model, casimir_id).expect("valid tag");
+            Self { tag, last_action: None }
+        }
+
+        fn when_poll_received(&mut self, sender: u16, tech: rf::Technology) {
+            let pkt: rf::RfPacket = rf::PollCommand {
+                sender,
+                receiver: u16::MAX,
+                technology: tech,
+                protocol: rf::Protocol::Undetermined,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: 10,
+                format: rf::PollingFrameFormat::Short,
+                payload: vec![],
+            }
+            .try_into()
+            .expect("valid poll pkt");
+            self.last_action = self.tag.handle_packet(&pkt);
+        }
+
+        fn when_rats_received(&mut self, sender: u16, receiver: u16) {
+            let pkt: rf::RfPacket = rf::IsoDepT4ATSelectCommand {
+                sender,
+                receiver,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: 10,
+                param: 0x80,
+            }
+            .try_into()
+            .expect("valid rats pkt");
+            self.last_action = self.tag.handle_packet(&pkt);
+        }
+
+        fn when_data_received(&mut self, sender: u16, receiver: u16, data: &[u8]) {
+            let pkt: rf::RfPacket = rf::Data {
+                sender,
+                receiver,
+                technology: rf::Technology::NfcA,
+                protocol: rf::Protocol::IsoDep,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: 10,
+                data: data.to_vec(),
+            }
+            .try_into()
+            .expect("valid data pkt");
+            self.last_action = self.tag.handle_packet(&pkt);
+        }
+
+        fn when_deactivate_received(&mut self, sender: u16, receiver: u16) {
+            let pkt: rf::RfPacket = rf::DeactivateNotification {
+                sender,
+                receiver,
+                technology: rf::Technology::NfcA,
+                protocol: rf::Protocol::IsoDep,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: 10,
+                type_: rf::DeactivateType::Discovery,
+                reason: rf::DeactivateReason::EndpointRequest,
+            }
+            .try_into()
+            .expect("valid deactivate pkt");
+            self.last_action = self.tag.handle_packet(&pkt);
+        }
+
+        fn then_poll_response_matches(
+            &self,
+            expected_sender: u16,
+            expected_receiver: u16,
+            expected_bit_frame_sdd: u8,
+            expected_nfcid1: &[u8],
+        ) {
+            match &self.last_action {
+                Some(pkt) => match pkt.specialize().expect("specializes to child") {
+                    rf::RfPacketChild::NfcAPollResponse(resp) => {
+                        assert_eq!(resp.sender(), expected_sender);
+                        assert_eq!(resp.receiver(), expected_receiver);
+                        assert_eq!(resp.protocol(), rf::Protocol::IsoDep);
+                        assert_eq!(resp.int_protocol(), 0b01);
+                        assert_eq!(resp.bit_frame_sdd(), expected_bit_frame_sdd);
+                        assert_eq!(resp.nfcid1(), expected_nfcid1);
+                    }
+                    other => panic!("expected NfcAPollResponse, got {other:?}"),
+                },
+                None => panic!("expected poll response, got None"),
+            }
+        }
+
+        fn then_ats_response_matches(
+            &self,
+            expected_sender: u16,
+            expected_receiver: u16,
+            expected_ats: &[u8],
+        ) {
+            match &self.last_action {
+                Some(pkt) => match pkt.specialize().expect("specializes to child") {
+                    rf::RfPacketChild::IsoDepT4ATSelectResponse(resp) => {
+                        assert_eq!(resp.sender(), expected_sender);
+                        assert_eq!(resp.receiver(), expected_receiver);
+                        assert_eq!(resp.rats_response(), expected_ats);
+                    }
+                    other => panic!("expected IsoDepT4ATSelectResponse, got {other:?}"),
+                },
+                None => panic!("expected IsoDepT4ATSelectResponse, got None"),
+            }
+        }
+
+        fn then_action_is_none(&self) {
+            assert_eq!(self.last_action, None);
+        }
+
+        fn then_data_matches(&self, expected: &[u8]) {
+            match &self.last_action {
+                Some(pkt) => match pkt.specialize().expect("specializes to child") {
+                    rf::RfPacketChild::Data(data) => {
+                        assert_eq!(data.data(), expected);
+                    }
+                    other => panic!("expected rf::Data, got {other:?}"),
+                },
+                None => panic!("expected rf::Data, got None"),
+            }
+        }
+
+        fn then_active_reader_is(&self, expected: Option<u16>) {
+            assert_eq!(self.tag.active_reader(), expected);
+        }
+    }
+
+    #[test]
+    fn poll_and_rats_activation_on_7_byte_uid_returns_iso_dep_and_desfire_ats() {
+        let mut world = T4atWorld::given_formatted_tag(100, "04010203040506", "Hello");
+        world.when_poll_received(1, rf::Technology::NfcA);
+        world.then_poll_response_matches(100, 1, 0x04, &[0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        world.when_rats_received(1, 100);
+        world.then_ats_response_matches(100, 1, &[0x75, 0x77, 0x81, 0x02, 0x80]);
+    }
+
+    #[test]
+    fn poll_reports_bit_frame_sdd_0x08_for_4_byte_uid_and_0x04_for_10_byte_uid() {
+        let mut world4 = T4atWorld::given_formatted_tag(101, "01020304", "Hello");
+        let mut world10 = T4atWorld::given_formatted_tag(102, "0102030405060708090A", "Hello");
+        world4.when_poll_received(1, rf::Technology::NfcA);
+        world4.then_poll_response_matches(101, 1, 0x08, &[0x01, 0x02, 0x03, 0x04]);
+        world10.when_poll_received(1, rf::Technology::NfcA);
+        world10.then_poll_response_matches(
+            102,
+            1,
+            0x04,
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A],
+        );
+    }
+
+    #[test]
+    fn non_nfca_poll_command_is_ignored() {
+        let mut world = T4atWorld::given_formatted_tag(103, "04010203040506", "Hello");
+        world.when_poll_received(2, rf::Technology::NfcB);
+        world.then_action_is_none();
+    }
+
+    #[test]
+    fn invisible_tag_ignores_poll_command() {
+        let mut world = T4atWorld::given_invisible_tag(104, "04010203040506");
+        world.when_poll_received(1, rf::Technology::NfcA);
+        world.then_action_is_none();
+    }
+
+    #[test]
+    fn active_reader_arbitration_ignores_competing_reader_until_deactivation() {
+        let mut world = T4atWorld::given_formatted_tag(50, "04010203040506", "Arbitration");
+        world.when_poll_received(1, rf::Technology::NfcA);
+        world.when_rats_received(1, 50);
+        world.then_active_reader_is(Some(1));
+
+        world.when_poll_received(2, rf::Technology::NfcA);
+        world.then_action_is_none();
+        world.when_rats_received(2, 50);
+        world.then_action_is_none();
+        world.when_data_received(2, 50, &[0x00, 0xA4, 0x04, 0x00]);
+        world.then_action_is_none();
+        world.then_active_reader_is(Some(1));
+
+        world.when_deactivate_received(1, 50);
+        world.then_active_reader_is(None);
+
+        world.when_poll_received(2, rf::Technology::NfcA);
+        world.when_rats_received(2, 50);
+        world.then_active_reader_is(Some(2));
+    }
+
+    #[test]
+    fn empty_data_presence_check_is_echoed_by_active_reader() {
+        let mut world = T4atWorld::given_formatted_tag(51, "04010203040506", "Echo");
+        world.when_poll_received(1, rf::Technology::NfcA);
+        world.when_rats_received(1, 51);
+        world.when_data_received(1, 51, &[]);
+        world.then_data_matches(&[]);
+    }
+
+    #[test]
+    fn non_empty_data_returns_sw_ins_not_supported_until_apdu_slice() {
+        let mut world = T4atWorld::given_formatted_tag(60, "04010203040506", "Data");
+        world.when_poll_received(1, rf::Technology::NfcA);
+        world.when_rats_received(1, 60);
+        world.when_data_received(1, 60, &[0x00, 0xA4, 0x04, 0x00]);
+        world.then_data_matches(&[0x6D, 0x00]);
     }
 
     #[test]
