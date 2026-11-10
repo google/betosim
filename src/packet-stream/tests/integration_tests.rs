@@ -17,7 +17,6 @@
 //=============================================================================
 
 use bytes::Bytes;
-use packet_stream::TransportType;
 
 use crate::world::{World, create_chip_info};
 
@@ -118,12 +117,8 @@ async fn test_multiple_transports() {
 #[tokio::test]
 async fn test_error_handling() {
     let mut world = World::new();
-    world
-        .when_try_connect_to_transport(
-            TransportType::tcp("localhost", 65534),
-            create_chip_info("test-chip"),
-        )
-        .await;
+    let transport = world.given_unreachable_tcp_transport();
+    world.when_try_connect_to_transport(transport, create_chip_info("test-chip")).await;
     world.then_connect_failed();
 }
 

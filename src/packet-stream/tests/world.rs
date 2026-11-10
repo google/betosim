@@ -19,7 +19,11 @@
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -27,7 +31,11 @@ use packet_stream::{
     ChipInfo, ChipKind, StreamAddress, Streams, TransportType,
     transport::traits::{PacketSink, PacketStream},
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream, time::timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpSocket, TcpStream},
+    time::timeout,
+};
 
 #[cfg(unix)]
 static UDS_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +87,7 @@ pub(crate) struct World {
     listener_targets: HashMap<String, TransportType>,
     #[cfg(unix)]
     uds_paths: Vec<PathBuf>,
+    reserved_sockets: Vec<TcpSocket>,
     clients: HashMap<String, Endpoint>,
     servers: HashMap<String, Endpoint>,
     raw_tcp_streams: HashMap<String, TcpStream>,
@@ -92,6 +101,7 @@ impl World {
             listener_targets: HashMap::new(),
             #[cfg(unix)]
             uds_paths: Vec::new(),
+            reserved_sockets: Vec::new(),
             clients: HashMap::new(),
             servers: HashMap::new(),
             raw_tcp_streams: HashMap::new(),
@@ -140,6 +150,14 @@ impl World {
         self.uds_paths.push(path);
         self.streams.start_listener(name, transport.clone()).await.expect("start UDS listener");
         self.listener_targets.insert(name.to_string(), transport);
+    }
+
+    pub(crate) fn given_unreachable_tcp_transport(&mut self) -> TransportType {
+        let socket = TcpSocket::new_v4().expect("create TCP socket");
+        socket.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind loopback socket");
+        let port = socket.local_addr().expect("socket local_addr").port();
+        self.reserved_sockets.push(socket);
+        TransportType::tcp("127.0.0.1", port)
     }
 
     pub(crate) async fn when_connect_client(
