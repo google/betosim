@@ -22,7 +22,7 @@ use std::{
 
 use netsim_packets::{CcmpHeader, Ieee80211, MacAddress};
 use parking_lot::RwLock;
-use tracing::error;
+use tracing::{debug, error};
 use zerocopy::IntoBytes;
 
 use crate::ffi::{AesCcmDecrypt, AesCcmEncrypt};
@@ -231,7 +231,7 @@ impl SharedKeyStore {
                 data.len(),
                 aad.len()
             );
-            error!("RAW FRAME TO DECRYPT (Hex): {:02X?}", ieee80211.as_bytes());
+            debug!("RAW FRAME TO DECRYPT (Hex): {:02X?}", ieee80211.as_bytes());
             return None;
         }
         let plaintext = out_plain;
@@ -441,5 +441,44 @@ mod tests {
         let decoded_unicast =
             Ieee80211::decode(&encrypted_unicast).expect("decode encrypted unicast");
         assert!(decoded_unicast.needs_decryption());
+    }
+
+    #[test]
+    fn test_try_decrypt_corrupted_ciphertext_records_error_stats() {
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        const PROTECTED_FC_BIT: u8 = 0x40;
+
+        // Given
+        let store = SharedKeyStore::new();
+        let bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let sta_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+        store.add_bssid(bssid);
+        store.add_session(sta_mac, vec![0x42; 16]);
+
+        let eth = create_dummy_ethernet(&sta_mac.bytes, &bssid.bytes, b"CorruptedToApPayload");
+        let to_ap_data = netsim_packets::Ieee80211::from_ieee8023(
+            &bytes::Bytes::from(eth),
+            bssid,
+            netsim_packets::FrameDirection::ToAp,
+            102,
+        )
+        .expect("create ToAp 802.11 data");
+        let mut raw = to_ap_data.as_bytes().to_vec();
+        raw[1] |= PROTECTED_FC_BIT;
+        let corrupted = Ieee80211::decode(&raw).expect("decode forged protected frame");
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        // When
+        let decrypted =
+            tracing::subscriber::with_default(subscriber, || store.try_decrypt(&corrupted));
+
+        // Then
+        assert!(decrypted.is_none());
+        assert_eq!(table.snapshot(), vec![(common::util::netsim_logger::err_bases::AP, 1)]);
     }
 }

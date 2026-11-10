@@ -47,8 +47,10 @@ cxx-build = "1.0"
 
 [dev-dependencies]
 ap-actor = { path = ".", features = ["testing"] }
+common = { package = "netsim-common", path = "../common" }
 netsim-testing = { path = "../testing", features = ["testing"] }
 rand = "0.9"
+tracing-subscriber = "0.3"
 
 [features]
 testing = ["actor-framework/testing"]

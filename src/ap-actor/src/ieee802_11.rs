@@ -663,7 +663,7 @@ impl Ieee80211Manager {
         shared_keys: &SharedKeyStore,
     ) -> Result<Vec<bytes::Bytes>, ApError> {
         let dump = frame.get(..48).unwrap_or(frame);
-        warn!(
+        debug!(
             "ApActor: Data Frame Debug [{} bytes] (stype: {:?}) hex: {:02x?}",
             frame.len(),
             ieee80211_frame.stype(),
@@ -873,5 +873,63 @@ mod tests {
         let has_ds_ie_5g =
             IeIterator::new(&beacon_5g[0][36..]).any(|ie| ie.id == tags::DS_PARAMETER_SET);
         assert!(!has_ds_ie_5g, "5 GHz channel 36 must omit DS_PARAMETER_SET IE");
+    }
+
+    #[test]
+    fn test_handle_non_eapol_data_frame_emits_no_warn_or_error() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+        struct WarnOrErrorCounter(Arc<AtomicUsize>);
+
+        impl<S: tracing::Subscriber> Layer<S> for WarnOrErrorCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let meta = event.metadata();
+                if meta.target().starts_with("ap_actor") && *meta.level() <= tracing::Level::WARN {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        const DATA_TO_DS_FC: u16 = 0x0108;
+        const STA_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x55];
+
+        // Given
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing_subscriber::registry().with(WarnOrErrorCounter(Arc::clone(&count)));
+        let manager = Ieee80211Manager::new();
+        let mut ap = ApState::default();
+        let shared_keys = SharedKeyStore::new();
+        let header = MacHeader3Addr {
+            frame_control: FrameControl::new(DATA_TO_DS_FC),
+            duration_id: U16::new(0),
+            addr1: ap.config.bssid,
+            addr2: netsim_packets::MacAddr { bytes: STA_MAC },
+            addr3: ap.config.bssid,
+            sequence_control: ap.next_seq_control(),
+        };
+        let mut raw_data = header.as_bytes().to_vec();
+        raw_data.extend_from_slice(&[0u8; 8]);
+        let ieee80211_frame = Ieee80211::decode(&raw_data).expect("decode valid 802.11 data frame");
+
+        // When
+        let out = tracing::subscriber::with_default(subscriber, || {
+            manager
+                .handle_data_frame(&mut ap, &raw_data, ieee80211_frame, &shared_keys)
+                .expect("non-EAPOL data frame returns empty Ok")
+        });
+
+        // Then
+        assert!(out.is_empty());
+        assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 }

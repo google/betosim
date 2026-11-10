@@ -57,8 +57,10 @@ netsim_rust_library(
     crate_name = "ap_actor",
     edition = "2024",
     test_deps = [
+        "//src/common",
         "//src/testing",
         "@rand",
+        "@tracing-subscriber",
     ],
     deps = [
         ":ap_actor_cxx",
