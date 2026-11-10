@@ -501,6 +501,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::stats::{UwbApi, UwbStats};
 
     #[tokio::test]
     async fn test_allocate_anchor_mac_wraps_after_zero() {
@@ -651,5 +652,110 @@ mod tests {
         final_pkt.encode(&mut bytes).unwrap();
 
         assert_eq!(count_p2p_ranging_measurements(&bytes), Ok(3));
+    }
+
+    #[test]
+    fn test_parsing_two_way_extended_and_owr_aoa_measurements() {
+        let two_way_ext = uci::ExtendedMacTwoWaySessionInfoNtf {
+            sequence_number: 0,
+            session_token: 0,
+            rcr_indicator: 0,
+            current_ranging_interval: 0,
+            two_way_ranging_measurements: vec![
+                uci::ExtendedAddressTwoWayRangingMeasurement {
+                    mac_address: 1,
+                    status: Status::Ok,
+                    ..Default::default()
+                },
+                uci::ExtendedAddressTwoWayRangingMeasurement {
+                    mac_address: 2,
+                    status: Status::Ok,
+                    ..Default::default()
+                },
+            ],
+            vendor_data: vec![],
+        };
+        let owr_short = uci::ShortMacOwrAoaSessionInfoNtf {
+            sequence_number: 0,
+            session_token: 0,
+            rcr_indicator: 0,
+            current_ranging_interval: 0,
+            owr_aoa_ranging_measurements: vec![uci::ShortAddressOwrAoaRangingMeasurement {
+                mac_address: 3,
+                status: Status::Ok,
+                ..Default::default()
+            }],
+            vendor_data: vec![],
+        };
+        let owr_ext = uci::ExtendedMacOwrAoaSessionInfoNtf {
+            sequence_number: 0,
+            session_token: 0,
+            rcr_indicator: 0,
+            current_ranging_interval: 0,
+            owr_aoa_ranging_measurements: vec![
+                uci::ExtendedAddressOwrAoaRangingMeasurement {
+                    mac_address: 4,
+                    status: Status::Ok,
+                    ..Default::default()
+                },
+                uci::ExtendedAddressOwrAoaRangingMeasurement {
+                    mac_address: 5,
+                    status: Status::Ok,
+                    ..Default::default()
+                },
+            ],
+            vendor_data: vec![],
+        };
+
+        for (bytes, expected) in [
+            (two_way_ext.encode_to_vec().unwrap(), 2),
+            (owr_short.encode_to_vec().unwrap(), 1),
+            (owr_ext.encode_to_vec().unwrap(), 2),
+        ] {
+            assert_eq!(count_p2p_ranging_measurements(&bytes), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn test_parse_and_count_uci_data_message_snd() {
+        let stats = UwbStats::new();
+        parse_and_count_uci_command(&[], &stats);
+        assert_eq!(stats.get(UwbApi::SendData), 0);
+
+        let snd_bytes = uci::DataMessageSnd {
+            pbf: uci::PacketBoundaryFlag::Complete,
+            session_handle: 7,
+            destination_address: 0x0001,
+            data_sequence_number: 1,
+            application_data: vec![0xAA, 0xBB],
+        }
+        .encode_to_vec()
+        .unwrap();
+        parse_and_count_uci_command(&snd_bytes, &stats);
+        parse_and_count_uci_data_receive(&snd_bytes, &stats);
+        assert_eq!(stats.get(UwbApi::SendData), 1);
+        assert_eq!(stats.get(UwbApi::OnDataReceived), 0);
+    }
+
+    #[test]
+    fn test_parse_and_count_uci_data_message_rcv() {
+        let stats = UwbStats::new();
+        parse_and_count_uci_data_receive(&[], &stats);
+        assert_eq!(stats.get(UwbApi::OnDataReceived), 0);
+
+        let rcv_bytes = uci::DataMessageRcv {
+            pbf: uci::PacketBoundaryFlag::Complete,
+            session_handle: 8,
+            status: uci::DataRcvStatusCode::UciStatusSuccess,
+            source_address: 0x0002,
+            data_sequence_number: 3,
+            application_data: vec![0xCC, 0xDD, 0xEE],
+        }
+        .encode_to_vec()
+        .unwrap();
+        parse_and_count_uci_command(&rcv_bytes, &stats);
+        parse_and_count_uci_data_receive(&rcv_bytes, &stats);
+        assert_eq!(stats.get(UwbApi::SendData), 0);
+        assert_eq!(stats.get(UwbApi::OnDataReceived), 1);
     }
 }

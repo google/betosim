@@ -255,9 +255,28 @@ impl World {
         device_mac: [u8; 2],
         peer_mac: [u8; 2],
     ) {
+        self.when_uci_session_with_type_is_established(
+            chip_id,
+            session_id,
+            uci::SessionType::FiraRangingSession,
+            (device_type, device_role),
+            device_mac,
+            peer_mac,
+        )
+        .await;
+    }
+
+    pub async fn when_uci_session_with_type_is_established(
+        &mut self,
+        chip_id: u32,
+        session_id: u32,
+        session_type: uci::SessionType,
+        (device_type, device_role): (uci::DeviceType, uci::DeviceRole),
+        device_mac: [u8; 2],
+        peer_mac: [u8; 2],
+    ) {
         // 1. Session Init
-        let init_cmd =
-            uci::SessionInitCmd { session_id, session_type: uci::SessionType::FiraRangingSession };
+        let init_cmd = uci::SessionInitCmd { session_id, session_type };
         self.when_packet_is_sent(chip_id, &init_cmd.encode_to_vec().unwrap()).await;
 
         let p1 = self.then_packet_is_received(chip_id).await;
@@ -449,5 +468,107 @@ impl World {
             .unwrap_or_else(|| panic!("chip {} not found in statistics", chip_id.0));
         assert_eq!(chip_stats.tx_count, expected_tx, "tx_count mismatch");
         assert_eq!(chip_stats.rx_count, expected_rx, "rx_count mismatch");
+    }
+
+    pub async fn given_active_session_between_two_chips(
+        &mut self,
+        session_type: uci::SessionType,
+        initiator_chip: u32,
+        initiator_mac: [u8; 2],
+        responder_chip: u32,
+        responder_mac: [u8; 2],
+        session_id: u32,
+    ) {
+        for chip_id in [initiator_chip, responder_chip] {
+            self.given_a_chip(chip_id).await;
+            self.then_status_notification_is_received(chip_id, uci::DeviceState::DeviceStateReady)
+                .await;
+            self.when_uci_is_reset(chip_id).await;
+        }
+        self.when_uci_session_with_type_is_established(
+            initiator_chip,
+            session_id,
+            session_type,
+            (uci::DeviceType::Controller, uci::DeviceRole::Initiator),
+            initiator_mac,
+            responder_mac,
+        )
+        .await;
+        self.when_uci_session_with_type_is_established(
+            responder_chip,
+            session_id,
+            session_type,
+            (uci::DeviceType::Controlee, uci::DeviceRole::Responder),
+            responder_mac,
+            initiator_mac,
+        )
+        .await;
+        self.when_ranging_is_started(responder_chip, session_id).await;
+        self.when_ranging_is_started(initiator_chip, session_id).await;
+    }
+
+    pub async fn when_data_message_is_sent(
+        &mut self,
+        chip_id: u32,
+        session_handle: u32,
+        peer_mac: [u8; 2],
+        data_sequence_number: u16,
+        payload: &[u8],
+    ) {
+        let snd = uci::DataMessageSnd {
+            pbf: uci::PacketBoundaryFlag::Complete,
+            session_handle,
+            destination_address: u64::from(u16::from_le_bytes(peer_mac)),
+            data_sequence_number,
+            application_data: payload.to_vec(),
+        };
+        self.when_packet_is_sent(chip_id, &snd.encode_to_vec().unwrap()).await;
+
+        // Skip any initiator ShortMacTwoWaySessionInfoNtf if the 200ms ranging tick fires first.
+        let credit_ntf = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let pkt = self.then_packet_is_received(chip_id).await;
+                if let Ok((ntf, _)) = uci::SessionDataCreditNtf::decode(&pkt) {
+                    return ntf;
+                }
+                uci::ShortMacTwoWaySessionInfoNtf::decode(&pkt)
+                    .expect("expected SessionDataCreditNtf or ShortMacTwoWaySessionInfoNtf");
+            }
+        })
+        .await
+        .expect("Timed out waiting for SessionDataCreditNtf");
+        assert_eq!(credit_ntf.session_token, session_handle);
+        assert_eq!(credit_ntf.credit_availability, uci::CreditAvailability::CreditNotAvailable);
+    }
+
+    pub async fn then_data_message_is_received(
+        &mut self,
+        chip_id: u32,
+        expected_session_handle: u32,
+        expected_sender_mac: [u8; 2],
+        expected_sequence_number: u16,
+        expected_payload: &[u8],
+    ) {
+        let pkt = self.then_packet_is_received(chip_id).await;
+        let (rcv, _) = uci::DataMessageRcv::decode(&pkt).expect("DataMessageRcv notification");
+
+        assert_eq!(rcv.session_handle, expected_session_handle);
+        assert_eq!(rcv.status, uci::DataRcvStatusCode::UciStatusSuccess);
+        assert_eq!(rcv.source_address, u64::from(u16::from_le_bytes(expected_sender_mac)));
+        assert_eq!(rcv.data_sequence_number, expected_sequence_number);
+        assert_eq!(rcv.application_data, expected_payload);
+    }
+
+    pub async fn then_ranging_session_data_stats_are(
+        &self,
+        expected_send_data: i32,
+        expected_on_data_received: i32,
+    ) {
+        use netsim_proto::{protobuf::Message, stats::UwbApiStats};
+
+        let stats_bytes = self.client.get_global_stats().await.unwrap().unwrap();
+        let stats = UwbApiStats::parse_from_bytes(&stats_bytes).unwrap();
+        assert_eq!(stats.ranging_session.send_data(), expected_send_data);
+        assert_eq!(stats.ranging_session.on_data_received(), expected_on_data_received);
     }
 }

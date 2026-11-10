@@ -260,3 +260,38 @@ async fn test_uwb_api_stats() {
     let stats = UwbApiStats::parse_from_bytes(&stats_bytes).unwrap();
     assert_eq!(stats.ranging_session.close(), 1);
 }
+
+// Scenario: In-band data transfer between two ranging UWB chips updates SendData and
+// OnDataReceived stats
+#[tokio::test]
+async fn test_uwb_data_message_stats() {
+    let mut world = World::new().await;
+    let sender_chip = 1;
+    let sender_mac = [0x01, 0x00];
+    let receiver_chip = 2;
+    let receiver_mac = [0x02, 0x00];
+    let session_id = 7;
+    let seq_num = 1;
+    let payload = b"uwb-payload";
+
+    // Given: Two initialized UWB chips with an active in-band data ranging session
+    world
+        .given_active_session_between_two_chips(
+            uci::SessionType::FiraRangingAndInBandDataSession,
+            sender_chip,
+            sender_mac,
+            receiver_chip,
+            receiver_mac,
+            session_id,
+        )
+        .await;
+
+    // When: The initiator sends a UCI DataMessageSnd packet to the responder
+    world.when_data_message_is_sent(sender_chip, session_id, receiver_mac, seq_num, payload).await;
+
+    // Then: The responder receives DataMessageRcv and stats record SendData and OnDataReceived
+    world
+        .then_data_message_is_received(receiver_chip, session_id, sender_mac, seq_num, payload)
+        .await;
+    world.then_ranging_session_data_stats_are(1, 1).await;
+}
