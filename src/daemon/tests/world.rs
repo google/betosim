@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::{
+    net::Ipv4Addr,
     path::PathBuf,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -41,13 +42,21 @@ use netsim_proto::{
     startup::{Chip as StartupChip, ChipInfo, DeviceInfo},
 };
 use netsim_rest_api::NetsimRestClient;
-use tokio::time::timeout;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::timeout,
+};
 use websocket_server::ManualWebSocketClient;
 
 // Share a single gRPC Environment across all server instances within the same
 // process (namely during parallel test execution) to prevent Abseil lock
 // contention.
 static SHARED_ENV: OnceLock<Arc<grpcio::Environment>> = OnceLock::new();
+
+const KEEPALIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const KEEPALIVE_HEADER_CAP: usize = 1024;
+const DEVICE_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// The BDD World for Daemon tests.
 pub struct World {
@@ -67,6 +76,7 @@ pub struct World {
     pub http_port: u16,
     ws_port: Option<u16>,
     ws_client: Option<ManualWebSocketClient>,
+    keepalive_streams: Vec<tokio::net::TcpStream>,
     _temp_dir: PathBuf,
 }
 
@@ -94,6 +104,19 @@ impl World {
         args.logtostderr = true;
         args.no_shutdown = true;
         args.ws_port = Some(0);
+        Self::new_with_args(args).await
+    }
+
+    /// Construct a World from real CLI flags via clap::Parser::try_parse_from + sanitize().
+    pub async fn new_with_cli_args(cli_flags: &[&str]) -> Self {
+        let full_args: Vec<&str> = std::iter::once("netsimd")
+            .chain(std::iter::once("--no-http-proxy"))
+            .chain(cli_flags.iter().copied())
+            .collect();
+        let mut args = <daemon::Args as clap::Parser>::try_parse_from(full_args)
+            .expect("Failed to parse CLI flags");
+        args.sanitize();
+        args.logtostderr = true;
         Self::new_with_args(args).await
     }
 
@@ -149,6 +172,7 @@ impl World {
             http_port,
             ws_port,
             ws_client: None,
+            keepalive_streams: Vec::new(),
             _temp_dir: temp_dir,
         }
     }
@@ -397,6 +421,13 @@ impl World {
         } else {
             panic!("No daemon spawned to shut down");
         }
+    }
+
+    /// Then the daemon and DeviceActor remain alive and serving across the entire window.
+    pub async fn then_daemon_stays_running(&mut self, duration_ms: u64) {
+        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+        assert!(!self.is_daemon_finished(), "Daemon unexpectedly shut down within {duration_ms}ms");
+        let _ = self.when_list_devices().await;
     }
 
     pub fn is_daemon_finished(&self) -> bool {
@@ -706,6 +737,25 @@ impl World {
         assert!(devices.iter().any(|d| d.name == name));
     }
 
+    /// Poll when_list_devices until expected_name is registered in DeviceActor.
+    pub async fn then_eventually_device_list_contains_by_name(&mut self, expected_name: &str) {
+        timeout(DEVICE_POLL_TIMEOUT, async {
+            loop {
+                let devices = self.when_list_devices().await;
+                if devices.iter().any(|d| d.name == expected_name) {
+                    return;
+                }
+                tokio::time::sleep(DEVICE_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "Timed out waiting for device list to contain device with name '{expected_name}'"
+            )
+        });
+    }
+
     /// When I create a test device with detailed options
     pub async fn when_create_detailed_device(
         &mut self,
@@ -924,6 +974,25 @@ impl World {
         self.send_initial_info(chip_info).await;
     }
 
+    /// Send a non-loopback Bluetooth InitialInfo with an explicit device name so DeviceActor registers a device.
+    pub async fn when_send_device_initial_info(&mut self, device_name: &str) {
+        let mut chip = StartupChip::new();
+        chip.kind = EnumOrUnknown::new(ChipKind::BLUETOOTH);
+        chip.address = "33:33:33:33:33:33".to_string();
+        chip.manufacturer = "TestMfg".to_string();
+        chip.product_name = "TestProduct".to_string();
+
+        let mut device_info = DeviceInfo::new();
+        device_info.name = device_name.to_string();
+        device_info.kind = "EMULATOR".to_string();
+
+        let mut chip_info = ChipInfo::new();
+        chip_info.chip = MessageField::some(chip);
+        chip_info.device_info = MessageField::some(device_info);
+
+        self.send_initial_info(chip_info).await;
+    }
+
     async fn send_initial_info(&mut self, chip_info: ChipInfo) {
         let sender = self.packet_sender.as_mut().expect("No packet sender");
         let mut initial_req = PacketRequest::new();
@@ -1062,5 +1131,55 @@ impl World {
         })
         .await
         .expect("Transient BleScanner/BleSniffer devices were not cleaned up on disconnect");
+    }
+
+    /// When a launcher opens an HTTP /v1/keepalive upgrade lease.
+    pub async fn when_open_keepalive(&mut self) {
+        let mut stream =
+            match tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, self.http_port)).await {
+                Ok(s) => s,
+                Err(_) => tokio::net::TcpStream::connect(("localhost", self.http_port))
+                    .await
+                    .expect("Failed to connect to netsimd HTTP server for keepalive"),
+            };
+
+        const KEEPALIVE_REQ: &[u8] = b"GET /v1/keepalive HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: netsim-keepalive\r\n\r\n";
+        stream.write_all(KEEPALIVE_REQ).await.expect("Failed to write keepalive request");
+
+        let mut buf = [0u8; KEEPALIVE_HEADER_CAP];
+        let mut bytes_read = 0;
+        timeout(KEEPALIVE_HANDSHAKE_TIMEOUT, async {
+            while bytes_read < KEEPALIVE_HEADER_CAP {
+                let n = stream
+                    .read(&mut buf[bytes_read..])
+                    .await
+                    .expect("Failed to read keepalive response");
+                assert!(n > 0, "Unexpected EOF while reading keepalive response headers");
+                bytes_read += n;
+                if buf[..bytes_read].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("Timed out waiting for keepalive response");
+
+        let resp_str =
+            std::str::from_utf8(&buf[..bytes_read]).expect("Keepalive response is not valid UTF-8");
+        assert!(
+            resp_str.starts_with("HTTP/1.1 101 "),
+            "Expected HTTP/1.1 101 Switching Protocols, got: {resp_str}"
+        );
+        assert!(
+            resp_str.contains("\r\n\r\n"),
+            "Keepalive response headers not terminated with \\r\\n\\r\\n: {resp_str}"
+        );
+
+        self.keepalive_streams.push(stream);
+    }
+
+    /// When the most recently opened /v1/keepalive lease is closed.
+    pub fn when_close_keepalive(&mut self) {
+        self.keepalive_streams.pop().expect("Expected an active keepalive stream to close");
     }
 }
