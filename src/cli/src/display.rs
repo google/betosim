@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use netsim_model::{
     AdvertiseData, AdvertiseSettings, BleBeacon, BluetoothMode, CallState, Chip, ChipVariant,
@@ -138,12 +138,18 @@ impl fmt::Display for Displayer<&Device> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 9;
+        let display_name: Cow<'_, str> = match self.value.adb_serial() {
+            Some(serial) if serial != self.value.name => {
+                Cow::Owned(format!("{} ({serial})", self.value.name))
+            }
+            _ => Cow::Borrowed(&self.value.name),
+        };
 
         write!(
             f,
             "{:indent$}{:width$} {}",
             "",
-            self.value.name,
+            display_name,
             Displayer::new(&self.value.pose.position, self.verbose)
         )?;
 
@@ -737,5 +743,50 @@ mod tests {
             "1000       | 1001       | BLUETOOTH    | -65   "
         );
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_display_device_with_adb_serial() {
+        let device = Device {
+            id: 1,
+            name: "Pixel_6".to_string(),
+            device_info: Some(netsim_model::DeviceInfo {
+                adb_serial: "emulator-5554".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(format!("{}", Displayer::new(&device, false)), "Pixel_6 (emulator-5554) ");
+    }
+
+    #[test]
+    fn test_display_device_without_device_info() {
+        let missing_info = Device { id: 1, name: "Pixel_6".to_string(), ..Default::default() };
+        assert_eq!(format!("{}", Displayer::new(&missing_info, false)), "Pixel_6   ");
+    }
+
+    #[test]
+    fn test_display_device_with_empty_adb_serial() {
+        let empty_serial = Device {
+            id: 2,
+            name: "Pixel_6".to_string(),
+            device_info: Some(netsim_model::DeviceInfo::default()),
+            ..Default::default()
+        };
+        assert_eq!(format!("{}", Displayer::new(&empty_serial, false)), "Pixel_6   ");
+    }
+
+    #[test]
+    fn test_display_device_matching_name_and_adb_serial() {
+        let device = Device {
+            id: 1,
+            name: "emulator-5554".to_string(),
+            device_info: Some(netsim_model::DeviceInfo {
+                adb_serial: "emulator-5554".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(format!("{}", Displayer::new(&device, false)), "emulator-5554 ");
     }
 }

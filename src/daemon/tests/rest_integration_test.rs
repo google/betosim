@@ -399,3 +399,23 @@ async fn test_rest_captures_lifecycle() {
         .expect("Failed to patch capture state to false");
     assert!(!disabled.enabled);
 }
+
+/// Scenario: Distinguish Same-Template Emulators by ADB Serial over REST and gRPC
+///   Given a running Netsim Daemon
+///   When two Pixel_6 emulators connect with serials emulator-5554 and emulator-5556
+///   Then REST GET /v1/devices reports both Pixel_6 devices with their ADB serials
+///   And gRPC ListDevice reports both Pixel_6 devices with their ADB serials
+#[tokio::test]
+async fn test_same_template_emulators_expose_adb_serial_over_rest_and_grpc() {
+    // Given a running Netsim Daemon
+    let mut world = World::new().await;
+    world.when_spawn_daemon().await;
+
+    // When two Pixel_6 emulators connect over PacketStreamer with distinct ADB serials
+    world.when_connect_emulator_packet_stream("Pixel_6", "emulator-5554").await;
+    world.when_connect_emulator_packet_stream("Pixel_6", "emulator-5556").await;
+
+    // Then REST GET /v1/devices and gRPC ListDevice report both ADB serials on Pixel_6
+    world.then_rest_devices_have_adb_serials("Pixel_6", &["emulator-5554", "emulator-5556"]).await;
+    world.then_grpc_devices_have_adb_serials("Pixel_6", &["emulator-5554", "emulator-5556"]).await;
+}

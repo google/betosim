@@ -309,7 +309,14 @@ pub struct Device {
     pub device_info: Option<DeviceInfo>,
 }
 
+impl Device {
+    pub fn adb_serial(&self) -> Option<&str> {
+        self.device_info.as_ref().map(|info| info.adb_serial.as_str()).filter(|s| !s.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DeviceInfo {
     pub name: String,
     pub kind: String,
@@ -321,6 +328,7 @@ pub struct DeviceInfo {
     pub avd_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    pub adb_serial: String,
 }
 
 impl From<netsim_types::DeviceInfo> for DeviceInfo {
@@ -335,6 +343,7 @@ impl From<netsim_types::DeviceInfo> for DeviceInfo {
             arch: info.arch,
             avd_path: info.avd_path,
             timezone: info.timezone,
+            adb_serial: info.adb_serial,
         }
     }
 }
@@ -735,5 +744,53 @@ mod tests {
         assert_eq!(beacon.settings.as_ref().map(|s| s.timeout), Some(3000));
         assert!(beacon.adv_data.is_none());
         assert!(beacon.scan_response.is_none());
+    }
+
+    #[test]
+    fn test_device_adb_serial_returns_some_when_configured() {
+        let configured = Device {
+            name: "Pixel_6".to_string(),
+            device_info: Some(DeviceInfo {
+                adb_serial: "emulator-5554".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(configured.adb_serial(), Some("emulator-5554"));
+    }
+
+    #[test]
+    fn test_device_adb_serial_returns_none_when_empty() {
+        let empty_serial = Device {
+            name: "Pixel_6".to_string(),
+            device_info: Some(DeviceInfo::default()),
+            ..Default::default()
+        };
+        assert_eq!(empty_serial.adb_serial(), None);
+    }
+
+    #[test]
+    fn test_device_adb_serial_returns_none_without_device_info() {
+        let missing_info = Device { name: "Pixel_6".to_string(), ..Default::default() };
+        assert_eq!(missing_info.adb_serial(), None);
+    }
+
+    #[test]
+    fn test_device_info_json_omitting_adb_serial_defaults_empty() {
+        let decoded: DeviceInfo =
+            serde_json::from_str(r#"{"name":"Pixel_6","kind":"EMULATOR"}"#).unwrap();
+        assert_eq!(decoded.name, "Pixel_6");
+        assert_eq!(decoded.adb_serial, "");
+    }
+
+    #[test]
+    fn test_device_info_from_types_maps_adb_serial() {
+        let types_info = netsim_types::DeviceInfo {
+            name: "Pixel_6".to_string(),
+            adb_serial: "emulator-5554".to_string(),
+            ..Default::default()
+        };
+        let model_info = DeviceInfo::from(types_info);
+        assert_eq!(model_info.adb_serial, "emulator-5554");
     }
 }

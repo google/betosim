@@ -58,6 +58,11 @@ const KEEPALIVE_HEADER_CAP: usize = 1024;
 const DEVICE_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+type IsolatedPacketStream = (
+    grpcio::ClientDuplexSender<PacketRequest>,
+    grpcio::ClientDuplexReceiver<netsim_proto::packet_streamer::PacketResponse>,
+);
+
 /// The BDD World for Daemon tests.
 pub struct World {
     pub daemon: Option<NetsimDaemon>,
@@ -74,6 +79,8 @@ pub struct World {
 
     pub grpc_port: u16,
     pub http_port: u16,
+    env: Arc<grpcio::Environment>,
+    packet_streams: Vec<IsolatedPacketStream>,
     ws_port: Option<u16>,
     ws_client: Option<ManualWebSocketClient>,
     keepalive_streams: Vec<tokio::net::TcpStream>,
@@ -152,7 +159,7 @@ impl World {
         let capture_client = daemon.capture_client().clone();
 
         let env = SHARED_ENV.get_or_init(|| Arc::new(grpcio::Environment::new(1))).clone();
-        let ch = ChannelBuilder::new(env).connect(&format!("localhost:{}", grpc_port));
+        let ch = ChannelBuilder::new(Arc::clone(&env)).connect(&format!("localhost:{}", grpc_port));
         let frontend_client = FrontendServiceClient::new(ch.clone());
         let access_point_client = AccessPointServiceClient::new(ch.clone());
         let nfc_client = NfcServiceClient::new(ch.clone());
@@ -170,6 +177,8 @@ impl World {
             packet_receiver: None,
             grpc_port,
             http_port,
+            env,
+            packet_streams: Vec::new(),
             ws_port,
             ws_client: None,
             keepalive_streams: Vec::new(),
@@ -1181,5 +1190,112 @@ impl World {
     /// When the most recently opened /v1/keepalive lease is closed.
     pub fn when_close_keepalive(&mut self) {
         self.keepalive_streams.pop().expect("Expected an active keepalive stream to close");
+    }
+
+    pub async fn when_connect_emulator_packet_stream(
+        &mut self,
+        device_name: &str,
+        adb_serial: &str,
+    ) {
+        let ch = ChannelBuilder::new(Arc::clone(&self.env))
+            .use_local_subchannel_pool(true)
+            .connect(&format!("localhost:{}", self.grpc_port));
+        let client = PacketStreamerClient::new(ch);
+        let (mut sender, receiver) =
+            client.stream_packets().expect("Failed to open emulator PacketStreamer stream");
+
+        let mut chip = StartupChip::new();
+        chip.kind = EnumOrUnknown::new(ChipKind::WIFI);
+
+        let mut device_info = DeviceInfo::new();
+        device_info.name = device_name.to_string();
+        device_info.kind = "EMULATOR".to_string();
+        device_info.adb_serial = adb_serial.to_string();
+
+        let mut chip_info = ChipInfo::new();
+        chip_info.chip = MessageField::some(chip);
+        chip_info.device_info = MessageField::some(device_info);
+
+        let mut initial_req = PacketRequest::new();
+        initial_req.set_initial_info(chip_info);
+        sender
+            .send((initial_req, grpcio::WriteFlags::default()))
+            .await
+            .expect("Failed to send emulator InitialInfo");
+
+        self.packet_streams.push((sender, receiver));
+    }
+
+    pub async fn then_rest_devices_have_adb_serials(
+        &mut self,
+        device_name: &str,
+        expected_serials: &[&str],
+    ) {
+        let rest_client = NetsimRestClient::new("localhost", self.http_port);
+        let mut expected: Vec<String> = expected_serials.iter().map(|s| (*s).to_string()).collect();
+        expected.sort();
+
+        let matched = timeout(Duration::from_secs(5), async {
+            loop {
+                let resp =
+                    rest_client.get_devices().send().await.expect("Failed to get devices via REST");
+                let devices: Vec<_> = resp
+                    .devices
+                    .into_iter()
+                    .filter(|d| !d.name.starts_with("gDevice-beacon-") && d.name == device_name)
+                    .collect();
+                if devices.len() == expected.len() {
+                    break devices;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for simulated emulators to appear over REST");
+
+        let mut ids: Vec<u32> = matched.iter().map(|d| d.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), expected.len(), "Each emulator must receive a distinct device ID");
+
+        let mut actual: Vec<String> =
+            matched.iter().filter_map(|d| d.adb_serial().map(str::to_string)).collect();
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
+
+    pub async fn then_grpc_devices_have_adb_serials(
+        &mut self,
+        device_name: &str,
+        expected_serials: &[&str],
+    ) {
+        let mut expected: Vec<String> = expected_serials.iter().map(|s| (*s).to_string()).collect();
+        expected.sort();
+
+        let matched = timeout(Duration::from_secs(5), async {
+            loop {
+                let devices: Vec<_> = self
+                    .when_list_devices()
+                    .await
+                    .into_iter()
+                    .filter(|d| !d.name.starts_with("gDevice-beacon-") && d.name == device_name)
+                    .collect();
+                if devices.len() == expected.len() {
+                    break devices;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for simulated emulators to appear over gRPC");
+
+        let mut ids: Vec<u32> = matched.iter().map(|d| d.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), expected.len(), "Each emulator must receive a distinct device ID");
+
+        let mut actual: Vec<String> = matched.into_iter().map(|d| d.adb_serial).collect();
+        actual.sort();
+        assert_eq!(actual, expected);
     }
 }

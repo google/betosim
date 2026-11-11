@@ -51,6 +51,7 @@ fn proto_to_device_info(proto: proto_startup::DeviceInfo) -> DeviceInfo {
         name: proto.name,
         id: String::new(), // Not available in proto DeviceInfo
         avd_path: proto.avd_path,
+        adb_serial: proto.adb_serial,
         kind: proto.kind,
         version: proto.version,
         sdk_version: proto.sdk_version,
@@ -116,9 +117,14 @@ mod tests {
     use netsim_proto::configuration::{
         Controller, ControllerFeatures, ControllerPreset, ControllerQuirks, VendorFeatures,
     };
-    use protobuf::MessageField;
+    use protobuf::{Message, MessageField, MessageFull};
 
     use super::*;
+
+    const ADB_SERIAL_FIELD_NUMBER: i32 = 10;
+    const LENGTH_DELIMITED_WIRE_TYPE: u8 = 2;
+    const ADB_SERIAL_WIRE_TAG: u8 =
+        (ADB_SERIAL_FIELD_NUMBER as u8) << 3 | LENGTH_DELIMITED_WIRE_TYPE;
 
     #[test]
     fn test_proto_to_chip_info_populates_bt_properties() {
@@ -200,5 +206,49 @@ mod tests {
             tz_chip_info.device_info.expect("device_info present").timezone.as_deref(),
             Some("America/New_York")
         );
+    }
+
+    #[test]
+    fn test_startup_device_info_adb_serial_descriptor_and_wire_roundtrip() {
+        let descriptor = proto_startup::DeviceInfo::descriptor();
+        let field = descriptor.field_by_name("adb_serial").expect("adb_serial descriptor field");
+        assert_eq!(field.number(), ADB_SERIAL_FIELD_NUMBER);
+
+        let empty = proto_startup::DeviceInfo::new();
+        let empty_bytes = empty.write_to_bytes().expect("serialize default DeviceInfo");
+        assert!(empty_bytes.is_empty());
+        let decoded_empty =
+            proto_startup::DeviceInfo::parse_from_bytes(&empty_bytes).expect("parse empty");
+        assert_eq!(decoded_empty.adb_serial, "");
+
+        let mut configured = proto_startup::DeviceInfo::new();
+        configured.adb_serial = "emulator-5554".to_string();
+        let wire_bytes = configured.write_to_bytes().expect("serialize configured DeviceInfo");
+        assert_eq!(wire_bytes.first().copied(), Some(ADB_SERIAL_WIRE_TAG));
+
+        let decoded =
+            proto_startup::DeviceInfo::parse_from_bytes(&wire_bytes).expect("parse configured");
+        assert_eq!(decoded.adb_serial, "emulator-5554");
+        assert_eq!(decoded.special_fields.unknown_fields().iter().count(), 0);
+    }
+
+    #[test]
+    fn test_proto_to_device_info_maps_adb_serial_and_preserves_empty_id() {
+        let mut proto = proto_startup::DeviceInfo::new();
+        proto.name = "Pixel_6".to_string();
+        proto.adb_serial = "emulator-5554".to_string();
+
+        let info = proto_to_device_info(proto);
+        assert_eq!(info.name, "Pixel_6");
+        assert_eq!(info.adb_serial, "emulator-5554");
+        assert_eq!(info.id, "");
+    }
+
+    #[test]
+    fn test_proto_to_device_info_unset_adb_serial_is_empty() {
+        let mut unset_proto = proto_startup::DeviceInfo::new();
+        unset_proto.name = "Pixel_6".to_string();
+        let unset_info = proto_to_device_info(unset_proto);
+        assert_eq!(unset_info.adb_serial, "");
     }
 }

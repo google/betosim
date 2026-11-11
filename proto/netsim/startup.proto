@@ -90,6 +90,8 @@ message DeviceInfo {
   string avd_path = 8;
   // IANA timezone name for the device (e.g. "America/Los_Angeles")
   optional string timezone = 9;
+  // ADB device serial e.g. emulator-5554, 0.0.0.0:6520, etc
+  string adb_serial = 10;
 }
 
 message Chip {

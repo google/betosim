@@ -89,6 +89,7 @@ fn find_device<'a>(
         .devices
         .iter()
         .find(|device| device.name == device_name)
+        .or_else(|| response.devices.iter().find(|device| device.adb_serial() == Some(device_name)))
         .ok_or_else(|| format!("Device not found: {device_name}").into())
 }
 
@@ -96,18 +97,18 @@ fn find_device_id(response: &ListDeviceResponse, device_name: &str) -> Result<u3
     Ok(find_device(response, device_name)?.id)
 }
 
-fn find_device_and_chip_id(
-    response: &ListDeviceResponse,
+fn find_device_and_chip_id<'a>(
+    response: &'a ListDeviceResponse,
     device_name: &str,
     chip_name: &str,
-) -> Result<(u32, u32)> {
+) -> Result<(u32, u32, &'a str)> {
     let device = find_device(response, device_name)?;
     let chip = device
         .chips
         .iter()
         .find(|chip| chip.name == chip_name)
         .ok_or_else(|| format!("Chip not found: {chip_name}"))?;
-    Ok((device.id, chip.id))
+    Ok((device.id, chip.id, device.name.as_str()))
 }
 
 fn run_beacon_create_ble(
@@ -136,8 +137,9 @@ fn run_beacon_patch_ble(
     verbose: bool,
 ) -> Result<()> {
     let devices = rest.get_devices().send_blocking()?;
-    let (device_id, chip_id) = find_device_and_chip_id(&devices, &cmd.device_name, &cmd.chip_name)?;
-    let patch = cmd.to_device_update(device_id, chip_id);
+    let (device_id, chip_id, device_name) =
+        find_device_and_chip_id(&devices, &cmd.device_name, &cmd.chip_name)?;
+    let patch = cmd.to_device_update(device_id, chip_id, device_name);
     rest.patch_device(device_id, &patch).send_blocking()?;
     if verbose {
         response::print_beacon_patch_ble_verbose(cmd);
@@ -436,11 +438,12 @@ pub(crate) fn repeat(continuous: bool, mut f: impl FnMut() -> Result<()>) -> Res
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use netsim_model::{Chip, Device};
+    use netsim_model::{Chip, Device, DeviceInfo};
     use netsim_rest_api::ListDeviceResponse;
 
     use crate::{
-        args::NetsimArgs, find_device_and_chip_id, find_device_id, run, validate_beacon_rest_args,
+        args::NetsimArgs, find_device, find_device_and_chip_id, find_device_id, run,
+        validate_beacon_rest_args,
     };
 
     #[test]
@@ -486,12 +489,125 @@ mod tests {
         };
         assert_eq!(
             find_device_and_chip_id(&response, "beacon-dev", "beacon-chip").unwrap(),
-            (7, 1001)
+            (7, 1001, "beacon-dev")
         );
         let err = find_device_and_chip_id(&response, "beacon-dev", "wrong-chip").unwrap_err();
         assert_eq!(err.to_string(), "Chip not found: wrong-chip");
         let err = find_device_and_chip_id(&response, "wrong-dev", "beacon-chip").unwrap_err();
         assert_eq!(err.to_string(), "Device not found: wrong-dev");
+    }
+
+    #[test]
+    fn test_find_device_and_chip_id_by_adb_serial_preserves_canonical_name() {
+        let response = ListDeviceResponse {
+            devices: vec![Device {
+                id: 7,
+                name: "beacon-dev".to_string(),
+                chips: vec![Chip {
+                    id: 1001,
+                    name: "beacon-chip".to_string(),
+                    ..Default::default()
+                }],
+                device_info: Some(DeviceInfo {
+                    adb_serial: "emulator-5554".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        };
+        assert_eq!(
+            find_device_and_chip_id(&response, "emulator-5554", "beacon-chip").unwrap(),
+            (7, 1001, "beacon-dev")
+        );
+    }
+
+    #[test]
+    fn test_find_device_by_adb_serial() {
+        let same_template = ListDeviceResponse {
+            devices: vec![
+                Device {
+                    id: 1,
+                    name: "Pixel_6".to_string(),
+                    device_info: Some(DeviceInfo {
+                        adb_serial: "emulator-5554".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Device {
+                    id: 2,
+                    name: "Pixel_6".to_string(),
+                    device_info: Some(DeviceInfo {
+                        adb_serial: "emulator-5556".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        };
+        assert_eq!(find_device(&same_template, "emulator-5556").unwrap().id, 2);
+    }
+
+    #[test]
+    fn test_find_device_exact_name_precedence_over_adb_serial() {
+        let precedence = ListDeviceResponse {
+            devices: vec![
+                Device {
+                    id: 10,
+                    name: "other".to_string(),
+                    device_info: Some(DeviceInfo {
+                        adb_serial: "emulator-5554".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Device {
+                    id: 20,
+                    name: "emulator-5554".to_string(),
+                    device_info: Some(DeviceInfo {
+                        adb_serial: "emulator-5556".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        };
+        assert_eq!(find_device(&precedence, "emulator-5554").unwrap().id, 20);
+    }
+
+    #[test]
+    fn test_find_device_unset_adb_serial_rejects_empty_selector() {
+        let unset_serials = ListDeviceResponse {
+            devices: vec![
+                Device {
+                    id: 30,
+                    name: "Pixel_6".to_string(),
+                    device_info: Some(DeviceInfo::default()),
+                    ..Default::default()
+                },
+                Device { id: 31, name: "Pixel_7".to_string(), ..Default::default() },
+            ],
+        };
+        assert_eq!(find_device(&unset_serials, "").unwrap_err().to_string(), "Device not found: ");
+    }
+
+    #[test]
+    fn test_find_device_unset_adb_serial_rejects_unmatched_selector() {
+        let unset_serials = ListDeviceResponse {
+            devices: vec![
+                Device {
+                    id: 30,
+                    name: "Pixel_6".to_string(),
+                    device_info: Some(DeviceInfo::default()),
+                    ..Default::default()
+                },
+                Device { id: 31, name: "Pixel_7".to_string(), ..Default::default() },
+            ],
+        };
+        assert_eq!(
+            find_device(&unset_serials, "emulator-5554").unwrap_err().to_string(),
+            "Device not found: emulator-5554"
+        );
     }
 
     #[test]

@@ -153,6 +153,7 @@ pub struct DeviceInfo {
     /// IANA timezone name for the device (e.g. "America/Los_Angeles").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    pub adb_serial: String,
 }
 
 impl DeviceInfo {

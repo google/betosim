@@ -139,6 +139,7 @@ impl crate::args::BeaconPatchBle {
         &self,
         device_id: u32,
         chip_id: u32,
+        device_name: &str,
     ) -> netsim_model::DeviceUpdate {
         let settings: netsim_model::AdvertiseSettingsUpdate = (&self.settings).into();
         let adv_data: netsim_model::AdvertiseDataUpdate = (&self.advertise_data).into();
@@ -151,7 +152,7 @@ impl crate::args::BeaconPatchBle {
         };
         netsim_model::DeviceUpdate {
             id: device_id,
-            name: Some(self.device_name.clone()),
+            name: Some(device_name.to_string()),
             chips: Some(vec![netsim_model::ChipUpdate {
                 id: Some(netsim_model::ChipId(chip_id)),
                 name: Some(self.chip_name.clone()),
@@ -365,12 +366,18 @@ impl Command {
         // Fetch devices to resolve name or get all chips
         let mut resolved_ids = Vec::new();
         if let GrpcResponse::ListDevice(response) = client.send_grpc(&GrpcRequest::ListDevice)? {
+            let has_name_match =
+                device_name.is_some_and(|n| response.devices.iter().any(|d| d.name == n));
             for device in response.devices {
-                // Filter by device name if provided
-                if let Some(dev_name) = device_name
-                    && device.name != dev_name
-                {
-                    continue;
+                if let Some(dev_name) = device_name {
+                    let matches_device = if has_name_match {
+                        device.name == dev_name
+                    } else {
+                        !device.adb_serial.is_empty() && device.adb_serial == dev_name
+                    };
+                    if !matches_device {
+                        continue;
+                    }
                 }
 
                 resolved_ids.extend(
@@ -1054,7 +1061,7 @@ mod tests {
         let Command::Beacon(Beacon::Patch(BeaconPatch::Ble(ref args))) = parsed else {
             panic!("Expected BeaconPatch::Ble, got {parsed:?}");
         };
-        let device_update = args.to_device_update(1, 10);
+        let device_update = args.to_device_update(1, 10, &args.device_name);
         assert_eq!(device_update, expected_update);
         let patch_json = serde_json::to_value(&device_update).unwrap();
         assert_eq!(patch_json, serde_json::to_value(&expected_update).unwrap());
@@ -1827,5 +1834,132 @@ mod tests {
             command,
             expected_request,
         );
+    }
+
+    #[test]
+    fn test_beacon_patch_ble_preserves_canonical_device_name_on_adb_serial_selector() {
+        let cmd = BeaconPatchBle {
+            device_name: "emulator-5554".to_string(),
+            chip_name: "beacon-chip".to_string(),
+            ..Default::default()
+        };
+        let update = cmd.to_device_update(7, 1001, "Pixel_6");
+        assert_eq!(update.id, 7);
+        assert_eq!(update.name.as_deref(), Some("Pixel_6"));
+    }
+
+    #[test]
+    fn test_resolve_chip_ids_by_adb_serial() {
+        let same_template = ListDeviceResponse {
+            devices: vec![
+                DeviceProto {
+                    id: 10,
+                    name: "Pixel_6".to_string(),
+                    adb_serial: "emulator-5554".to_string(),
+                    chips: vec![ChipProto {
+                        id: 100,
+                        kind: ChipKind::WIFI.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                DeviceProto {
+                    id: 20,
+                    name: "Pixel_6".to_string(),
+                    adb_serial: "emulator-5556".to_string(),
+                    chips: vec![ChipProto {
+                        id: 200,
+                        kind: ChipKind::WIFI.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let client = MockClient::new(vec![Ok(GrpcResponse::ListDevice(same_template))]);
+        let ids = Command::resolve_chip_ids(&client, None, Some("emulator-5556"), ChipKind::WIFI)
+            .unwrap();
+        assert_eq!(ids, vec![200]);
+    }
+
+    #[test]
+    fn test_resolve_chip_ids_exact_name_precedence_over_adb_serial() {
+        let precedence_list = ListDeviceResponse {
+            devices: vec![
+                DeviceProto {
+                    id: 10,
+                    name: "other".to_string(),
+                    adb_serial: "emulator-5554".to_string(),
+                    chips: vec![ChipProto {
+                        id: 100,
+                        kind: ChipKind::WIFI.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                DeviceProto {
+                    id: 20,
+                    name: "emulator-5554".to_string(),
+                    adb_serial: "emulator-5556".to_string(),
+                    chips: vec![ChipProto {
+                        id: 200,
+                        kind: ChipKind::WIFI.into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let client = MockClient::new(vec![Ok(GrpcResponse::ListDevice(precedence_list))]);
+        let ids = Command::resolve_chip_ids(&client, None, Some("emulator-5554"), ChipKind::WIFI)
+            .unwrap();
+        assert_eq!(ids, vec![200]);
+    }
+
+    #[test]
+    fn test_resolve_chip_ids_unset_adb_serial_ignores_empty_selector() {
+        let unset_serials = ListDeviceResponse {
+            devices: vec![DeviceProto {
+                id: 10,
+                name: "Pixel_6".to_string(),
+                chips: vec![ChipProto {
+                    id: 100,
+                    kind: ChipKind::WIFI.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let client = MockClient::new(vec![Ok(GrpcResponse::ListDevice(unset_serials))]);
+        let ids = Command::resolve_chip_ids(&client, None, Some(""), ChipKind::WIFI).unwrap();
+        assert_eq!(ids, Vec::<u32>::new());
+    }
+
+    #[test]
+    fn test_resolve_chip_ids_unset_adb_serial_ignores_unmatched_selector() {
+        let unset_serials = ListDeviceResponse {
+            devices: vec![DeviceProto {
+                id: 10,
+                name: "Pixel_6".to_string(),
+                chips: vec![ChipProto {
+                    id: 100,
+                    kind: ChipKind::WIFI.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let client = MockClient::new(vec![Ok(GrpcResponse::ListDevice(unset_serials))]);
+        let ids = Command::resolve_chip_ids(&client, None, Some("emulator-5554"), ChipKind::WIFI)
+            .unwrap();
+        assert_eq!(ids, Vec::<u32>::new());
     }
 }

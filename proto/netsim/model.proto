@@ -258,6 +258,8 @@ message Device {
   Orientation orientation = 5;
   // Chips in Device. Device can have multiple chips of the same kind.
   repeated Chip chips = 6;
+  // ADB device serial e.g. emulator-5554, 0.0.0.0:6520, etc
+  string adb_serial = 7;
 }
 
 // Protobuf for DeviceCreate

@@ -88,6 +88,7 @@ components:
         variant: *str
         arch: *str
         avd_path: *str
+        adb_serial: *str
     Chip: &Chip
       properties:
         id: *int

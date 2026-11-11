@@ -204,6 +204,9 @@ fn to_proto_advertise_data(
 
 pub(crate) fn to_proto_device(d: ApiDevice) -> ProtoDevice {
     let mut device = ProtoDevice::new();
+    if let Some(serial) = d.adb_serial() {
+        device.adb_serial = serial.to_string();
+    }
     device.id = d.id;
     device.name = d.name;
     device.visible = Some(d.visible);
@@ -755,5 +758,54 @@ mod tests {
         chip.kind = EnumOrUnknown::new(ProtoChipKind::UNSPECIFIED);
         let update = from_proto_chip_update(chip);
         assert_eq!(update.kind, None);
+    }
+
+    #[test]
+    fn test_model_device_adb_serial_descriptor_and_wire_roundtrip() {
+        use netsim_proto::protobuf::{Message, MessageFull};
+
+        const DEVICE_ADB_SERIAL_FIELD_NUMBER: i32 = 7;
+        const LENGTH_DELIMITED_WIRE_TYPE: u8 = 2;
+        const DEVICE_ADB_SERIAL_WIRE_TAG: u8 =
+            (DEVICE_ADB_SERIAL_FIELD_NUMBER as u8) << 3 | LENGTH_DELIMITED_WIRE_TYPE;
+
+        let descriptor = ProtoDevice::descriptor();
+        let field = descriptor.field_by_name("adb_serial").expect("adb_serial descriptor field");
+        assert_eq!(field.number(), DEVICE_ADB_SERIAL_FIELD_NUMBER);
+
+        let empty = ProtoDevice::new();
+        let empty_bytes = empty.write_to_bytes().expect("serialize default Device");
+        assert!(empty_bytes.is_empty());
+
+        let mut configured = ProtoDevice::new();
+        configured.adb_serial = "emulator-5554".to_string();
+        let wire_bytes = configured.write_to_bytes().expect("serialize configured Device");
+        assert_eq!(wire_bytes.first().copied(), Some(DEVICE_ADB_SERIAL_WIRE_TAG));
+
+        let decoded = ProtoDevice::parse_from_bytes(&wire_bytes).expect("parse configured Device");
+        assert_eq!(decoded.adb_serial, "emulator-5554");
+        assert_eq!(decoded.special_fields.unknown_fields().iter().count(), 0);
+    }
+
+    #[test]
+    fn test_to_proto_device_populates_adb_serial() {
+        let configured = ApiDevice {
+            id: 1,
+            name: "Pixel_6".to_string(),
+            device_info: Some(netsim_model::DeviceInfo {
+                adb_serial: "emulator-5554".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let proto_configured = to_proto_device(configured);
+        assert_eq!(proto_configured.name, "Pixel_6");
+        assert_eq!(proto_configured.adb_serial, "emulator-5554");
+    }
+
+    #[test]
+    fn test_to_proto_device_unset_adb_serial_is_empty() {
+        let unset = ApiDevice { id: 2, name: "Pixel_6".to_string(), ..Default::default() };
+        assert_eq!(to_proto_device(unset).adb_serial, "");
     }
 }
