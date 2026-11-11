@@ -98,27 +98,15 @@ impl<'a> UdpBuilder<'a> {
         }
         self.header.length.set(total_len as u16);
         let payload_slice = self.payload.get(..self.payload_len)?;
-        let checksum = match (self.src_addr, self.dst_addr) {
-            (IpAddr::V4(src), IpAddr::V4(dst)) => crate::utils::checksum::normalize_udp_checksum(
-                crate::utils::checksum::pseudo_header_checksum_parts(
-                    self.header.as_bytes(),
-                    payload_slice,
-                    &src.octets(),
-                    &dst.octets(),
-                    crate::IP_P_UDP,
-                ),
-            ),
-            (IpAddr::V6(src), IpAddr::V6(dst)) => crate::utils::checksum::normalize_udp_checksum(
-                crate::utils::checksum::pseudo_header_checksum_parts(
-                    self.header.as_bytes(),
-                    payload_slice,
-                    &src.octets(),
-                    &dst.octets(),
-                    crate::IP_P_UDP,
-                ),
-            ),
-            _ => return None,
-        };
+        let checksum = crate::utils::checksum::normalize_udp_checksum(
+            crate::utils::checksum::ip_pseudo_header_checksum_parts(
+                self.header.as_bytes(),
+                payload_slice,
+                self.src_addr,
+                self.dst_addr,
+                crate::IP_P_UDP,
+            )?,
+        );
         self.header.checksum.set(checksum);
         Some(total_len)
     }

@@ -149,27 +149,13 @@ impl<'a> TcpBuilder<'a> {
             return None;
         }
         let options_and_payload = self.rest.get(..end - std::mem::size_of::<TcpHeader>())?;
-        let checksum = match (self.src_addr, self.dst_addr) {
-            (IpAddr::V4(src), IpAddr::V4(dst)) => {
-                crate::utils::checksum::pseudo_header_checksum_parts(
-                    self.header.as_bytes(),
-                    options_and_payload,
-                    &src.octets(),
-                    &dst.octets(),
-                    crate::IP_P_TCP,
-                )
-            }
-            (IpAddr::V6(src), IpAddr::V6(dst)) => {
-                crate::utils::checksum::pseudo_header_checksum_parts(
-                    self.header.as_bytes(),
-                    options_and_payload,
-                    &src.octets(),
-                    &dst.octets(),
-                    crate::IP_P_TCP,
-                )
-            }
-            _ => return None,
-        };
+        let checksum = crate::utils::checksum::ip_pseudo_header_checksum_parts(
+            self.header.as_bytes(),
+            options_and_payload,
+            self.src_addr,
+            self.dst_addr,
+            crate::IP_P_TCP,
+        )?;
         self.header.checksum.set(checksum);
         Some(end)
     }

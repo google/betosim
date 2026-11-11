@@ -14,11 +14,15 @@
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use crate::{
+        IP_P_TCP,
         transport::{TcpBuilder, UdpBuilder, UdpHeader, UdpPacketBuilder},
-        utils::test_utils::validate_pcap_json,
+        utils::{
+            checksum::{ip_pseudo_header_checksum_parts, tcp_checksum_v6, udp_checksum_v6},
+            test_utils::validate_pcap_json,
+        },
     };
 
     #[test]
@@ -179,5 +183,35 @@ mod tests {
             UdpHeader::parse(&buffer).expect("Failed to parse UDP header");
         assert_eq!(header.length.get(), 12);
         assert_eq!(parsed_payload, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_tcp_builder_v6_checksum_verifies() {
+        let src_v6 = Ipv6Addr::LOCALHOST;
+        let dst_v6 = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+        let mut tcp_buf = [0u8; 32];
+        let mut tcp = TcpBuilder::new_v6(&mut tcp_buf, src_v6, dst_v6).unwrap();
+        tcp.source_port(1234).dest_port(80).payload(&[1, 2, 3, 4]).unwrap();
+        let tcp_len = tcp.build().unwrap();
+        assert_eq!(tcp_checksum_v6(&tcp_buf[..tcp_len], src_v6, dst_v6), 0);
+    }
+
+    #[test]
+    fn test_udp_builder_v6_checksum_verifies() {
+        let src_v6 = Ipv6Addr::LOCALHOST;
+        let dst_v6 = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+        let mut udp_buf = [0u8; 16];
+        let mut udp = UdpBuilder::new_v6(&mut udp_buf, src_v6, dst_v6, 1234, 5678).unwrap();
+        udp.payload(&[1, 2, 3]).unwrap();
+        let udp_len = udp.build().unwrap();
+        assert_eq!(udp_checksum_v6(&udp_buf[..udp_len], src_v6, dst_v6), u16::MAX);
+    }
+
+    #[test]
+    fn test_ip_pseudo_header_checksum_rejects_mixed_families() {
+        let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert!(ip_pseudo_header_checksum_parts(&[], &[], v4, v6, IP_P_TCP).is_none());
+        assert!(ip_pseudo_header_checksum_parts(&[], &[], v6, v4, IP_P_TCP).is_none());
     }
 }

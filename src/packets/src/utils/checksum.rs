@@ -14,7 +14,7 @@
 
 //! Checksum utility functions for network packets.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::{IP_P_ICMPV6, IP_P_TCP, IP_P_UDP};
 
@@ -37,7 +37,26 @@ pub(crate) fn normalize_udp_checksum(cksum: u16) -> u16 {
     if cksum == 0 { u16::MAX } else { cksum }
 }
 
-pub(crate) fn pseudo_header_checksum_parts(
+/// Computes the one's-complement pseudo-header checksum over `header` and
+/// `payload` when `src_addr` and `dst_addr` share an IP family, or returns
+/// `None` if their address families differ.
+pub(crate) fn ip_pseudo_header_checksum_parts(
+    header: &[u8],
+    payload: &[u8],
+    src_addr: IpAddr,
+    dst_addr: IpAddr,
+    protocol: u8,
+) -> Option<u16> {
+    let checksum =
+        |src: &[u8], dst: &[u8]| pseudo_header_checksum_parts(header, payload, src, dst, protocol);
+    match (src_addr, dst_addr) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => Some(checksum(&src.octets(), &dst.octets())),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => Some(checksum(&src.octets(), &dst.octets())),
+        _ => None,
+    }
+}
+
+fn pseudo_header_checksum_parts(
     header: &[u8],
     payload: &[u8],
     src_octets: &[u8],
