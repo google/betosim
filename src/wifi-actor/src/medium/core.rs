@@ -455,29 +455,4 @@ mod tests {
 
         assert_eq!(snapshot, vec![(Code::MediumP2pRxClientMissing as u32, 1)]);
     }
-
-    #[test]
-    fn test_ieee8023_response_to_unknown_station_records_medium_unicast_unknown_station() {
-        use bytes::Bytes;
-        use netsim_packets::{EthernetFrame, MacAddr, ether_type};
-        use zerocopy::IntoBytes;
-
-        use crate::err::Code;
-
-        let mut medium = new_error_stats_medium();
-        let eth = EthernetFrame::new(
-            MacAddr::new(UNKNOWN_STATION_MAC),
-            MacAddr::new(STATION_MAC),
-            ether_type::IPV4,
-        );
-        let mut eth_bytes = eth.as_bytes().to_vec();
-        eth_bytes.resize(60, 0);
-        let mut out_queue = Vec::new();
-
-        let snapshot = record_error_stats(|| {
-            medium.process_ieee8023_response(&Bytes::from(eth_bytes), &mut out_queue).unwrap();
-        });
-
-        assert_eq!(snapshot, vec![(Code::MediumUnicastUnknownStation as u32, 1)]);
-    }
 }

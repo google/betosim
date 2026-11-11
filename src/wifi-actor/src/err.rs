@@ -54,9 +54,15 @@ pub enum Code {
     MediumClientMissing = 66005,
     MediumP2pTxClientMissing = 66006,
     MediumP2pRxClientMissing = 66007,
+    #[deprecated(note = "Demoted to debug log (b/582875796); produces no ErrorStats")]
+    #[allow(dead_code)]
     MediumUnicastUnknownStation = 66008,
     TxEncryptedFrameDecodeFailed = 66009,
     FtmInvalidDistance = 66010,
+    #[deprecated(note = "Demoted to debug log (b/582875796); produces no ErrorStats")]
+    #[allow(dead_code)]
     SlirpUnicastUnknownStation = 66011,
+    #[deprecated(note = "Demoted to debug log (b/582875796); produces no ErrorStats")]
+    #[allow(dead_code)]
     TapUnicastUnknownStation = 66012,
 }

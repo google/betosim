@@ -141,11 +141,7 @@ impl Medium {
         }
 
         let Some(bssid) = self.key_store.get_station_bssid(&dest_mac) else {
-            tracing::warn!(
-                code = crate::err::Code::MediumUnicastUnknownStation as u32,
-                "Dropping unicast packet to unknown station {}",
-                dest_mac
-            );
+            debug!("Dropping unicast packet to unknown station {}", dest_mac);
             return Ok(());
         };
 
@@ -776,5 +772,19 @@ mod tests {
         let dest_clients: HashSet<u32> = out_queue.iter().map(|(c, _)| *c).collect();
         assert_eq!(out_queue.len(), 2);
         assert_eq!(dest_clients, HashSet::from([2, 3]));
+    }
+
+    #[test]
+    fn test_process_ieee8023_response_unknown_station_logs_at_debug() {
+        let (_, mut medium, frame) = crate::test_support::unknown_station_test_fixture();
+        let mut out_queue = Vec::new();
+        let (res, warn_count, debug_count) =
+            crate::test_support::count_unknown_station_drop_logs(|| {
+                medium.process_ieee8023_response(&frame, &mut out_queue)
+            });
+
+        assert!(res.is_ok());
+        assert_eq!(warn_count, 0, "unknown station unicast drop should not log warn");
+        assert_eq!(debug_count, 1, "unknown station unicast drop should log debug");
     }
 }

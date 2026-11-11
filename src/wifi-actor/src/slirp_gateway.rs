@@ -141,11 +141,7 @@ impl GatewayTrait for SlirpGateway {
         }
 
         let Some(bssid) = shared_keys.get_station_bssid(&dest_mac) else {
-            tracing::warn!(
-                code = crate::err::Code::SlirpUnicastUnknownStation as u32,
-                "Dropping unicast packet to unknown station {}",
-                dest_mac
-            );
+            debug!("Dropping unicast packet to unknown station {}", dest_mac);
             return;
         };
 
@@ -260,34 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_incoming_unknown_station_records_error_stat() {
-        let table = Arc::new(ErrorStatsTable::new());
-        let subscriber =
-            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+    fn test_handle_incoming_unknown_station_logs_at_debug() {
+        let (key_store, mut medium, packet) = crate::test_support::unknown_station_test_fixture();
 
-        let key_store = Arc::new(SharedKeyStore::new());
-        let wifi_stats = WifiStats::new(Arc::new(MockClock::new()));
-        let debug = Arc::new(DebugArgs::default());
-        let mut medium = Medium::new(Arc::clone(&key_store), wifi_stats, debug);
         let gateway = SlirpGateway::new(None);
         let mut out_queue = Vec::new();
-        let mut frame = vec![0u8; 60];
-        frame[..6].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+        let ((), warn_count, debug_count) =
+            crate::test_support::count_unknown_station_drop_logs(|| {
+                gateway.handle_incoming(ChipId(1), packet, &mut medium, &key_store, &mut out_queue);
+            });
 
-        tracing::subscriber::with_default(subscriber, || {
-            gateway.handle_incoming(
-                SLIRP_ID,
-                bytes::Bytes::from(frame),
-                &mut medium,
-                &key_store,
-                &mut out_queue,
-            );
-        });
-
-        assert_eq!(
-            table.snapshot(),
-            vec![(crate::err::Code::SlirpUnicastUnknownStation as u32, 1)]
-        );
+        assert_eq!(warn_count, 0, "unknown station unicast drop should not log warn");
+        assert_eq!(debug_count, 1, "unknown station unicast drop should log debug");
     }
 
     struct NoopContext;

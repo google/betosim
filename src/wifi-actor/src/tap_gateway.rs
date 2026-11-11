@@ -272,11 +272,7 @@ impl GatewayTrait for TapGateway {
         }
 
         let Some(bssid) = shared_keys.get_station_bssid(&dest_mac) else {
-            tracing::warn!(
-                code = crate::err::Code::TapUnicastUnknownStation as u32,
-                "Dropping unicast packet to unknown station {}",
-                dest_mac
-            );
+            debug!("Dropping unicast packet to unknown station {}", dest_mac);
             return;
         };
 
@@ -730,36 +726,18 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_incoming_unknown_station_records_error_stat() {
-        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
-        use tracing_subscriber::layer::SubscriberExt;
+    fn test_handle_incoming_unknown_station_logs_at_debug() {
+        let (key_store, mut medium, packet) = crate::test_support::unknown_station_test_fixture();
 
-        use crate::{DebugArgs, MockClock, WifiStats, err::Code};
-
-        let gw = TapGateway::new("test-tap".to_string());
-        let key_store = Arc::new(SharedKeyStore::new());
-        let wifi_stats = WifiStats::new(Arc::new(MockClock::new()));
-        let mut medium =
-            Medium::new(Arc::clone(&key_store), wifi_stats, Arc::new(DebugArgs::default()));
+        let gateway = TapGateway::new("cvd-etap".to_string());
         let mut out_queue = Vec::new();
-        let mut frame = vec![0u8; 60];
-        frame[..6].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+        let ((), warn_count, debug_count) =
+            crate::test_support::count_unknown_station_drop_logs(|| {
+                gateway.handle_incoming(ChipId(1), packet, &mut medium, &key_store, &mut out_queue);
+            });
 
-        let table = Arc::new(ErrorStatsTable::new());
-        let subscriber =
-            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
-
-        tracing::subscriber::with_default(subscriber, || {
-            gw.handle_incoming(
-                ChipId(1 | TAP_FLAG),
-                bytes::Bytes::from(frame),
-                &mut medium,
-                &key_store,
-                &mut out_queue,
-            );
-        });
-
-        assert_eq!(table.snapshot(), vec![(Code::TapUnicastUnknownStation as u32, 1)]);
+        assert_eq!(warn_count, 0, "unknown station unicast drop should not log warn");
+        assert_eq!(debug_count, 1, "unknown station unicast drop should log debug");
     }
 
     #[cfg(target_os = "linux")]
