@@ -148,6 +148,8 @@ impl WifiActor {
         ctx: &mut DynContext<WifiActor>,
     ) -> Result<(), WifiError> {
         if let Some(chip) = self.active_chips.remove(&id) {
+            ctx.abort(id);
+            ctx.remove_stream(id);
             self.senders.remove(&id);
             self.medium.remove(id.0);
 

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use actor_framework::ResourceActor;
 use ap_actor::{ApActor, ApClient};
@@ -31,12 +34,50 @@ use slirp_actor::SlirpActor;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tracing::{error, info, warn};
+use tracing_subscriber::{Layer, layer::SubscriberExt};
 use wifi_actor::WifiActor;
 use zerocopy::{FromBytes, IntoBytes};
 
 use crate::hwsim_helper::wrap_ethernet_in_hwsim;
 
 pub const AP_BSSID: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+struct LogCaptureLayer {
+    logs: Arc<Mutex<Vec<(tracing::Level, String)>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCaptureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let metadata = event.metadata();
+        let level = *metadata.level();
+        let is_error = level == tracing::Level::ERROR;
+        let is_lifecycle_info =
+            level == tracing::Level::INFO && metadata.target() == "wifi_actor::lifecycle";
+        if is_error || is_lifecycle_info {
+            struct Visitor(String);
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    use std::fmt::Write;
+                    let _ = write!(self.0, "{}: {:?}", field.name(), value);
+                }
+            }
+            let mut visitor = Visitor(String::new());
+            event.record(&mut visitor);
+            self.logs.lock().unwrap().push((level, visitor.0));
+        }
+    }
+}
 
 pub struct ChipChannels {
     pub id: u32,
@@ -81,6 +122,7 @@ pub struct World {
     pub mock_clock: std::sync::Arc<wifi_actor::MockClock>,
     pub shared_keys: std::sync::Arc<ap_actor::SharedKeyStore>,
     pub error_stats: std::sync::Arc<ErrorStatsTable>,
+    lifecycle_and_error_logs: Arc<Mutex<Vec<(tracing::Level, String)>>>,
     #[cfg(target_os = "linux")]
     pub gateway_downlink_tx: Option<mpsc::UnboundedSender<Bytes>>,
 }
@@ -103,6 +145,13 @@ impl World {
     pub async fn new_with_mock_gateway() -> Self {
         let gw = MockGateway::new();
         let mut world = Self::new_internal(Some(Box::new(gw.clone()))).await;
+        world.mock_gateway = Some(gw);
+        world
+    }
+
+    pub async fn new_with_mock_gateway_error_stats() -> Self {
+        let gw = MockGateway::new();
+        let mut world = Self::new_internal_with_error_stats(Some(Box::new(gw.clone())), true).await;
         world.mock_gateway = Some(gw);
         world
     }
@@ -144,7 +193,6 @@ impl World {
         gateway: Option<Box<dyn wifi_actor::GatewayTrait>>,
         record_error_stats: bool,
     ) -> Self {
-        use tracing_subscriber::layer::SubscriberExt;
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         // Setup dependencies
         let slirp_actor_impl = SlirpActor::new(Default::default(), None, None).await;
@@ -233,15 +281,29 @@ impl World {
 
         let error_stats = Arc::new(ErrorStatsTable::new());
         let (wifi_runner, wifi_client) = wifi_actor::new();
+        let lifecycle_and_error_logs = Arc::new(Mutex::new(Vec::new()));
+        let log_layer = LogCaptureLayer { logs: lifecycle_and_error_logs.clone() }
+            .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
+        let test_layer = tracing_subscriber::fmt::layer()
+            .with_test_writer()
+            .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
+
         if record_error_stats {
+            let error_stats_layer = ErrorStatsLayer::with_table(Arc::clone(&error_stats));
             let subscriber = tracing_subscriber::registry()
-                .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
+                .with(test_layer)
+                .with(log_layer)
+                .with(error_stats_layer);
             tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
                 wifi_runner.run(wifi_actor_impl),
                 subscriber,
             ));
         } else {
-            tokio::spawn(wifi_runner.run(wifi_actor_impl));
+            let subscriber = tracing_subscriber::registry().with(test_layer).with(log_layer);
+            tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+                wifi_runner.run(wifi_actor_impl),
+                subscriber,
+            ));
         }
 
         // Wait for registration to capture the injector
@@ -269,9 +331,101 @@ impl World {
             mock_clock,
             shared_keys,
             error_stats,
+            lifecycle_and_error_logs,
             #[cfg(target_os = "linux")]
             gateway_downlink_tx: None,
         }
+    }
+
+    async fn wait_for_lifecycle_info_and_assert_no_delete_error(
+        &self,
+        expected_info: &str,
+        context: &str,
+    ) {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(1);
+        loop {
+            let found = {
+                let logs = self.lifecycle_and_error_logs.lock().unwrap();
+                logs.iter().any(|(level, msg)| {
+                    *level == tracing::Level::INFO && msg.contains(expected_info)
+                })
+            };
+            if found {
+                break;
+            }
+            if start.elapsed() > timeout {
+                panic!("Timed out waiting for info log: '{}'", expected_info);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        self.wifi_client.list().await.expect("list() should succeed after lifecycle event");
+
+        let logs = self.lifecycle_and_error_logs.lock().unwrap();
+        let error_logs: Vec<_> = logs
+            .iter()
+            .filter(|(level, msg)| {
+                *level == tracing::Level::ERROR && msg.contains("Failed to delete chip")
+            })
+            .collect();
+        assert!(
+            error_logs.is_empty(),
+            "Found unexpected delete error log after {}: {:?}",
+            context,
+            error_logs
+        );
+    }
+
+    pub async fn then_sink_task_is_aborted_without_close_log(&self, chip_id: u32) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.wifi_client.list().await.expect("Failed to list chips");
+
+        let sink_closed_msg = format!("Sink task closed for chip {chip_id}");
+        let stream_closed_msg = format!("Stream closed for chip {chip_id}");
+        let logs = self.lifecycle_and_error_logs.lock().unwrap();
+        let has_sink_close = logs
+            .iter()
+            .any(|(level, msg)| *level == tracing::Level::INFO && msg.contains(&sink_closed_msg));
+        assert!(
+            !has_sink_close,
+            "Found unexpected sink task close log for chip {chip_id}: {logs:?}"
+        );
+        let has_stream_close = logs
+            .iter()
+            .any(|(level, msg)| *level == tracing::Level::INFO && msg.contains(&stream_closed_msg));
+        assert!(
+            !has_stream_close,
+            "Found unexpected stream close log for chip {chip_id}: {logs:?}"
+        );
+        let has_delete_error = logs.iter().any(|(level, msg)| {
+            *level == tracing::Level::ERROR && msg.contains("Failed to delete chip")
+        });
+        assert!(
+            !has_delete_error,
+            "Found unexpected delete error log for chip {chip_id}: {logs:?}"
+        );
+    }
+
+    pub async fn when_mock_gateway_stream_closes(&self) {
+        self.mock_gateway.as_ref().expect("MockGateway not configured").close_incoming();
+    }
+
+    pub async fn then_mock_gateway_stream_closes_without_delete_error(&self) {
+        self.wait_for_lifecycle_info_and_assert_no_delete_error(
+            &format!("Stream closed for chip {}", MOCK_GATEWAY_STREAM_ID),
+            "mock gateway stream closes",
+        )
+        .await;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn then_tap_gateway_stream_closes_without_delete_error(&self, chip_id: u32) {
+        self.wait_for_lifecycle_info_and_assert_no_delete_error(
+            &format!("Stream closed for chip {}", chip_id | TAP_FLAG),
+            "tap gateway downlink stream closed",
+        )
+        .await;
     }
 
     pub async fn given_an_ap(&mut self) -> u32 {
@@ -1063,8 +1217,9 @@ impl World {
         self.ap_client.destroy_ap(ap_id).await.unwrap();
     }
 
-    pub async fn when_chip_is_deleted_keeping_stream_open(&mut self, chip_id: u32) {
+    pub async fn when_chip_is_deleted_closing_test_channels(&mut self, chip_id: u32) {
         self.wifi_client.delete(ChipId(chip_id)).await.expect("Failed to delete chip");
+        self.chips.retain(|c| c.id != chip_id);
     }
 
     #[cfg(target_os = "linux")]
@@ -1077,14 +1232,8 @@ impl World {
         assert!(chip.is_err());
     }
 
-    pub async fn then_error_stats_are(&mut self, expected: &[(u32, u32)]) {
-        let start = std::time::Instant::now();
-        while self.error_stats.snapshot() != expected
-            && start.elapsed() < std::time::Duration::from_secs(2)
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(self.error_stats.snapshot(), expected);
+    pub fn then_error_stats_are_empty(&self) {
+        assert_eq!(self.error_stats.snapshot(), &[]);
     }
 
     pub async fn when_chip_rx_is_drained(&mut self, chip_idx: usize) {
@@ -1788,7 +1937,7 @@ const MOCK_GATEWAY_STREAM_ID: ChipId = ChipId(u32::MAX - 1);
 #[derive(Clone, Debug)]
 pub struct MockGateway {
     pub outgoing_packets: Arc<std::sync::Mutex<Vec<(ChipId, Bytes)>>>,
-    incoming_tx: mpsc::UnboundedSender<Bytes>,
+    incoming_tx: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Bytes>>>>,
     incoming_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<Bytes>>>>,
 }
 
@@ -1797,13 +1946,17 @@ impl MockGateway {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         Self {
             outgoing_packets: Arc::new(std::sync::Mutex::new(Vec::new())),
-            incoming_tx,
+            incoming_tx: Arc::new(std::sync::Mutex::new(Some(incoming_tx))),
             incoming_rx: Arc::new(std::sync::Mutex::new(Some(incoming_rx))),
         }
     }
 
     fn inject_downlink_ethernet(&self, eth_frame: Vec<u8>) {
         self.incoming_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("MockGateway incoming channel closed")
             .send(Bytes::from(eth_frame))
             .expect("Failed to inject downlink Ethernet frame into MockGateway");
     }
@@ -1835,6 +1988,10 @@ impl MockGateway {
             );
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+    }
+
+    pub fn close_incoming(&self) {
+        let _ = self.incoming_tx.lock().unwrap().take();
     }
 }
 

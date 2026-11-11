@@ -105,8 +105,13 @@ impl ActorLifecycle for WifiActor {
 
     async fn on_stream_closed(&mut self, id: Self::Id, ctx: &mut DynContext<Self>) {
         info!("Stream closed for chip {id}");
+        if self.gateway.should_handle(id) {
+            return;
+        }
         ctx.abort(id);
-        if let Err(error) = self.handle_delete_impl(id, ctx).await {
+        if self.active_chips.contains_key(&id)
+            && let Err(error) = self.handle_delete_impl(id, ctx).await
+        {
             error!(
                 code = crate::err::Code::LifecycleStreamClosedDeleteFailed as u32,
                 %error,
@@ -118,7 +123,9 @@ impl ActorLifecycle for WifiActor {
     async fn on_task_closed(&mut self, id: Self::Id, ctx: &mut DynContext<Self>) {
         info!("Sink task closed for chip {id}");
         ctx.remove_stream(id);
-        if let Err(error) = self.handle_delete_impl(id, ctx).await {
+        if self.active_chips.contains_key(&id)
+            && let Err(error) = self.handle_delete_impl(id, ctx).await
+        {
             error!(
                 code = crate::err::Code::LifecycleTaskClosedDeleteFailed as u32,
                 %error,

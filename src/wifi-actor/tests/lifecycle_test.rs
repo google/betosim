@@ -14,7 +14,7 @@
 
 use device_api::DeviceAction;
 use netsim_model::{ChipClient, ChipId};
-use wifi_actor::{WifiClient, err::Code};
+use wifi_actor::WifiClient;
 
 use crate::world::World;
 
@@ -44,6 +44,7 @@ async fn test_create_chip() {
 //   Given a world with a chip
 //   When we delete the chip
 //   Then the chip is removed from the wifi actor
+//   And the sink task is aborted without close callbacks or false delete errors
 #[tokio::test]
 async fn test_delete_chip() {
     // Given
@@ -56,38 +57,67 @@ async fn test_delete_chip() {
     // Then
     let chip = world.wifi_client.read(ChipId(chip_id)).await;
     assert!(chip.is_err());
+
+    world.then_sink_task_is_aborted_without_close_log(chip_id).await;
 }
 
-/// Scenario: Sink task closing after chip deletion records LifecycleTaskClosedDeleteFailed
-// TODO(b/582873927): pins pre-fix behavior; update when the delete guard lands.
+// Feature: Non-Chip Stream Closure
+// Scenario: Non-chip stream closes without false delete errors
+//
+//   Given a world with a mock gateway stream
+//   When the mock gateway stream closes
+//   Then no false delete error is logged
 #[tokio::test]
-async fn test_sink_task_closed_after_chip_delete_records_error_stat() {
+async fn test_non_chip_stream_closure_without_delete_error() {
+    let world = World::new_with_mock_gateway().await;
+    world.when_mock_gateway_stream_closes().await;
+    world.then_mock_gateway_stream_closes_without_delete_error().await;
+}
+
+/// Scenario: Deleting a chip aborts the sink task and removes the stream without error stats
+#[tokio::test]
+async fn test_chip_delete_aborts_task_and_removes_stream_without_error_stats() {
     // Given
     let mut world = World::with_error_stats().await;
     let chip_id = world.given_a_chip(5).await;
 
     // When
-    world.when_chip_is_deleted_keeping_stream_open(chip_id).await;
+    world.when_chip_is_deleted_closing_test_channels(chip_id).await;
 
     // Then
     world.then_chip_is_not_found(chip_id).await;
-    world.then_error_stats_are(&[(Code::LifecycleTaskClosedDeleteFailed as u32, 1)]).await;
+    world.then_sink_task_is_aborted_without_close_log(chip_id).await;
+    world.then_error_stats_are_empty();
 }
 
-/// Scenario: Closing a non-chip gateway stream records LifecycleStreamClosedDeleteFailed
-// TODO(b/582873927): pins pre-fix behavior; update when the delete guard lands.
+/// Scenario: Closing a non-chip gateway stream emits no delete error stats
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn test_non_chip_stream_closed_records_error_stat() {
+async fn test_non_chip_stream_closed_records_no_error_stats() {
     // Given
     let mut world = World::with_tap_gateway_error_stats().await;
-    let _chip_id = world.given_a_chip(6).await;
+    let chip_id = world.given_a_chip(6).await;
 
     // When
     world.when_gateway_downlink_stream_closed();
 
     // Then
-    world.then_error_stats_are(&[(Code::LifecycleStreamClosedDeleteFailed as u32, 1)]).await;
+    world.then_tap_gateway_stream_closes_without_delete_error(chip_id).await;
+    world.then_error_stats_are_empty();
+}
+
+/// Scenario: Closing a non-chip mock gateway stream emits no delete error stats
+#[tokio::test]
+async fn test_mock_gateway_stream_closed_records_no_error_stats() {
+    // Given
+    let world = World::new_with_mock_gateway_error_stats().await;
+
+    // When
+    world.when_mock_gateway_stream_closes().await;
+
+    // Then
+    world.then_mock_gateway_stream_closes_without_delete_error().await;
+    world.then_error_stats_are_empty();
 }
 
 // Feature: Sink Closure Notification
