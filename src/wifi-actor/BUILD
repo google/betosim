@@ -21,6 +21,9 @@ SELECT_DEPS = select({
         "@nix",
         "@libc",
     ],
+    "@platforms//os:macos": [
+        "@libc",
+    ],
     "//conditions:default": [],
 })
 
