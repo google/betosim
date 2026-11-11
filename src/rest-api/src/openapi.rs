@@ -35,13 +35,13 @@ pub use spec::expand;
 pub(crate) use spec::{SchemaKind, Spec};
 
 /// OpenAPI version required by [`validate`].
-pub const OPENAPI_VERSION: &str = "3.1.0";
+const OPENAPI_VERSION: &str = "3.1.0";
 /// Prefix of schema `$ref`s in the document.
-pub const SCHEMA_REF_PREFIX: &str = "#/components/schemas/";
+const SCHEMA_REF_PREFIX: &str = "#/components/schemas/";
 /// Prefix of shared response `$ref`s in the document.
-pub const RESPONSE_REF_PREFIX: &str = "#/components/responses/";
+const RESPONSE_REF_PREFIX: &str = "#/components/responses/";
 /// Prefix of shared parameter `$ref`s in the document.
-pub const PARAM_REF_PREFIX: &str = "#/components/parameters/";
+const PARAM_REF_PREFIX: &str = "#/components/parameters/";
 /// Only media type used for request and response bodies.
 pub const JSON: &str = "application/json";
 const ALLOWED_METHODS: &[&str] = &["get", "post", "patch", "put", "delete"];
@@ -81,7 +81,7 @@ impl<Op> Route<Op> {
 }
 
 /// Names of the parameters in a path template, in order.
-pub fn path_params(template: &str) -> impl Iterator<Item = &str> {
+fn path_params(template: &str) -> impl Iterator<Item = &str> {
     template.split('/').filter_map(|s| split_param(s).map(|(_, name, _)| name))
 }
 
