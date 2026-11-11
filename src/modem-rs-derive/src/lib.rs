@@ -30,18 +30,15 @@ pub fn parsable_enum_derive(input: TokenStream) -> TokenStream {
 
     for variant in variants {
         let v_name = &variant.ident;
-        let val =
+        let val: u8 =
             if let Some((_, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit_int), .. }))) =
                 &variant.discriminant
             {
-                let parsed_val: u8 = lit_int.base10_parse().expect("Discriminant must be u8");
-                next_discriminant = parsed_val.checked_add(1).unwrap_or(0);
-                parsed_val
+                lit_int.base10_parse().expect("Discriminant must be u8")
             } else {
-                let current = next_discriminant;
-                next_discriminant = next_discriminant.checked_add(1).unwrap_or(0);
-                current
+                next_discriminant
             };
+        next_discriminant = val.wrapping_add(1);
 
         match_arms.push(quote! {
             #val => Ok((input, Self::#v_name)),
@@ -67,7 +64,9 @@ pub fn parsable_enum_derive(input: TokenStream) -> TokenStream {
 pub fn command_parser_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-    let has_lifetime = !input.generics.lifetimes().collect::<Vec<_>>().is_empty();
+    let has_lifetime = input.generics.lifetimes().next().is_some();
+    let (generics, lt) =
+        if has_lifetime { (quote!(<'a>), quote!('a)) } else { (quote!(), quote!()) };
 
     let variants = match &input.data {
         Data::Enum(data) => &data.variants,
@@ -75,6 +74,7 @@ pub fn command_parser_derive(input: TokenStream) -> TokenStream {
     };
 
     let mut parser_fns = Vec::new();
+    let mut parser_fn_names = Vec::new();
     for variant in variants {
         let variant_name = &variant.ident;
         let parser_fn_name = Ident::new(
@@ -106,84 +106,52 @@ pub fn command_parser_derive(input: TokenStream) -> TokenStream {
 
         let (field_names, field_parsers) = match &variant.fields {
             Fields::Unnamed(fields) => {
-                let mut names = Vec::new();
-                let mut parsers = Vec::new();
-                for (i, field) in fields.unnamed.iter().enumerate() {
-                    let field_name = Ident::new(&format!("field_{i}"), variant_name.span());
-                    names.push(quote! { #field_name });
-                    parsers.push(generate_field_parser(&field_name, field));
-                }
+                let (names, parsers): (Vec<_>, Vec<_>) = fields
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, field)| {
+                        let field_name = Ident::new(&format!("field_{i}"), variant_name.span());
+                        (quote! { #field_name }, generate_field_parser(&field_name, field))
+                    })
+                    .unzip();
                 (quote! { ( #(#names),* ) }, parsers)
             }
             Fields::Named(fields) => {
-                let mut names = Vec::new();
-                let mut parsers = Vec::new();
-                for field in &fields.named {
-                    let field_name = field.ident.as_ref().unwrap();
-                    names.push(quote! { #field_name });
-                    parsers.push(generate_field_parser(field_name, field));
-                }
+                let (names, parsers): (Vec<_>, Vec<_>) = fields
+                    .named
+                    .iter()
+                    .map(|field| {
+                        let field_name = field.ident.as_ref().unwrap();
+                        (quote! { #field_name }, generate_field_parser(field_name, field))
+                    })
+                    .unzip();
                 (quote! { { #(#names),* } }, parsers)
             }
             Fields::Unit => (quote! {}, vec![]),
         };
 
-        let parser_fn = if has_lifetime {
-            quote! {
-                fn #parser_fn_name(input: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
-                    let (input, _) = nom::bytes::complete::tag(#tag)(input)?;
-                    #(#field_parsers)*
-                    Ok((input, #name::#variant_name #field_names))
-                }
+        parser_fns.push(quote! {
+            fn #parser_fn_name(input: &#lt [u8]) -> nom::IResult<&#lt [u8], Self> {
+                let (input, _) = nom::bytes::complete::tag(#tag)(input)?;
+                #(#field_parsers)*
+                Ok((input, #name::#variant_name #field_names))
             }
-        } else {
-            quote! {
-                fn #parser_fn_name(input: &[u8]) -> nom::IResult<&[u8], Self> {
-                    let (input, _) = nom::bytes::complete::tag(#tag)(input)?;
-                    #(#field_parsers)*
-                    Ok((input, #name::#variant_name #field_names))
-                }
-            }
-        };
-        parser_fns.push(parser_fn);
+        });
+        parser_fn_names.push(parser_fn_name);
     }
 
-    let parser_fn_names = variants.iter().map(|v| {
-        let variant_name = &v.ident;
-        Ident::new(
-            &format!("parse_{}", variant_name.to_string().to_lowercase()),
-            variant_name.span(),
-        )
-    });
+    let impl_block = quote! {
+        impl #generics #name #generics {
+            #(#parser_fns)*
 
-    let impl_block = if has_lifetime {
-        quote! {
-            impl<'a> #name<'a> {
-                #(#parser_fns)*
-
-                pub fn parse(input: &'a [u8]) -> nom::IResult<&'a [u8], Self> {
-                    #(
-                        if let Ok(result) = Self::#parser_fn_names(input) {
-                            return Ok(result);
-                        }
-                    )*
-                    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alt)))
-                }
-            }
-        }
-    } else {
-        quote! {
-            impl #name {
-                #(#parser_fns)*
-
-                pub fn parse(input: &[u8]) -> nom::IResult<&[u8], Self> {
-                    #(
-                        if let Ok(result) = Self::#parser_fn_names(input) {
-                            return Ok(result);
-                        }
-                    )*
-                    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alt)))
-                }
+            pub fn parse(input: &#lt [u8]) -> nom::IResult<&#lt [u8], Self> {
+                #(
+                    if let Ok(result) = Self::#parser_fn_names(input) {
+                        return Ok(result);
+                    }
+                )*
+                Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alt)))
             }
         }
     };
