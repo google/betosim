@@ -49,7 +49,7 @@ struct TftpSession {
     is_last_block: bool,
 }
 
-pub struct TftpManager {
+pub(super) struct TftpManager {
     sessions: HashMap<u16, TftpSession>,
     next_tid: u16,
 }
@@ -61,15 +61,15 @@ impl Default for TftpManager {
 }
 
 impl TftpManager {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self { sessions: HashMap::new(), next_tid: 50000 }
     }
 
-    pub fn has_session_with_tid(&self, tid: u16) -> bool {
+    pub(super) fn has_session_with_tid(&self, tid: u16) -> bool {
         self.sessions.contains_key(&tid)
     }
 
-    pub fn handle_packet(
+    pub(super) fn handle_packet(
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         config: &Config,

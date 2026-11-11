@@ -25,7 +25,7 @@ pub mod packet;
 pub mod tcp;
 
 pub mod logging;
-pub mod tftp;
+mod tftp;
 pub mod udp;
 pub mod utils;
 
