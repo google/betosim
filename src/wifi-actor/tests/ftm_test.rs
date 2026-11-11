@@ -179,3 +179,41 @@ async fn test_ftm_request_rtt_scales_with_distance() {
         .then_chip_receives_ftm_measurement_rtt_ps(0, EXPECTED_600M_RTT_PS, RTT_TOLERANCE_PS)
         .await;
 }
+
+/// Scenario: FTM distance is zero (co-located chips) -> RTT is 0 ps
+#[tokio::test]
+async fn test_wifi_actor_ftm_zero_distance_returns_zero_rtt() {
+    assert_ftm_rtt_zero_for_initiator(Position::default()).await;
+}
+
+/// Scenario: FTM initiator position has NaN -> RTT is clamped to 0 ps
+#[tokio::test]
+async fn test_wifi_actor_ftm_nan_position_clamps_rtt_to_zero() {
+    assert_ftm_rtt_zero_for_initiator(Position { x: f32::NAN, y: 0.0, z: 0.0 }).await;
+}
+
+/// Scenario: FTM initiator position has positive Infinity -> RTT is clamped to 0 ps
+#[tokio::test]
+async fn test_wifi_actor_ftm_positive_infinity_position_clamps_rtt_to_zero() {
+    assert_ftm_rtt_zero_for_initiator(Position { x: f32::INFINITY, y: 0.0, z: 0.0 }).await;
+}
+
+/// Scenario: FTM initiator position has negative Infinity -> RTT is clamped to 0 ps
+#[tokio::test]
+async fn test_wifi_actor_ftm_negative_infinity_position_clamps_rtt_to_zero() {
+    assert_ftm_rtt_zero_for_initiator(Position { x: f32::NEG_INFINITY, y: 0.0, z: 0.0 }).await;
+}
+
+async fn assert_ftm_rtt_zero_for_initiator(initiator_pos: Position) {
+    let mut world = World::new().await;
+    let _chip0 = world.given_a_chip(1).await;
+    let _chip1 = world.given_a_chip(2).await;
+
+    world.given_chip_position(0, initiator_pos).await;
+    world.given_chip_position(1, Position::default()).await;
+
+    world.when_chip_transmits_ftm_request(0, 1).await;
+
+    world.then_chip_receives_ftm_measurement_rtt_ps(0, 0, 0).await;
+    world.then_chip_receives_nothing(1).await;
+}

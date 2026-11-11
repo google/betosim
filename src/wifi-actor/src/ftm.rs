@@ -42,17 +42,7 @@ pub fn handle_ftm_request(
 
     // 2. Calculate Distance & RTT
     let distance = calculate_distance(initiator_pos, responder_pos);
-    if distance <= 0.0 {
-        warn!(
-            code = crate::err::Code::FtmInvalidDistance as u32,
-            "FTM distance is zero or invalid, using minimal RTT"
-        );
-    }
-
-    // Time of Flight (seconds) = distance / c
-    let tof_seconds = distance / SPEED_OF_LIGHT;
-    // RTT = 2 * ToF
-    let rtt_picoseconds = (tof_seconds * 2.0 * PICOSECONDS_PER_SECOND as f64) as u64;
+    let rtt_picoseconds = distance_to_rtt_picoseconds(distance);
 
     // Simulate Timestamps
     // t1: Time of Departure (Responder) - arbitrary base (0)
@@ -135,6 +125,19 @@ fn calculate_distance(p1: &Position, p2: &Position) -> f64 {
     (dx * dx + dy * dy + dz * dz).sqrt() as f64
 }
 
+fn distance_to_rtt_picoseconds(distance: f64) -> u64 {
+    if !distance.is_finite() || distance < 0.0 {
+        warn!(
+            code = crate::err::Code::FtmInvalidDistance as u32,
+            distance, "FTM distance is non-finite or negative; clamping RTT to 0"
+        );
+        return 0;
+    }
+
+    let tof_seconds = distance / SPEED_OF_LIGHT;
+    (tof_seconds * 2.0 * PICOSECONDS_PER_SECOND as f64) as u64
+}
+
 // Helpers for extracting addresses directly if inherent helpers are restrictive
 trait AddrHelpers {
     fn get_structure_addr1(&self) -> netsim_packets::MacAddress;
@@ -156,11 +159,18 @@ impl AddrHelpers for Ieee80211 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
-    use netsim_packets::{FrameControl, MacAddress, MacHeader3Addr, SequenceControl};
+    use netsim_packets::{
+        ActionHeader, FineTimingMeasurement, FrameControl, MacAddress, MacHeader3Addr,
+        SequenceControl,
+    };
     use tracing_subscriber::layer::SubscriberExt;
+    use zerocopy::FromBytes;
 
     use super::*;
     use crate::err::Code;
@@ -169,6 +179,49 @@ mod tests {
     const FTM_TRIGGER_START: u8 = 1;
     const INITIATOR_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
     const RESPONDER_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+
+    struct WarnCaptureLayer {
+        warn_count: Arc<AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                struct Visitor(bool);
+                impl tracing::field::Visit for Visitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message"
+                            && format!("{value:?}").contains("FTM distance")
+                        {
+                            self.0 = true;
+                        }
+                    }
+                }
+                let mut v = Visitor(false);
+                event.record(&mut v);
+                if v.0 {
+                    self.warn_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    fn count_ftm_distance_warn_logs<F: FnOnce() -> R, R>(f: F) -> (R, usize) {
+        let warn_count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(WarnCaptureLayer { warn_count: warn_count.clone() });
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let count = warn_count.load(Ordering::Relaxed);
+        (result, count)
+    }
 
     fn build_test_ftm_request() -> Ieee80211 {
         let header = MacHeader3Addr {
@@ -189,8 +242,126 @@ mod tests {
         Ieee80211::decode(&frame_bytes).expect("valid FTM request frame")
     }
 
+    fn assert_handle_ftm_request_returns_zero_rtt(initiator_pos: Position, expected_warns: usize) {
+        let packet = build_test_ftm_request();
+
+        let (responses, warn_count) = count_ftm_distance_warn_logs(|| {
+            handle_ftm_request(&packet, &initiator_pos, &Position::default())
+                .expect("handle_ftm_request should succeed")
+        });
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(warn_count, expected_warns);
+
+        for response in &responses {
+            let frame = Ieee80211::decode(response).expect("decode response frame");
+            let payload = frame.get_payload();
+            let (action_hdr, rest) = ActionHeader::ref_from_prefix(&payload).expect("ActionHeader");
+            assert_eq!(action_hdr.category, category::PUBLIC);
+            assert_eq!(action_hdr.action, public_action::FINE_TIMING_MEASUREMENT);
+            let (ftm, _) = FineTimingMeasurement::ref_from_prefix(rest).expect("FTM");
+            assert_eq!(ftm.tod, [0; 6]);
+            assert_eq!(ftm.toa, [0; 6]);
+        }
+    }
+
     #[test]
-    fn handle_ftm_request_zero_distance_records_invalid_distance_error() {
+    fn test_distance_to_rtt_picoseconds_positive_distance_computes_rtt_without_warning() {
+        let (rtt, count) = count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(300.0));
+        assert!(rtt.abs_diff(2_001_384) < 10);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_distance_to_rtt_picoseconds_zero_returns_zero_without_warning() {
+        let (rtt, count) = count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(0.0));
+        assert_eq!(rtt, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_distance_to_rtt_picoseconds_negative_zero_returns_zero_without_warning() {
+        let (rtt, count) = count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(-0.0));
+        assert_eq!(rtt, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_distance_to_rtt_picoseconds_negative_warns_and_clamps_to_zero() {
+        let (rtt, count) = count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(-1.0));
+        assert_eq!(rtt, 0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_distance_to_rtt_picoseconds_nan_warns_and_clamps_to_zero() {
+        let (rtt, count) = count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(f64::NAN));
+        assert_eq!(rtt, 0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_distance_to_rtt_picoseconds_positive_infinity_warns_and_clamps_to_zero() {
+        let (rtt, count) =
+            count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(f64::INFINITY));
+        assert_eq!(rtt, 0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_distance_to_rtt_picoseconds_negative_infinity_warns_and_clamps_to_zero() {
+        let (rtt, count) =
+            count_ftm_distance_warn_logs(|| distance_to_rtt_picoseconds(f64::NEG_INFINITY));
+        assert_eq!(rtt, 0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_handle_ftm_request_zero_distance_returns_zero_rtt_without_warning() {
+        assert_handle_ftm_request_returns_zero_rtt(Position::default(), 0);
+    }
+
+    #[test]
+    fn test_handle_ftm_request_nan_position_warns_and_clamps_rtt() {
+        assert_handle_ftm_request_returns_zero_rtt(Position { x: f32::NAN, y: 0.0, z: 0.0 }, 1);
+    }
+
+    #[test]
+    fn test_handle_ftm_request_positive_infinity_position_warns_and_clamps_rtt() {
+        assert_handle_ftm_request_returns_zero_rtt(
+            Position { x: f32::INFINITY, y: 0.0, z: 0.0 },
+            1,
+        );
+    }
+
+    #[test]
+    fn test_handle_ftm_request_negative_infinity_position_warns_and_clamps_rtt() {
+        assert_handle_ftm_request_returns_zero_rtt(
+            Position { x: f32::NEG_INFINITY, y: 0.0, z: 0.0 },
+            1,
+        );
+    }
+
+    #[test]
+    fn handle_ftm_request_invalid_distance_records_invalid_distance_error() {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let packet = build_test_ftm_request();
+        let origin = Position::default();
+        let invalid = Position { x: f32::NAN, y: 0.0, z: 0.0 };
+
+        tracing::subscriber::with_default(subscriber, || {
+            let responses =
+                handle_ftm_request(&packet, &origin, &invalid).expect("co-located FTM succeeds");
+            assert_eq!(responses.len(), 2);
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::FtmInvalidDistance as u32, 1)]);
+    }
+
+    #[test]
+    fn handle_ftm_request_zero_distance_records_no_error_stats() {
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
@@ -203,7 +374,7 @@ mod tests {
             assert_eq!(responses.len(), 2);
         });
 
-        assert_eq!(table.snapshot(), vec![(Code::FtmInvalidDistance as u32, 1)]);
+        assert!(table.snapshot().is_empty());
     }
 
     #[test]
