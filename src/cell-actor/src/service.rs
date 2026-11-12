@@ -103,7 +103,7 @@ impl ActorService for CellActor {
             return Err(CellError::Chip(ChipError::ChipExists(chip_id.0)));
         }
 
-        let (sim_type, sim_profile, timezone_override, quirks, mut network_configs) =
+        let (sim_type, sim_profile, timezone_override, quirks, mut network_configs, radio_state) =
             match params.chip.variant.as_ref() {
                 Some(ChipVariant::Cell(cell)) => (
                     cell.sim_type,
@@ -111,6 +111,7 @@ impl ActorService for CellActor {
                     cell.timezone_override.clone(),
                     cell.quirks,
                     cell.network_configs.clone(),
+                    cell.radio.state,
                 ),
                 _ => Default::default(),
             };
@@ -185,7 +186,12 @@ impl ActorService for CellActor {
             return Err(CellError::ModemError(e));
         }
 
-        self.active_chips.insert(chip_id, ChipState { device_id, enabled: true });
+        let enabled = radio_state.unwrap_or(params.chip.enabled);
+        if !enabled {
+            self.controller.set_host_radio_enabled(chip_id.0, false)?;
+        }
+
+        self.active_chips.insert(chip_id, ChipState { device_id, enabled });
 
         Ok(chip_id)
     }
@@ -234,9 +240,7 @@ impl ActorService for CellActor {
             .get_mut(&id)
             .ok_or_else(|| CellError::Chip(ChipError::ChipNotFound(id)))?;
 
-        if let Some(enabled) = update.enabled {
-            state.enabled = enabled;
-        }
+        let mut enabled = update.enabled;
         if let Some(ChipVariantUpdate::Cell(cell_update)) = &update.variant {
             if let Some(configs) = &cell_update.network_configs
                 && let Err(error) = self.controller.update_network_configs(id.0, configs.clone())
@@ -244,12 +248,14 @@ impl ActorService for CellActor {
                 error!(?error, "Failed to update network configs for chip {id}");
                 return Err(CellError::ModemError(error));
             }
-            if let Some(s) = &cell_update.state {
-                state.enabled = s != "down";
-            }
-            if let Some(enabled) = cell_update.radio.state {
-                state.enabled = enabled;
-            }
+            enabled = cell_update.radio.state.or(enabled);
+        }
+
+        if let Some(enabled) = enabled
+            && enabled != state.enabled
+        {
+            self.controller.set_host_radio_enabled(id.0, enabled)?;
+            state.enabled = enabled;
         }
 
         self.handle_get(id, ctx)

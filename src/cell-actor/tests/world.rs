@@ -36,8 +36,15 @@ use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
 
 const DEVICE_ID: DeviceId = DeviceId(1);
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
+const NO_PACKET_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const SLIRP_FIRST_V4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 32);
 pub(crate) const SLIRP_FIRST_V6: Ipv6Addr = Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0x20);
+pub(crate) const AT_CMEE_NUMERIC_CMD: &str = "AT+CMEE=1\r\n";
+pub(crate) const AT_CREG_ENABLE_CMD: &str = "AT+CREG=1\r\n";
+pub(crate) const OK_RESP: &str = "OK\r\n";
+pub(crate) const CREG_DETACH_URC: &str = "+CREG: 0\r\n";
+/// Prefix of the attach URCs sent to the guest on network attach with `AT+CREG=1`.
+pub(crate) const ATTACH_URC_PREFIX: &str = "+CREG: 1\r\n+CSQ:";
 
 struct GuestChannel {
     stream_tx: fmpsc::Sender<Bytes>,
@@ -152,6 +159,54 @@ impl World {
         let params = create_params(chip_id, Some(stream), Some(sink), quirks, configs);
         self.client.create(chip_id, params).await.expect("given_cell_chip create");
         self.guests.insert(chip_id, GuestChannel { stream_tx, sink_rx });
+    }
+
+    pub(crate) async fn given_cell_chip_with_enabled_and_radio_state(
+        &mut self,
+        id: u32,
+        enabled: bool,
+        radio_state: bool,
+    ) {
+        let chip_id = ChipId(id);
+        let (stream, sink, stream_tx, sink_rx) = create_dummy_stream_sink();
+        let mut params =
+            create_params(chip_id, Some(stream), Some(sink), Quirks::default(), Vec::new());
+        params.chip.enabled = enabled;
+        if let Some(ChipVariant::Cell(ref mut cell)) = params.chip.variant {
+            cell.radio.state = Some(radio_state);
+        }
+        self.client
+            .create(chip_id, params)
+            .await
+            .expect("given_cell_chip_with_enabled_and_radio_state create");
+        self.guests.insert(chip_id, GuestChannel { stream_tx, sink_rx });
+    }
+
+    pub(crate) async fn given_disabled_cell_chip(&mut self, id: u32) {
+        let chip_id = ChipId(id);
+        let (stream, sink, stream_tx, sink_rx) = create_dummy_stream_sink();
+        let mut params =
+            create_params(chip_id, Some(stream), Some(sink), Quirks::default(), Vec::new());
+        params.chip.enabled = false;
+        self.client.create(chip_id, params).await.expect("given_disabled_cell_chip create");
+        self.guests.insert(chip_id, GuestChannel { stream_tx, sink_rx });
+    }
+
+    pub(crate) async fn given_guest_cme_errors_numeric(&mut self, id: u32) {
+        self.when_guest_sends(id, AT_CMEE_NUMERIC_CMD).await;
+        self.then_guest_receives_exact_packet(id, OK_RESP).await;
+    }
+
+    pub(crate) async fn given_guest_registered(&mut self, id: u32) {
+        self.when_guest_sends(id, AT_CREG_ENABLE_CMD).await;
+        self.then_guest_receives_exact_packet(id, OK_RESP).await;
+        self.then_guest_receives_packet_starting_with(id, ATTACH_URC_PREFIX).await;
+    }
+
+    pub(crate) async fn given_registered_chip_disabled(&mut self, id: u32) {
+        self.given_guest_registered(id).await;
+        self.when_set_chip_enabled(id, false).await;
+        self.then_guest_receives_exact_packet(id, CREG_DETACH_URC).await;
     }
 
     pub(crate) async fn given_voice_registered_home(&self, id: u32) {
@@ -319,6 +374,30 @@ impl World {
         self.client.update(ChipId(id), update).await.expect("update cell radio state");
     }
 
+    pub(crate) async fn when_set_chip_enabled_and_cell_radio_state(
+        &self,
+        id: u32,
+        enabled: bool,
+        radio_state: bool,
+    ) {
+        let update = ChipUpdate {
+            enabled: Some(enabled),
+            variant: Some(ChipVariantUpdate::Cell(CellUpdate {
+                radio: RadioUpdate { state: Some(radio_state) },
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        self.client
+            .update(ChipId(id), update)
+            .await
+            .expect("update chip enabled and cell radio state");
+    }
+
+    pub(crate) async fn when_guest_sends(&mut self, id: u32, command: &str) {
+        self.when_guest_sends_packet(id, command.as_bytes()).await;
+    }
+
     pub(crate) async fn when_update_network_configs(
         &self,
         id: u32,
@@ -474,6 +553,16 @@ impl World {
         self.then_active_calls_are(id, &expected).await;
     }
 
+    pub(crate) async fn then_cell_registrations_are(
+        &self,
+        id: u32,
+        voice: RegistrationStatus,
+        data: RegistrationStatus,
+    ) {
+        let cell = self.read_cell(id).await;
+        assert_eq!((cell.voice_registration, cell.data_registration), (voice, data));
+    }
+
     pub(crate) async fn then_cell_sms_count_is(&self, id: u32, expected: u32) {
         assert_eq!(self.read_cell(id).await.sms_count, expected);
     }
@@ -534,6 +623,20 @@ impl World {
             .expect("valid +CBM framing");
         let parsed = modem_rs::CbsPdu::parse(hex_pdu).expect("parse CBS hex PDU");
         assert_eq!(parsed.decode_content().expect("decode CBS content"), text);
+    }
+
+    pub(crate) async fn then_guest_receives_no_packet(&mut self, id: u32) {
+        let guest = self.guests.get_mut(&ChipId(id)).expect("guest not found");
+        match timeout(NO_PACKET_TIMEOUT, guest.sink_rx.next()).await {
+            Err(_) => {}
+            Ok(Some(packet)) => {
+                panic!(
+                    "expected no packet for chip {id}, got {:?}",
+                    String::from_utf8_lossy(&packet)
+                );
+            }
+            Ok(None) => panic!("guest sink channel closed for chip {id}"),
+        }
     }
 
     pub(crate) async fn then_guest_receives_lowercase_packet_framing(

@@ -299,6 +299,7 @@ type NetworkResult = Result<Option<NetworkResponse>, ExecutionResult>;
 
 // Holds all state related to the network.
 pub struct NetworkService {
+    host_enabled: bool,
     voice_registration: RegistrationStatus,
     data_registration: RegistrationStatus,
     signal_quality: SignalQuality,
@@ -320,6 +321,7 @@ pub struct NetworkService {
 impl NetworkService {
     pub fn new(quirks: Quirks, home_plmn: Option<Plmn>) -> Self {
         Self {
+            host_enabled: true,
             voice_registration: RegistrationStatus::NotRegistered,
             data_registration: RegistrationStatus::NotRegistered,
             signal_quality: SignalQuality::default(),
@@ -352,9 +354,71 @@ impl NetworkService {
     pub fn is_attached(&self) -> bool {
         self.is_attached
     }
-    pub fn is_radio_on(&self) -> bool {
-        self.radio_power == RadioPowerLevel::Full
+
+    fn detach_and_format_urcs(&mut self) -> Vec<NetworkUrc> {
+        let not_registered = RegistrationStatus::NotRegistered;
+        let voice_changed =
+            self.wire_registration_status(self.voice_registration) != not_registered;
+        let data_changed = self.wire_registration_status(self.data_registration) != not_registered;
+        self.detach_network();
+        self.voice_registration = not_registered;
+        self.data_registration = not_registered;
+        let mut urcs = Vec::new();
+        if voice_changed {
+            urcs.extend(self.format_registration_urc(RegistrationType::Voice, not_registered));
+        }
+        if data_changed {
+            urcs.extend(self.format_registration_urc(RegistrationType::Data, not_registered));
+            urcs.extend(self.format_registration_urc(RegistrationType::Lte, not_registered));
+        }
+        urcs
     }
+
+    /// Resets the network service state: re-enables host radio, restores
+    /// full radio power (`CFUN=1`), default signal quality, and automatic
+    /// operator selection, and detaches existing registrations (emitting
+    /// detach URCs for previously registered domains while preserving guest
+    /// `+CREG`/`+CGREG`/`+CEREG` subscriptions so Android RIL observes the
+    /// detach and subsequent re-attach without re-bootstrapping).
+    pub fn reset(&mut self) -> Vec<NetworkUrc> {
+        self.host_enabled = true;
+        self.radio_power = RadioPowerLevel::Full;
+        self.signal_quality = SignalQuality::default();
+        self.cops_mode = CopsMode::Automatic;
+        self.cops_format = CopsFormat::Numeric;
+        self.current_network_mode = CtecTechnology::Lte;
+        self.preferred_network_mode = CtecPreferredMask(CtecTechnology::Nr as u32);
+        self.act = AccessTechnology::Lte;
+        self.detach_and_format_urcs()
+    }
+
+    /// Returns whether RF is on: the host has not disabled the radio and the
+    /// guest has set full functionality (`AT+CFUN=1`).
+    pub fn is_radio_on(&self) -> bool {
+        self.host_enabled && self.radio_power == RadioPowerLevel::Full
+    }
+
+    pub(crate) fn is_host_radio_enabled(&self) -> bool {
+        self.host_enabled
+    }
+
+    /// Applies the host (netsim) radio state, which gates RF independently of
+    /// the guest-controlled `AT+CFUN` level so the AT channel stays responsive.
+    ///
+    /// Disabling detaches from the network, reporting only registration
+    /// changes the guest can observe. Re-enabling only lifts the gate; the
+    /// caller re-attaches through the same path as `AT+CFUN=1`.
+    pub(crate) fn set_host_radio_enabled(&mut self, enabled: bool) -> Vec<NetworkUrc> {
+        if enabled == self.host_enabled {
+            return Vec::new();
+        }
+        self.host_enabled = enabled;
+        if enabled {
+            return Vec::new();
+        }
+        self.detach_and_format_urcs()
+    }
+
     pub fn voice_registration(&self) -> RegistrationStatus {
         self.voice_registration
     }
@@ -405,11 +469,7 @@ impl NetworkService {
             "attach_network called! is_attached: {}, radio_power: {}",
             self.is_attached, self.radio_power
         );
-        if !sim.is_present()
-            || self.is_attached
-            || self.radio_power == RadioPowerLevel::Minimum
-            || self.radio_power == RadioPowerLevel::DisableRf
-        {
+        if !self.is_radio_on() || !sim.is_present() || self.is_attached {
             return Vec::new();
         }
         self.is_attached = true;
@@ -487,6 +547,11 @@ impl NetworkService {
         reg_type: RegistrationType,
         status: RegistrationStatus,
     ) -> Option<String> {
+        // A host-disabled radio stays deregistered until it is re-enabled and
+        // re-attaches.
+        if !self.host_enabled {
+            return None;
+        }
         let urcs = match reg_type {
             RegistrationType::Voice => {
                 let old_status = self.voice_registration;
@@ -632,7 +697,7 @@ impl NetworkService {
         let tech_changed = act.is_some_and(|a| self.apply_resolved_act(a));
         if self.is_attached {
             if tech_changed { self.tech_change_urcs(data) } else { Vec::new() }
-        } else if self.radio_power == RadioPowerLevel::Full {
+        } else if self.is_radio_on() {
             self.attach_network_urcs(sim, data)
         } else {
             Vec::new()
@@ -677,10 +742,12 @@ impl NetworkService {
                     if urcs.is_empty() { Ok(None) } else { Ok(Some(NetworkResponse::Urcs(urcs))) }
                 } else {
                     self.is_attached = false;
-                    self.voice_registration = RegistrationStatus::Denied;
-                    self.data_registration = RegistrationStatus::Denied;
                     self.phys_chan_timer.cancel();
-                    urcs = self.all_registration_urcs();
+                    if self.is_radio_on() {
+                        self.voice_registration = RegistrationStatus::Denied;
+                        self.data_registration = RegistrationStatus::Denied;
+                        urcs = self.all_registration_urcs();
+                    }
 
                     // Legacy Goldfish RIL treats CME 30 as an invalid argument
                     // (b/495634151).
@@ -690,6 +757,8 @@ impl NetworkService {
                         } else {
                             Ok(Some(NetworkResponse::Urcs(urcs)))
                         }
+                    } else if urcs.is_empty() {
+                        Err(ExecutionResult::cme_error(CmeError::NoNetworkService))
                     } else {
                         Err(ExecutionResult::cme_error(CmeError::NoNetworkService)
                             .with_urcs(vec![Response::Network(NetworkResponse::Urcs(urcs))]))
@@ -892,13 +961,12 @@ impl NetworkService {
         reset: Option<bool>,
         enable_unsolicited_urcs: bool,
     ) -> NetworkResult {
-        let old_power = self.radio_power;
+        let was_on = self.is_radio_on();
         self.radio_power = power;
 
         let mut urcs = Vec::new();
 
-        let was_on = old_power == RadioPowerLevel::Full;
-        let is_on = self.radio_power == RadioPowerLevel::Full;
+        let is_on = self.is_radio_on();
         let should_reset = reset == Some(true);
 
         if !is_on || should_reset {

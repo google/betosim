@@ -1361,3 +1361,103 @@ fn test_text_sms_ucs2_packing_limits() {
     when_hex_bytes_sent(&mut world, "A", &payload_72);
     then_response_is(&mut world, "A", "+CMS ERROR: 305");
 }
+
+// Scenario: Peer PDU SMS Suppressed When Recipient Host Radio Disabled
+//   Given modem "A" and host-disabled modem "B" in PDU mode
+//   When "A" sends a PDU SMS to "B" via "AT+CMGS=15"
+//   Then "A" receives "+CMGS: " and "OK"
+//   And "B" receives no response
+#[test]
+fn test_peer_pdu_sms_not_delivered_when_recipient_host_radio_disabled() {
+    let mut world = World::new();
+    given_modem_with_number(&mut world, "A", TEST_PHONE_NUMBER_LONG_B);
+    given_modem_with_number(&mut world, "B", TEST_PHONE_NUMBER_LONG_A);
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+    world.send_and_expect_ok("B", "AT+CMGF=0");
+    when_host_radio_set(&mut world, "B", false);
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS={TEST_SMS_TPDU_LEN}"));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", TEST_SMS_PDU_WITH_CTRL_Z);
+
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+    then_no_response(&mut world, "B");
+}
+
+// Scenario: Host Radio Disable Clears Queued Incoming SMS and Status Reports
+//   Given modem "A" sends an in-flight SRR PDU SMS and a second queued PDU SMS to "B"
+//   When the host disables the radio of "B"
+//   And "B" sends "AT+CNMA=1"
+//   Then "B" receives only "OK" with no queued "+CMT"
+//   And "A" receives no "+CDS" status report
+#[test]
+fn test_host_radio_disable_clears_queued_incoming_sms_and_status_reports() {
+    const PDU_WITH_SRR_CTRL_Z: &str = "0031000B915155255155F40000AA01F01A";
+    let mut world = World::new();
+    given_modem_with_number(&mut world, "A", TEST_PHONE_NUMBER_LONG_B);
+    given_modem_with_number(&mut world, "B", TEST_PHONE_NUMBER_LONG_A);
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+    world.send_and_expect_ok("B", "AT+CMGF=0");
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS={TEST_SMS_TPDU_LEN}"));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", PDU_WITH_SRR_CTRL_Z);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+    then_wait_for_response_containing(&mut world, "B", "+CMT: ,20");
+    then_wait_for_response_containing(&mut world, "B", "00240B915155255155");
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS={TEST_SMS_TPDU_LEN}"));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", TEST_SMS_PDU_WITH_CTRL_Z);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+    then_no_response(&mut world, "B");
+
+    when_host_radio_set(&mut world, "B", false);
+    world.send_and_expect_ok("B", "AT+CNMA=1");
+
+    then_no_response(&mut world, "B");
+    then_no_response(&mut world, "A");
+}
+
+// Scenario: Host-Disabled Sender Receives No Status Report On Recipient CNMA
+//   Given modem "A" sends an in-flight SRR PDU SMS and a second queued SRR PDU SMS to "B"
+//   When the host disables the radio of sender "A"
+//   And recipient "B" sends "AT+CNMA=1"
+//   Then "B" receives "OK" followed by the next queued "+CMT"
+//   And "A" receives no "+CDS" status report
+#[test]
+fn test_host_radio_disabled_sender_receives_no_status_report_on_cnma() {
+    const PDU1_WITH_SRR_CTRL_Z: &str = "0031000B915155255155F40000AA01F01A";
+    const PDU2_WITH_SRR_CTRL_Z: &str = "0031000B915155255155F40000AA01F11A";
+    let mut world = World::new();
+    given_modem_with_number(&mut world, "A", TEST_PHONE_NUMBER_LONG_B);
+    given_modem_with_number(&mut world, "B", TEST_PHONE_NUMBER_LONG_A);
+    world.send_and_expect_ok("A", "AT+CMGF=0");
+    world.send_and_expect_ok("B", "AT+CMGF=0");
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS={TEST_SMS_TPDU_LEN}"));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", PDU1_WITH_SRR_CTRL_Z);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+    then_wait_for_response_containing(&mut world, "B", "+CMT: ,20");
+    then_wait_for_response_containing(&mut world, "B", "00240B915155255155");
+
+    when_at_command_sent(&mut world, "A", &format!("AT+CMGS={TEST_SMS_TPDU_LEN}"));
+    then_prompt_is(&mut world, "A", "> ");
+    when_hex_bytes_sent(&mut world, "A", PDU2_WITH_SRR_CTRL_Z);
+    then_response_contains(&mut world, "A", "+CMGS: ");
+    then_response_is(&mut world, "A", "OK");
+    then_no_response(&mut world, "B");
+
+    when_host_radio_set(&mut world, "A", false);
+    world.send_and_expect_ok("B", "AT+CNMA=1");
+
+    then_wait_for_response_containing(&mut world, "B", "+CMT: ,20");
+    then_wait_for_response_containing(&mut world, "B", "00240B915155255155");
+    then_no_response(&mut world, "B");
+    then_no_response(&mut world, "A");
+}

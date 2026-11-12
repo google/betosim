@@ -58,6 +58,18 @@ pub fn when_time_advances_ms(world: &mut World, ms: u64) {
     world.manager.tick();
 }
 
+/// Enables or disables the modem radio from the host (netsim chip state).
+pub fn when_host_radio_set(world: &mut World, name: &str, enabled: bool) {
+    let (id, _) = world.get_modem(name);
+    world.manager.set_host_radio_enabled(id, enabled).expect("set host radio state");
+}
+
+/// Resets the modem instance from the host (netsim reset action).
+pub fn when_reset_modem(world: &mut World, name: &str) {
+    let (id, _) = world.get_modem(name);
+    world.manager.reset_modem(id).expect("reset modem");
+}
+
 /// Triggers a physical channel configuration update on the modem.
 pub fn when_physical_channel_configs_updated(world: &mut World, name: &str) {
     let (id, _) = world.get_modem(name);

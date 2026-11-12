@@ -334,18 +334,26 @@ impl crate::DataBearerState for DataService {
 impl DataService {
     // --- Pure command handlers ---
 
-    pub fn handle_define_pdp_context(
+    pub(crate) fn reset(&mut self) {
+        self.pdp_contexts.clear();
+        self.ps_attached = true;
+    }
+
+    fn handle_define_pdp_context(
         &mut self,
         cid: u8,
         pdp_type: PdpType,
         apn: QuotedString,
+        radio: &impl RadioAdmission,
     ) -> DataResult {
         self.pdp_contexts.insert(
             cid,
             PdpContext {
                 pdp_type,
                 apn: apn.as_str().to_string(),
-                active: self.ps_attached, // Goldfish expects data to be auto-activated
+                // Goldfish RIL omits AT+CGACT=1,<cid> and queries AT+CGCONTRDP
+                // directly, so auto-activate only when data admission allows.
+                active: self.check_data_admission(radio).is_ok(),
                 qos: Qos::default(),
                 req_qos: Qos::default(),
                 gprs_qos: Qos::default(),
@@ -555,7 +563,7 @@ impl DataService {
     ) -> ExecutionResult {
         let result: DataResult = match command {
             DataCommand::DefinePdpContext(cid, pdp_type, apn, ..) => {
-                self.handle_define_pdp_context(*cid, *pdp_type, *apn)
+                self.handle_define_pdp_context(*cid, *pdp_type, *apn, radio_service)
             }
             DataCommand::QueryPdpContext => self.handle_query_pdp_context(),
             DataCommand::QueryQualityOfServiceMinimum => self.handle_query_qos(QosType::Minimum),
@@ -620,12 +628,20 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
-    use crate::{parser::QuotedString, tests::test_utils::MockRadioAdmission, types::Response};
+    use crate::{
+        capabilities::AdmissionDenial, parser::QuotedString, tests::test_utils::MockRadioAdmission,
+        types::Response,
+    };
 
     #[test]
     fn test_data_service_dial_direct() {
         let mut service = DataService::default();
-        let res = service.handle_define_pdp_context(1, PdpType::Ip, QuotedString("test"));
+        let res = service.handle_define_pdp_context(
+            1,
+            PdpType::Ip,
+            QuotedString("test"),
+            &MockRadioAdmission::default(),
+        );
         assert!(res.is_ok());
 
         // Dial
@@ -641,7 +657,12 @@ mod tests {
     #[test]
     fn test_data_service_dial_malformed() {
         let mut service = DataService::default();
-        let res = service.handle_define_pdp_context(1, PdpType::Ip, QuotedString("test"));
+        let res = service.handle_define_pdp_context(
+            1,
+            PdpType::Ip,
+            QuotedString("test"),
+            &MockRadioAdmission::default(),
+        );
         assert!(res.is_ok());
 
         // Dial malformed alphanumeric CID
@@ -658,7 +679,12 @@ mod tests {
     #[test]
     fn test_pdp_context_auto_activation() {
         let mut service = DataService::default();
-        let _ = service.handle_define_pdp_context(1, PdpType::Ip, QuotedString(""));
+        let _ = service.handle_define_pdp_context(
+            1,
+            PdpType::Ip,
+            QuotedString(""),
+            &MockRadioAdmission::default(),
+        );
         assert!(service.pdp_contexts.get(&1).unwrap().active);
     }
 
@@ -666,8 +692,50 @@ mod tests {
     fn test_pdp_context_no_auto_activation_when_detached() {
         let mut service = DataService::default();
         let _ = service.handle_set_ps_attach(false);
-        let _ = service.handle_define_pdp_context(1, PdpType::Ip, QuotedString(""));
+        let _ = service.handle_define_pdp_context(
+            1,
+            PdpType::Ip,
+            QuotedString(""),
+            &MockRadioAdmission::default(),
+        );
         assert!(!service.pdp_contexts.get(&1).unwrap().active);
+    }
+
+    #[test]
+    fn test_pdp_context_no_auto_activation_when_radio_admission_denied() {
+        let mut service = DataService::default();
+        let denied = MockRadioAdmission { admission: Err(AdmissionDenial::NoNetworkService) };
+        let res = service.handle_define_pdp_context(1, PdpType::Ip, QuotedString(""), &denied);
+        assert!(res.is_ok());
+        assert!(!service.pdp_contexts.get(&1).unwrap().active);
+    }
+
+    #[test]
+    fn test_data_service_reset() {
+        let network_config = CellNetworkConfig {
+            ip_address: IpAddr::V4(Ipv4Addr::new(192, 168, 97, 2)),
+            prefixlen: 30,
+            gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 97, 1)),
+            dns: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        };
+        let quirks = Quirks { auto_ctzv: true, ..Default::default() };
+        let mut service = DataService::new(quirks, vec![network_config.clone()]);
+        service.ps_attached = false;
+        let _ = service.handle_define_pdp_context(
+            1,
+            PdpType::Ip,
+            QuotedString("test"),
+            &MockRadioAdmission::default(),
+        );
+        assert!(service.pdp_contexts.contains_key(&1));
+        assert!(!service.ps_attached);
+
+        service.reset();
+
+        assert!(service.pdp_contexts.is_empty());
+        assert!(service.ps_attached);
+        assert_eq!(service.network_configs(), &[network_config]);
+        assert_eq!(service.quirks, quirks);
     }
 
     #[test]
@@ -714,8 +782,12 @@ mod tests {
         assert_eq!(unconfigured_service.get_ip_address(&PdpType::Ip), None);
         assert_eq!(unconfigured_service.get_ip_address(&PdpType::Ipv6), None);
         assert_eq!(unconfigured_service.get_ip_address(&PdpType::Ipv4v6), None);
-        let _ =
-            unconfigured_service.handle_define_pdp_context(1, PdpType::Ip, QuotedString("test"));
+        let _ = unconfigured_service.handle_define_pdp_context(
+            1,
+            PdpType::Ip,
+            QuotedString("test"),
+            &MockRadioAdmission::default(),
+        );
         assert!(unconfigured_service.handle_show_pdp_address(1).is_err());
         assert!(unconfigured_service.handle_read_dynamic_param(1).is_err());
 

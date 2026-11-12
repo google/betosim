@@ -1276,3 +1276,55 @@ fn test_call_forwarding_late_forward_fallback_and_offnet() {
     world.hangup("A");
     world.assert_idle("A");
 }
+
+/// Scenario: Host Radio Disable Releases Active Call
+#[test]
+fn test_host_radio_disable_releases_active_call() {
+    // Given modems "A" and "B" connected in an active voice call
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.connect_call("A", "B");
+
+    // When the host disables the radio of modem "A"
+    when_host_radio_set(&mut world, "A", false);
+
+    // Then both modems receive NO CARRIER and return to idle
+    world.then_response_is("A", "NO CARRIER");
+    world.then_no_response("A");
+    world.then_response_is("B", "NO CARRIER");
+    world.assert_idle("B");
+}
+
+/// Scenario: Reset Releases Active Call
+#[test]
+fn test_reset_releases_active_call() {
+    // Given modems "A" and "B" connected in an active voice call
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.given_modem_with_number("B", CALL_PEER_B);
+    world.connect_call("A", "B");
+
+    // When the host resets modem "A"
+    when_reset_modem(&mut world, "A");
+
+    // Then both modems receive NO CARRIER and return to idle
+    world.then_response_is("A", "NO CARRIER");
+    world.then_response_is("B", "NO CARRIER");
+    world.assert_idle("A");
+    world.assert_idle("B");
+}
+
+/// Scenario: Reset Preserves Assigned Phone Number
+#[test]
+fn test_reset_preserves_assigned_phone_number() {
+    // Given a modem "A" assigned a phone number
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+
+    // When the host resets modem "A"
+    when_reset_modem(&mut world, "A");
+
+    // Then modem "A" retains its assigned phone number
+    then_phone_number_is(&mut world, "A", &format!("+{TEST_PHONE_NUMBER_LONG_A}"));
+}

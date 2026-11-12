@@ -1153,3 +1153,90 @@ fn test_physical_channel_config_reemitted_on_voice_roaming_to_home() {
     then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,5000,5,0,{TEST_PDP_CID}"));
     then_no_response(&mut world, "A");
 }
+
+// Scenario: Host Radio Re-enable Restores Registration
+//   Given a modem "A" registered after "AT+CREG=1"
+//   When the host disables the radio of "A"
+//   Then response from "A" is "+CREG: 0"
+//   When the host re-enables the radio of "A"
+//   And time advances 10 ms
+//   Then response from "A" is "+CREG: 1"
+//   And response from "A" is "+CSQ: ..."
+#[test]
+fn test_host_radio_reenable_restores_registration() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    when_time_advances_ms(&mut world, 10);
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    when_host_radio_set(&mut world, "A", false);
+    then_response_is(&mut world, "A", "+CREG: 0");
+
+    when_host_radio_set(&mut world, "A", true);
+    when_time_advances_ms(&mut world, 10);
+
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    then_no_response(&mut world, "A");
+}
+
+// Scenario: Host Radio Disable Without Registration Reports Nothing
+//   Given an unregistered modem "A" with "AT+CREG=1"
+//   When the host disables the radio of "A"
+//   Then "A" receives no response
+#[test]
+fn test_host_radio_disable_without_registration_reports_nothing() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    world.send_and_expect_ok("A", "AT+CREG=1");
+
+    when_host_radio_set(&mut world, "A", false);
+
+    then_no_response(&mut world, "A");
+}
+
+// Scenario: Guest Radio Cycle While Host Radio Disabled Does Not Attach
+//   Given a host-disabled modem "A" that was registered after "AT+CREG=1"
+//   When AT command "AT+CFUN=0" is sent to "A"
+//   Then response from "A" is "OK"
+//   When AT command "AT+CFUN=1" is sent to "A"
+//   Then response from "A" is "OK"
+//   When time advances 10 ms
+//   Then "A" receives no response
+#[test]
+fn test_guest_radio_cycle_while_host_radio_disabled_does_not_attach() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    when_time_advances_ms(&mut world, 10);
+    then_response_is(&mut world, "A", "+CREG: 1");
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    when_host_radio_set(&mut world, "A", false);
+    then_response_is(&mut world, "A", "+CREG: 0");
+
+    world.send_and_expect_ok("A", "AT+CFUN=0");
+    then_no_response(&mut world, "A");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    when_time_advances_ms(&mut world, 10);
+
+    then_no_response(&mut world, "A");
+}
+
+// Scenario: Invalid Manual Operator Selection While Host Radio Disabled Stays Unregistered
+//   Given a host-disabled modem "A" with "AT+CMEE=1" and "AT+CREG=1"
+//   When AT command 'AT+COPS=1,2,"123456"' is sent to "A"
+//   Then response from "A" is "+CME ERROR: 30" with no "+CREG: 3" URC
+//   And "AT+CREG?" reports "+CREG: 1,0"
+#[test]
+fn test_cops_invalid_manual_operator_while_host_radio_disabled() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    world.send_and_expect_ok("A", "AT+CMEE=1");
+    world.send_and_expect_ok("A", "AT+CREG=1");
+    when_host_radio_set(&mut world, "A", false);
+
+    world.send_and_expect_error("A", &format!("AT+COPS=1,2,\"{INVALID_PLMN}\""), "+CME ERROR: 30");
+    world.send_and_expect("A", "AT+CREG?", &["+CREG: 1,0", "OK"]);
+    then_no_response(&mut world, "A");
+}

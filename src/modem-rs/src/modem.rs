@@ -40,10 +40,14 @@ use crate::{
     },
 };
 
+const NETWORK_ATTACH_DELAY: Duration = Duration::from_millis(10);
+
 /// Represents a single modem device.
 pub struct ModemImpl {
     pub id: ModemId,
     pub enable_unsolicited_urcs: bool,
+    initial_profile: SimProfile,
+    initial_sim_present: bool,
     sim_service: SimService,
     network_service: NetworkService,
     sms_service: SmsService,
@@ -87,17 +91,16 @@ impl ModemImpl {
         let enable_unsol = profile.enable_unsolicited_urcs.unwrap_or(true);
         let home_plmn = profile.home_plmn();
         let sim_service = SimService::from_profile(&profile);
-        let mut misc_service = MiscService::new(clock.clone());
-        if quirks.auto_ctzv {
-            misc_service.set_ctzv_mode(true);
-        }
+        let misc_service = MiscService::new(quirks, clock.clone());
         Self {
             id,
             enable_unsolicited_urcs: enable_unsol,
+            initial_profile: profile.clone(),
+            initial_sim_present: true,
             sim_service,
             network_service: NetworkService::new(quirks, home_plmn),
             sms_service: SmsService::new(quirks, clock),
-            stk_service: StkService::new(profile.stk.clone()),
+            stk_service: StkService::new(profile.stk),
             sup_service: SupService::new(quirks),
             misc_service,
             call_service: CallService::default(),
@@ -258,10 +261,11 @@ impl ModemImpl {
     }
 
     pub fn trigger_network_time_update(&mut self) -> Vec<ModemEffect> {
-        let mut effects = Vec::new();
+        if !self.network_service.is_radio_on() {
+            return Vec::new();
+        }
         let response = self.misc_service.current_time_update();
-        effects.push(ModemEffect::Response(response.to_string().into_bytes()));
-        effects
+        vec![ModemEffect::Response(response.to_string().into_bytes())]
     }
 
     /// Sets Emergency Callback Mode (ECBM) and emits a `+WSOS` URC.
@@ -275,6 +279,12 @@ impl ModemImpl {
 
     pub fn set_phone_number(&mut self, phone: PhoneNumber) {
         self.sim_service.set_msisdn(Some(&phone));
+        self.initial_profile.msisdn = Some(phone);
+    }
+
+    pub(crate) fn set_initial_sim_present(&mut self, present: bool) {
+        self.initial_sim_present = present;
+        self.set_sim_status(present);
     }
 
     pub fn phone_number(&self) -> Option<PhoneNumber> {
@@ -294,6 +304,83 @@ impl ModemImpl {
         self.data_service.network_configs()
     }
 
+    /// Updates the host radio state.
+    pub(crate) fn set_host_radio_enabled(&mut self, enabled: bool) -> Vec<ModemEffect> {
+        if enabled == self.network_service.is_host_radio_enabled() {
+            return Vec::new();
+        }
+        let urcs = self.network_service.set_host_radio_enabled(enabled);
+        let mut effects = if self.enable_unsolicited_urcs {
+            Self::network_urcs_to_effects(urcs)
+        } else {
+            Vec::new()
+        };
+        if !enabled {
+            effects.extend(self.release_radio_resources(true));
+        } else if self.network_service.is_radio_on() && !self.network_service.is_attached() {
+            effects.push(ModemEffect::Schedule {
+                delay: NETWORK_ATTACH_DELAY,
+                event: ModemEvent::AttachNetwork,
+            });
+        }
+        effects
+    }
+
+    /// Resets the modem to its initial runtime state.
+    pub(crate) fn reset(&mut self) -> Vec<ModemEffect> {
+        let mut effects = self.release_radio_resources(true);
+        self.call_service.reset();
+        self.data_service.reset();
+        self.sms_service.reset();
+        self.sim_service.reset(&self.initial_profile, self.initial_sim_present);
+        if let Some(msisdn) = &self.initial_profile.msisdn {
+            self.sim_service.set_msisdn(Some(msisdn));
+        }
+        self.misc_service.reset();
+        self.sup_service = SupService::new(self.quirks);
+        self.stk_service = if self.initial_sim_present {
+            StkService::new(self.initial_profile.stk.clone())
+        } else {
+            StkService::default()
+        };
+        let urcs = self.network_service.reset();
+        self.network_service.set_home_plmn(if self.sim_service.is_present() {
+            self.initial_profile.home_plmn()
+        } else {
+            None
+        });
+        if self.enable_unsolicited_urcs {
+            effects.extend(Self::network_urcs_to_effects(urcs));
+        }
+        if self.sim_service.is_present() && self.network_service.is_radio_on() {
+            effects.push(ModemEffect::Schedule {
+                delay: NETWORK_ATTACH_DELAY,
+                event: ModemEvent::AttachNetwork,
+            });
+        }
+        effects
+    }
+
+    /// Releases all calls and deactivates all PDP contexts after RF goes down.
+    ///
+    /// `notify_local_hangup` reports the release to the local guest, which is
+    /// needed when the guest did not initiate the teardown itself.
+    fn release_radio_resources(&mut self, notify_local_hangup: bool) -> Vec<ModemEffect> {
+        let had_calls = self.call_service.has_calls();
+        let mut effects: Vec<ModemEffect> =
+            self.call_service.hangup_all(self.id).into_iter().map(ModemEffect::Action).collect();
+        if notify_local_hangup && had_calls {
+            let urc = HangupReason::Normal.as_urc_str(self.quirks.goldfish_ril_37_or_earlier);
+            effects.push(ModemEffect::Response(urc.as_bytes().to_vec()));
+        }
+        self.data_service.deactivate_all();
+        effects
+    }
+
+    fn network_urcs_to_effects(urcs: impl IntoIterator<Item = NetworkUrc>) -> Vec<ModemEffect> {
+        urcs.into_iter().map(|u| ModemEffect::Response(u.to_string().into_bytes())).collect()
+    }
+
     pub(crate) fn signal_quality(&self) -> SignalQuality {
         self.network_service.signal_quality()
     }
@@ -304,6 +391,10 @@ impl ModemImpl {
 
     pub(crate) fn data_registration(&self) -> RegistrationStatus {
         self.network_service.data_registration()
+    }
+
+    pub(crate) fn can_terminate_sms(&self) -> bool {
+        self.network_service.can_terminate_sms()
     }
 
     pub(crate) fn get_profile_metadata(&self) -> Option<ProfileMetadata> {
@@ -328,10 +419,6 @@ impl ModemImpl {
 
     pub(crate) fn receive_peer_hold(&mut self, peer_id: ModemId, on_hold: bool) {
         self.call_service.receive_peer_hold(peer_id, on_hold);
-    }
-
-    fn network_urcs_to_effects(urcs: impl IntoIterator<Item = NetworkUrc>) -> Vec<ModemEffect> {
-        urcs.into_iter().map(|u| ModemEffect::Response(u.to_string().into_bytes())).collect()
     }
 
     pub(crate) fn update_physical_channel_configs(&self) -> Vec<ModemEffect> {
@@ -443,9 +530,9 @@ impl ModemImpl {
             } else {
                 let home_plmn = self.sim_service.home_plmn();
                 self.network_service.set_home_plmn(home_plmn);
-                if home_plmn.is_some() {
+                if home_plmn.is_some() && self.network_service.is_radio_on() {
                     effects.push(ModemEffect::Schedule {
-                        delay: Duration::from_millis(10),
+                        delay: NETWORK_ATTACH_DELAY,
                         event: ModemEvent::AttachNetwork,
                     });
                 }
@@ -504,9 +591,9 @@ impl ModemImpl {
         );
         self.network_service.detach_network();
 
-        if home_plmn.is_some() {
+        if home_plmn.is_some() && self.network_service.is_radio_on() {
             effects.push(ModemEffect::Schedule {
-                delay: Duration::from_millis(10),
+                delay: NETWORK_ATTACH_DELAY,
                 event: ModemEvent::AttachNetwork,
             });
         }
@@ -623,11 +710,14 @@ impl ModemImpl {
             }
             ModemEvent::AttachNetwork => {
                 if self.sim_service.is_present() {
+                    let was_attached = self.network_service.is_attached();
                     let sim_ready = self.sim_service.is_ready();
                     let mut responses =
                         self.network_service.attach_network(&self.sim_service, &self.data_service);
                     // NITZ requires normal-service registration unless auto_ctzv quirk is enabled.
-                    if (sim_ready || self.quirks.auto_ctzv)
+                    if !was_attached
+                        && self.network_service.is_attached()
+                        && (sim_ready || self.quirks.auto_ctzv)
                         && self.misc_service.ctzv_enabled()
                         && self.enable_unsolicited_urcs
                     {
@@ -693,7 +783,7 @@ impl ModemImpl {
             if !was_sim_ready && self.sim_service.is_ready() && self.network_service.is_radio_on() {
                 self.network_service.detach_network();
                 effects.push(ModemEffect::Schedule {
-                    delay: Duration::from_millis(10),
+                    delay: NETWORK_ATTACH_DELAY,
                     event: ModemEvent::AttachNetwork,
                 });
             }
@@ -710,16 +800,14 @@ impl ModemImpl {
             if let Command::Network(NetworkCommand::SetRadioPower(power, reset)) = command {
                 let should_reset = reset.unwrap_or(false);
                 if should_reset || *power != RadioPowerLevel::Full {
-                    for action in self.call_service.hangup_all(self.id) {
-                        effects.push(ModemEffect::Action(action));
-                    }
-                    self.data_service.deactivate_all();
+                    effects.extend(self.release_radio_resources(false));
                 }
                 if *power == RadioPowerLevel::Full
+                    && self.network_service.is_radio_on()
                     && (!self.network_service.is_attached() || should_reset)
                 {
                     effects.push(ModemEffect::Schedule {
-                        delay: std::time::Duration::from_millis(10),
+                        delay: NETWORK_ATTACH_DELAY,
                         event: ModemEvent::AttachNetwork,
                     });
                 }
@@ -732,9 +820,12 @@ impl ModemImpl {
                 ) => *m != RegistrationUnsolicitedMode::Disable,
                 _ => false,
             };
-            if mode_active && !self.network_service.is_attached() {
+            if mode_active
+                && self.network_service.is_radio_on()
+                && !self.network_service.is_attached()
+            {
                 effects.push(ModemEffect::Schedule {
-                    delay: std::time::Duration::from_millis(10),
+                    delay: NETWORK_ATTACH_DELAY,
                     event: ModemEvent::AttachNetwork,
                 });
             }
@@ -970,5 +1061,194 @@ mod tests {
         } else {
             panic!("Expected Response effect for CLIP");
         }
+    }
+
+    fn new_test_modem() -> ModemImpl {
+        ModemImpl::new(
+            1,
+            SimProfile::default(),
+            Quirks::default(),
+            Arc::new(SystemClock),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn test_host_radio_reenable_schedules_network_attach() {
+        let mut modem = new_test_modem();
+        modem.set_host_radio_enabled(false);
+
+        let effects = modem.set_host_radio_enabled(true);
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [ModemEffect::Schedule { event: ModemEvent::AttachNetwork, .. }]
+            ),
+            "unexpected effects: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn test_host_radio_reenable_with_guest_radio_off_schedules_nothing() {
+        let mut modem = new_test_modem();
+        modem.set_host_radio_enabled(false);
+        modem.execute_chained_commands(&[b"AT+CFUN=0".to_vec()]);
+
+        let effects = modem.set_host_radio_enabled(true);
+
+        assert!(effects.is_empty(), "unexpected effects: {effects:?}");
+    }
+
+    #[test]
+    fn test_redundant_host_radio_enable_schedules_nothing() {
+        let mut modem = new_test_modem();
+
+        let effects = modem.set_host_radio_enabled(true);
+
+        assert!(effects.is_empty(), "unexpected effects: {effects:?}");
+    }
+
+    /// Scenario: Resetting an enabled modem cleans dirty AT, SMS, data, call, and radio state
+    #[test]
+    fn test_reset_on_already_enabled_modem_cleans_dirty_state() {
+        const TEST_SMS_PDU_LEN_CMD: &[u8] = b"AT+CMGW=15\r\n";
+        const TEST_SMS_PDU_PAYLOAD: &[u8] = b"0011000B915155255155F40000AA01F0\x1a";
+        const CALLER_PEER_ID: ModemId = 2;
+
+        // Given an enabled, registered modem with dirty CMEE=1, SIM SMS, PS detach, and a call
+        let mut modem = new_test_modem();
+        modem.set_voice_registration(RegistrationStatus::RegisteredHome);
+        modem.set_registration(RegistrationType::Data, RegistrationStatus::RegisteredHome);
+        modem.receive_at_command(b"AT+CREG=1\r\n");
+        modem.receive_at_command(b"AT+CMEE=1\r\n");
+        modem.receive_at_command(b"AT+CLIP=1\r\n");
+        modem.receive_at_command(b"AT+CPMS=\"SM\",\"SM\",\"SM\"\r\n");
+        modem.receive_at_command(TEST_SMS_PDU_LEN_CMD);
+        modem.receive_at_command(TEST_SMS_PDU_PAYLOAD);
+        assert_eq!(modem.get_sms_count(), 1);
+
+        modem.receive_at_command(b"AT+CGATT=0\r\n");
+        let cgatt_before = modem.receive_at_command(b"AT+CGATT?\r\n");
+        assert!(
+            cgatt_before
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CGATT: 0\r\nOK\r\n")),
+            "expected +CGATT: 0 before reset, got {cgatt_before:?}"
+        );
+
+        let ring_effects =
+            modem.trigger_incoming_call(None, NumberPresentation::Allowed, Some(CALLER_PEER_ID));
+        assert!(ring_effects.is_some(), "expected incoming call ring");
+        assert!(modem.call_service.has_calls());
+
+        // When the modem is reset
+        let effects = modem.reset();
+
+        // Then the call is torn down with HangupCall + NO CARRIER, detach URC is emitted, and
+        // re-attach is scheduled
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Action(CommandAction::HangupCall { .. }))),
+            "expected HangupCall action in effects: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, ModemEffect::Response(r) if r == b"NO CARRIER\r\n")),
+            "expected NO CARRIER response in effects: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CREG: 0\r\n")),
+            "expected +CREG: 0 detach URC in effects: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                ModemEffect::Schedule { event: ModemEvent::AttachNetwork, .. }
+            )),
+            "expected AttachNetwork schedule in effects: {effects:?}"
+        );
+
+        // And call, SIM SMS, PS attach, and CMEE state are restored to defaults
+        assert!(!modem.call_service.has_calls());
+        assert_eq!(modem.get_sms_count(), 0);
+        assert!(modem.network_service.is_host_radio_enabled());
+        assert!(modem.network_service.is_radio_on());
+
+        let cgatt_after = modem.receive_at_command(b"AT+CGATT?\r\n");
+        assert!(
+            cgatt_after
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CGATT: 1\r\nOK\r\n")),
+            "expected +CGATT: 1 after reset, got {cgatt_after:?}"
+        );
+
+        let cmee_after = modem.receive_at_command(b"AT+CMEE?\r\n");
+        assert!(
+            cmee_after
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CMEE: 0\r\nOK\r\n")),
+            "expected +CMEE: 0 after reset, got {cmee_after:?}"
+        );
+
+        let clip_after = modem.receive_at_command(b"AT+CLIP?\r\n");
+        assert!(
+            clip_after
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CLIP: 0,1\r\nOK\r\n")),
+            "expected +CLIP: 0,1 after reset, got {clip_after:?}"
+        );
+    }
+
+    /// Scenario: Resetting after AT+CFUN=0 restores AT+CFUN=1 and schedules attach
+    #[test]
+    fn test_reset_after_guest_cfun_off_restores_cfun_on_and_schedules_attach() {
+        // Given a modem where the guest powered radio off with AT+CFUN=0
+        let mut modem = new_test_modem();
+        modem.receive_at_command(b"AT+CFUN=0\r\n");
+        let cfun_before = modem.receive_at_command(b"AT+CFUN?\r\n");
+        assert!(
+            cfun_before
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CFUN: 0\r\nOK\r\n")),
+            "expected +CFUN: 0 before reset, got {cfun_before:?}"
+        );
+
+        // When the modem is reset
+        let cfun_reset_effects = modem.reset();
+
+        // Then AT+CFUN? returns +CFUN: 1 and AttachNetwork is scheduled
+        assert!(
+            cfun_reset_effects.iter().any(|e| matches!(
+                e,
+                ModemEffect::Schedule { event: ModemEvent::AttachNetwork, .. }
+            )),
+            "expected AttachNetwork schedule after CFUN=0 reset: {cfun_reset_effects:?}"
+        );
+        let cfun_after = modem.receive_at_command(b"AT+CFUN?\r\n");
+        assert!(
+            cfun_after
+                .iter()
+                .any(|e| matches!(e, ModemEffect::Response(r) if r == b"+CFUN: 1\r\nOK\r\n")),
+            "expected +CFUN: 1 after reset, got {cfun_after:?}"
+        );
+    }
+
+    /// Scenario: Resetting a default-profile modem preserves its assigned phone number
+    #[test]
+    fn test_reset_preserves_assigned_phone_number_on_default_profile() {
+        const ASSIGNED_NUMBER: &str = "+15550009999";
+
+        // Given a default-profile modem assigned a custom phone number
+        let mut modem = new_test_modem();
+        let assigned = PhoneNumber::new_for_test(ASSIGNED_NUMBER);
+        modem.set_phone_number(assigned.clone());
+        assert_eq!(modem.phone_number(), Some(assigned.clone()));
+
+        // When the modem is reset
+        modem.reset();
+
+        // Then the assigned phone number is preserved rather than reverting to the XML fallback
+        assert_eq!(modem.phone_number(), Some(assigned));
     }
 }

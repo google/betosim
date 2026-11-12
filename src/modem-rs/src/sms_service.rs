@@ -276,6 +276,10 @@ impl SmsService {
     pub fn new(quirks: Quirks, clock: Arc<dyn Clock>) -> Self {
         Self { quirks, clock, ..Default::default() }
     }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self { quirks: self.quirks, clock: self.clock.clone(), ..Default::default() };
+    }
     // --- Pure command handlers ---
 
     pub fn get_sms_count(&self) -> usize {
@@ -657,5 +661,18 @@ mod tests {
             ExecutionResult::Success(HandledCommand { responses, .. })
                 if responses == vec![Response::Sms(SmsResponse::Prompt { goldfish_compat: false })]
         ));
+    }
+
+    #[test]
+    fn test_sms_service_reset() {
+        let mut service = SmsService::default();
+        service
+            .messages
+            .insert(1, SimSmsMessage::new(SmsMessageStatus::ReceivedUnread, vec![1, 2, 3]));
+        assert_eq!(service.get_sms_count(), 1);
+
+        service.reset();
+
+        assert_eq!(service.get_sms_count(), 0);
     }
 }

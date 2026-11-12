@@ -255,6 +255,34 @@ impl ModemNetworkSimulator {
         self.apply_to_modem(id, |modem| modem.set_operator(operator))
     }
 
+    /// Updates the host radio state of a modem instance.
+    pub fn set_host_radio_enabled(
+        &mut self,
+        chip_id: ModemId,
+        enabled: bool,
+    ) -> Result<Vec<NetworkEvent>, ModemError> {
+        let modem = self.modems.get_mut(&chip_id).ok_or(ModemError::UnknownModemId(chip_id))?;
+        if !enabled {
+            self.incoming_sms.remove(&chip_id);
+        }
+        let effects = modem.set_host_radio_enabled(enabled);
+        let pairs = effects.into_iter().map(|e| (chip_id, e)).collect();
+        Ok(self.process_effects(pairs))
+    }
+
+    /// Resets a modem instance to its initial runtime state.
+    pub fn reset_modem(&mut self, chip_id: ModemId) -> Result<Vec<NetworkEvent>, ModemError> {
+        let modem = self.modems.get_mut(&chip_id).ok_or(ModemError::UnknownModemId(chip_id))?;
+        self.incoming_sms.remove(&chip_id);
+        for queue in self.incoming_sms.values_mut() {
+            queue.remove_sender(chip_id);
+        }
+        self.event_queue.retain(|e| e.0.modem_id != chip_id);
+        let effects = modem.reset();
+        let pairs = effects.into_iter().map(|e| (chip_id, e)).collect();
+        Ok(self.process_effects(pairs))
+    }
+
     /// Creates a new modem instance.
     pub fn new_modem(
         &mut self,
@@ -390,7 +418,7 @@ impl ModemNetworkSimulator {
             modem.set_phone_number(target_msisdn);
         }
         if let Some(t) = sim_type {
-            modem.set_sim_status(t > 0);
+            modem.set_initial_sim_present(t > 0);
         }
         self.modems.insert(id, modem);
         self.sinks.insert(id, sink);
@@ -676,7 +704,9 @@ impl ModemNetworkSimulator {
                     Some(id)
                 };
 
-                if let Some(peer_id) = peer_id {
+                if let Some(peer_id) = peer_id
+                    && self.modems.get(&peer_id).is_some_and(ModemImpl::can_terminate_sms)
+                {
                     let tpdu_len = crate::pdu::calculate_tpdu_len(&pdu);
                     let peer_is_goldfish_37 = self
                         .modems
@@ -709,7 +739,12 @@ impl ModemNetworkSimulator {
                     let queue = entry.get_mut();
                     if let Some(ack_sms) = queue.acknowledge() {
                         if let Some(pending) = ack_sms.status_report {
-                            if ack.is_success() {
+                            if ack.is_success()
+                                && self
+                                    .modems
+                                    .get(&pending.sender_id)
+                                    .is_some_and(ModemImpl::can_terminate_sms)
+                            {
                                 let report_pdu = pending.report.to_pdu_hex(&self.clock.now_zoned());
                                 let report_tpdu_len =
                                     crate::pdu::calculate_tpdu_len(report_pdu.as_bytes());
@@ -722,7 +757,7 @@ impl ModemNetworkSimulator {
                                 ));
                             } else {
                                 debug!(
-                                    "Incoming SMS negatively acknowledged by modem {id}, dropping status report"
+                                    "Incoming SMS negatively acknowledged or sender unreachable for modem {id}, dropping status report"
                                 );
                             }
                         }
@@ -1292,6 +1327,11 @@ mod tests {
         let info = interface.get_modem_info(chip_id).unwrap();
         assert!(info.ringing);
 
+        let res = interface.reset_modem(chip_id);
+        assert!(res.is_ok());
+        let info = interface.get_modem_info(chip_id).unwrap();
+        assert!(!info.ringing);
+
         let res = interface.on_timer(chip_id);
         assert!(res.is_ok());
 
@@ -1373,6 +1413,59 @@ mod tests {
         assert!(ack_sms.status_report.is_none());
         assert_eq!(ack_sms.next_cmt_response, None);
         assert!(queue.is_empty());
+    }
+
+    /// Scenario: `reset_modem` purges pending timers for that modem and drops peer SMS status reports
+    #[test]
+    fn test_reset_modem_purges_stale_timers_and_peer_sms_status_reports() {
+        const CHIP_1: ModemId = 1;
+        const CHIP_2: ModemId = 2;
+        const ATTACH_DELAY: Duration = Duration::from_millis(10);
+        const STALE_TIMER_DELAY: Duration = Duration::from_millis(50);
+
+        // Given two modems with scheduled timers and an active peer SMS status report back to CHIP_1
+        let clock = Arc::new(MockClock::default());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut simulator = ModemNetworkSimulator::new_with_clock(clock.clone(), tx);
+
+        let (mut handler1, sink1) = MockModemHandler::new(false);
+        let (mut handler2, sink2) = MockModemHandler::new(false);
+        simulator.new_modem(CHIP_1, sink1, None, None, Quirks::default(), Vec::new()).unwrap();
+        simulator.new_modem(CHIP_2, sink2, None, None, Quirks::default(), Vec::new()).unwrap();
+
+        simulator.schedule_event(CHIP_1, STALE_TIMER_DELAY, ModemEvent::TestEvent);
+        simulator.schedule_event(CHIP_2, STALE_TIMER_DELAY, ModemEvent::TestEvent);
+
+        let dummy_report = crate::pdu::StatusReport {
+            message_reference: 1,
+            recipient_address: vec![0x0B, 0x91, 0x51, 0x55, 0x25, 0x51, 0x55, 0xF4],
+            scts_bcd: [0x26, 0x06, 0x15, 0x19, 0x30, 0x45, 0x00],
+        };
+        let queue = simulator.incoming_sms.entry(CHIP_2).or_default();
+        queue.enqueue(
+            b"+CMT: 1\r\n...".to_vec(),
+            Some(PendingStatusReport { sender_id: CHIP_1, report: dummy_report }),
+        );
+
+        // When CHIP_1 is reset and the clock advances past both the attach delay and the 50ms timer
+        simulator.reset_modem(CHIP_1).unwrap();
+
+        assert_eq!(
+            simulator.incoming_sms.get(&CHIP_2).unwrap().link_state,
+            IncomingSmsLinkState::Active(None)
+        );
+
+        clock.advance(ATTACH_DELAY);
+        let _ = simulator.tick();
+        let attach_csq = handler1.wait_for_response();
+        assert!(String::from_utf8_lossy(&attach_csq).starts_with("+CSQ:"));
+
+        clock.advance(STALE_TIMER_DELAY - ATTACH_DELAY);
+        let _ = simulator.tick();
+
+        // Then CHIP_1's pre-reset timer does not fire while CHIP_2's timer fires normally
+        assert_eq!(handler1.try_get_response(), None);
+        assert_eq!(handler2.wait_for_response(), b"TEST_EVENT_FIRED\r\n");
     }
 
     #[test]

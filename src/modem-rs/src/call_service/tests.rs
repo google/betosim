@@ -669,3 +669,19 @@ fn test_handle_call_hold_swap_peerless_active_and_held() {
     assert_eq!(service.calls[0].state, CallState::Held);
     assert_eq!(service.calls[1].state, CallState::Active);
 }
+
+#[test]
+fn test_call_service_reset() {
+    let mut service = CallService::default();
+    service.set_emergency_mode(true);
+    service.ring(None, NumberPresentation::Allowed, None).unwrap();
+    let token_before = service.next_ring_token;
+    assert!(service.has_calls());
+    assert!(service.emergency_mode);
+
+    service.reset();
+
+    assert!(!service.has_calls());
+    assert!(!service.emergency_mode);
+    assert_eq!(service.next_ring_token, token_before);
+}

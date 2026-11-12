@@ -460,3 +460,173 @@ fn test_physical_channel_timer_canceled_on_operator_denial() {
     service.is_attached = true;
     assert_eq!(service.handle_physical_channel_timeout(token, &data).next(), None);
 }
+
+fn voice_registration_urc(status: RegistrationStatus) -> NetworkUrc {
+    NetworkUrc::Registration { reg_type: RegistrationType::Voice, status, location: None }
+}
+
+fn data_registration_urc(status: RegistrationStatus) -> NetworkUrc {
+    NetworkUrc::Registration { reg_type: RegistrationType::Data, status, location: None }
+}
+
+fn lte_registration_urc(status: RegistrationStatus) -> NetworkUrc {
+    NetworkUrc::Registration { reg_type: RegistrationType::Lte, status, location: None }
+}
+
+#[test]
+fn test_host_radio_disable_detaches_and_reports_deregistration() {
+    let mut service = registered_network_service();
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+
+    let urcs = service.set_host_radio_enabled(false);
+
+    assert_eq!(urcs, &[voice_registration_urc(RegistrationStatus::NotRegistered)]);
+    assert!(!service.is_attached());
+    assert_eq!(service.voice_registration(), RegistrationStatus::NotRegistered);
+    assert_eq!(service.data_registration(), RegistrationStatus::NotRegistered);
+}
+
+#[test]
+fn test_host_radio_disable_while_unregistered_reports_nothing() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.data_unsol_mode = RegistrationUnsolicitedMode::Enable;
+
+    let urcs = service.set_host_radio_enabled(false);
+
+    assert!(urcs.is_empty(), "unexpected URCs: {urcs:?}");
+}
+
+#[test]
+fn test_host_radio_disable_denies_radio_admission() {
+    let mut service = registered_network_service();
+
+    service.set_host_radio_enabled(false);
+
+    assert!(!service.is_radio_on());
+    assert_eq!(service.can_originate_voice_call(true), Err(AdmissionDenial::NoNetworkService));
+    assert_eq!(service.can_originate_data(), Err(AdmissionDenial::NoNetworkService));
+}
+
+#[test]
+fn test_redundant_host_radio_disable_is_noop() {
+    let mut service = registered_network_service();
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.set_host_radio_enabled(false);
+
+    assert!(service.set_host_radio_enabled(false).is_empty());
+}
+
+#[test]
+fn test_redundant_host_radio_enable_keeps_registration() {
+    let mut service = registered_network_service();
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+
+    let urcs = service.set_host_radio_enabled(true);
+
+    assert!(urcs.is_empty(), "unexpected URCs: {urcs:?}");
+    assert_eq!(service.voice_registration(), RegistrationStatus::RegisteredHome);
+}
+
+#[test]
+fn test_host_radio_enable_restores_radio_at_full_power() {
+    let mut service = registered_network_service();
+    service.set_host_radio_enabled(false);
+
+    service.set_host_radio_enabled(true);
+
+    assert!(service.is_radio_on());
+}
+
+#[test]
+fn test_host_radio_enable_keeps_radio_off_when_guest_radio_off() {
+    let mut service = registered_network_service();
+    service.set_host_radio_enabled(false);
+    service.radio_power = RadioPowerLevel::Minimum;
+
+    service.set_host_radio_enabled(true);
+
+    assert!(!service.is_radio_on());
+}
+
+#[test]
+fn test_host_registration_ignored_while_host_radio_disabled() {
+    let mut service = NetworkService::new(Quirks::default(), None);
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.set_host_radio_enabled(false);
+
+    let urc = service.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+
+    assert_eq!(urc, None);
+    assert_eq!(service.voice_registration(), RegistrationStatus::NotRegistered);
+}
+
+#[test]
+fn test_invalid_manual_operator_while_host_radio_disabled_stays_unregistered() {
+    use crate::tests::test_utils::MockCardState;
+
+    let mut service = NetworkService::new(
+        Quirks::default(),
+        Some(Plmn::parse("310260").expect("valid test PLMN")),
+    );
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.data_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.set_host_radio_enabled(false);
+    let sim = MockCardState::default();
+    let data = MockDataBearerState::default();
+
+    let res =
+        service.handle_set_operator(CopsMode::Manual, None, Some("999999"), None, &sim, &data);
+
+    assert_eq!(res, Err(ExecutionResult::cme_error(CmeError::NoNetworkService)));
+    assert_eq!(service.voice_registration(), RegistrationStatus::NotRegistered);
+    assert_eq!(service.data_registration(), RegistrationStatus::NotRegistered);
+}
+
+#[test]
+fn test_network_service_reset_restores_defaults_and_detaches() {
+    let mut service = registered_network_service();
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.data_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.lte_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.radio_power = RadioPowerLevel::Minimum;
+    service.cops_mode = CopsMode::Manual;
+
+    let urcs = service.reset();
+
+    assert!(service.is_radio_on());
+    assert!(!service.is_attached());
+    assert_eq!(service.voice_registration(), RegistrationStatus::NotRegistered);
+    assert_eq!(service.data_registration(), RegistrationStatus::NotRegistered);
+    assert_eq!(service.radio_power, RadioPowerLevel::Full);
+    assert_eq!(service.cops_mode, CopsMode::Automatic);
+    assert_eq!(service.signal_quality(), SignalQuality::default());
+    assert_eq!(
+        urcs,
+        &[
+            voice_registration_urc(RegistrationStatus::NotRegistered),
+            data_registration_urc(RegistrationStatus::NotRegistered),
+            lte_registration_urc(RegistrationStatus::NotRegistered),
+        ]
+    );
+}
+
+#[test]
+fn test_network_service_reset_after_host_disable() {
+    let mut service = registered_network_service();
+    service.voice_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.data_unsol_mode = RegistrationUnsolicitedMode::Enable;
+    service.radio_power = RadioPowerLevel::Minimum;
+    let _ = service.set_host_radio_enabled(false);
+
+    let urcs = service.reset();
+
+    assert!(service.is_radio_on());
+    assert!(!service.is_attached());
+    assert_eq!(service.voice_registration(), RegistrationStatus::NotRegistered);
+    assert_eq!(service.data_registration(), RegistrationStatus::NotRegistered);
+    assert_eq!(service.radio_power, RadioPowerLevel::Full);
+    assert_eq!(service.cops_mode, CopsMode::Automatic);
+    assert_eq!(service.signal_quality(), SignalQuality::default());
+    assert!(urcs.is_empty(), "expected no duplicate detach URCs on reset after disable");
+}

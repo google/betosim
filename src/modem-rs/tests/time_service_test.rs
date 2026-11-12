@@ -256,3 +256,74 @@ fn test_per_modem_timezone_independence() {
     then_response_is(&mut world, "B", "+CCLK: \"26/06/15,19:30:45+36\"");
     then_response_is(&mut world, "B", "OK");
 }
+
+// Scenario: Host Radio Re-enable Sends NITZ on Attach
+//   Given a modem "A" with auto_ctzv that attached after "AT+CFUN=1"
+//   When the host disables and re-enables the radio of "A"
+//   And time advances 15 ms
+//   Then response from "A" is "+CSQ: ..."
+//   And response from "A" is "%CTZV: ..."
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_host_radio_reenable_sends_nitz_on_attach() {
+    let mut world = World::new();
+    let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
+    world.clock.set_zoned(zoned);
+    given_modem_with_quirks(
+        &mut world,
+        "A",
+        netsim_model::Quirks { auto_ctzv: true, ..Default::default() },
+    );
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    when_time_advances_ms(&mut world, 15);
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    then_response_is(&mut world, "A", "%CTZV: 26/06/15:19:30:45-28:1:America!Los_Angeles");
+
+    when_host_radio_set(&mut world, "A", false);
+    when_host_radio_set(&mut world, "A", true);
+    when_time_advances_ms(&mut world, 15);
+
+    then_response_is(&mut world, "A", RESP_CSQ_LTE_DEFAULT);
+    then_response_is(&mut world, "A", "%CTZV: 26/06/15:19:30:45-28:1:America!Los_Angeles");
+    then_no_response(&mut world, "A");
+}
+
+// Scenario: Guest Radio Cycle While Host Radio Disabled Suppresses Auto CTZV
+//   Given a host-disabled modem "A" with auto_ctzv
+//   When AT command "AT+CFUN=0" is sent to "A"
+//   Then response from "A" is "OK"
+//   When AT command "AT+CFUN=1" is sent to "A"
+//   Then response from "A" is "OK"
+//   When time advances 15 ms
+//   Then "A" receives no response
+#[test]
+fn test_guest_radio_cycle_while_host_radio_disabled_suppresses_auto_ctzv() {
+    let mut world = World::new();
+    given_modem_with_quirks(
+        &mut world,
+        "A",
+        netsim_model::Quirks { auto_ctzv: true, ..Default::default() },
+    );
+    when_host_radio_set(&mut world, "A", false);
+
+    world.send_and_expect_ok("A", "AT+CFUN=0");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    when_time_advances_ms(&mut world, 15);
+
+    then_no_response(&mut world, "A");
+}
+
+// Scenario: Network Time Update Suppressed While Host Radio Disabled
+//   Given a host-disabled modem "A"
+//   When external network time update is received
+//   Then "A" receives no response
+#[test]
+fn test_update_network_time_suppressed_while_host_radio_disabled() {
+    let mut world = World::new();
+    given_modem(&mut world, "A");
+    when_host_radio_set(&mut world, "A", false);
+
+    when_network_time_updated(&mut world, "A");
+
+    then_no_response(&mut world, "A");
+}

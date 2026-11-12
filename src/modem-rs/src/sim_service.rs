@@ -814,6 +814,13 @@ impl SimService {
         was_provisioned
     }
 
+    pub(crate) fn reset(&mut self, profile: &SimProfile, present: bool) {
+        *self = Self::from_profile(profile);
+        if !present {
+            self.set_present(false);
+        }
+    }
+
     /// Returns the home PLMN (MCC + MNC) derived from the active SIM's EF_IMSI,
     /// or `None` if the SIM is absent or has no valid IMSI.
     pub(crate) fn home_plmn(&self) -> Option<Plmn> {
@@ -2699,5 +2706,18 @@ mod tests {
         assert_eq!(entry.pin, "1111");
         assert_eq!(entry.pin_attempts(), (5, 5));
         assert_eq!(entry.puk_attempts(), (8, 8));
+    }
+
+    #[test]
+    fn test_sim_service_reset() {
+        let profile = SimProfile::default();
+        let mut service = SimService::from_profile(&profile);
+        service.set_present(true);
+        service.pin1.pin_retries = 1;
+
+        service.reset(&profile, false);
+
+        assert!(!service.is_present());
+        assert_eq!(service.pin1.pin_retries, DEFAULT_PIN_RETRIES);
     }
 }

@@ -235,6 +235,10 @@ impl CallService {
         self.calls.clear();
     }
 
+    pub(crate) fn reset(&mut self) {
+        *self = Self { next_ring_token: self.next_ring_token, ..Self::default() };
+    }
+
     pub(crate) fn has_outbound_to_peer(&self, peer_id: ModemId) -> bool {
         self.calls.iter().any(|c| c.state.is_outbound() && c.peer_id == Some(peer_id))
     }

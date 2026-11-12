@@ -63,6 +63,12 @@ pub trait ModemNetworkInterface: Send + Sync {
     fn get_modem_info(&self, chip_id: ModemId) -> Result<ModemInfo, ModemError>;
     fn on_timer(&mut self, chip_id: ModemId) -> Result<(), ModemError>;
     fn perform_action(&mut self, action: ModemAction) -> Result<Vec<NetworkEvent>, ModemError>;
+    fn set_host_radio_enabled(
+        &mut self,
+        chip_id: ModemId,
+        enabled: bool,
+    ) -> Result<Vec<NetworkEvent>, ModemError>;
+    fn reset_modem(&mut self, chip_id: ModemId) -> Result<(), ModemError>;
 }
 
 use crate::modem_network_simulator::ModemNetworkSimulator;
@@ -161,5 +167,17 @@ impl ModemNetworkInterface for ModemNetworkSimulator {
 
     fn perform_action(&mut self, action: ModemAction) -> Result<Vec<NetworkEvent>, ModemError> {
         Ok(self.dispatch(action))
+    }
+
+    fn set_host_radio_enabled(
+        &mut self,
+        chip_id: ModemId,
+        enabled: bool,
+    ) -> Result<Vec<NetworkEvent>, ModemError> {
+        self.set_host_radio_enabled(chip_id, enabled)
+    }
+
+    fn reset_modem(&mut self, chip_id: ModemId) -> Result<(), ModemError> {
+        self.reset_modem(chip_id).map(|_| ())
     }
 }

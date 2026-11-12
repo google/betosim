@@ -20,6 +20,7 @@ use std::{
 
 use jiff::{Zoned, civil::DateTime, tz::TimeZone};
 use modem_rs_derive::CommandParser;
+use netsim_model::Quirks;
 use nom::IResult;
 
 use crate::{
@@ -292,6 +293,7 @@ impl Display for MiscResponse {
 type MiscResult = Result<Option<MiscResponse>, ExecutionResult>;
 
 pub struct MiscService {
+    quirks: Quirks,
     clock: Arc<dyn Clock>,
     ctzv_mode: bool,
     cclk: Option<CclkTime>,
@@ -308,15 +310,16 @@ pub struct MiscService {
 
 impl Default for MiscService {
     fn default() -> Self {
-        Self::new(Arc::new(SystemClock))
+        Self::new(Quirks::default(), Arc::new(SystemClock))
     }
 }
 
 impl MiscService {
-    pub fn new(clock: Arc<dyn Clock>) -> Self {
+    pub fn new(quirks: Quirks, clock: Arc<dyn Clock>) -> Self {
         Self {
+            quirks,
             clock,
-            ctzv_mode: false,
+            ctzv_mode: quirks.auto_ctzv,
             cclk: None,
             cmee_mode: CmeeMode::default(),
             speaker_volume: SpeakerVolume::default(),
@@ -330,10 +333,15 @@ impl MiscService {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        *self = Self::new(self.quirks, self.clock.clone());
+    }
+
     pub fn cmee_mode(&self) -> CmeeMode {
         self.cmee_mode
     }
 
+    #[cfg(test)]
     pub fn set_ctzv_mode(&mut self, enabled: bool) {
         self.ctzv_mode = enabled;
     }
@@ -563,7 +571,7 @@ mod tests {
     #[test]
     fn test_ctzv_at_commands() {
         let clock = Arc::new(MockClock::default());
-        let mut service = MiscService::new(clock.clone());
+        let mut service = MiscService::new(Quirks::default(), clock.clone());
 
         assert!(!service.ctzv_enabled());
 
@@ -634,7 +642,7 @@ mod tests {
         let clock = Arc::new(MockClock::default());
         let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
         clock.set_zoned(zoned);
-        let mut service = MiscService::new(clock.clone());
+        let mut service = MiscService::new(Quirks::default(), clock.clone());
 
         // Default AT+CCLK? queries clock
         let res = service.execute(&MiscCommand::QueryTime);
@@ -705,5 +713,17 @@ mod tests {
         assert_eq!(service.icf_parity, IcfParity::default());
         assert_eq!(service.ifc_dce, FlowControlMode::default());
         assert_eq!(service.ifc_dte, FlowControlMode::default());
+    }
+
+    #[test]
+    fn test_misc_service_reset() {
+        let quirks = Quirks { auto_ctzv: true, ..Default::default() };
+        let mut service = MiscService::new(quirks, Arc::new(SystemClock));
+        service.set_ctzv_mode(false);
+        assert!(!service.ctzv_mode);
+
+        service.reset();
+
+        assert!(service.ctzv_mode);
     }
 }

@@ -898,3 +898,43 @@ fn test_read_dynamic_param_timer_canceled_when_all_contexts_deactivated() {
     then_response_is(&mut world, "A", &format!("%CGFPCCFG: 2,50000,6,4,{TEST_PDP_CID_ALT}"));
     then_no_response(&mut world, "A");
 }
+
+/// Scenario: Host Radio Disable Deactivates PDP Context
+#[test]
+fn test_host_radio_disable_deactivates_pdp_context() {
+    // Given a data modem "A" with an active PDP context
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+    world.send_and_expect_ok("A", &format!("AT+CGACT=1,{TEST_PDP_CID}"));
+
+    // When the host disables the radio of "A"
+    when_host_radio_set(&mut world, "A", false);
+
+    // Then the PDP context is deactivated
+    world.send_and_expect("A", "AT+CGACT?", &[&format!("+CGACT: {TEST_PDP_CID},0"), "OK"]);
+}
+
+/// Scenario: Define PDP Context While Host Radio Disabled Stays Inactive
+#[test]
+fn test_define_pdp_context_while_host_radio_disabled_stays_inactive() {
+    // Given a host-disabled data modem "A"
+    let mut world = World::new();
+    given_data_modem(&mut world, "A");
+    when_host_radio_set(&mut world, "A", false);
+
+    // When AT+CGDCONT defines a PDP context while RF is disabled
+    world.send_and_expect_ok(
+        "A",
+        &format!("AT+CGDCONT={TEST_PDP_CID},\"{TEST_PDP_TYPE}\",\"{TEST_APN}\""),
+    );
+
+    // Then the PDP context stays inactive with no allocated IP lease
+    world.send_and_expect("A", "AT+CGACT?", &[&format!("+CGACT: {TEST_PDP_CID},0"), "OK"]);
+    world.send_and_expect_error("A", &format!("AT+CGCONTRDP={TEST_PDP_CID}"), "ERROR");
+    world.send_and_expect_error("A", &format!("AT+CGPADDR={TEST_PDP_CID}"), "ERROR");
+    then_no_response(&mut world, "A");
+}

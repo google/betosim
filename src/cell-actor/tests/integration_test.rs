@@ -15,9 +15,29 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use cell_actor::CellAction;
-use netsim_model::{CallState, CellNetworkConfig, Quirks, RadioTechnology, RegistrationStatus};
+use netsim_model::{
+    CallState, CellNetworkConfig, MODEM_STATE_DOWN, MODEM_STATE_IDLE, MODEM_STATE_RINGING, Quirks,
+    RadioTechnology, RegistrationStatus,
+};
 
-use crate::world::{SLIRP_FIRST_V4, SLIRP_FIRST_V6, World};
+use crate::world::{
+    AT_CREG_ENABLE_CMD, ATTACH_URC_PREFIX, CREG_DETACH_URC, OK_RESP, SLIRP_FIRST_V4,
+    SLIRP_FIRST_V6, World,
+};
+
+const CHIP_1: u32 = 1;
+const CHIP_2: u32 = 2;
+const CALLER_NUMBER: &str = "123456";
+const SMS_TEXT: &str = "hello";
+const SHORT_DIAL_CMD: &str = "ATD123;\r\n";
+const DIAL_CMD: &str = "ATD12345;\r\n";
+const DIAL_MODEM_1_CMD: &str = "ATD15555211001;\r\n";
+const AT_CMD: &str = "AT\r\n";
+const AT_CFUN_QUERY_CMD: &str = "AT+CFUN?\r\n";
+const RING_URC: &str = "RING\r\n";
+const NO_CARRIER_URC: &str = "NO CARRIER\r\n";
+const CFUN_FULL_RESP: &str = "+CFUN: 1\r\nOK\r\n";
+const CME_NO_NETWORK_RESP: &str = "+CME ERROR: 30\r\n";
 
 /// Scenario: Creating a cellular chip initializes an active idle modem in the actor
 #[tokio::test]
@@ -109,30 +129,301 @@ async fn test_get_chip() {
     world.then_chip_not_found(99).await;
 }
 
-/// Scenario: Reading and listing a cellular chip reflect transitions across idle, ringing, and down states
+/// Scenario: Reading and listing a cell chip reflects idle, ringing, and down states and clears active calls on disable
 #[tokio::test]
 async fn test_get_and_list_chip_states_across_idle_ringing_and_down() {
+    // Given an enabled cell chip registered on its home voice network
     let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_voice_registered_home(CHIP_1).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
 
-    // Given a voice-registered cellular chip 1 in the idle state
-    world.given_cell_chip(1).await;
-    world.given_voice_registered_home(1).await;
-    world.then_cell_state_is(1, "idle").await;
-    world.then_listed_cell_states_are(&[(1, true, "idle")]).await;
+    // When an incoming voice call arrives and then the chip is disabled
+    world.when_incoming_call(CHIP_1, CALLER_NUMBER).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_RINGING).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_RINGING)]).await;
+    world.then_mt_call_state_is(CHIP_1, CALLER_NUMBER, CallState::Incoming).await;
+    world.then_guest_receives_exact_packet(CHIP_1, RING_URC).await;
 
-    // When an incoming call arrives on chip 1
-    world.when_incoming_call(1, "123456").await;
+    world.when_set_chip_enabled(CHIP_1, false).await;
 
-    // Then both read and list report the ringing state
-    world.then_cell_state_is(1, "ringing").await;
-    world.then_listed_cell_states_are(&[(1, true, "ringing")]).await;
+    // Then read and list report disabled and down, active calls are cleared, and NO CARRIER is emitted
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, false, MODEM_STATE_DOWN)]).await;
+    world.then_active_calls_are(CHIP_1, &[]).await;
+    world.then_guest_receives_exact_packet(CHIP_1, NO_CARRIER_URC).await;
+}
 
-    // When chip 1 is disabled
-    world.when_set_chip_enabled(1, false).await;
+/// Scenario: A cell chip created disabled reports down, emits no attach URCs, and rejects dialing
+#[tokio::test]
+async fn test_chip_created_disabled_reports_down() {
+    // Given a cell chip created with enabled set to false and numeric CME error reporting
+    let mut world = World::new().await;
+    world.given_disabled_cell_chip(CHIP_1).await;
+    world.given_guest_cme_errors_numeric(CHIP_1).await;
 
-    // Then both read and list report the down state with radio disabled
-    world.then_cell_state_is(1, "down").await;
-    world.then_listed_cell_states_are(&[(1, false, "down")]).await;
+    // When the guest subscribes to registration URCs and attempts to dial after the 50ms no-packet window (> 10ms attach delay)
+    world.when_guest_sends(CHIP_1, AT_CREG_ENABLE_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+    world.then_guest_receives_no_packet(CHIP_1).await;
+    world.when_guest_sends(CHIP_1, SHORT_DIAL_CMD).await;
+
+    // Then the chip remains down and unregistered and dialing fails with +CME ERROR: 30
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::NotRegistered,
+            RegistrationStatus::NotRegistered,
+        )
+        .await;
+    world.then_guest_receives_exact_packet(CHIP_1, CME_NO_NETWORK_RESP).await;
+}
+
+/// Scenario: Creating a cellular chip with radio state disabled overrides chip enabled true
+#[tokio::test]
+async fn test_create_chip_with_radio_state_disabled_reports_down() {
+    // Given a cell chip created with chip.enabled = true, cell.radio.state = Some(false), and numeric CME errors
+    let mut world = World::new().await;
+    world.given_cell_chip_with_enabled_and_radio_state(CHIP_1, true, false).await;
+    world.given_guest_cme_errors_numeric(CHIP_1).await;
+
+    // When the guest subscribes to registration URCs and dials after the 50ms no-packet window (> 10ms attach delay)
+    world.when_guest_sends(CHIP_1, AT_CREG_ENABLE_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+    world.then_guest_receives_no_packet(CHIP_1).await;
+    world.when_guest_sends(CHIP_1, SHORT_DIAL_CMD).await;
+
+    // Then listed and read states report disabled and down, registrations stay NotRegistered, and dialing fails
+    world.then_listed_cell_states_are(&[(CHIP_1, false, MODEM_STATE_DOWN)]).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::NotRegistered,
+            RegistrationStatus::NotRegistered,
+        )
+        .await;
+    world.then_guest_receives_exact_packet(CHIP_1, CME_NO_NETWORK_RESP).await;
+}
+
+/// Scenario: Creating a cellular chip with radio state enabled overrides chip enabled false
+#[tokio::test]
+async fn test_create_chip_disabled_with_radio_state_enabled_attaches() {
+    // Given a cell chip created with chip.enabled = false and cell.radio.state = Some(true)
+    let mut world = World::new().await;
+    world.given_cell_chip_with_enabled_and_radio_state(CHIP_1, false, true).await;
+
+    // When the guest subscribes to registration URCs
+    world.when_guest_sends(CHIP_1, AT_CREG_ENABLE_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+
+    // Then the modem attaches on its home network and reports enabled and idle
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
+}
+
+/// Scenario: An incoming peer voice call to a host-disabled modem is rejected without ringing
+#[tokio::test]
+async fn test_incoming_peer_call_to_disabled_modem_rejected() {
+    // Given modem 1 created disabled and peer modem 2 enabled and registered
+    let mut world = World::new().await;
+    world.given_disabled_cell_chip(CHIP_1).await;
+    world.given_cell_chip(CHIP_2).await;
+    world.given_guest_registered(CHIP_2).await;
+
+    // When peer modem 2 dials disabled modem 1
+    world.when_guest_sends(CHIP_2, DIAL_MODEM_1_CMD).await;
+
+    // Then peer 2 receives NO CARRIER while modem 1 receives no packets and stays down
+    world.then_guest_receives_exact_packet(CHIP_2, OK_RESP).await;
+    world.then_guest_receives_exact_packet(CHIP_2, NO_CARRIER_URC).await;
+    world.then_guest_receives_no_packet(CHIP_1).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+}
+
+/// Scenario: A host-disabled cell chip keeps its AT serial channel responsive
+#[tokio::test]
+async fn test_disabled_chip_still_answers_at_commands() {
+    // Given an enabled cell chip that is subsequently disabled by the host
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.when_set_chip_enabled(CHIP_1, false).await;
+
+    // When the guest sends AT and AT+CFUN?
+    world.when_guest_sends(CHIP_1, AT_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+    world.when_guest_sends(CHIP_1, AT_CFUN_QUERY_CMD).await;
+
+    // Then the AT channel responds while preserving guest CFUN=1
+    world.then_guest_receives_exact_packet(CHIP_1, CFUN_FULL_RESP).await;
+}
+
+/// Scenario: Disabling a registered cell chip emits a deregistration URC to the guest
+#[tokio::test]
+async fn test_disabling_registered_chip_deregisters_guest() {
+    // Given an attached cell chip with AT+CREG=1 enabled
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_guest_registered(CHIP_1).await;
+
+    // When the host disables the chip
+    world.when_set_chip_enabled(CHIP_1, false).await;
+
+    // Then the guest receives +CREG: 0
+    world.then_guest_receives_exact_packet(CHIP_1, CREG_DETACH_URC).await;
+}
+
+/// Scenario: A host-disabled cell chip rejects mobile-originated voice calls
+#[tokio::test]
+async fn test_disabled_chip_rejects_dial() {
+    // Given a previously registered cell chip with numeric CME errors that is disabled
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_guest_cme_errors_numeric(CHIP_1).await;
+    world.given_registered_chip_disabled(CHIP_1).await;
+
+    // When the guest dials an outgoing voice call
+    world.when_guest_sends(CHIP_1, DIAL_CMD).await;
+
+    // Then the modem rejects the call with +CME ERROR: 30
+    world.then_guest_receives_exact_packet(CHIP_1, CME_NO_NETWORK_RESP).await;
+}
+
+/// Scenario: Re-enabling a disabled cell chip schedules network re-attachment
+#[tokio::test]
+async fn test_reenabling_chip_restores_registration() {
+    // Given a registered cell chip that was disabled by the host
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_registered_chip_disabled(CHIP_1).await;
+
+    // When the host re-enables the chip
+    world.when_set_chip_enabled(CHIP_1, true).await;
+
+    // Then the guest receives attach URCs and home registration is restored
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+}
+
+/// Scenario: Updating `cell.radio.state` toggles guest registration and synchronized chip state
+#[tokio::test]
+async fn test_cell_radio_state_update_toggles_registration_and_modem_state() {
+    // Given an enabled, registered cell chip
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_guest_registered(CHIP_1).await;
+
+    // When cell.radio.state is set to false and then back to true
+    world.when_set_cell_radio_state(CHIP_1, false).await;
+    world.then_guest_receives_exact_packet(CHIP_1, CREG_DETACH_URC).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, false, MODEM_STATE_DOWN)]).await;
+
+    world.when_set_cell_radio_state(CHIP_1, true).await;
+
+    // Then registration URCs fire and chip state returns to enabled, registered, and idle
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
+}
+
+/// Scenario: Updating cell radio state takes precedence over chip enabled
+#[tokio::test]
+async fn test_cell_radio_state_update_takes_precedence_over_chip_enabled() {
+    // Given an enabled, registered cell chip
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_guest_registered(CHIP_1).await;
+
+    // When updating with chip.enabled = true but cell.radio.state = false
+    world.when_set_chip_enabled_and_cell_radio_state(CHIP_1, true, false).await;
+
+    // Then radio state false takes precedence and guest receives detach URC
+    world.then_guest_receives_exact_packet(CHIP_1, CREG_DETACH_URC).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, false, MODEM_STATE_DOWN)]).await;
+
+    // When updating with chip.enabled = false but cell.radio.state = true
+    world.when_set_chip_enabled_and_cell_radio_state(CHIP_1, false, true).await;
+
+    // Then radio state true takes precedence and guest receives attach URCs
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
+}
+
+/// Scenario: A disabled cell chip suppresses inbound SMS delivery
+#[tokio::test]
+async fn test_disabled_chip_does_not_deliver_incoming_sms() {
+    // Given a cell chip disabled after home voice registration
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_voice_registered_home(CHIP_1).await;
+    world.when_set_chip_enabled(CHIP_1, false).await;
+
+    // When an inbound SMS action is dispatched while disabled
+    world.when_receive_sms(CHIP_1, CALLER_NUMBER, SMS_TEXT).await;
+    world.when_guest_sends(CHIP_1, AT_CMD).await;
+
+    // Then no +CMT URC precedes the AT OK response
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+}
+
+/// Scenario: Host registration actions are ignored while a cell chip is disabled
+#[tokio::test]
+async fn test_host_registration_ignored_while_chip_disabled() {
+    // Given a host-disabled cell chip
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.when_set_chip_enabled(CHIP_1, false).await;
+
+    // When the host attempts to mark voice and data registered
+    world
+        .when_set_registrations(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+
+    // Then both voice and data registrations remain NotRegistered
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::NotRegistered,
+            RegistrationStatus::NotRegistered,
+        )
+        .await;
 }
 
 /// Scenario: Deleting a chip spawns device notification asynchronously without blocking concurrent reads
@@ -354,8 +645,9 @@ async fn test_list_and_count_multiple_modems_and_reflect_deletion() {
         .await;
     world.then_reset_chip_returns_state(10, "idle").await;
 
-    // When modem 20 is set to "down" via CellUpdate.state, modem 30 radio is toggled off and back on, and modem 10 is deleted
-    world.when_set_cell_state(20, "down").await;
+    // When modem 20 is disabled via ChipUpdate.enabled (and ignores CellUpdate.state = "idle"), modem 30 radio is toggled off and back on, and modem 10 is deleted
+    world.when_set_chip_enabled(20, false).await;
+    world.when_set_cell_state(20, MODEM_STATE_IDLE).await;
     world.when_set_cell_radio_state(30, false).await;
     world.then_cell_state_is(30, "down").await;
     world.when_set_cell_radio_state(30, true).await;
@@ -372,9 +664,15 @@ async fn test_list_and_count_multiple_modems_and_reflect_deletion() {
 async fn test_call_lifecycle_actions_incoming_answer_hold_update_and_end() {
     let mut world = World::new().await;
 
-    // Given a voice-registered cellular chip 1
+    // Given a cellular chip 1 with voice and data registered synchronously (before the 10ms attach delay)
     world.given_cell_chip(1).await;
-    world.given_voice_registered_home(1).await;
+    world
+        .when_set_registrations(
+            1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
 
     // When an incoming call from +15551234567 arrives
     world.when_incoming_call(1, "+15551234567").await;
