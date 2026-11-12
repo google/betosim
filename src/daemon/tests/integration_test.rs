@@ -631,3 +631,74 @@ async fn test_daemon_hci_and_test_port_ephemeral_fallback_recorded_in_ini() {
         default_test_port,
     );
 }
+
+const TEST_BT_MAC: &str = "aa:bb:cc:dd:ee:01";
+const TEST_BEACONS: [&str; 2] = ["gDevice-beacon-1", "gDevice-beacon-2"];
+
+fn bt_chips(name: &str) -> Vec<netsim_proto::model::ChipCreate> {
+    vec![World::make_bluetooth_chip(name, TEST_BT_MAC)]
+}
+
+// Scenario: Default daemon launch spawns builtin test beacons only on Cuttlefish builds
+#[tokio::test]
+async fn test_default_test_beacons_match_platform() {
+    // Given a daemon launched with --no-shutdown and no beacon CLI flags
+    let mut world = World::new_with_cli_args(&["--no-shutdown"]).await;
+    // Then builtin test beacons are present on Cuttlefish and absent otherwise
+    if cfg!(feature = "cuttlefish") {
+        world.then_device_list_contains_by_name(TEST_BEACONS[0]).await;
+        world.then_device_list_contains_by_name(TEST_BEACONS[1]).await;
+    } else {
+        world.then_device_list_does_not_contain_by_name(TEST_BEACONS[0]).await;
+        world.then_device_list_does_not_contain_by_name(TEST_BEACONS[1]).await;
+    }
+}
+
+// Scenario: --no-test-beacons suppresses startup beacons and overrides --test-beacons
+#[tokio::test]
+async fn test_no_test_beacons_overrides_test_beacons() {
+    // Given a daemon launched with --no-shutdown and --test-beacons followed by --no-test-beacons
+    let mut world =
+        World::new_with_cli_args(&["--no-shutdown", "--test-beacons", "--no-test-beacons"]).await;
+    // Then neither builtin test beacon is registered
+    world.then_device_list_does_not_contain_by_name(TEST_BEACONS[0]).await;
+    world.then_device_list_does_not_contain_by_name(TEST_BEACONS[1]).await;
+}
+
+// Scenario: Trailing --test-beacons overrides an earlier --no-test-beacons flag
+#[tokio::test]
+async fn test_test_beacons_overrides_no_test_beacons() {
+    // Given a daemon launched with --no-shutdown and --no-test-beacons followed by --test-beacons
+    let mut world =
+        World::new_with_cli_args(&["--no-shutdown", "--no-test-beacons", "--test-beacons"]).await;
+    // Then both builtin test beacons are registered
+    world.then_device_list_contains_by_name(TEST_BEACONS[0]).await;
+    world.then_device_list_contains_by_name(TEST_BEACONS[1]).await;
+}
+
+// Scenario: Default daemon mode allows two Bluetooth devices with the same MAC address
+#[tokio::test]
+async fn test_default_allows_duplicate_bluetooth_mac() {
+    // Given a daemon launched with --no-shutdown and without --disable-address-reuse
+    let mut world = World::new_with_cli_args(&["--no-shutdown"]).await;
+    // When two Bluetooth devices reuse the same MAC address
+    let id1 = world.when_create_device_with_chips("BtReuse1", bt_chips("bt0")).await;
+    let id2 = world.when_create_device_with_chips("BtReuse2", bt_chips("bt1")).await;
+    // Then both devices are registered
+    world.then_device_list_contains(id1, "BtReuse1").await;
+    world.then_device_list_contains(id2, "BtReuse2").await;
+}
+
+// Scenario: --disable-address-reuse rejects a second Bluetooth device reusing an active MAC
+#[tokio::test]
+async fn test_disable_address_reuse_rejects_duplicate_bluetooth_mac() {
+    // Given --no-shutdown, --disable-address-reuse, and one registered Bluetooth device
+    let mut world = World::new_with_cli_args(&["--no-shutdown", "--disable-address-reuse"]).await;
+    let id1 = world.when_create_device_with_chips("BtStrict1", bt_chips("bt0")).await;
+    // When a second Bluetooth device reuses the same MAC address
+    let res = world.when_try_create_device_with_chips("BtStrict2", bt_chips("bt1")).await;
+    // Then CreateDevice fails and only the first device remains registered
+    World::then_rpc_error_contains(res, "address already in use");
+    world.then_device_list_contains(id1, "BtStrict1").await;
+    world.then_device_list_does_not_contain_by_name("BtStrict2").await;
+}

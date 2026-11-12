@@ -368,25 +368,27 @@ impl World {
             .expect("RPC failed");
     }
 
+    /// When a CreateDevice gRPC request is sent, returning the raw RPC result.
+    pub async fn when_try_create_device_with_chips(
+        &mut self,
+        name: &str,
+        chips: Vec<ChipCreate>,
+    ) -> grpcio::Result<u32> {
+        let mut create_req = CreateDeviceRequest::new();
+        let mut device_create = DeviceCreate::new();
+        device_create.name = name.to_string();
+        device_create.chips = chips;
+        create_req.device = MessageField::some(device_create);
+        Ok(self.frontend_client.create_device_async(&create_req)?.await?.device.id)
+    }
+
     /// When I create a device with specific chips
     pub async fn when_create_device_with_chips(
         &mut self,
         name: &str,
         chips: Vec<ChipCreate>,
     ) -> u32 {
-        let mut create_req = CreateDeviceRequest::new();
-        let mut device_create = DeviceCreate::new();
-        device_create.name = name.to_string();
-        device_create.chips = chips;
-        create_req.device = MessageField::some(device_create);
-
-        let resp = self
-            .frontend_client
-            .create_device_async(&create_req)
-            .expect("CreateDevice failed")
-            .await
-            .expect("RPC failed");
-        resp.device.id
+        self.when_try_create_device_with_chips(name, chips).await.expect("CreateDevice failed")
     }
 
     /// When I patch a device
@@ -744,6 +746,20 @@ impl World {
     pub async fn then_device_list_contains_by_name(&mut self, name: &str) {
         let devices = self.when_list_devices().await;
         assert!(devices.iter().any(|d| d.name == name));
+    }
+
+    /// Then the device list does not contain a device matching `expected_name`.
+    pub async fn then_device_list_does_not_contain_by_name(&mut self, expected_name: &str) {
+        let devices = self.when_list_devices().await;
+        assert!(!devices.iter().any(|d| d.name == expected_name), "Unexpected '{expected_name}'");
+    }
+
+    /// Then the gRPC result is an `RpcFailure` whose status message contains `expected`.
+    pub fn then_rpc_error_contains<T: std::fmt::Debug>(result: grpcio::Result<T>, expected: &str) {
+        let Err(grpcio::Error::RpcFailure(status)) = result else {
+            panic!("Expected RpcFailure containing '{expected}', got {result:?}");
+        };
+        assert!(status.message().contains(expected), "Unexpected status: {status:?}");
     }
 
     /// Poll when_list_devices until expected_name is registered in DeviceActor.
