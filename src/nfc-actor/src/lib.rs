@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod accessory;
+mod apdu;
 mod error;
 mod lifecycle;
 mod nfc_actor;

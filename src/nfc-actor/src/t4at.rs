@@ -19,11 +19,19 @@ use netsim_model::{
     MAX_T4AT_NDEF_FILE_CAPACITY, MAX_T4AT_NDEF_MESSAGE_BYTES, NfcTag, NfcTagError, NfcTagProtocol,
     NfcTagUpdate, decode_ndef_hex, normalize_uid_hex,
 };
-use pdl_runtime::Packet;
+use tracing::debug;
 
-use crate::accessory::RfAccessory;
+use crate::{
+    accessory::RfAccessory,
+    apdu::{ParsedApdu, SW_WRONG_LENGTH, parse_apdu},
+};
 
+const SW_OK: [u8; 2] = [0x90, 0x00];
+const SW_FILE_NOT_FOUND: [u8; 2] = [0x6A, 0x82];
+const SW_INCORRECT_P1P2: [u8; 2] = [0x6A, 0x86];
+const SW_WRONG_P1P2: [u8; 2] = [0x6B, 0x00];
 const SW_INS_NOT_SUPPORTED: [u8; 2] = [0x6D, 0x00];
+const SW_CLA_NOT_SUPPORTED: [u8; 2] = [0x6E, 0x00];
 
 // Casimir's `IsoDepT4ATSelectResponse.rats_response` excludes the leading ISO/IEC 14443-4 `TL`
 // length byte (starting at Byte 2: T0, TA(1), TB(1), TC(1), historical byte 0x80) because
@@ -37,6 +45,63 @@ const BIT_FRAME_SDD_SINGLE_SIZE_UID: u8 = 0x08;
 const BIT_FRAME_SDD_CASCADE_REQUIRED: u8 = 0x04;
 const INT_PROTOCOL_ISO_DEP: u8 = 0b01;
 
+const CC_FILE_LEN: usize = 15;
+const CC_WRITE_ACCESS_OFFSET: usize = 14;
+
+const CC_FILE_ID: [u8; 2] = [0xE1, 0x03];
+const NDEF_FILE_ID: [u8; 2] = [0xE1, 0x04];
+const T4T_V2_APP_ID: [u8; 7] = [0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01];
+const T4T_V1_APP_ID: [u8; 7] = [0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x00];
+const DESFIRE_NDEF_APP_ID: [u8; 5] = [0xF0, 0x4E, 0x44, 0x45, 0x46];
+
+const CC_LEN_BYTES: [u8; 2] = (CC_FILE_LEN as u16).to_be_bytes();
+const T4T_MAX_R_APDU_DATA_BYTES: [u8; 2] = 0x00FFu16.to_be_bytes();
+const T4T_MAX_C_APDU_DATA_BYTES: [u8; 2] = 0x00FFu16.to_be_bytes();
+const MAX_NDEF_SIZE_BYTES: [u8; 2] = (MAX_T4AT_NDEF_FILE_CAPACITY as u16).to_be_bytes();
+
+const T4T_SPEC_VERSION_2_0: u8 = 0x20;
+const T4T_NDEF_TLV_TAG: u8 = 0x04;
+const T4T_NDEF_TLV_LEN: u8 = 0x06;
+
+const CC_ACCESS_GRANTED: u8 = 0x00;
+const CC_ACCESS_DISABLED: u8 = 0xFF;
+
+const CLA_STANDARD: u8 = 0x00;
+const CLA_PROPRIETARY: u8 = 0x80;
+const INS_SELECT: u8 = 0xA4;
+const INS_READ_BINARY: u8 = 0xB0;
+
+const P1_SELECT_BY_DF_NAME: u8 = 0x04;
+const P1_SELECT_BY_EF_ID: u8 = 0x00;
+const P2_SELECT_FIRST_OR_ONLY: u8 = 0x00;
+const P2_SELECT_NO_FCI: u8 = 0x0C;
+
+const EF_FILE_ID_LEN: usize = 2;
+const CARD_STATE_READ_ONLY: u8 = 0x01;
+const CARD_STATE_READ_WRITE: u8 = 0x02;
+const DEFAULT_READ_BINARY_LE: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedFile {
+    None,
+    App,
+    Cc,
+    Ndef,
+}
+
+fn encode<T: TryInto<rf::RfPacket>>(pkt: T, what: &str) -> Option<rf::RfPacket>
+where
+    T::Error: std::fmt::Display,
+{
+    match pkt.try_into() {
+        Ok(packet) => Some(packet),
+        Err(error) => {
+            debug!(%error, "failed to encode T4AT {what}");
+            None
+        }
+    }
+}
+
 /// Sans-I/O state machine emulating an NFC Forum Type 4A / DESFire tag.
 #[derive(Debug)]
 pub struct T4atTag {
@@ -49,10 +114,38 @@ pub struct T4atTag {
     tx_count: u32,
     rx_count: u32,
     active_reader: Option<u16>,
+    cc_file: [u8; CC_FILE_LEN],
     e104_file: [u8; MAX_T4AT_NDEF_FILE_CAPACITY],
+    selected_file: SelectedFile,
 }
 
 impl T4atTag {
+    fn build_cc_file(read_only: bool) -> [u8; CC_FILE_LEN] {
+        let write_access = if read_only { CC_ACCESS_DISABLED } else { CC_ACCESS_GRANTED };
+        let [cc_len_hi, cc_len_lo] = CC_LEN_BYTES;
+        let [mle_hi, mle_lo] = T4T_MAX_R_APDU_DATA_BYTES;
+        let [mlc_hi, mlc_lo] = T4T_MAX_C_APDU_DATA_BYTES;
+        let [ndef_id_hi, ndef_id_lo] = NDEF_FILE_ID;
+        let [max_ndef_hi, max_ndef_lo] = MAX_NDEF_SIZE_BYTES;
+        [
+            cc_len_hi,
+            cc_len_lo,
+            T4T_SPEC_VERSION_2_0,
+            mle_hi,
+            mle_lo,
+            mlc_hi,
+            mlc_lo,
+            T4T_NDEF_TLV_TAG,
+            T4T_NDEF_TLV_LEN,
+            ndef_id_hi,
+            ndef_id_lo,
+            max_ndef_hi,
+            max_ndef_lo,
+            CC_ACCESS_GRANTED,
+            write_access,
+        ]
+    }
+
     fn clamped_e104_end(&self) -> usize {
         let nlen = usize::from(u16::from_be_bytes([self.e104_file[0], self.e104_file[1]]));
         self.e104_file.len().min(NLEN_HEADER_BYTES.saturating_add(nlen))
@@ -76,7 +169,9 @@ impl T4atTag {
         Ok(())
     }
 
-    fn reset_session_state(&mut self) {}
+    fn reset_session_state(&mut self) {
+        self.selected_file = SelectedFile::None;
+    }
 
     /// Creates a validated Type 4A tag state machine from model parameters.
     pub fn try_from_tag(tag: &NfcTag, casimir_rf_id: u16) -> Result<Self, NfcTagError> {
@@ -86,6 +181,7 @@ impl T4atTag {
         let normalized_uid = normalize_uid_hex(&tag.uid)?;
         let uid = decode_ndef_hex(&normalized_uid, NfcTagProtocol::T4at)?;
         let ndef_bytes = decode_ndef_hex(&tag.ndef_bytes, NfcTagProtocol::T4at)?;
+        let cc_file = Self::build_cc_file(tag.read_only);
         let mut this = Self {
             casimir_rf_id,
             uid,
@@ -96,7 +192,9 @@ impl T4atTag {
             tx_count: 0,
             rx_count: 0,
             active_reader: None,
+            cc_file,
             e104_file: [0u8; MAX_T4AT_NDEF_FILE_CAPACITY],
+            selected_file: SelectedFile::None,
         };
         if tag.formatted {
             this.write_e104_ndef(&ndef_bytes)?;
@@ -129,23 +227,19 @@ impl T4atTag {
         self.rx_count = self.rx_count.saturating_add(1);
         self.tx_count = self.tx_count.saturating_add(1);
 
-        let resp = rf::NfcAPollResponse {
-            sender: self.casimir_rf_id,
-            receiver: cmd.sender(),
-            protocol: rf::Protocol::IsoDep,
-            bitrate: rf::BitRate::BitRate106KbitS,
-            power_level: RF_POWER_LEVEL_NOMINAL,
-            nfcid1: self.uid.clone(),
-            int_protocol: INT_PROTOCOL_ISO_DEP,
-            bit_frame_sdd,
-        };
-        match resp.try_into() {
-            Ok(pkt) => Some(pkt),
-            Err(error) => {
-                tracing::debug!(%error, "failed to encode NfcAPollResponse");
-                None
-            }
-        }
+        encode(
+            rf::NfcAPollResponse {
+                sender: self.casimir_rf_id,
+                receiver: cmd.sender(),
+                protocol: rf::Protocol::IsoDep,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: RF_POWER_LEVEL_NOMINAL,
+                nfcid1: self.uid.clone(),
+                int_protocol: INT_PROTOCOL_ISO_DEP,
+                bit_frame_sdd,
+            },
+            "poll response",
+        )
     }
 
     fn handle_select_command(&mut self, cmd: &rf::IsoDepT4ATSelectCommand) -> Option<rf::RfPacket> {
@@ -157,20 +251,16 @@ impl T4atTag {
         self.rx_count = self.rx_count.saturating_add(1);
         self.tx_count = self.tx_count.saturating_add(1);
 
-        let resp = rf::IsoDepT4ATSelectResponse {
-            sender: self.casimir_rf_id,
-            receiver: cmd.sender(),
-            bitrate: rf::BitRate::BitRate106KbitS,
-            power_level: RF_POWER_LEVEL_NOMINAL,
-            rats_response: DESFIRE_ATS_RESPONSE.to_vec(),
-        };
-        match resp.try_into() {
-            Ok(pkt) => Some(pkt),
-            Err(error) => {
-                tracing::debug!(%error, "failed to encode IsoDepT4ATSelectResponse");
-                None
-            }
-        }
+        encode(
+            rf::IsoDepT4ATSelectResponse {
+                sender: self.casimir_rf_id,
+                receiver: cmd.sender(),
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: RF_POWER_LEVEL_NOMINAL,
+                rats_response: DESFIRE_ATS_RESPONSE.to_vec(),
+            },
+            "select response",
+        )
     }
 
     fn handle_deactivate_notification(
@@ -185,6 +275,88 @@ impl T4atTag {
         None
     }
 
+    fn handle_select_apdu(&mut self, apdu: &ParsedApdu<'_>) -> Vec<u8> {
+        if apdu.p2 != P2_SELECT_FIRST_OR_ONLY && apdu.p2 != P2_SELECT_NO_FCI {
+            return SW_INCORRECT_P1P2.to_vec();
+        }
+        if apdu.p1 == P1_SELECT_BY_DF_NAME {
+            if !self.formatted {
+                return SW_FILE_NOT_FOUND.to_vec();
+            }
+            if apdu.data == T4T_V2_APP_ID || apdu.data == T4T_V1_APP_ID {
+                self.selected_file = SelectedFile::App;
+                SW_OK.to_vec()
+            } else if apdu.data == DESFIRE_NDEF_APP_ID {
+                self.selected_file = SelectedFile::Ndef;
+                let card_state =
+                    if self.read_only { CARD_STATE_READ_ONLY } else { CARD_STATE_READ_WRITE };
+                let end = self.clamped_e104_end();
+                let mut resp = Vec::with_capacity(1 + end + 2);
+                resp.push(card_state);
+                resp.extend_from_slice(self.e104_file.get(..end).unwrap_or(&[]));
+                resp.extend_from_slice(&SW_OK);
+                resp
+            } else {
+                SW_FILE_NOT_FOUND.to_vec()
+            }
+        } else if apdu.p1 == P1_SELECT_BY_EF_ID {
+            if apdu.data.len() != EF_FILE_ID_LEN {
+                return SW_WRONG_LENGTH.to_vec();
+            }
+            if !self.formatted {
+                return SW_FILE_NOT_FOUND.to_vec();
+            }
+            if apdu.data == CC_FILE_ID {
+                self.selected_file = SelectedFile::Cc;
+                SW_OK.to_vec()
+            } else if apdu.data == NDEF_FILE_ID {
+                self.selected_file = SelectedFile::Ndef;
+                SW_OK.to_vec()
+            } else {
+                SW_FILE_NOT_FOUND.to_vec()
+            }
+        } else {
+            SW_INCORRECT_P1P2.to_vec()
+        }
+    }
+
+    fn handle_read_binary_apdu(&mut self, apdu: &ParsedApdu<'_>) -> Vec<u8> {
+        if !self.formatted {
+            return SW_FILE_NOT_FOUND.to_vec();
+        }
+        if !apdu.data.is_empty() {
+            return SW_WRONG_LENGTH.to_vec();
+        }
+        let target_file: &[u8] = match self.selected_file {
+            SelectedFile::Cc => &self.cc_file,
+            SelectedFile::Ndef => &self.e104_file,
+            SelectedFile::None | SelectedFile::App => return SW_FILE_NOT_FOUND.to_vec(),
+        };
+        let offset = usize::from(u16::from_be_bytes([apdu.p1, apdu.p2]));
+        if offset >= target_file.len() {
+            return SW_WRONG_P1P2.to_vec();
+        }
+        let req_le = apdu.le.unwrap_or(DEFAULT_READ_BINARY_LE);
+        let end = target_file.len().min(offset.saturating_add(req_le));
+        let slice = target_file.get(offset..end).unwrap_or(&[]);
+        let mut resp = Vec::with_capacity(slice.len() + 2);
+        resp.extend_from_slice(slice);
+        resp.extend_from_slice(&SW_OK);
+        resp
+    }
+
+    fn process_apdu(&mut self, parsed: &ParsedApdu<'_>) -> Vec<u8> {
+        if parsed.cla == CLA_STANDARD || parsed.cla == CLA_PROPRIETARY {
+            match parsed.ins {
+                INS_SELECT => self.handle_select_apdu(parsed),
+                INS_READ_BINARY => self.handle_read_binary_apdu(parsed),
+                _ => SW_INS_NOT_SUPPORTED.to_vec(),
+            }
+        } else {
+            SW_CLA_NOT_SUPPORTED.to_vec()
+        }
+    }
+
     fn handle_data_command(&mut self, cmd: &rf::Data) -> Option<rf::RfPacket> {
         if self.active_reader != Some(cmd.sender())
             || cmd.technology() != rf::Technology::NfcA
@@ -194,44 +366,28 @@ impl T4atTag {
         }
 
         self.rx_count = self.rx_count.saturating_add(1);
+        let payload = if cmd.data().is_empty() {
+            Vec::new()
+        } else {
+            match parse_apdu(cmd.data()) {
+                Ok(ref parsed) => self.process_apdu(parsed),
+                Err(sw) => sw.to_vec(),
+            }
+        };
+        self.tx_count = self.tx_count.saturating_add(1);
 
-        if cmd.data().is_empty() {
-            self.tx_count = self.tx_count.saturating_add(1);
-            let resp = rf::Data {
+        encode(
+            rf::Data {
                 sender: self.casimir_rf_id,
                 receiver: cmd.sender(),
                 technology: rf::Technology::NfcA,
                 protocol: rf::Protocol::IsoDep,
                 bitrate: rf::BitRate::BitRate106KbitS,
                 power_level: RF_POWER_LEVEL_NOMINAL,
-                data: Vec::new(),
-            };
-            return match resp.try_into() {
-                Ok(pkt) => Some(pkt),
-                Err(error) => {
-                    tracing::debug!(%error, "failed to encode 0-byte presence check response");
-                    None
-                }
-            };
-        }
-
-        self.tx_count = self.tx_count.saturating_add(1);
-        let resp = rf::Data {
-            sender: self.casimir_rf_id,
-            receiver: cmd.sender(),
-            technology: rf::Technology::NfcA,
-            protocol: rf::Protocol::IsoDep,
-            bitrate: rf::BitRate::BitRate106KbitS,
-            power_level: RF_POWER_LEVEL_NOMINAL,
-            data: SW_INS_NOT_SUPPORTED.to_vec(),
-        };
-        match resp.try_into() {
-            Ok(pkt) => Some(pkt),
-            Err(error) => {
-                tracing::debug!(%error, "failed to encode RF Data packet");
-                None
-            }
-        }
+                data: payload,
+            },
+            "data packet",
+        )
     }
 }
 
@@ -250,19 +406,7 @@ impl RfAccessory for T4atTag {
         let child = match packet.specialize() {
             Ok(c) => c,
             Err(error) => {
-                if packet.packet_type() == rf::RfPacketType::SelectCommand
-                    && packet.protocol() == rf::Protocol::IsoDep
-                    && packet.technology() == rf::Technology::NfcA
-                {
-                    let reparsed = packet
-                        .encode_to_vec()
-                        .ok()
-                        .and_then(|bytes| rf::IsoDepT4ATSelectCommand::decode_full(&bytes).ok());
-                    if let Some(cmd) = reparsed {
-                        return self.handle_select_command(&cmd);
-                    }
-                }
-                tracing::debug!(%error, "failed to specialize RF packet");
+                debug!(%error, "failed to specialize RF packet");
                 return None;
             }
         };
@@ -282,19 +426,19 @@ impl RfAccessory for T4atTag {
         let reader_id = self.active_reader.take()?;
         self.reset_session_state();
         self.tx_count = self.tx_count.saturating_add(1);
-        rf::DeactivateNotification {
-            sender: self.casimir_rf_id,
-            receiver: reader_id,
-            technology: rf::Technology::NfcA,
-            protocol: rf::Protocol::IsoDep,
-            bitrate: rf::BitRate::BitRate106KbitS,
-            power_level: RF_POWER_LEVEL_NOMINAL,
-            type_: rf::DeactivateType::Discovery,
-            reason,
-        }
-        .try_into()
-        .map_err(|error| tracing::debug!(%error, "failed to encode deactivate notification"))
-        .ok()
+        encode(
+            rf::DeactivateNotification {
+                sender: self.casimir_rf_id,
+                receiver: reader_id,
+                technology: rf::Technology::NfcA,
+                protocol: rf::Protocol::IsoDep,
+                bitrate: rf::BitRate::BitRate106KbitS,
+                power_level: RF_POWER_LEVEL_NOMINAL,
+                type_: rf::DeactivateType::Discovery,
+                reason,
+            },
+            "deactivate notification",
+        )
     }
 
     fn active_reader(&self) -> Option<u16> {
@@ -329,12 +473,18 @@ impl RfAccessory for T4atTag {
         }
         if let Some(read_only) = patch.read_only {
             self.read_only = read_only;
+            self.cc_file[CC_WRITE_ACCESS_OFFSET] =
+                if read_only { CC_ACCESS_DISABLED } else { CC_ACCESS_GRANTED };
         }
         if let Some(formatted) = patch.formatted {
+            let was_formatted = self.formatted;
             self.formatted = formatted;
             if !formatted {
+                self.cc_file = Self::build_cc_file(self.read_only);
                 self.e104_file.fill(0);
                 self.reset_session_state();
+            } else if !was_formatted {
+                self.cc_file = Self::build_cc_file(self.read_only);
             }
         }
         if let (true, Some(raw_ndef)) = (self.formatted, decoded_ndef) {
@@ -432,6 +582,29 @@ mod tests {
             model.uid = uid_hex.to_string();
             let tag = T4atTag::try_from_tag(&model, casimir_id).expect("valid tag");
             Self { tag, last_action: None }
+        }
+
+        fn given_unformatted_tag(casimir_id: u16, uid_hex: &str) -> Self {
+            let mut model = make_test_tag(false, false, "");
+            model.uid = uid_hex.to_string();
+            let tag = T4atTag::try_from_tag(&model, casimir_id).expect("valid tag");
+            Self { tag, last_action: None }
+        }
+
+        fn given_activated_tag(casimir_id: u16, uid_hex: &str, ndef_text: &str) -> Self {
+            let mut world = Self::given_formatted_tag(casimir_id, uid_hex, ndef_text);
+            world.when_poll_received(1, rf::Technology::NfcA);
+            world.when_rats_received(1, casimir_id);
+            world.last_action = None;
+            world
+        }
+
+        fn given_activated_unformatted_tag(casimir_id: u16, uid_hex: &str) -> Self {
+            let mut world = Self::given_unformatted_tag(casimir_id, uid_hex);
+            world.when_poll_received(1, rf::Technology::NfcA);
+            world.when_rats_received(1, casimir_id);
+            world.last_action = None;
+            world
         }
 
         fn given_invisible_tag(casimir_id: u16, uid_hex: &str) -> Self {
@@ -560,10 +733,49 @@ mod tests {
             }
         }
 
+        fn then_data_length_is(&self, expected_len: usize) {
+            match &self.last_action {
+                Some(pkt) => match pkt.specialize().expect("specializes to child") {
+                    rf::RfPacketChild::Data(data) => {
+                        assert_eq!(data.data().len(), expected_len);
+                    }
+                    other => panic!("expected rf::Data, got {other:?}"),
+                },
+                None => panic!("expected rf::Data, got None"),
+            }
+        }
+
+        fn then_data_ends_with(&self, expected_suffix: &[u8]) {
+            match &self.last_action {
+                Some(pkt) => match pkt.specialize().expect("specializes to child") {
+                    rf::RfPacketChild::Data(data) => {
+                        assert!(
+                            data.data().ends_with(expected_suffix),
+                            "expected data to end with {expected_suffix:?}, got {:?}",
+                            data.data()
+                        );
+                    }
+                    other => panic!("expected rf::Data, got {other:?}"),
+                },
+                None => panic!("expected rf::Data, got None"),
+            }
+        }
+
         fn then_active_reader_is(&self, expected: Option<u16>) {
             assert_eq!(self.tag.active_reader(), expected);
         }
     }
+
+    const CMD_SELECT_AID_V2: [u8; 13] =
+        [0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00];
+    const CMD_SELECT_AID_V1: [u8; 12] =
+        [0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x00];
+    const CMD_SELECT_AID_LEGACY: [u8; 10] =
+        [0x00, 0xA4, 0x04, 0x00, 0x05, 0xF0, 0x4E, 0x44, 0x45, 0x46];
+    const CMD_SELECT_CC: [u8; 7] = [0x00, 0xA4, 0x00, 0x00, 0x02, 0xE1, 0x03];
+    const CMD_SELECT_NDEF: [u8; 7] = [0x00, 0xA4, 0x00, 0x00, 0x02, 0xE1, 0x04];
+    const CMD_READ_CC_ALL: [u8; 5] = [0x00, 0xB0, 0x00, 0x00, 0x0F];
+    const CMD_READ_NLEN: [u8; 5] = [0x00, 0xB0, 0x00, 0x00, 0x02];
 
     #[test]
     fn poll_and_rats_activation_on_7_byte_uid_returns_iso_dep_and_desfire_ats() {
@@ -636,12 +848,142 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_data_returns_sw_ins_not_supported_until_apdu_slice() {
-        let mut world = T4atWorld::given_formatted_tag(60, "04010203040506", "Data");
-        world.when_poll_received(1, rf::Technology::NfcA);
-        world.when_rats_received(1, 60);
-        world.when_data_received(1, 60, &[0x00, 0xA4, 0x04, 0x00]);
+    fn select_aid_v2_v1_and_legacy_verify_alias() {
+        let mut world = T4atWorld::given_activated_tag(20, "04010203040506", "Payload");
+
+        world.when_data_received(1, 20, &CMD_SELECT_AID_V2);
+        world.then_data_matches(&[0x90, 0x00]);
+
+        world.when_data_received(1, 20, &CMD_SELECT_AID_V1);
+        world.then_data_matches(&[0x90, 0x00]);
+
+        world.when_data_received(1, 20, &CMD_SELECT_AID_LEGACY);
+        world.then_data_matches(&[
+            0x02, 0x00, 0x0E, 0xD1, 0x01, 0x0A, 0x54, 0x02, 0x65, 0x6E, 0x50, 0x61, 0x79, 0x6C,
+            0x6F, 0x61, 0x64, 0x90, 0x00,
+        ]);
+    }
+
+    #[test]
+    fn select_unknown_aid_returns_6a82() {
+        let mut world = T4atWorld::given_activated_tag(21, "04010203040506", "Payload");
+
+        let unknown = [0x00, 0xA4, 0x04, 0x00, 0x07, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
+        world.when_data_received(1, 21, &unknown);
+        world.then_data_matches(&[0x6A, 0x82]);
+    }
+
+    #[test]
+    fn read_cc_and_ndef_with_case1_short_and_le_zero_slicing() {
+        let mut world = T4atWorld::given_activated_tag(30, "04010203040506", "Hello World");
+
+        world.when_data_received(1, 30, &CMD_SELECT_CC);
+        world.then_data_matches(&[0x90, 0x00]);
+
+        world.when_data_received(1, 30, &CMD_READ_CC_ALL);
+        world.then_data_matches(&[
+            0x00, 0x0F, 0x20, 0x00, 0xFF, 0x00, 0xFF, 0x04, 0x06, 0xE1, 0x04, 0x10, 0x00, 0x00,
+            0x00, 0x90, 0x00,
+        ]);
+
+        world.when_data_received(1, 30, &CMD_SELECT_NDEF);
+        world.then_data_matches(&[0x90, 0x00]);
+
+        world.when_data_received(1, 30, &CMD_READ_NLEN);
+        world.then_data_matches(&[0x00, 0x12, 0x90, 0x00]);
+
+        world.when_data_received(1, 30, &[0x00, 0xB0, 0x00, 0x00]);
+        world.then_data_length_is(258);
+        world.then_data_ends_with(&[0x90, 0x00]);
+
+        world.when_data_received(1, 30, &[0x00, 0xB0, 0x00, 0x00, 0x00]);
+        world.then_data_length_is(258);
+        world.then_data_ends_with(&[0x90, 0x00]);
+
+        world.when_data_received(1, 30, &[0x00, 0xB0, 0x00, 0x02, 0x05]);
+        world.then_data_matches(&[0xD1, 0x01, 0x0E, 0x54, 0x02, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn unformatted_tag_rejects_select_and_read_binary_with_6a82() {
+        let mut world = T4atWorld::given_activated_unformatted_tag(35, "04010203040506");
+
+        world.when_data_received(1, 35, &CMD_SELECT_AID_V2);
+        world.then_data_matches(&[0x6A, 0x82]);
+
+        world.when_data_received(1, 35, &CMD_SELECT_NDEF);
+        world.then_data_matches(&[0x6A, 0x82]);
+
+        world.when_data_received(1, 35, &CMD_READ_NLEN);
+        world.then_data_matches(&[0x6A, 0x82]);
+    }
+
+    #[test]
+    fn invalid_p1_on_select_returns_6a86() {
+        let mut world = T4atWorld::given_activated_tag(91, "04010203040506", "Err");
+        world.when_data_received(1, 91, &[0x00, 0xA4, 0x02, 0x00, 0x02, 0xE1, 0x04]);
+        world.then_data_matches(&[0x6A, 0x86]);
+    }
+
+    #[test]
+    fn invalid_p2_on_select_aid_and_select_file_returns_6a86() {
+        let mut world = T4atWorld::given_activated_tag(92, "04010203040506", "Err");
+
+        let bad_p2_aid =
+            [0x00, 0xA4, 0x04, 0x01, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00];
+        world.when_data_received(1, 92, &bad_p2_aid);
+        world.then_data_matches(&[0x6A, 0x86]);
+
+        world.when_data_received(1, 92, &[0x00, 0xA4, 0x00, 0x01, 0x02, 0xE1, 0x04]);
+        world.then_data_matches(&[0x6A, 0x86]);
+    }
+
+    #[test]
+    fn select_file_with_invalid_length_returns_6700() {
+        let mut world = T4atWorld::given_activated_unformatted_tag(93, "04010203040506");
+        world.when_data_received(1, 93, &[0x00, 0xA4, 0x00, 0x00, 0x01, 0xE1]);
+        world.then_data_matches(&[0x67, 0x00]);
+    }
+
+    #[test]
+    fn select_unknown_file_returns_6a82() {
+        let mut world = T4atWorld::given_activated_tag(94, "04010203040506", "Err");
+        world.when_data_received(1, 94, &[0x00, 0xA4, 0x00, 0x00, 0x02, 0xE1, 0x05]);
+        world.then_data_matches(&[0x6A, 0x82]);
+    }
+
+    #[test]
+    fn read_binary_with_non_empty_payload_returns_6700() {
+        let mut world = T4atWorld::given_activated_tag(95, "04010203040506", "Err");
+        world.when_data_received(1, 95, &CMD_SELECT_CC);
+        world.then_data_matches(&[0x90, 0x00]);
+
+        world.when_data_received(1, 95, &[0x00, 0xB0, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
+        world.then_data_matches(&[0x67, 0x00]);
+    }
+
+    #[test]
+    fn read_binary_with_out_of_bounds_offset_returns_6b00() {
+        let mut world = T4atWorld::given_activated_tag(96, "04010203040506", "Err");
+        world.when_data_received(1, 96, &CMD_SELECT_CC);
+        world.then_data_matches(&[0x90, 0x00]);
+
+        world.when_data_received(1, 96, &[0x00, 0xB0, 0x13, 0x88, 0x05]);
+        world.then_data_matches(&[0x6B, 0x00]);
+    }
+
+    #[test]
+    fn unsupported_ins_returns_6d00() {
+        let mut world = T4atWorld::given_activated_tag(97, "04010203040506", "Err");
+        world.when_data_received(1, 97, &[0x00, 0xEE, 0x00, 0x00]);
         world.then_data_matches(&[0x6D, 0x00]);
+    }
+
+    #[test]
+    fn unsupported_cla_returns_6e00() {
+        let mut world = T4atWorld::given_activated_tag(98, "04010203040506", "Err");
+        world.when_data_received(1, 98, &[0x55, 0x11, 0x00, 0x00]);
+        world.then_data_matches(&[0x6E, 0x00]);
     }
 
     #[test]
