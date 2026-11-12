@@ -25,10 +25,11 @@ use device_actor::DeviceActor;
 use device_api::{DeviceAction, DeviceId};
 use netsim_model::{ChipClient, ChipCreate, ChipId, ChipUpdate, PoseUpdate, Position};
 use netsim_packets::{
-    ActionHeader, BeaconFixedFields, DataSubType, EthernetFrame, FineTimingMeasurement,
-    FrameControl, FrameDirection, FrameType, HwsimCmd, HwsimFrame, HwsimMsg, IeIterator, Ieee80211,
-    Ieee80211ToAp, MacAddr, MacAddress, MacHeader3Addr, NlMsgHdr, SequenceControl, category,
-    ether_type, management_subtype, public_action, tags, write_ie,
+    ActionHeader, BeaconFixedFields, DHCP_SERVER_PORT, DataSubType, EthernetFrame,
+    FineTimingMeasurement, FrameControl, FrameDirection, FrameType, HwsimCmd, HwsimFrame, HwsimMsg,
+    IP_P_UDP, IeIterator, Ieee80211, Ieee80211ToAp, Ipv4Header, MacAddr, MacAddress,
+    MacHeader3Addr, NlMsgHdr, PacketBuilder, SequenceControl, UdpHeader, category, ether_type,
+    management_subtype, public_action, tags, write_ie,
 };
 use slirp_actor::SlirpActor;
 use tokio::sync::mpsc;
@@ -881,23 +882,19 @@ impl World {
 
     pub async fn when_chip_transmits_mdns(&mut self, sender_idx: usize, payload: &str) {
         let sender_mac = self.chips[sender_idx].mac;
-        let mdns_multicast = [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]; // IPv4 mDNS
-
-        let eth = Self::create_ethernet_frame(&sender_mac, &mdns_multicast, payload.as_bytes());
+        let eth = Self::create_ethernet_frame(&sender_mac, &MDNS_MULTICAST_MAC, payload.as_bytes());
 
         // P2P/Ad-hoc Context: Use wildcard BSSID for simple multicast/broadcast.
         let bssid_p2p = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
-        let msg =
-            wrap_ethernet_in_hwsim(&eth, &bssid_p2p, &mdns_multicast, &sender_mac, 2412).unwrap();
+        let msg = wrap_ethernet_in_hwsim(&eth, &bssid_p2p, &MDNS_MULTICAST_MAC, &sender_mac, 2412)
+            .unwrap();
         self.chips[sender_idx].sink_tx.send(Bytes::from(msg)).await.unwrap();
     }
 
     pub async fn when_chip_transmits_infra_mdns(&mut self, sender_idx: usize, payload: &str) {
         let sender_mac = self.chips[sender_idx].mac;
-        let mdns_multicast = [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]; // IPv4 mDNS
-
-        let eth = Self::create_ethernet_frame(&sender_mac, &mdns_multicast, payload.as_bytes());
+        let eth = Self::create_ethernet_frame(&sender_mac, &MDNS_MULTICAST_MAC, payload.as_bytes());
 
         // Infra Context: The packet goes to the AP (dest_hwsim_addr = AP_BSSID).
         let msg = wrap_ethernet_in_hwsim(&eth, &AP_BSSID, &AP_BSSID, &sender_mac, 2412).unwrap();
@@ -1385,6 +1382,23 @@ impl World {
         );
     }
 
+    pub async fn when_raw_chip_sends_to_ds_ethernet(
+        &mut self,
+        id_val: u32,
+        hwsim_addr: [u8; 6],
+        bssid: [u8; 6],
+        freq: u32,
+        eth: &[u8],
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let uplink = crate::hwsim_helper::build_to_ds_data_hwsim(eth, bssid, hwsim_addr, freq);
+        chip.sink_tx.send(uplink).await.expect("Failed to send ToDS data");
+        assert!(
+            recv_next_tx_info_ack(chip).await,
+            "Expected TxInfoFrame ACK on ToDS data from chip {id_val}"
+        );
+    }
+
     pub async fn when_raw_chip_sends_to_ds_data(
         &mut self,
         id_val: u32,
@@ -1394,14 +1408,9 @@ impl World {
         freq: u32,
         payload: &[u8],
     ) {
-        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
-        let eth = Self::create_ethernet_frame(&chip.mac, &dst_mac, payload);
-        let uplink = crate::hwsim_helper::build_to_ds_data_hwsim(&eth, bssid, hwsim_addr, freq);
-        chip.sink_tx.send(uplink).await.expect("Failed to send ToDS data");
-        assert!(
-            recv_next_tx_info_ack(chip).await,
-            "Expected TxInfoFrame ACK on ToDS data from chip {id_val}"
-        );
+        let chip_mac = self.raw_chips.get(&id_val).expect("Chip not found").mac;
+        let eth = Self::create_ethernet_frame(&chip_mac, &dst_mac, payload);
+        self.when_raw_chip_sends_to_ds_ethernet(id_val, hwsim_addr, bssid, freq, &eth).await;
     }
 
     pub async fn when_raw_chip_sends_ibss_data(
@@ -1930,6 +1939,231 @@ impl World {
             }
         }
     }
+
+    pub fn given_station_ptk(&self, sta_mac: [u8; 6], tk: &[u8; 16]) {
+        self.shared_keys.add_session(MacAddress::new(sta_mac), tk.to_vec());
+    }
+
+    pub async fn when_infra_transmits_mdns(&mut self, payload: &str) {
+        self.when_infra_transmits_unicast_to_mac(MDNS_MULTICAST_MAC, payload).await;
+    }
+
+    async fn recv_raw_chip_dhcp_reply(
+        &mut self,
+        id_val: u32,
+        expected_xid: u32,
+        expected_msg_type: u8,
+    ) -> [u8; 4] {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let timeout_fut = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let bytes = chip.stream_rx.recv().await.expect("stream_rx closed");
+                if let Ok(eth) = crate::hwsim_helper::unwrap_hwsim_to_ethernet(&bytes)
+                    && let Some(dhcp) = extract_dhcp_from_ethernet(&eth)
+                    && get_dhcp_msg_type(dhcp) == Some(expected_msg_type)
+                {
+                    let xid_bytes: [u8; 4] = dhcp[DHCP_XID_OFFSET..DHCP_XID_OFFSET + 4]
+                        .try_into()
+                        .expect("slice length 4");
+                    let xid = u32::from_be_bytes(xid_bytes);
+                    if xid == expected_xid
+                        && let Ok(yiaddr) =
+                            dhcp[DHCP_YIADDR_OFFSET..DHCP_YIADDR_OFFSET + 4].try_into()
+                    {
+                        return yiaddr;
+                    }
+                }
+            }
+        });
+        timeout_fut.await.unwrap_or_else(|_| {
+            panic!("Timeout waiting for DHCP message type {expected_msg_type} on chip {id_val}");
+        })
+    }
+
+    pub async fn when_raw_chip_acquires_dhcp_lease(
+        &mut self,
+        id_val: u32,
+        hwsim_addr: [u8; 6],
+        ap_bssid: [u8; 6],
+        freq: u32,
+    ) -> std::net::Ipv4Addr {
+        let xid = DHCP_XID_PREFIX | (id_val & 0xFFFF);
+        let sta_mac = self.raw_chips.get(&id_val).expect("Chip not found").mac;
+
+        let disc_eth = build_dhcp_packet(&sta_mac, xid, DHCPDISCOVER, None);
+        self.when_raw_chip_sends_to_ds_ethernet(id_val, hwsim_addr, ap_bssid, freq, &disc_eth)
+            .await;
+        let offered_ip = self.recv_raw_chip_dhcp_reply(id_val, xid, DHCPOFFER).await;
+
+        let req_eth = build_dhcp_packet(&sta_mac, xid, DHCPREQUEST, Some(offered_ip));
+        self.when_raw_chip_sends_to_ds_ethernet(id_val, hwsim_addr, ap_bssid, freq, &req_eth).await;
+        let ack_ip = self.recv_raw_chip_dhcp_reply(id_val, xid, DHCPACK).await;
+
+        std::net::Ipv4Addr::from(ack_ip)
+    }
+
+    pub fn then_leases_are_valid_and_distinct(&self, leases: &[std::net::Ipv4Addr]) {
+        assert!(!leases.is_empty(), "Lease list must not be empty");
+        let mut unique_leases = std::collections::HashSet::new();
+        for lease in leases {
+            let octets = lease.octets();
+            assert_eq!(
+                octets[0..3],
+                SLIRP_SUBNET_PREFIX,
+                "Lease {lease} does not match expected subnet 10.0.2.0/24"
+            );
+            assert!(
+                octets[3] != 0 && octets[3] != 255,
+                "Host octet {} is network or broadcast address",
+                octets[3]
+            );
+            assert!(unique_leases.insert(*lease), "Duplicate DHCP lease detected: {lease}");
+        }
+    }
+
+    pub async fn then_raw_chip_receives_encrypted_m2u_frame(
+        &mut self,
+        id_val: u32,
+        tk: &[u8; 16],
+        expected_payload: &str,
+    ) {
+        let chip = self.raw_chips.get_mut(&id_val).expect("Chip not found");
+        let chip_mac = chip.mac;
+        let expected_bytes = expected_payload.as_bytes();
+        let timeout_fut = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let bytes = chip.stream_rx.recv().await.expect("stream_rx closed");
+                if let Ok(hwsim_msg) = netsim_packets::HwsimMsg::decode_full(&bytes)
+                    && hwsim_msg.hwsim_hdr.hwsim_cmd == netsim_packets::HwsimCmd::Frame
+                    && let Ok(frame) = netsim_packets::HwsimFrame::parse(&hwsim_msg)
+                {
+                    let ieee = frame.ieee80211;
+                    if ieee.is_data()
+                        && ieee.needs_decryption()
+                        && ieee.get_destination() == MacAddress::new(chip_mac)
+                    {
+                        let store = ap_actor::SharedKeyStore::new();
+                        store.add_session(ieee.get_source(), tk.to_vec());
+                        if let Some(decrypted) = store.try_decrypt(&ieee)
+                            && decrypted.windows(expected_bytes.len()).any(|w| w == expected_bytes)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        timeout_fut.await.unwrap_or_else(|_| {
+            panic!("Timeout waiting for encrypted M2U frame on chip {id_val}");
+        });
+    }
+}
+
+pub(crate) const MDNS_MULTICAST_MAC: [u8; 6] = [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB];
+const DHCP_CLIENT_PORT: u16 = 68;
+const DHCP_OP_BOOTREQUEST: u8 = 1;
+const DHCP_HTYPE_ETHERNET: u8 = 1;
+const DHCP_HLEN_ETHERNET: u8 = 6;
+const DHCP_XID_OFFSET: usize = 4;
+const DHCP_FLAGS_OFFSET: usize = 10;
+const DHCP_BROADCAST_FLAG: u16 = 0x8000;
+const DHCP_YIADDR_OFFSET: usize = 16;
+const DHCP_CHADDR_OFFSET: usize = 28;
+const DHCP_FIXED_HEADER_LEN: usize = 236;
+const DHCP_MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
+const DHCP_MIN_HEADER_LEN: usize = DHCP_FIXED_HEADER_LEN + DHCP_MAGIC_COOKIE.len();
+const DHCP_MIN_BOOTP_PACKET_LEN: usize = 300;
+const DHCP_OPT_PAD: u8 = 0;
+const DHCP_OPT_REQUESTED_IP: u8 = 50;
+const DHCP_OPT_MSG_TYPE: u8 = 53;
+const DHCP_OPT_END: u8 = 255;
+const DHCPDISCOVER: u8 = 1;
+const DHCPOFFER: u8 = 2;
+const DHCPREQUEST: u8 = 3;
+const DHCPACK: u8 = 5;
+const DHCP_XID_PREFIX: u32 = 0x5814_0000;
+const SLIRP_SUBNET_PREFIX: [u8; 3] = [10, 0, 2];
+
+fn build_dhcp_packet(
+    src_mac: &[u8; 6],
+    xid: u32,
+    msg_type: u8,
+    requested_ip: Option<[u8; 4]>,
+) -> Vec<u8> {
+    let mut dhcp = vec![0u8; DHCP_FIXED_HEADER_LEN];
+    dhcp[0] = DHCP_OP_BOOTREQUEST;
+    dhcp[1] = DHCP_HTYPE_ETHERNET;
+    dhcp[2] = DHCP_HLEN_ETHERNET;
+    dhcp[DHCP_XID_OFFSET..DHCP_XID_OFFSET + 4].copy_from_slice(&xid.to_be_bytes());
+    dhcp[DHCP_FLAGS_OFFSET..DHCP_FLAGS_OFFSET + 2]
+        .copy_from_slice(&DHCP_BROADCAST_FLAG.to_be_bytes());
+    dhcp[DHCP_CHADDR_OFFSET..DHCP_CHADDR_OFFSET + 6].copy_from_slice(src_mac);
+
+    dhcp.extend_from_slice(&DHCP_MAGIC_COOKIE);
+    dhcp.extend_from_slice(&[DHCP_OPT_MSG_TYPE, 1, msg_type]);
+
+    if let Some(ip) = requested_ip {
+        dhcp.extend_from_slice(&[DHCP_OPT_REQUESTED_IP, 4, ip[0], ip[1], ip[2], ip[3]]);
+    }
+
+    dhcp.push(DHCP_OPT_END);
+
+    if dhcp.len() < DHCP_MIN_BOOTP_PACKET_LEN {
+        dhcp.resize(DHCP_MIN_BOOTP_PACKET_LEN, 0);
+    }
+
+    PacketBuilder::new([0xFF; 6], *src_mac, ether_type::IPV4)
+        .ipv4([0; 4], [255; 4], IP_P_UDP)
+        .udp(DHCP_CLIENT_PORT, DHCP_SERVER_PORT)
+        .payload(&dhcp)
+}
+
+fn extract_dhcp_from_ethernet(eth_bytes: &[u8]) -> Option<&[u8]> {
+    let (eth, eth_payload) = EthernetFrame::parse(eth_bytes)?;
+    if eth.ethertype.get() != ether_type::IPV4 {
+        return None;
+    }
+    let (ip, ip_payload) = Ipv4Header::parse(eth_payload)?;
+    if ip.protocol != IP_P_UDP {
+        return None;
+    }
+    let (udp, udp_payload) = UdpHeader::parse(ip_payload)?;
+    if udp.dest_port.get() == DHCP_CLIENT_PORT || udp.source_port.get() == DHCP_CLIENT_PORT {
+        return Some(udp_payload);
+    }
+    None
+}
+
+fn get_dhcp_msg_type(dhcp: &[u8]) -> Option<u8> {
+    if dhcp.len() < DHCP_MIN_HEADER_LEN {
+        return None;
+    }
+    if dhcp[DHCP_FIXED_HEADER_LEN..DHCP_MIN_HEADER_LEN] != DHCP_MAGIC_COOKIE {
+        return None;
+    }
+    let mut idx = DHCP_MIN_HEADER_LEN;
+    while idx < dhcp.len() {
+        let opt = dhcp[idx];
+        if opt == DHCP_OPT_END {
+            break;
+        }
+        if opt == DHCP_OPT_PAD {
+            idx += 1;
+            continue;
+        }
+        if idx + 1 >= dhcp.len() {
+            break;
+        }
+        let len = dhcp[idx + 1] as usize;
+        if idx + 2 + len > dhcp.len() {
+            break;
+        }
+        if opt == DHCP_OPT_MSG_TYPE && len >= 1 {
+            return Some(dhcp[idx + 2]);
+        }
+        idx += 2 + len;
+    }
+    None
 }
 
 const MOCK_GATEWAY_STREAM_ID: ChipId = ChipId(u32::MAX - 1);

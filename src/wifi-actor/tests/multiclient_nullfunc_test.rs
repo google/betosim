@@ -15,7 +15,7 @@
 //! Integration tests for multi-client shared radio MAC delivery and ToDS
 //! NullFunc BSSID learning (b/581470055).
 
-use crate::world::World;
+use crate::world::{AP_BSSID, MDNS_MULTICAST_MAC, World};
 
 const DEFAULT_OPEN_AP_BSSID: [u8; 6] = [0x02, 0x15, 0xb2, 0x00, 0x00, 0x01];
 const HWSIM_RADIO_ADDR: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
@@ -234,4 +234,202 @@ async fn test_silent_client_on_shared_hwsim_addr_receives_no_beacons_before_firs
         .await;
 
     world.then_raw_chip_receives_no_frames(CHIP_2).await;
+}
+
+// ============================================================================
+// Feature: Colliding HWSIM Radio Address Dedup Protection (b/581470055)
+// ============================================================================
+
+const SECURE_AP_SHARED_HWSIM_ADDR: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x01, 0x00];
+
+// Scenario: mDNS multicast from station delivers to all non-sender stations sharing hwsim_addr
+//
+// Given: Three stations registered with distinct station MACs but the same HWSIM radio address on
+// a default open AP.
+// When: Station 1 transmits an mDNS multicast packet to the hosted default open AP BSSID.
+// Then: Station 2 and Station 3 each receive an M2U unicast copy addressed to their station MAC.
+#[tokio::test]
+async fn test_colliding_hwsim_mdns_multicast_reaches_all_non_sender_stations() {
+    let mut world = World::new().await;
+    world.given_default_open_ap().await;
+
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_1,
+            STA_MAC_A,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_2,
+            STA_MAC_B,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_3,
+            STA_MAC_C,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+
+    world
+        .when_raw_chip_sends_to_ds_data(
+            CHIP_1,
+            HWSIM_RADIO_ADDR,
+            MDNS_MULTICAST_MAC,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+            b"MdnsDiscoveryPayload",
+        )
+        .await;
+
+    world
+        .then_raw_chip_receives_downlink(
+            CHIP_2,
+            b"MdnsDiscoveryPayload",
+            STA_MAC_B,
+            HWSIM_RADIO_ADDR,
+            Some(FREQ_2412),
+        )
+        .await;
+    world
+        .then_raw_chip_receives_downlink(
+            CHIP_3,
+            b"MdnsDiscoveryPayload",
+            STA_MAC_C,
+            HWSIM_RADIO_ADDR,
+            Some(FREQ_2412),
+        )
+        .await;
+}
+
+// Scenario: Broadcast DHCP discovery and request deliver distinct IP leases across colliding
+// hwsim_addr
+//
+// Given: An AP and three stations sharing the same HWSIM radio address.
+// When: Each station executes DHCP Discover/Offer/Request/ACK lease acquisition.
+// Then: All three stations receive broadcast replies and obtain valid, distinct SLiRP leases.
+#[tokio::test]
+async fn test_colliding_hwsim_broadcast_dhcp_reaches_stations_with_distinct_chaddr() {
+    let mut world = World::new().await;
+    world.given_default_open_ap().await;
+
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_1,
+            STA_MAC_A,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_2,
+            STA_MAC_B,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_3,
+            STA_MAC_C,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+
+    let ip1 = world
+        .when_raw_chip_acquires_dhcp_lease(
+            CHIP_1,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    let ip2 = world
+        .when_raw_chip_acquires_dhcp_lease(
+            CHIP_2,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    let ip3 = world
+        .when_raw_chip_acquires_dhcp_lease(
+            CHIP_3,
+            HWSIM_RADIO_ADDR,
+            DEFAULT_OPEN_AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+
+    world.then_leases_are_valid_and_distinct(&[ip1, ip2, ip3]);
+}
+
+// Scenario: Three stations sharing hwsim_addr receive distinct CCMP-encrypted M2U frames
+//
+// Given: A secure AP and three stations sharing the same HWSIM radio address, each with distinct
+// PTKs.
+// When: The AP transmits an mDNS multicast packet converted to per-station encrypted M2U frames.
+// Then: All three stations receive and successfully decrypt their CCMP-encrypted M2U frame with
+// their PTK.
+#[tokio::test]
+async fn test_colliding_hwsim_stations_receive_distinct_encrypted_m2u_frames() {
+    let mut world = World::new().await;
+    world.given_a_secure_ap().await;
+
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_1,
+            STA_MAC_A,
+            SECURE_AP_SHARED_HWSIM_ADDR,
+            AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_2,
+            STA_MAC_B,
+            SECURE_AP_SHARED_HWSIM_ADDR,
+            AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            CHIP_3,
+            STA_MAC_C,
+            SECURE_AP_SHARED_HWSIM_ADDR,
+            AP_BSSID,
+            FREQ_2412,
+        )
+        .await;
+
+    let tk1: [u8; 16] = [0x11; 16];
+    let tk2: [u8; 16] = [0x22; 16];
+    let tk3: [u8; 16] = [0x33; 16];
+
+    world.given_station_ptk(STA_MAC_A, &tk1);
+    world.given_station_ptk(STA_MAC_B, &tk2);
+    world.given_station_ptk(STA_MAC_C, &tk3);
+
+    world.when_infra_transmits_mdns("SecureMdnsPayload").await;
+
+    world.then_raw_chip_receives_encrypted_m2u_frame(CHIP_1, &tk1, "SecureMdnsPayload").await;
+    world.then_raw_chip_receives_encrypted_m2u_frame(CHIP_2, &tk2, "SecureMdnsPayload").await;
+    world.then_raw_chip_receives_encrypted_m2u_frame(CHIP_3, &tk3, "SecureMdnsPayload").await;
 }
