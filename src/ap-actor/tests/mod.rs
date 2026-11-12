@@ -20,6 +20,7 @@ mod creation_test;
 mod crypto_test;
 mod deauth_test;
 mod eap_auth_test;
+mod error_stats_test;
 mod ftm_test;
 mod lifecycle_test;
 mod sae_handshake_test;

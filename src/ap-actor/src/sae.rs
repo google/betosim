@@ -85,7 +85,10 @@ impl SaeStateMachine {
             info!("SAE: Deriving PWE for peer {:?}", self.peer_addr);
             self.pwe = ffi::EcP256CalculatePwe(&self.password, &self.own_addr, &self.peer_addr);
             if self.pwe.is_empty() {
-                error!("SAE: Failed to derive PWE");
+                error!(
+                    code = crate::err::Code::SaePweDeriveFailed as u32,
+                    "SAE: Failed to derive PWE"
+                );
                 return None;
             }
         }
@@ -141,7 +144,10 @@ impl SaeStateMachine {
         self.own_commit_element = ffi::EcP256PointMul(&self.pwe, &mask);
 
         if self.own_commit_scalar.is_empty() || self.own_commit_element.is_empty() {
-            error!("SAE: Failed to generate commit values");
+            error!(
+                code = crate::err::Code::SaeCommitGenerateFailed as u32,
+                "SAE: Failed to generate commit values"
+            );
             return None;
         }
 
@@ -176,7 +182,11 @@ impl SaeStateMachine {
         } else if self.own_commit_element.len() == 64 {
             body.extend_from_slice(&self.own_commit_element);
         } else {
-            error!("SAE: Invalid element length {}", self.own_commit_element.len());
+            error!(
+                code = crate::err::Code::SaeOwnElementLenInvalid as u32,
+                "SAE: Invalid element length {}",
+                self.own_commit_element.len()
+            );
             return None;
         }
 
@@ -189,14 +199,21 @@ impl SaeStateMachine {
     /// Step 2: Process Peer's Commit Message
     pub fn parse_commit(&mut self, body: &[u8]) -> Option<()> {
         if body.len() < 2 + 32 + 64 {
-            error!("SAE: Commit body too short: {}", body.len());
+            error!(
+                code = crate::err::Code::SaeCommitTooShort as u32,
+                "SAE: Commit body too short: {}",
+                body.len()
+            );
             return None;
         }
 
         let (group_bytes, rest) = body.split_first_chunk::<2>()?;
         let group = u16::from_le_bytes(*group_bytes);
         if group != SaeGroup::EccP256 as u16 {
-            error!("SAE: Unsupported group {}", group);
+            error!(
+                code = crate::err::Code::SaeUnsupportedGroup as u32,
+                "SAE: Unsupported group {}", group
+            );
             return None;
         }
 
@@ -211,7 +228,11 @@ impl SaeStateMachine {
             self.peer_commit_element = vec![0x04];
             self.peer_commit_element.extend_from_slice(element_raw);
         } else {
-            error!("SAE: Unexpected element length {}", element_raw.len());
+            error!(
+                code = crate::err::Code::SaePeerElementLenInvalid as u32,
+                "SAE: Unexpected element length {}",
+                element_raw.len()
+            );
             return None;
         }
 
@@ -239,6 +260,7 @@ impl SaeStateMachine {
         let tmp1 = ffi::EcP256PointMul(&self.pwe, &self.peer_commit_scalar);
         if tmp1.is_empty() {
             error!(
+                code = crate::err::Code::SaePeerScalarMulFailed as u32,
                 "SAE: Failed to compute peer_scalar * PWE. PWE len: {}, Scalar len: {}",
                 self.pwe.len(),
                 self.peer_commit_scalar.len()
@@ -249,14 +271,17 @@ impl SaeStateMachine {
         // 2. tmp2 = tmp1 + peer_element
         let tmp2 = ffi::EcP256PointAdd(&tmp1, &self.peer_commit_element);
         if tmp2.is_empty() {
-            error!("SAE: Failed to compute tmp1 + peer_element");
+            error!(
+                code = crate::err::Code::SaePointAddFailed as u32,
+                "SAE: Failed to compute tmp1 + peer_element"
+            );
             return None;
         }
 
         // 3. K_point = rand * tmp2
         let k_point = ffi::EcP256PointMul(&tmp2, &self.rand);
         if k_point.is_empty() {
-            error!("SAE: Failed to compute K");
+            error!(code = crate::err::Code::SaeKComputeFailed as u32, "SAE: Failed to compute K");
             return None;
         }
 
@@ -272,7 +297,11 @@ impl SaeStateMachine {
         {
             x.to_vec()
         } else {
-            error!("SAE: K point invalid length {}", k_point.len());
+            error!(
+                code = crate::err::Code::SaeKPointLenInvalid as u32,
+                "SAE: K point invalid length {}",
+                k_point.len()
+            );
             return None;
         };
 
@@ -307,7 +336,11 @@ impl SaeStateMachine {
 
         let Some((kck, pmk)) = kdf_out.split_first_chunk::<32>().filter(|(_, pmk)| pmk.len() == 32)
         else {
-            error!("SAE: KDF output invalid length {}", kdf_out.len());
+            error!(
+                code = crate::err::Code::SaeKdfOutputLenInvalid as u32,
+                "SAE: KDF output invalid length {}",
+                kdf_out.len()
+            );
             return None;
         };
         self.kck = kck.to_vec();
@@ -357,7 +390,10 @@ impl SaeStateMachine {
     /// Step 3: Generate Confirm Message
     pub fn build_confirm(&mut self) -> Option<Vec<u8>> {
         if self.kck.is_empty() {
-            error!("SAE: KCK not derived, cannot build confirm");
+            error!(
+                code = crate::err::Code::SaeKckMissing as u32,
+                "SAE: KCK not derived, cannot build confirm"
+            );
             return None;
         }
 
@@ -378,7 +414,10 @@ impl SaeStateMachine {
     pub fn parse_confirm(&mut self, body: &[u8]) -> Option<()> {
         if body.len() < 2 + 32 {
             // counter + 32-byte hash
-            error!("SAE: Confirm body too short");
+            error!(
+                code = crate::err::Code::SaeConfirmTooShort as u32,
+                "SAE: Confirm body too short"
+            );
             return None;
         }
 
@@ -390,5 +429,150 @@ impl SaeStateMachine {
         self.rcounter = rc;
 
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+    use crate::err::Code;
+
+    const OWN_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const PEER_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+    const PASSWORD: &[u8] = b"sae-test-password";
+    const SHORT_INVALID_MAC: [u8; 5] = [0x02; 5];
+    const UNSUPPORTED_GROUP_ID: u16 = 99;
+    const P256_SCALAR_LEN: usize = 32;
+    const P256_ELEMENT_XY_LEN: usize = 64;
+    const P256_UNCOMPRESSED_POINT_LEN: usize = 65;
+    const TRUNCATED_BODY_LEN: usize = 10;
+
+    fn capture_error_stats<F: FnOnce()>(f: F) -> Vec<(u32, u32)> {
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+        tracing::subscriber::with_default(subscriber, f);
+        table.snapshot()
+    }
+
+    #[test]
+    fn test_sae_pwe_derive_failed_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&SHORT_INVALID_MAC, &PEER_MAC, PASSWORD);
+        let snap = capture_error_stats(|| {
+            assert!(sm.build_commit().is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaePweDeriveFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_commit_generate_failed_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        sm.pwe = vec![0x04, 0x01];
+        let snap = capture_error_stats(|| {
+            assert!(sm.build_commit().is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaeCommitGenerateFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_commit_too_short_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        let snap = capture_error_stats(|| {
+            assert!(sm.parse_commit(&[0u8; TRUNCATED_BODY_LEN]).is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaeCommitTooShort as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_unsupported_group_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        let mut body = UNSUPPORTED_GROUP_ID.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0u8; P256_SCALAR_LEN + P256_ELEMENT_XY_LEN]);
+        let snap = capture_error_stats(|| {
+            assert!(sm.parse_commit(&body).is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaeUnsupportedGroup as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_peer_element_len_invalid_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        let mut body = (SaeGroup::EccP256 as u16).to_le_bytes().to_vec();
+        body.extend_from_slice(&[1u8; P256_SCALAR_LEN]);
+        body.extend_from_slice(&[2u8; P256_UNCOMPRESSED_POINT_LEN]);
+        let snap = capture_error_stats(|| {
+            assert!(sm.parse_commit(&body).is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaePeerElementLenInvalid as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_peer_scalar_mul_failed_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        sm.pwe = vec![0x04, 0x01];
+        sm.peer_commit_scalar = vec![1; P256_SCALAR_LEN];
+        let snap = capture_error_stats(|| {
+            assert!(sm.process_commit().is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaePeerScalarMulFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_point_add_failed_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        sm.build_commit().expect("valid own commit");
+        sm.peer_commit_scalar = vec![1; P256_SCALAR_LEN];
+        sm.peer_commit_element = vec![0x04; P256_UNCOMPRESSED_POINT_LEN];
+        let snap = capture_error_stats(|| {
+            assert!(sm.process_commit().is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaePointAddFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_empty_rand_scalar_records_k_compute_or_point_len_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        let mut peer = SaeStateMachine::new(&PEER_MAC, &OWN_MAC, PASSWORD);
+        sm.build_commit().expect("valid own commit");
+        peer.build_commit().expect("valid peer commit");
+
+        sm.peer_commit_scalar = peer.own_commit_scalar;
+        sm.peer_commit_element = peer.own_commit_element;
+        sm.rand.clear();
+
+        let snap = capture_error_stats(|| {
+            assert!(sm.process_commit().is_none());
+        });
+        // OpenSSL 3 encodes the point at infinity as [0x00] (76005);
+        // BoringSSL returns 0 (78005).
+        assert!(
+            snap == vec![(Code::SaeKComputeFailed as u32, 1)]
+                || snap == vec![(Code::SaeKPointLenInvalid as u32, 1)],
+            "unexpected SAE K error stats: {snap:?}"
+        );
+    }
+
+    #[test]
+    fn test_sae_kck_missing_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        let snap = capture_error_stats(|| {
+            assert!(sm.build_confirm().is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaeKckMissing as u32, 1)]);
+    }
+
+    #[test]
+    fn test_sae_confirm_too_short_records_error_stat() {
+        let mut sm = SaeStateMachine::new(&OWN_MAC, &PEER_MAC, PASSWORD);
+        let snap = capture_error_stats(|| {
+            assert!(sm.parse_confirm(&[0u8; TRUNCATED_BODY_LEN]).is_none());
+        });
+        assert_eq!(snap, vec![(Code::SaeConfirmTooShort as u32, 1)]);
     }
 }

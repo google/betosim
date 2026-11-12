@@ -15,6 +15,7 @@
 mod ap_actor;
 mod ap_client;
 mod eap_auth;
+pub mod err;
 mod error;
 #[doc(hidden)]
 pub mod ffi;

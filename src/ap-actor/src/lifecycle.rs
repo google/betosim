@@ -40,7 +40,10 @@ impl ActorLifecycle for ApActor {
                         if let Some((_, frame)) = ap.delayed_frames.pop_front()
                             && sink.send(frame).is_err()
                         {
-                            warn!("Sink closed while transmitting delayed frame");
+                            warn!(
+                                code = crate::err::Code::DelayedFrameSinkClosed as u32,
+                                "Sink closed while transmitting delayed frame"
+                            );
                             ctx.shutdown();
                             self.sink = None;
                             return;
@@ -54,7 +57,10 @@ impl ActorLifecycle for ApActor {
                 if let Ok(frames) = self.manager.generate_beacon(ap, interval) {
                     for frame in frames {
                         if sink.send(frame).is_err() {
-                            warn!("Sink closed, stopping ApActor");
+                            warn!(
+                                code = crate::err::Code::BeaconSinkClosed as u32,
+                                "Sink closed, stopping ApActor"
+                            );
                             ctx.shutdown();
                             self.sink = None;
                             return;
@@ -68,7 +74,10 @@ impl ActorLifecycle for ApActor {
     // We expect stream messages (Mgmt frames or Data frames if bridged)
     async fn on_stream(&mut self, stream_id: ApId, msg: bytes::Bytes, ctx: &mut DynContext<Self>) {
         if stream_id.0 != WIFI_STREAM_ID {
-            warn!("Received message on unknown stream_id: {}", stream_id);
+            warn!(
+                code = crate::err::Code::StreamUnknownId as u32,
+                "Received message on unknown stream_id: {}", stream_id
+            );
             return;
         }
         let source_id = ChipId(0); // Placeholder until we lookup by MAC
@@ -77,7 +86,10 @@ impl ActorLifecycle for ApActor {
         let ieee_frame = match Ieee80211::decode(&msg) {
             Ok(frame) => frame,
             Err(_) => {
-                warn!("Failed to parse IEEE 802.11 frame");
+                warn!(
+                    code = crate::err::Code::StreamFrameParseFailed as u32,
+                    "Failed to parse IEEE 802.11 frame"
+                );
                 return;
             }
         };
@@ -145,7 +157,10 @@ impl ActorLifecycle for ApActor {
                         ) {
                             for frame in frames {
                                 if sink.send(frame).is_err() {
-                                    warn!("Sink closed, stopping ApActor");
+                                    warn!(
+                                        code = crate::err::Code::UnicastResponseSinkClosed as u32,
+                                        "Sink closed, stopping ApActor"
+                                    );
                                     ctx.shutdown();
                                     self.sink = None;
                                     return;

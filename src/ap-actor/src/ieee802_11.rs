@@ -170,7 +170,11 @@ impl Ieee80211Manager {
         let ieee80211_frame = match Ieee80211::decode(frame) {
             Ok(f) => f,
             Err(error) => {
-                warn!(%error, "ApActor: Failed to decode 802.11 frame");
+                warn!(
+                    code = crate::err::Code::FrameDecodeFailed as u32,
+                    %error,
+                    "ApActor: Failed to decode 802.11 frame"
+                );
                 return Ok(vec![]);
             }
         };
@@ -260,14 +264,20 @@ impl Ieee80211Manager {
         // Parse Auth Fixed Fields (Alg, Seq, Status)
         // Mgmt Header is usually 24 bytes (FC+Duration+3Addr+SC)
         let Some(body) = raw_frame.get(24..) else {
-            warn!("ApActor: Auth frame too short");
+            warn!(
+                code = crate::err::Code::AuthFrameTooShort as u32,
+                "ApActor: Auth frame too short"
+            );
             return Ok(vec![]);
         };
 
         let fixed = match AuthenticationFixedFields::read_from_prefix(body) {
             Ok((f, _)) => f,
             Err(_) => {
-                warn!("ApActor: Auth frame fixed fields invalid");
+                warn!(
+                    code = crate::err::Code::AuthFixedFieldsInvalid as u32,
+                    "ApActor: Auth frame fixed fields invalid"
+                );
                 return Ok(vec![]);
             }
         };
@@ -289,7 +299,10 @@ impl Ieee80211Manager {
         // SAE (Algorithm 3)
         if alg == 3 {
             if !ap.config.sae {
-                warn!("ApActor: SAE requested but not enabled");
+                warn!(
+                    code = crate::err::Code::AuthSaeNotEnabled as u32,
+                    "ApActor: SAE requested but not enabled"
+                );
                 // Should return Auth reject? (Status 13 - not supported alg?)
                 // For now, ignore or send error.
                 return Ok(vec![]);
@@ -310,7 +323,10 @@ impl Ieee80211Manager {
             // Confirm. SAE Standard: Commit is Seq 1, Confirm is Seq 2.
 
             let Some(sae_payload) = body.get(6..) else {
-                warn!("ApActor: Auth frame missing SAE payload");
+                warn!(
+                    code = crate::err::Code::AuthSaePayloadMissing as u32,
+                    "ApActor: Auth frame missing SAE payload"
+                );
                 return Ok(vec![]);
             };
 
@@ -687,7 +703,10 @@ impl Ieee80211Manager {
         // EAPOL-Start (Type 1)
         if eapol_type == 1 {
             if !ap.config.enterprise_enabled {
-                warn!("ApActor: Received EAPOL-Start but enterprise not enabled");
+                warn!(
+                    code = crate::err::Code::EapolStartEnterpriseDisabled as u32,
+                    "ApActor: Received EAPOL-Start but enterprise not enabled"
+                );
                 return Ok(vec![]);
             }
             // Start EAP
@@ -711,7 +730,11 @@ impl Ieee80211Manager {
                     return Ok(frames);
                 }
                 Err(error) => {
-                    error!(?error, "ApActor: Failed to start EAP");
+                    error!(
+                        code = crate::err::Code::EapStartFailed as u32,
+                        ?error,
+                        "ApActor: Failed to start EAP"
+                    );
                     return Ok(vec![]);
                 }
             }
@@ -743,7 +766,7 @@ impl Ieee80211Manager {
                         return Ok(frames);
                     }
                     Err(error) => {
-                        warn!(?error, "EAP Error");
+                        warn!(code = crate::err::Code::EapHandleFailed as u32, ?error, "EAP Error");
                         return Ok(vec![]);
                     }
                 }
@@ -766,7 +789,10 @@ impl Ieee80211Manager {
             let outputs = match wpa.handle_eapol(payload) {
                 Ok(o) => o,
                 Err(_) => {
-                    warn!("ApActor: WPA handle_eapol failed");
+                    warn!(
+                        code = crate::err::Code::WpaHandleEapolFailed as u32,
+                        "ApActor: WPA handle_eapol failed"
+                    );
                     return Ok(vec![]);
                 }
             };
@@ -875,6 +901,60 @@ mod tests {
         assert!(!has_ds_ie_5g, "5 GHz channel 36 must omit DS_PARAMETER_SET IE");
     }
 
+    struct NoopContext;
+
+    impl actor_framework::Context<ApActor> for NoopContext {
+        fn set_interval(&mut self, _duration: std::time::Duration) {}
+        fn add_stream(&mut self, _id: crate::ap_actor::ApId, _stream: actor_framework::BoxStream) {}
+        fn remove_stream(&mut self, _id: crate::ap_actor::ApId) {}
+        fn add_typed_stream(&mut self, _id: usize, _stream: actor_framework::BoxTypedStream<()>) {}
+        fn remove_typed_stream(&mut self, _id: usize) {}
+        fn spawn(
+            &mut self,
+            _id: crate::ap_actor::ApId,
+            _task: futures::future::BoxFuture<'static, crate::ap_actor::ApId>,
+        ) {
+        }
+        fn abort(&mut self, _id: crate::ap_actor::ApId) {}
+        fn shutdown(&mut self) {}
+        fn run_later(
+            &mut self,
+            _duration: std::time::Duration,
+            _f: actor_framework::TimerCallback<ApActor>,
+        ) -> actor_framework::TimerKey {
+            unimplemented!()
+        }
+        fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {}
+    }
+
+    #[test]
+    fn test_handle_frame_decode_failed_records_error_stat() {
+        use std::sync::Arc;
+
+        use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        use crate::err::Code;
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let mut manager = Ieee80211Manager::new();
+        let mut ap = ApState::default();
+        let shared_keys = SharedKeyStore::new();
+        let mut ctx = NoopContext;
+
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+        tracing::subscriber::with_default(subscriber, || {
+            let out = manager
+                .handle_frame(&mut ap, &[0x01, 0x02], &shared_keys, 100, ChipId(0), &mut ctx)
+                .expect("short frame returns empty Ok");
+            assert!(out.is_empty());
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::FrameDecodeFailed as u32, 1)]);
+    }
+
     #[test]
     fn test_handle_non_eapol_data_frame_emits_no_warn_or_error() {
         use std::sync::{
@@ -922,6 +1002,7 @@ mod tests {
         let ieee80211_frame = Ieee80211::decode(&raw_data).expect("decode valid 802.11 data frame");
 
         // When
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let out = tracing::subscriber::with_default(subscriber, || {
             manager
                 .handle_data_frame(&mut ap, &raw_data, ieee80211_frame, &shared_keys)

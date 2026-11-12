@@ -155,7 +155,12 @@ impl WpaAuthenticator {
                 self.calc_ptk()?;
 
                 if !self.verify_mic(frame_data, &key_frame.mic) {
-                    warn!("WPA: MIC verification failed for M2 from {}", self.sta_addr);
+                    // Counted to surface guest passphrase mismatches and PTK
+                    // derivation bugs in session error stats.
+                    warn!(
+                        code = crate::err::Code::WpaM2MicInvalid as u32,
+                        "WPA: MIC verification failed for M2 from {}", self.sta_addr
+                    );
                     return Ok(vec![]);
                 }
 
@@ -214,7 +219,12 @@ impl WpaAuthenticator {
             }
             WpaState::PtkNegotiating => {
                 if !self.verify_mic(frame_data, &key_frame.mic) {
-                    warn!("WPA: MIC verification failed for M4 from {}", self.sta_addr);
+                    // Counted to surface post-M2 EAPOL-Key corruption or PTK
+                    // state desync in session error stats.
+                    warn!(
+                        code = crate::err::Code::WpaM4MicInvalid as u32,
+                        "WPA: MIC verification failed for M4 from {}", self.sta_addr
+                    );
                     return Ok(vec![]);
                 }
 
@@ -355,5 +365,82 @@ impl WpaAuthenticator {
         frame.extend_from_slice(key_data);
 
         Ok(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+    use crate::err::Code;
+
+    const AP_BSSID: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const STA_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+    const SSID: &[u8] = b"WpaUnitTestSsid";
+    const PSK: &[u8] = b"wpa2-secret-passphrase";
+    const EAPOL_KEY_INFO_MIC_V2: u16 = 0x010A;
+    const CORRUPTED_MIC: [u8; 16] = [0xFF; 16];
+    const DUMMY_GTK: [u8; 16] = [0xAA; 16];
+    const DUMMY_KCK: [u8; 16] = [0x11; 16];
+
+    #[test]
+    fn test_wpa_m2_invalid_mic_records_error_stat() {
+        let mut auth = WpaAuthenticator::new(
+            MacAddr::new(AP_BSSID),
+            MacAddr::new(STA_MAC),
+            SSID,
+            PSK,
+            &[],
+            DUMMY_GTK,
+        );
+        auth.initiate_handshake().expect("M1 generated");
+        let bad_m2 = auth
+            .build_eapol_frame(EAPOL_KEY_INFO_MIC_V2, &CORRUPTED_MIC, 0, &[])
+            .expect("build forged M2");
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+        tracing::subscriber::with_default(subscriber, || {
+            let out = auth.handle_eapol(&bad_m2).expect("invalid M2 MIC returns empty output");
+            assert!(out.is_empty());
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::WpaM2MicInvalid as u32, 1)]);
+    }
+
+    #[test]
+    fn test_wpa_m4_invalid_mic_records_error_stat() {
+        let mut auth = WpaAuthenticator::new(
+            MacAddr::new(AP_BSSID),
+            MacAddr::new(STA_MAC),
+            SSID,
+            PSK,
+            &[],
+            DUMMY_GTK,
+        );
+        auth.state = WpaState::PtkNegotiating;
+        auth.kck = DUMMY_KCK.to_vec();
+        let bad_m4 = auth
+            .build_eapol_frame(EAPOL_KEY_INFO_MIC_V2, &CORRUPTED_MIC, 0, &[])
+            .expect("build forged M4");
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+        tracing::subscriber::with_default(subscriber, || {
+            let out = auth.handle_eapol(&bad_m4).expect("invalid M4 MIC returns empty output");
+            assert!(out.is_empty());
+        });
+
+        assert_eq!(table.snapshot(), vec![(Code::WpaM4MicInvalid as u32, 1)]);
     }
 }

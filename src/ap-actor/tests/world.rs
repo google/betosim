@@ -12,19 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use actor_framework::ResourceActor;
 use ap_actor::{ApActor, ApClient, ApConfig, SharedKeyStore};
+use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
 use netsim_model::WifiMode;
 use netsim_packets::{
-    AssociationRequestFixedFields, BeaconFixedFields, BeaconFrameHeader, FrameControl, Ieee80211,
-    MacAddr, MacHeader3Addr, SequenceControl, management_subtype,
+    AssociationRequestFixedFields, BeaconFixedFields, BeaconFrameHeader, EAPOL_TYPE_KEY,
+    EAPOL_VERSION, FrameControl, Ieee80211, MacAddr, MacHeader3Addr, SequenceControl,
+    management_subtype,
 };
 use rand::prelude::*;
 use tokio::sync::mpsc;
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
 use zerocopy::{IntoBytes, Ref, U16};
+
+const MGMT_AUTH_FC: u16 = 0x00B0;
+const EAPOL_M1_DELAY: Duration = Duration::from_millis(150);
+const DELAYED_FRAME_READY_WAIT: Duration = EAPOL_M1_DELAY.saturating_add(Duration::from_millis(10));
 
 pub fn generate_random_mac() -> [u8; 6] {
     let mut rng = rand::rng();
@@ -39,18 +46,37 @@ pub struct ApWorld {
     pub ap_bssid: MacAddr,
     pub actor_handle: Option<tokio::task::JoinHandle<()>>,
     pub next_ap_id: u32,
-    pub shared_keys: std::sync::Arc<SharedKeyStore>,
+    pub shared_keys: Arc<SharedKeyStore>,
+    pub error_stats: Arc<ErrorStatsTable>,
 }
 
 impl ApWorld {
     pub async fn new() -> Self {
+        Self::build(false)
+    }
+
+    pub async fn with_error_stats() -> Self {
+        Self::build(true)
+    }
+
+    fn build(record_error_stats: bool) -> Self {
         netsim_testing::setup(None);
-        let shared_keys = std::sync::Arc::new(SharedKeyStore::new());
-        let ap_actor_impl = ApActor::new(shared_keys.clone());
+        let shared_keys = Arc::new(SharedKeyStore::new());
+        let error_stats = Arc::new(ErrorStatsTable::new());
+        let ap_actor_impl = ApActor::new(Arc::clone(&shared_keys));
         let (runner, client_base) = ResourceActor::new(32);
         let client = ApClient::new(client_base);
 
-        let handle = tokio::spawn(runner.run(ap_actor_impl));
+        let handle = if record_error_stats {
+            let subscriber = tracing_subscriber::registry()
+                .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
+            tokio::spawn(tracing::instrument::WithSubscriber::with_subscriber(
+                runner.run(ap_actor_impl),
+                subscriber,
+            ))
+        } else {
+            tokio::spawn(runner.run(ap_actor_impl))
+        };
 
         Self {
             client,
@@ -61,6 +87,7 @@ impl ApWorld {
             actor_handle: Some(handle),
             next_ap_id: 1001,
             shared_keys,
+            error_stats,
         }
     }
 
@@ -317,6 +344,7 @@ impl ApWorld {
     fn build_eapol_frame(
         &self,
         client_mac: MacAddr,
+        frame_control: u16,
         version: u8,
         packet_type: u8,
         body: &[u8],
@@ -324,7 +352,7 @@ impl ApWorld {
         use netsim_packets::{EapolHeader, LlcSnapHeader, control_field, sap};
 
         let mut frame = Vec::new();
-        let header = self.header_to_ap(0x0008, client_mac);
+        let header = self.header_to_ap(frame_control, client_mac);
         frame.extend_from_slice(header.as_bytes());
 
         let llc = LlcSnapHeader::new(
@@ -345,7 +373,7 @@ impl ApWorld {
     pub async fn when_station_sends_eapol_start(&mut self, client_mac: MacAddr) {
         use netsim_packets::EAPOL_TYPE_START;
 
-        let start_frame = self.build_eapol_frame(client_mac, 1, EAPOL_TYPE_START, &[]);
+        let start_frame = self.build_eapol_frame(client_mac, 0x0008, 1, EAPOL_TYPE_START, &[]);
         let tx = self.tx_to_ap.as_mut().expect("AP not registered");
         tx.send(bytes::Bytes::from(start_frame)).expect("Failed to send EAPOL-Start");
     }
@@ -379,7 +407,7 @@ impl ApWorld {
         body.extend_from_slice(eap_header.as_bytes());
         body.extend_from_slice(eap_type_and_data);
 
-        let frame = self.build_eapol_frame(client_mac, 1, EAPOL_TYPE_PACKET, &body);
+        let frame = self.build_eapol_frame(client_mac, 0x0008, 1, EAPOL_TYPE_PACKET, &body);
         let tx = self.tx_to_ap.as_mut().expect("AP not registered");
         tx.send(bytes::Bytes::from(frame)).expect("Failed to send EAP packet");
     }
@@ -391,7 +419,7 @@ impl ApWorld {
     ) {
         use netsim_packets::EAPOL_TYPE_PACKET;
 
-        let frame = self.build_eapol_frame(client_mac, 1, EAPOL_TYPE_PACKET, raw_body);
+        let frame = self.build_eapol_frame(client_mac, 0x0008, 1, EAPOL_TYPE_PACKET, raw_body);
         let tx = self.tx_to_ap.as_mut().expect("AP not registered");
         tx.send(bytes::Bytes::from(frame)).expect("Failed to send raw EAPOL packet");
     }
@@ -463,6 +491,98 @@ impl ApWorld {
                 "Unexpected EAPOL response received"
             );
         }
+    }
+
+    pub async fn when_force_disconnect_is_requested_for(&mut self, mac: &str) {
+        info!("When a force disconnect is requested for '{}'", mac);
+        let id = self.ap_id.expect("AP not registered");
+        self.client
+            .update_ap_config(id, None, None, Some(vec![mac.to_string()]), None)
+            .await
+            .expect("Force disconnect failed");
+    }
+
+    pub async fn when_station_sends_auth_frame_truncated_after_addr2<M>(&mut self, src_mac: M)
+    where
+        M: TryInto<MacAddr>,
+        M::Error: std::fmt::Debug,
+    {
+        let src_mac = src_mac.try_into().expect("Invalid MAC address");
+        info!("When a Station sends an Auth frame truncated after Addr2 from {}", src_mac);
+        let header = self.header_to_ap(MGMT_AUTH_FC, src_mac);
+        // FC(2) + Duration(2) + Addr1(6) + Addr2(6), without Addr3 and
+        // Sequence Control.
+        let truncated = header.as_bytes().get(..16).expect("header shorter than 16 bytes");
+        let tx = self.tx_to_ap.as_mut().expect("AP not registered");
+        tx.send(bytes::Bytes::copy_from_slice(truncated)).expect("Failed to send Auth frame");
+    }
+
+    pub async fn given_station_is_associated(&mut self, src_mac: &str) {
+        self.when_station_sends_assoc_req(src_mac).await;
+        self.then_station_receives_assoc_resp(src_mac).await;
+    }
+
+    pub async fn given_ap_beacons_disabled(&mut self) {
+        let id = self.ap_id.expect("AP not registered");
+        self.client
+            .update_ap_config(id, None, None, None, Some(false))
+            .await
+            .expect("Failed to disable AP beacons");
+    }
+
+    pub async fn when_ap_enabled_after_delayed_frame_ready(&mut self) {
+        tokio::time::sleep(DELAYED_FRAME_READY_WAIT).await;
+        let id = self.ap_id.expect("AP not registered");
+        self.client
+            .update_ap_config(id, None, None, None, Some(true))
+            .await
+            .expect("Failed to enable AP beacons");
+    }
+
+    pub async fn when_non_existent_ap_is_deleted(&mut self, id: u32) {
+        self.client.destroy_ap(id).await.expect("Failed to invoke destroy_ap");
+    }
+
+    pub async fn when_disconnect_is_requested_for(&mut self, mac: &str) {
+        let id = self.ap_id.expect("AP not registered");
+        self.client.disconnect(id, mac.to_string()).await.expect("Failed to disconnect station");
+    }
+
+    pub async fn when_malformed_raw_bytes_sent(&mut self, raw: &[u8]) {
+        let tx = self.tx_to_ap.as_mut().expect("AP not registered");
+        tx.send(bytes::Bytes::copy_from_slice(raw)).expect("Failed to send malformed frame");
+    }
+
+    pub async fn when_station_sends_auth_frame_with_truncated_fixed_fields(
+        &mut self,
+        src_mac: &str,
+    ) {
+        const TRUNCATED_AUTH_FIXED_BYTES: [u8; 2] = [0x00, 0x00];
+        let src_mac: MacAddr = src_mac.parse().expect("Invalid MAC address");
+        let header = self.header_to_ap(MGMT_AUTH_FC, src_mac);
+        let mut frame = header.as_bytes().to_vec();
+        frame.extend_from_slice(&TRUNCATED_AUTH_FIXED_BYTES);
+        let tx = self.tx_to_ap.as_mut().expect("AP not registered");
+        tx.send(bytes::Bytes::from(frame)).expect("Failed to send Auth frame");
+    }
+
+    pub async fn when_station_sends_truncated_eapol_key(&mut self, src_mac: MacAddr) {
+        let frame = self.build_eapol_frame(src_mac, 0x0108, EAPOL_VERSION, EAPOL_TYPE_KEY, &[]);
+        self.tx_to_ap
+            .as_mut()
+            .expect("AP not registered")
+            .send(bytes::Bytes::from(frame))
+            .expect("Failed to send EAPOL data frame");
+    }
+
+    /// Waits up to 2s for the recorded error stats to equal `expected`.
+    pub async fn then_error_stats_are(&mut self, expected: &[(u32, u32)]) {
+        info!("Then the error stats are {:?}", expected);
+        let start = std::time::Instant::now();
+        while self.error_stats.snapshot() != expected && start.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(self.error_stats.snapshot(), expected);
     }
 
     pub async fn when_ap_is_deleted(&mut self) {

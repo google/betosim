@@ -104,13 +104,19 @@ impl ActorService for ApActor {
                 let mac = match mac_str.parse::<netsim_packets::MacAddr>() {
                     Ok(m) => m,
                     Err(_) => {
-                        warn!("Invalid MAC address in force_disconnect: {}", mac_str);
+                        warn!(
+                            code = crate::err::Code::ForceDisconnectInvalidMac as u32,
+                            "Invalid MAC address in force_disconnect: {}", mac_str
+                        );
                         continue;
                     }
                 };
 
                 if !ap_state.associations.remove(&mac) {
-                    warn!("Requested force disconnect for unknown MAC: {}", mac);
+                    warn!(
+                        code = crate::err::Code::ForceDisconnectUnknownMac as u32,
+                        "Requested force disconnect for unknown MAC: {}", mac
+                    );
                     continue;
                 }
 
@@ -164,7 +170,10 @@ impl ActorService for ApActor {
 
             info!("Deleted AP with ID: {}", id);
         } else {
-            warn!("Attempted to delete non-existent AP with ID: {}", id);
+            warn!(
+                code = crate::err::Code::DeleteApNotFound as u32,
+                "Attempted to delete non-existent AP with ID: {}", id
+            );
         }
         Ok(())
     }
@@ -225,7 +234,10 @@ impl ActorService for ApActor {
                     // Send Deauth Frame
                     send_deauth(self.sink.as_ref(), &self.manager, ap_state, mac);
                 } else {
-                    warn!("ApActor: Requested disconnect for unknown MAC {} on AP {}", mac, id);
+                    warn!(
+                        code = crate::err::Code::DisconnectUnknownMac as u32,
+                        "ApActor: Requested disconnect for unknown MAC {} on AP {}", mac, id
+                    );
                 }
                 Ok(ApResponse::Ok)
             }
@@ -262,7 +274,11 @@ fn send_deauth(
     if let Some(sink) = sink {
         let frame = manager.build_deauth_frame(ap_state, mac, DEAUTH_REASON_STA_LEAVING);
         if let Err(error) = sink.send(bytes::Bytes::from(frame)) {
-            error!(%error, "Failed to send Deauth frame");
+            error!(
+                code = crate::err::Code::DeauthSendFailed as u32,
+                %error,
+                "Failed to send Deauth frame"
+            );
         }
     }
 }

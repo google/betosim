@@ -226,6 +226,7 @@ impl SharedKeyStore {
         let success = AesCcmDecrypt(tk_slice, &nonce, &aad, data, &mut out_plain, 8);
         if !success {
             error!(
+                code = crate::err::Code::CcmpDecryptFailed as u32,
                 "CCMP DECRYPT FAILED! hdr_len: {}, msg_len: {}, aad_len: {}",
                 hdr_len,
                 data.len(),
@@ -448,6 +449,8 @@ mod tests {
         use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
         use tracing_subscriber::layer::SubscriberExt;
 
+        use crate::err::Code;
+
         const PROTECTED_FC_BIT: u8 = 0x40;
 
         // Given
@@ -474,11 +477,12 @@ mod tests {
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
 
         // When
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let decrypted =
             tracing::subscriber::with_default(subscriber, || store.try_decrypt(&corrupted));
 
         // Then
         assert!(decrypted.is_none());
-        assert_eq!(table.snapshot(), vec![(common::util::netsim_logger::err_bases::AP, 1)]);
+        assert_eq!(table.snapshot(), vec![(Code::CcmpDecryptFailed as u32, 1)]);
     }
 }

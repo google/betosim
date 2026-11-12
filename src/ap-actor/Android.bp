@@ -159,6 +159,7 @@ rust_test_host {
         "tests/crypto_test.rs",
         "tests/deauth_test.rs",
         "tests/eap_auth_test.rs",
+        "tests/error_stats_test.rs",
         "tests/ftm_test.rs",
         "tests/lifecycle_test.rs",
         "tests/mod.rs",
