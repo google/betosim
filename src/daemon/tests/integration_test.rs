@@ -149,6 +149,219 @@ async fn test_pcap_args_disabled() {
     world.then_capture_is(chip.id, false).await;
 }
 
+const VERBOSE_INFO_PROBE: &str = "netsim_verbose_info_probe";
+const VERBOSE_DEBUG_PROBE: &str = "netsim_verbose_debug_probe";
+const WIFI_SECRET_PROBE: &str = "secret-pass-probe";
+
+fn emit_verbose_log_probes() {
+    tracing::info!("{VERBOSE_INFO_PROBE}");
+    tracing::debug!("{VERBOSE_DEBUG_PROBE}");
+}
+
+/// Scenario: --no-cli-ui disables gRPC FrontendService while keeping backend gRPC and HTTP running
+///   Given CLI flags with --no-cli-ui (or --no_cli_ui)
+///   When netsimd spawns the daemon and opens/closes an HTTP /v1/keepalive lease
+///   Then CLI aliases parse, FrontendService RPCs fail with UNIMPLEMENTED, and AndroidWifi stays served
+#[tokio::test]
+async fn test_no_cli_ui_disables_frontend_grpc_while_keeping_backend_and_http() {
+    // Given CLI flags with --no-cli-ui
+    let mut world = World::new_with_cli_args(&["--no-shutdown", "--no-cli-ui"]).await;
+
+    // When netsimd spawns the daemon and opens and closes an HTTP /v1/keepalive lease
+    world.when_spawn_daemon().await;
+    world.when_open_keepalive().await;
+    world.when_close_keepalive();
+
+    // Then CLI aliases parse, FrontendService RPCs fail with UNIMPLEMENTED, and AndroidWifi stays served
+    World::then_no_cli_ui_cli_aliases_parse();
+    world.then_frontend_cli_ui_is_unimplemented().await;
+    world.then_access_point_exists_by_ssid("AndroidWifi").await;
+}
+
+/// Scenario: --version prints the version banner and exits before creating discovery files
+///   Given an empty discovery directory
+///   When netsimd is invoked with --version
+///   Then it prints "Netsim version: " to stdout and returns ExitedNormally
+///   And leaves the discovery directory empty without creating log files
+#[test]
+fn test_version_flag_prints_banner_and_exits_before_creating_discovery_files() {
+    // Given an isolated subprocess with an empty discovery directory
+    // When netsimd runs with --version
+    let Some(output) = World::when_run_child_exit_probe(
+        module_path!(),
+        "test_version_flag_prints_banner_and_exits_before_creating_discovery_files",
+        &["--version"],
+    ) else {
+        return;
+    };
+
+    // Then stdout prints the version banner while discovery_dir and log files stay empty
+    output.then_stdout_contains("Netsim version: ");
+    output.then_discovery_dir_is_empty();
+    output.then_no_log_files_created();
+}
+
+/// Scenario: Default daemon logger emits INFO logs and suppresses DEBUG logs
+///   Given an isolated daemon process starting with -l --no-shutdown
+///   When launched without -v or --verbose and emitting INFO and DEBUG probes
+///   Then stderr contains a "netsim I " line with the INFO probe
+///   And stderr suppresses the DEBUG probe and emits no "netsim D " lines
+#[test]
+fn test_default_logger_logs_info_and_suppresses_debug() {
+    // Given default (non-verbose) CLI flags with -l --no-shutdown
+    // When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_default_logger_logs_info_and_suppresses_debug",
+        &["-l", "--no-shutdown"],
+        emit_verbose_log_probes,
+    ) else {
+        return;
+    };
+
+    // Then INFO logs are emitted without DEBUG probes or any "netsim D " line
+    output.then_stderr_logs_info_and_suppresses_debug(VERBOSE_INFO_PROBE, VERBOSE_DEBUG_PROBE);
+}
+
+/// Scenario: -v enables daemon DEBUG logging alongside INFO logs
+///   Given an isolated daemon process starting with -l --no-shutdown -v
+///   When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+///   Then stderr contains both a "netsim I " INFO probe line and a "netsim D " DEBUG probe line
+#[test]
+fn test_short_verbose_flag_enables_debug_logs() {
+    // Given CLI flags with -v
+    // When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_short_verbose_flag_enables_debug_logs",
+        &["-l", "--no-shutdown", "-v"],
+        emit_verbose_log_probes,
+    ) else {
+        return;
+    };
+
+    // Then both INFO and DEBUG probes appear with their level prefixes on stderr
+    output.then_stderr_logs_info_and_debug(VERBOSE_INFO_PROBE, VERBOSE_DEBUG_PROBE);
+}
+
+/// Scenario: --verbose enables daemon DEBUG logging alongside INFO logs
+///   Given an isolated daemon process starting with -l --no-shutdown --verbose
+///   When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+///   Then stderr contains both a "netsim I " INFO probe line and a "netsim D " DEBUG probe line
+#[test]
+fn test_long_verbose_flag_enables_debug_logs() {
+    // Given CLI flags with --verbose
+    // When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_long_verbose_flag_enables_debug_logs",
+        &["-l", "--no-shutdown", "--verbose"],
+        emit_verbose_log_probes,
+    ) else {
+        return;
+    };
+
+    // Then both INFO and DEBUG probes appear with their level prefixes on stderr
+    output.then_stderr_logs_info_and_debug(VERBOSE_INFO_PROBE, VERBOSE_DEBUG_PROBE);
+}
+
+/// Scenario: Default daemon launch redirects stdout and stderr into netsim_stdout.log and netsim_stderr.log
+///   Given netsimd invoked with --no-shutdown --wifi-password secret-pass-probe and no -l flag
+///   When NetsimDaemon starts as the default instance
+///   Then netsim_stdout.log captures the pass marker while piped stdout does not
+///   And netsim_stderr.log captures the artifacts path with the wifi password redacted
+#[test]
+fn test_default_log_redirection_writes_stdout_and_stderr_logs() {
+    // Given default log redirection (logtostderr unset) with --wifi-password
+    // When NetsimDaemon starts as Owner for the default instance
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_default_log_redirection_writes_stdout_and_stderr_logs",
+        &["--no-shutdown", "--wifi-password", WIFI_SECRET_PROBE],
+        || {},
+    ) else {
+        return;
+    };
+
+    // Then netsim_stdout.log and netsim_stderr.log receive redirected output with redacted args
+    output.then_redirected_logs_written(
+        "netsim_stdout.log",
+        "netsim_stderr.log",
+        WIFI_SECRET_PROBE,
+    );
+}
+
+/// Scenario: --instance 3 redirects stdout and stderr into instance-numbered log files
+///   Given netsimd invoked with --no-shutdown --wifi-password secret-pass-probe --instance 3
+///   When NetsimDaemon starts as Owner without -l
+///   Then netsim_3_stdout.log and netsim_3_stderr.log receive redirected output with redacted args
+///   And default netsim_stdout.log and netsim_stderr.log files are not created
+#[test]
+fn test_instance_flag_redirects_numbered_daemon_logs() {
+    // Given --instance 3 and --wifi-password without logtostderr
+    // When NetsimDaemon starts as Owner for instance 3
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_instance_flag_redirects_numbered_daemon_logs",
+        &["--no-shutdown", "--wifi-password", WIFI_SECRET_PROBE, "--instance", "3"],
+        || {},
+    ) else {
+        return;
+    };
+
+    // Then instance-prefixed log files receive redirected output without creating default log files
+    output.then_redirected_logs_written(
+        "netsim_3_stdout.log",
+        "netsim_3_stderr.log",
+        WIFI_SECRET_PROBE,
+    );
+    output.then_no_default_log_files_created();
+}
+
+/// Scenario: -l writes startup logs to stderr with wifi_password redacted and creates no log files
+///   Given netsimd invoked with -l --no-shutdown --wifi-password secret-pass-probe
+///   When NetsimDaemon starts as Owner
+///   Then netsimd_temp_dir exists with no log files created
+///   And piped stdout contains the pass marker while stderr logs startup with the secret redacted
+#[test]
+fn test_short_logtostderr_flag_writes_stderr_without_log_files() {
+    // Given CLI flags with -l and --wifi-password
+    // When NetsimDaemon starts as Owner
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_short_logtostderr_flag_writes_stderr_without_log_files",
+        &["-l", "--no-shutdown", "--wifi-password", WIFI_SECRET_PROBE],
+        || {},
+    ) else {
+        return;
+    };
+
+    // Then netsimd_temp_dir exists without log files, stdout passes, and redacted logs appear on stderr
+    output.then_logtostderr_writes_redacted_stderr_without_log_files(WIFI_SECRET_PROBE);
+}
+
+/// Scenario: --logtostderr writes startup logs to stderr with wifi_password redacted and creates no log files
+///   Given netsimd invoked with --logtostderr --no-shutdown --wifi-password secret-pass-probe
+///   When NetsimDaemon starts as Owner
+///   Then netsimd_temp_dir exists with no log files created
+///   And piped stdout contains the pass marker while stderr logs startup with the secret redacted
+#[test]
+fn test_long_logtostderr_flag_writes_stderr_without_log_files() {
+    // Given CLI flags with --logtostderr and --wifi-password
+    // When NetsimDaemon starts as Owner
+    let Some(output) = World::when_run_isolated_owner(
+        module_path!(),
+        "test_long_logtostderr_flag_writes_stderr_without_log_files",
+        &["--logtostderr", "--no-shutdown", "--wifi-password", WIFI_SECRET_PROBE],
+        || {},
+    ) else {
+        return;
+    };
+
+    // Then netsimd_temp_dir exists without log files, stdout passes, and redacted logs appear on stderr
+    output.then_logtostderr_writes_redacted_stderr_without_log_files(WIFI_SECRET_PROBE);
+}
+
 // Scenario: Toggle capture using generic patch
 //   Given I start netsimd
 //   When a device is created and its capture is toggled

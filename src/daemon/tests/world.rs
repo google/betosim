@@ -14,10 +14,12 @@
 // limitations under the License.
 
 use std::{
+    io::Write as _,
     net::Ipv4Addr,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -57,6 +59,321 @@ const KEEPALIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_HEADER_CAP: usize = 1024;
 const DEVICE_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SUBPROCESS_TEST_ENV: &str = "NETSIM_DAEMON_TEST_SUBPROCESS";
+const SUBPROCESS_DISCOVERY_DIR_ENV: &str = "NETSIM_DAEMON_TEST_DISCOVERY_DIR";
+const SUBPROCESS_USER: &str = "netsimtest";
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+const SUBPROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const CHILD_TEST_PASS_MARKER: &str = "1 passed; 0 failed";
+const REDACTED_WIFI_PASSWORD_FIELD: &str = r#"wifi_password: "<redacted>""#;
+const ARTIFACTS_PATH_LOG_MARKER: &str = "netsim artifacts path:";
+const SCRUBBED_ENV_VARS: &[&str] = &[
+    "RUST_LOG",
+    "NETSIM_INSTANCE",
+    "NETSIM_ARGS",
+    "NETSIM_GRPC_PORT",
+    "NETSIM_HTTP_PORT",
+    "NETSIM_HCI_PORT",
+    "NETSIM_WS_PORT",
+    "NETSIM_TCP_PORT",
+    "NETSIM_TEST_DATA_DIR",
+    "http_proxy",
+    "XML_OUTPUT_FILE",
+    "GUNIT_OUTPUT",
+    "TESTBRIDGE_TEST_ONLY",
+    "TEST_SHARD_INDEX",
+    "TEST_TOTAL_SHARDS",
+    "TEST_SHARD_STATUS_FILE",
+];
+
+/// Output and temporary directories captured from an isolated child test run.
+pub struct IsolatedChildOutput {
+    stdout: String,
+    stderr: String,
+    android_tmp: tempfile::TempDir,
+    discovery_dir: tempfile::TempDir,
+}
+
+impl IsolatedChildOutput {
+    fn netsimd_temp_dir(&self) -> PathBuf {
+        expected_netsimd_temp_dir(self.android_tmp.path())
+    }
+
+    fn discovery_dir(&self) -> &Path {
+        self.discovery_dir.path()
+    }
+
+    /// Then the isolated child's captured stdout contains `expected`.
+    pub fn then_stdout_contains(&self, expected: &str) {
+        assert!(
+            self.stdout.contains(expected),
+            "Expected {expected:?} in child stdout, got:\n{}",
+            self.stdout
+        );
+    }
+
+    /// Then the isolated child left its discovery directory empty.
+    pub fn then_discovery_dir_is_empty(&self) {
+        let has_entries = std::fs::read_dir(self.discovery_dir())
+            .expect("Failed to read discovery_dir")
+            .next()
+            .is_some();
+        assert!(
+            !has_entries,
+            "Expected discovery_dir {} to remain empty",
+            self.discovery_dir().display()
+        );
+    }
+
+    /// Then the isolated child's captured stderr contains a `"netsim I "` log line with `info_msg`.
+    fn then_stderr_logs_info(&self, info_msg: &str) {
+        assert_has_log_line(&self.stderr, "netsim I ", info_msg, "child stderr");
+    }
+
+    /// Then the isolated child's captured stderr logs `info_msg` at INFO level while
+    /// suppressing `debug_msg` and emitting no `"netsim D "` lines.
+    pub fn then_stderr_logs_info_and_suppresses_debug(&self, info_msg: &str, debug_msg: &str) {
+        self.then_stderr_logs_info(info_msg);
+        assert!(
+            !self.stderr.contains(debug_msg),
+            "Did not expect {debug_msg:?} on child stderr, got:\n{}",
+            self.stderr
+        );
+        assert!(
+            !self.stderr.lines().any(|line| line.starts_with("netsim D ")),
+            "Did not expect stderr line starting with \"netsim D \", got:\n{}",
+            self.stderr
+        );
+    }
+
+    /// Then the isolated child's captured stderr logs `info_msg` at INFO level
+    /// and `debug_msg` at DEBUG level.
+    pub fn then_stderr_logs_info_and_debug(&self, info_msg: &str, debug_msg: &str) {
+        self.then_stderr_logs_info(info_msg);
+        assert_has_log_line(&self.stderr, "netsim D ", debug_msg, "child stderr");
+    }
+
+    /// Then `netsimd_temp_dir()` was created at the expected path.
+    fn then_netsimd_temp_dir_exists(&self) {
+        let netsimd_temp = self.netsimd_temp_dir();
+        assert!(
+            netsimd_temp.is_dir(),
+            "Expected netsimd temp dir {} to exist",
+            netsimd_temp.display()
+        );
+    }
+
+    /// Then no netsim stdout/stderr log files exist under `netsimd_temp_dir`.
+    pub fn then_no_log_files_created(&self) {
+        let netsimd_temp = self.netsimd_temp_dir();
+        let logs = collect_netsim_log_contents(&netsimd_temp);
+        assert!(
+            logs.is_empty(),
+            "Expected no netsim log files in {}, found:\n{}",
+            netsimd_temp.display(),
+            format_log_diagnostics(&logs)
+        );
+    }
+
+    /// Then `netsimd_temp_dir()` exists without log files, piped stdout passed,
+    /// and child stderr logs startup with `secret` redacted.
+    pub fn then_logtostderr_writes_redacted_stderr_without_log_files(&self, secret: &str) {
+        self.then_netsimd_temp_dir_exists();
+        self.then_no_log_files_created();
+        self.then_stdout_contains(CHILD_TEST_PASS_MARKER);
+        self.then_stderr_logs_info("netsim startup");
+        assert_redacts_secret(&self.stderr, secret, "child stderr");
+    }
+
+    /// Then default `netsim_stdout.log` and `netsim_stderr.log` were not created.
+    pub fn then_no_default_log_files_created(&self) {
+        let netsimd_temp = self.netsimd_temp_dir();
+        assert!(
+            !netsimd_temp.join("netsim_stdout.log").exists(),
+            "Did not expect netsim_stdout.log in {}",
+            netsimd_temp.display()
+        );
+        assert!(
+            !netsimd_temp.join("netsim_stderr.log").exists(),
+            "Did not expect netsim_stderr.log in {}",
+            netsimd_temp.display()
+        );
+    }
+
+    /// Then `stdout_filename` captures the pass marker while piped stdout does not,
+    /// and `stderr_filename` logs the artifacts path with `secret` redacted while
+    /// piped stderr leaks neither the artifacts path nor `secret`.
+    pub fn then_redirected_logs_written(
+        &self,
+        stdout_filename: &str,
+        stderr_filename: &str,
+        secret: &str,
+    ) {
+        let netsimd_temp = self.netsimd_temp_dir();
+        let stdout_log_path = netsimd_temp.join(stdout_filename);
+        let stderr_log_path = netsimd_temp.join(stderr_filename);
+
+        assert!(
+            stdout_log_path.exists(),
+            "Expected {stdout_filename} in {}",
+            netsimd_temp.display()
+        );
+        assert!(
+            stderr_log_path.exists(),
+            "Expected {stderr_filename} in {}",
+            netsimd_temp.display()
+        );
+
+        let stdout_log = std::fs::read_to_string(&stdout_log_path).unwrap_or_else(|err| {
+            panic!("Failed to read {}: {err:?}", stdout_log_path.display());
+        });
+        assert!(
+            stdout_log.contains(CHILD_TEST_PASS_MARKER),
+            "Expected {CHILD_TEST_PASS_MARKER:?} in {}: {stdout_log}",
+            stdout_log_path.display()
+        );
+        assert!(
+            !self.stdout.contains(CHILD_TEST_PASS_MARKER),
+            "Expected stdout to redirect to {} instead of child stdout pipe, got:\n{}",
+            stdout_log_path.display(),
+            self.stdout
+        );
+
+        let stderr_log = std::fs::read_to_string(&stderr_log_path).unwrap_or_else(|err| {
+            panic!("Failed to read {}: {err:?}", stderr_log_path.display());
+        });
+        let stderr_log_source = stderr_log_path.display().to_string();
+        assert_has_log_line(
+            &stderr_log,
+            "netsim I ",
+            ARTIFACTS_PATH_LOG_MARKER,
+            &stderr_log_source,
+        );
+        assert_redacts_secret(&stderr_log, secret, &stderr_log_source);
+        assert!(
+            !self.stderr.contains(ARTIFACTS_PATH_LOG_MARKER),
+            "Expected stderr to redirect to {stderr_log_source} instead of child stderr pipe, got:\n{}",
+            self.stderr
+        );
+        assert!(
+            !self.stderr.contains(secret),
+            "Expected pre-redirection piped stderr not to leak {secret:?}, got:\n{}",
+            self.stderr
+        );
+    }
+}
+
+fn expected_netsimd_temp_dir(android_tmp: &Path) -> PathBuf {
+    #[cfg(not(target_os = "windows"))]
+    {
+        android_tmp.join(format!("android-{}", SUBPROCESS_USER)).join("netsimd")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        android_tmp.join("netsimd")
+    }
+}
+
+fn read_pipe(mut pipe: impl std::io::Read) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = pipe.read_to_end(&mut buf);
+    buf
+}
+
+fn collect_netsim_log_contents(netsimd_temp: &Path) -> Vec<(String, String)> {
+    let entries = match std::fs::read_dir(netsimd_temp) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => panic!("Failed to read netsimd temp dir {}: {err:?}", netsimd_temp.display()),
+    };
+    let mut logs: Vec<(String, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?;
+            if file_name.starts_with("netsim_")
+                && (file_name.ends_with("stdout.log") || file_name.ends_with("stderr.log"))
+            {
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(err) => format!("<failed to read {}: {err:?}>", path.display()),
+                };
+                Some((file_name.to_string(), content))
+            } else {
+                None
+            }
+        })
+        .collect();
+    logs.sort_by(|(left_name, _), (right_name, _)| left_name.cmp(right_name));
+    logs
+}
+
+fn format_log_diagnostics(logs: &[(String, String)]) -> String {
+    if logs.is_empty() {
+        return "<none>".to_string();
+    }
+    logs.iter()
+        .map(|(name, content)| format!("--- {name} ---\n{content}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct ChildKillGuard(Option<Child>);
+
+impl ChildKillGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("Child process missing")
+    }
+
+    fn kill_and_wait(&mut self) -> Option<std::io::Result<ExitStatus>> {
+        self.0.take().map(|mut child| {
+            let _ = child.kill();
+            child.wait()
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ChildKillGuard {
+    fn drop(&mut self) {
+        let _ = self.kill_and_wait();
+    }
+}
+
+fn collect_child_failure_diagnostics(
+    stdout_reader: std::thread::JoinHandle<Vec<u8>>,
+    stderr_reader: std::thread::JoinHandle<Vec<u8>>,
+    netsimd_temp: &Path,
+) -> (String, String, String) {
+    let stdout = String::from_utf8_lossy(&stdout_reader.join().unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_reader.join().unwrap_or_default()).into_owned();
+    let logs = collect_netsim_log_contents(netsimd_temp);
+    (stdout, stderr, format_log_diagnostics(&logs))
+}
+
+fn assert_has_log_line(log_text: &str, level_prefix: &str, expected_message: &str, source: &str) {
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line.starts_with(level_prefix) && line.contains(expected_message)),
+        "Expected {source} line starting with {level_prefix:?} containing {expected_message:?}, got:\n{log_text}",
+    );
+}
+
+fn assert_redacts_secret(log_text: &str, secret: &str, source: &str) {
+    assert_has_log_line(log_text, "netsim I ", REDACTED_WIFI_PASSWORD_FIELD, source);
+    assert!(
+        !log_text.contains(secret),
+        "Found unredacted secret {secret:?} in {source}, got:\n{log_text}",
+    );
+}
 
 type IsolatedPacketStream = (
     grpcio::ClientDuplexSender<PacketRequest>,
@@ -114,8 +431,9 @@ impl World {
         Self::new_with_args(args).await
     }
 
-    /// Construct a World from real CLI flags via clap::Parser::try_parse_from + sanitize().
-    pub async fn new_with_cli_args(cli_flags: &[&str]) -> Self {
+    /// Parses real CLI flags with `--no-http-proxy` prepended and `sanitize()` applied,
+    /// preserving the parsed `logtostderr` value.
+    fn parse_cli_args_preserving_stdio(cli_flags: &[&str]) -> daemon::Args {
         let full_args: Vec<&str> = std::iter::once("netsimd")
             .chain(std::iter::once("--no-http-proxy"))
             .chain(cli_flags.iter().copied())
@@ -123,6 +441,13 @@ impl World {
         let mut args = <daemon::Args as clap::Parser>::try_parse_from(full_args)
             .expect("Failed to parse CLI flags");
         args.sanitize();
+        args
+    }
+
+    /// Constructs a `World` from parsed CLI flags with `logtostderr = true` so in-process
+    /// BDD scenarios do not redirect process-wide stdout/stderr file descriptors.
+    pub async fn new_with_cli_args(cli_flags: &[&str]) -> Self {
+        let mut args = Self::parse_cli_args_preserving_stdio(cli_flags);
         args.logtostderr = true;
         Self::new_with_args(args).await
     }
@@ -199,6 +524,19 @@ impl World {
         #[cfg(feature = "cuttlefish")]
         if args.instance.is_none() && args.test_port.is_none() {
             args.test_port = Some(0);
+        }
+        args
+    }
+
+    /// Assigns OS-assigned ephemeral ports to any unset listener flags so isolated
+    /// child owner probes never collide on default ports even with `--instance`.
+    fn with_isolated_owner_ports(mut args: daemon::Args) -> daemon::Args {
+        args.grpc_port.get_or_insert(0);
+        args.http_port.get_or_insert(0);
+        args.hci_port.get_or_insert(0);
+        #[cfg(feature = "cuttlefish")]
+        {
+            args.test_port.get_or_insert(0);
         }
         args
     }
@@ -284,6 +622,216 @@ impl World {
             .await
             .expect("RPC failed");
         resp.version
+    }
+
+    fn assert_rpc_unimplemented<T: std::fmt::Debug>(rpc_name: &str, result: grpcio::Result<T>) {
+        match result {
+            Err(grpcio::Error::RpcFailure(status)) => {
+                assert_eq!(
+                    status.code(),
+                    grpcio::RpcStatusCode::UNIMPLEMENTED,
+                    "{rpc_name} returned unexpected gRPC status: {status:?}"
+                );
+            }
+            other => panic!("Expected {rpc_name} to fail with UNIMPLEMENTED, got {other:?}"),
+        }
+    }
+
+    /// Then default CLI flags leave `no_cli_ui` false while `--no-cli-ui` and `--no_cli_ui` enable it.
+    pub fn then_no_cli_ui_cli_aliases_parse() {
+        assert!(!Self::parse_cli_args_preserving_stdio(&[]).no_cli_ui);
+        assert!(Self::parse_cli_args_preserving_stdio(&["--no-cli-ui"]).no_cli_ui);
+        assert!(Self::parse_cli_args_preserving_stdio(&["--no_cli_ui"]).no_cli_ui);
+    }
+
+    /// Then FrontendService RPCs fail with UNIMPLEMENTED when `--no-cli-ui` is set.
+    pub async fn then_frontend_cli_ui_is_unimplemented(&mut self) {
+        let get_version_res = self
+            .frontend_client
+            .get_version_async(&netsim_proto::empty::Empty::new())
+            .expect("GetVersion call failed")
+            .await;
+        Self::assert_rpc_unimplemented("FrontendService/GetVersion", get_version_res);
+
+        let list_device_res = self
+            .frontend_client
+            .list_device_async(&netsim_proto::empty::Empty::new())
+            .expect("ListDevice call failed")
+            .await;
+        Self::assert_rpc_unimplemented("FrontendService/ListDevice", list_device_res);
+    }
+
+    fn is_isolated_child_for(test_name: &str) -> bool {
+        std::env::var_os(SUBPROCESS_TEST_ENV).is_some_and(|target| target == test_name)
+    }
+
+    /// Spawns `<rel_module>::<test_name>` in an isolated child process with clean
+    /// `ANDROID_TMP` and discovery directories and captures stdout, stderr, and temp handles.
+    fn run_isolated_child_test(module_path: &str, test_name: &str) -> IsolatedChildOutput {
+        let android_tmp = tempfile::tempdir().expect("Failed to create temp ANDROID_TMP");
+        let discovery_dir = tempfile::tempdir().expect("Failed to create temp discovery_dir");
+        let current_exe =
+            std::env::current_exe().expect("Failed to resolve current test executable");
+        let exact_filter = module_path
+            .split_once("::")
+            .map_or_else(|| test_name.to_string(), |(_, rel)| format!("{rel}::{test_name}"));
+
+        let mut cmd = Command::new(current_exe);
+        cmd.args(["--exact", exact_filter.as_str(), "--test-threads=1", "--nocapture"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("ANDROID_TMP", android_tmp.path())
+            .env(SUBPROCESS_DISCOVERY_DIR_ENV, discovery_dir.path())
+            .env(SUBPROCESS_TEST_ENV, test_name)
+            .env("USER", SUBPROCESS_USER);
+        for &var in SCRUBBED_ENV_VARS {
+            cmd.env_remove(var);
+        }
+
+        let mut child = ChildKillGuard::new(cmd.spawn().unwrap_or_else(|err| {
+            panic!("Failed to spawn isolated child test {exact_filter}: {err:?}")
+        }));
+
+        // Drain stdout and stderr on dedicated reader threads while polling
+        // `try_wait` so verbose child logs cannot block on a full pipe buffer.
+        let stdout_pipe = child.child_mut().stdout.take().expect("Child stdout pipe missing");
+        let stderr_pipe = child.child_mut().stderr.take().expect("Child stderr pipe missing");
+        let stdout_reader = std::thread::spawn(move || read_pipe(stdout_pipe));
+        let stderr_reader = std::thread::spawn(move || read_pipe(stderr_pipe));
+
+        let netsimd_temp = expected_netsimd_temp_dir(android_tmp.path());
+        let deadline = Instant::now() + SUBPROCESS_TIMEOUT;
+        let status = loop {
+            match child.child_mut().try_wait() {
+                Ok(Some(status)) => {
+                    child.disarm();
+                    break status;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let wait_status = child.kill_and_wait();
+                        let (stdout, stderr, logs) = collect_child_failure_diagnostics(
+                            stdout_reader,
+                            stderr_reader,
+                            &netsimd_temp,
+                        );
+                        panic!(
+                            "Isolated child test {exact_filter} timed out after {:?}; wait={wait_status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}\nlogs:\n{logs}",
+                            SUBPROCESS_TIMEOUT,
+                        );
+                    }
+                    std::thread::sleep(SUBPROCESS_POLL_INTERVAL);
+                }
+                Err(err) => {
+                    let wait_status = child.kill_and_wait();
+                    let (stdout, stderr, logs) = collect_child_failure_diagnostics(
+                        stdout_reader,
+                        stderr_reader,
+                        &netsimd_temp,
+                    );
+                    panic!(
+                        "Failed waiting for isolated child test {exact_filter}: {err:?}; wait={wait_status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}\nlogs:\n{logs}",
+                    );
+                }
+            }
+        };
+
+        let stdout_bytes = stdout_reader.join().expect("Failed to join child stdout reader thread");
+        let stderr_bytes = stderr_reader.join().expect("Failed to join child stderr reader thread");
+        let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+        let logs = collect_netsim_log_contents(&netsimd_temp);
+
+        // When log redirection is active (`!logtostderr`), `libtest --nocapture`
+        // writes its summary into `netsim_[<instance>_]stdout.log` instead of the pipe.
+        let stdout_passed = stdout.contains(CHILD_TEST_PASS_MARKER);
+        let redirected_stdout_passed = logs.iter().any(|(name, content)| {
+            name.ends_with("stdout.log") && content.contains(CHILD_TEST_PASS_MARKER)
+        });
+
+        if !status.success() || (!stdout_passed && !redirected_stdout_passed) {
+            panic!(
+                "Isolated child test {exact_filter} failed (status={status:?}, stdout_passed={stdout_passed}, redirected_stdout_passed={redirected_stdout_passed})\nstdout:\n{stdout}\nstderr:\n{stderr}\nlogs:\n{}",
+                format_log_diagnostics(&logs),
+            );
+        }
+
+        IsolatedChildOutput { stdout, stderr, android_tmp, discovery_dir }
+    }
+
+    /// Runs `NetsimDaemon::new_with_dirs` directly in an isolated child process without
+    /// constructing `World` so `World::new_with_args_in_dir` (`init_for_test`) cannot
+    /// pre-lock the global `tracing` subscriber before `logger::init` runs.
+    fn run_child_daemon_probe<F>(args: daemon::Args, verify: F)
+    where
+        F: FnOnce(Result<StartUpMode, daemon::RunResult>),
+    {
+        let discovery_dir = PathBuf::from(
+            std::env::var_os(SUBPROCESS_DISCOVERY_DIR_ENV)
+                .expect("SUBPROCESS_DISCOVERY_DIR_ENV must be set in child process"),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build child Tokio runtime");
+
+        runtime.block_on(async {
+            let result = NetsimDaemon::new_with_dirs(discovery_dir, args).await;
+            verify(result);
+        });
+
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        runtime.shutdown_background();
+    }
+
+    /// Two-phase isolated child test entry point that starts `NetsimDaemon` as
+    /// `StartUpMode::Owner` with `cli_flags` and ephemeral ports, invoking `on_owner`
+    /// in the child (`None`) and returning captured outputs in the parent (`Some`).
+    pub fn when_run_isolated_owner(
+        module_path: &str,
+        test_name: &str,
+        cli_flags: &[&str],
+        on_owner: impl FnOnce(),
+    ) -> Option<IsolatedChildOutput> {
+        if Self::is_isolated_child_for(test_name) {
+            let args =
+                Self::with_isolated_owner_ports(Self::parse_cli_args_preserving_stdio(cli_flags));
+            Self::run_child_daemon_probe(args, |result| {
+                let daemon = match result {
+                    Ok(StartUpMode::Owner(daemon)) => daemon,
+                    Ok(StartUpMode::Client(_)) => {
+                        panic!("Expected StartUpMode::Owner, got StartUpMode::Client")
+                    }
+                    Err(err) => panic!("Expected StartUpMode::Owner, got Err({err:?})"),
+                };
+                on_owner();
+                drop(daemon);
+            });
+            return None;
+        }
+        Some(Self::run_isolated_child_test(module_path, test_name))
+    }
+
+    /// Two-phase isolated child test entry point that starts `NetsimDaemon` with
+    /// `cli_flags` and asserts `Err(daemon::RunResult::ExitedNormally)` in the child
+    /// (`None`), returning captured outputs in the parent (`Some`).
+    pub fn when_run_child_exit_probe(
+        module_path: &str,
+        test_name: &str,
+        cli_flags: &[&str],
+    ) -> Option<IsolatedChildOutput> {
+        if Self::is_isolated_child_for(test_name) {
+            let args = Self::parse_cli_args_preserving_stdio(cli_flags);
+            Self::run_child_daemon_probe(args, |result| match result {
+                Err(daemon::RunResult::ExitedNormally) => {}
+                Err(err) => panic!("Expected ExitedNormally, got Err({err:?})"),
+                Ok(_) => panic!("Expected Err(RunResult::ExitedNormally), got Ok(StartUpMode)"),
+            });
+            return None;
+        }
+        Some(Self::run_isolated_child_test(module_path, test_name))
     }
 
     /// When I call reset
