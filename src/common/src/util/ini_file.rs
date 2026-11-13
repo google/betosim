@@ -363,9 +363,21 @@ mod tests {
             }
         };
 
-        let closed_listener = std::net::TcpListener::bind("localhost:0").unwrap();
-        let closed_port = closed_listener.local_addr().unwrap().port();
-        drop(closed_listener);
+        let (reserved_v4, reserved_v6, closed_port) = (0..10)
+            .find_map(|_| {
+                let v4 = tokio::net::TcpSocket::new_v4().unwrap();
+                v4.bind(std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0))).unwrap();
+                let port = v4.local_addr().unwrap().port();
+                match tokio::net::TcpSocket::new_v6().and_then(|v6| {
+                    v6.bind(std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)))
+                        .map(|()| v6)
+                }) {
+                    Ok(v6) => Some((v4, Some(v6), port)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => None,
+                    Err(_) => Some((v4, None, port)),
+                }
+            })
+            .unwrap();
 
         assert!(!super::is_server_reachable(&format!("localhost:{closed_port}")));
         assert!(!super::is_server_reachable("invalid:address:port"));
@@ -379,5 +391,7 @@ mod tests {
         assert!(super::get_address_by_key_with_env(&mock_env, 1, "tcp.port").is_none());
         assert!(super::get_address_by_key_with_env(&mock_env, 1, "ws.port").is_none());
         assert!(super::get_address_by_key_with_env(&mock_env, 1, "http.port").is_none());
+
+        drop((reserved_v4, reserved_v6));
     }
 }
