@@ -20,8 +20,8 @@
 # Run all tests:
 #   bazel test //src/modem-rs:tests
 #
-# Run the linter (uses bazel test):
-#   bazel test //src/modem-rs:clippy
+# Run the linter:
+#   bazel build //src/modem-rs:modem-rs_clippy
 
 load("//src:defs.bzl", "netsim_rust_library")
 

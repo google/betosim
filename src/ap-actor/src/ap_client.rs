@@ -18,6 +18,10 @@ use netsim_model::{ClientError, Position};
 
 use crate::ap_actor::{ApActor, ApConfig, ApId, ApReq, ApState};
 
+#[cfg(feature = "testing")]
+type PacketInterceptor =
+    std::sync::Arc<dyn Fn(&tokio::sync::mpsc::UnboundedSender<bytes::Bytes>) + Send + Sync>;
+
 /// Client for interacting with the Access Point Actor.
 ///
 /// Wraps a `ResourceClient<ApActor>` and provides helper methods for
@@ -27,9 +31,7 @@ pub struct ApClient {
     pub client: ResourceClient<ApActor>,
     // Optional interceptor for capturing packets in tests
     #[cfg(feature = "testing")]
-    interceptor: Option<
-        std::sync::Arc<dyn Fn(&tokio::sync::mpsc::UnboundedSender<bytes::Bytes>) + Send + Sync>,
-    >,
+    interceptor: Option<PacketInterceptor>,
 }
 
 impl std::fmt::Debug for ApClient {

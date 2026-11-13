@@ -20,4 +20,4 @@ pub use logger::setup;
 #[cfg(feature = "testing")]
 mod mocks;
 #[cfg(feature = "testing")]
-pub use mocks::{mock_sink, mock_stream};
+pub use mocks::{PinnedSink, mock_sink, mock_stream};

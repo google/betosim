@@ -20,8 +20,8 @@
 # Run all tests:
 #   bazel test //src/modem-rs-derive:tests
 #
-# Run the linter (uses bazel test):
-#   bazel test //src/modem-rs-derive:clippy
+# Run the linter:
+#   bazel build //src/modem-rs-derive:clippy
 
 load(
     "@rules_rust//rust:defs.bzl",

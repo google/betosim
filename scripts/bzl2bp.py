@@ -146,7 +146,9 @@ def select(items):
 
 
 def load(label, *args, **kwargs):
-  pass
+  for arg in args:
+    if arg not in SANDBOX:
+      SANDBOX[arg] = {}
 
 
 def package(*args, **kwargs):
@@ -216,6 +218,10 @@ def android_binary(*args, **kwargs):
 
 
 def rust_clippy(*args, **kwargs):
+  pass
+
+
+def rust_lint_config(*args, **kwargs):
   pass
 
 
@@ -1008,6 +1014,7 @@ SANDBOX = {
     "sh_test": sh_test,
     "android_binary": android_binary,
     "rust_clippy": rust_clippy,
+    "rust_lint_config": rust_lint_config,
     "rust_doc": rust_doc,
     "rust_doc_test": rust_doc_test,
     "True": True,

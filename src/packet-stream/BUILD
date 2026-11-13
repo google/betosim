@@ -20,8 +20,8 @@
 # Run all tests:
 #   bazel test //src/packet-stream:tests
 #
-# Run the linter (uses bazel test):
-#   bazel test //src/packet-stream:clippy
+# Run the linter:
+#   bazel build //src/packet-stream:packet-stream_clippy
 
 load("//src:defs.bzl", "netsim_rust_library")
 
