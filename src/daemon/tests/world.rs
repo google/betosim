@@ -667,7 +667,11 @@ impl World {
 
     /// Spawns `<rel_module>::<test_name>` in an isolated child process with clean
     /// `ANDROID_TMP` and discovery directories and captures stdout, stderr, and temp handles.
-    fn run_isolated_child_test(module_path: &str, test_name: &str) -> IsolatedChildOutput {
+    fn run_isolated_child_test(
+        module_path: &str,
+        test_name: &str,
+        netsim_args: Option<&str>,
+    ) -> IsolatedChildOutput {
         let android_tmp = tempfile::tempdir().expect("Failed to create temp ANDROID_TMP");
         let discovery_dir = tempfile::tempdir().expect("Failed to create temp discovery_dir");
         let current_exe =
@@ -687,6 +691,9 @@ impl World {
             .env("USER", SUBPROCESS_USER);
         for &var in SCRUBBED_ENV_VARS {
             cmd.env_remove(var);
+        }
+        if let Some(netsim_args) = netsim_args {
+            cmd.env("NETSIM_ARGS", netsim_args);
         }
 
         let mut child = ChildKillGuard::new(cmd.spawn().unwrap_or_else(|err| {
@@ -795,9 +802,37 @@ impl World {
         cli_flags: &[&str],
         on_owner: impl FnOnce(),
     ) -> Option<IsolatedChildOutput> {
+        Self::when_run_isolated_owner_with_netsim_args(
+            module_path,
+            test_name,
+            cli_flags,
+            None,
+            on_owner,
+        )
+    }
+
+    /// Two-phase isolated child test entry point that starts `NetsimDaemon` as
+    /// `StartUpMode::Owner` with `cli_flags`, optional `NETSIM_ARGS`, and ephemeral ports.
+    pub fn when_run_isolated_owner_with_netsim_args(
+        module_path: &str,
+        test_name: &str,
+        cli_flags: &[&str],
+        netsim_args: Option<&str>,
+        on_owner: impl FnOnce(),
+    ) -> Option<IsolatedChildOutput> {
         if Self::is_isolated_child_for(test_name) {
-            let args =
-                Self::with_isolated_owner_ports(Self::parse_cli_args_preserving_stdio(cli_flags));
+            // Read NETSIM_ARGS from the child's OS environment rather than `netsim_args`
+            // so the test verifies the variable reached the spawned child process.
+            let parsed_args = match std::env::var("NETSIM_ARGS").ok() {
+                Some(child_netsim_args) => {
+                    let full_args = std::iter::once("netsimd")
+                        .chain(std::iter::once("--no-http-proxy"))
+                        .chain(cli_flags.iter().copied());
+                    daemon::Args::parse_from_with_env(full_args, Some(child_netsim_args.as_str()))
+                }
+                None => Self::parse_cli_args_preserving_stdio(cli_flags),
+            };
+            let args = Self::with_isolated_owner_ports(parsed_args);
             Self::run_child_daemon_probe(args, |result| {
                 let daemon = match result {
                     Ok(StartUpMode::Owner(daemon)) => daemon,
@@ -811,7 +846,7 @@ impl World {
             });
             return None;
         }
-        Some(Self::run_isolated_child_test(module_path, test_name))
+        Some(Self::run_isolated_child_test(module_path, test_name, netsim_args))
     }
 
     /// Two-phase isolated child test entry point that starts `NetsimDaemon` with
@@ -831,7 +866,7 @@ impl World {
             });
             return None;
         }
-        Some(Self::run_isolated_child_test(module_path, test_name))
+        Some(Self::run_isolated_child_test(module_path, test_name, None))
     }
 
     /// When I call reset

@@ -272,11 +272,22 @@ impl Args {
     // Return the command line args along with any NETSIM_ARGS from
     // the environment.
     pub(crate) fn parse() -> Args {
-        let mut args: Vec<String> = env::args().collect();
+        let netsim_args = env::var("NETSIM_ARGS").ok();
+        Self::parse_from_with_env(env::args(), netsim_args.as_deref())
+    }
+
+    /// Parses CLI arguments along with an optional `NETSIM_ARGS` environment
+    /// string appended after the CLI arguments.
+    pub fn parse_from_with_env<I, T>(itr: I, netsim_args: Option<&str>) -> Args
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let mut args: Vec<std::ffi::OsString> = itr.into_iter().map(Into::into).collect();
         // This simple split WILL FAIL on quoted values like: --host "my custom
         // host"
-        if let Ok(env_str) = env::var("NETSIM_ARGS") {
-            args.extend(env_str.split_whitespace().map(|s| s.to_string()));
+        if let Some(env_str) = netsim_args {
+            args.extend(env_str.split_whitespace().map(std::ffi::OsString::from));
         }
         Self::parse_from_with_ambient_proxy(args)
     }
@@ -513,5 +524,53 @@ mod tests {
         let formatted = args.format_for_log();
         assert!(!formatted.contains('\n'));
         assert!(formatted.contains(r#"fd_startup_str: "{\n  \"devices\": []\n}""#));
+    }
+
+    #[test]
+    fn test_parse_from_with_env_none_or_whitespace_preserves_cli_args() {
+        let parsed_none =
+            Args::parse_from_with_env(["netsimd", "--no-http-proxy", "--instance", "3"], None);
+        assert_eq!(parsed_none.instance, Some(3));
+        assert!(!parsed_none.logtostderr);
+
+        let parsed_blank = Args::parse_from_with_env(
+            ["netsimd", "--no-http-proxy", "--instance", "3"],
+            Some("   \t\n  "),
+        );
+        assert_eq!(parsed_blank.instance, Some(3));
+        assert!(!parsed_blank.logtostderr);
+    }
+
+    #[test]
+    fn test_parse_from_with_env_splits_whitespace_and_appends_after_cli_args() {
+        let parsed = Args::parse_from_with_env(
+            ["netsimd", "--no-http-proxy", "--test-beacons"],
+            Some("  --logtostderr\t--instance 5\n--no-test-beacons  "),
+        );
+        assert!(parsed.logtostderr);
+        assert_eq!(parsed.instance, Some(5));
+        assert!(!parsed.test_beacons);
+        assert!(parsed.no_test_beacons);
+
+        let sanitized = Args::parse_from_with_env(
+            ["netsimd", "--http-proxy", "http://127.0.0.1:8080"],
+            Some("--no-http-proxy"),
+        );
+        assert!(sanitized.no_http_proxy);
+        assert_eq!(sanitized.http_proxy, None);
+    }
+
+    #[test]
+    fn test_parse_from_with_env_redacts_wifi_password_in_format_for_log() {
+        let parsed = Args::parse_from_with_env(
+            ["netsimd", "--no-http-proxy"],
+            Some("--wifi-ssid OfficeAp --wifi-password s3cr3tPass"),
+        );
+        assert_eq!(parsed.wifi.wifi_ssid.as_deref(), Some("OfficeAp"));
+        assert_eq!(parsed.wifi.wifi_password.as_deref(), Some("s3cr3tPass"));
+
+        let formatted = parsed.format_for_log();
+        assert!(formatted.contains(r#"wifi_password: "<redacted>""#));
+        assert!(!formatted.contains("s3cr3tPass"));
     }
 }

@@ -362,6 +362,60 @@ fn test_long_logtostderr_flag_writes_stderr_without_log_files() {
     output.then_logtostderr_writes_redacted_stderr_without_log_files(WIFI_SECRET_PROBE);
 }
 
+/// Scenario: NETSIM_ARGS injects -l, -v, and --wifi-password, logging DEBUG probes and redacting wifi_password on stderr
+///   Given netsimd invoked with --no-shutdown and NETSIM_ARGS="-l -v --wifi-password secret-pass-probe"
+///   When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+///   Then netsimd_temp_dir exists with no log files created
+///   And stderr logs INFO and DEBUG probes and redacts wifi_password
+#[test]
+fn test_netsim_args_env_enables_verbose_and_redacts_wifi_password_on_stderr() {
+    // Given CLI flags with --no-shutdown and NETSIM_ARGS injecting -l, -v, and --wifi-password
+    let netsim_args = format!("-l -v --wifi-password {WIFI_SECRET_PROBE}");
+    // When NetsimDaemon starts as Owner and emits INFO and DEBUG probes
+    let Some(output) = World::when_run_isolated_owner_with_netsim_args(
+        module_path!(),
+        "test_netsim_args_env_enables_verbose_and_redacts_wifi_password_on_stderr",
+        &["--no-shutdown"],
+        Some(netsim_args.as_str()),
+        emit_verbose_log_probes,
+    ) else {
+        return;
+    };
+
+    // Then stderr logs INFO and DEBUG probes with wifi_password redacted and creates no log files
+    output.then_logtostderr_writes_redacted_stderr_without_log_files(WIFI_SECRET_PROBE);
+    output.then_stderr_logs_info_and_debug(VERBOSE_INFO_PROBE, VERBOSE_DEBUG_PROBE);
+}
+
+/// Scenario: NETSIM_ARGS injects --instance and --wifi-password into redirected instance log files with redaction
+///   Given netsimd invoked with --no-shutdown and NETSIM_ARGS="--instance 4 --wifi-password secret-pass-probe"
+///   When NetsimDaemon starts as Owner without -l
+///   Then netsim_4_stdout.log and netsim_4_stderr.log receive redirected output with wifi_password redacted
+///   And default netsim_stdout.log and netsim_stderr.log files are not created
+#[test]
+fn test_netsim_args_env_redirects_instance_logs_and_redacts_wifi_password() {
+    // Given CLI flags with --no-shutdown and NETSIM_ARGS injecting --instance 4 and --wifi-password
+    let netsim_args = format!("--instance 4 --wifi-password {WIFI_SECRET_PROBE}");
+    // When NetsimDaemon starts as Owner for instance 4
+    let Some(output) = World::when_run_isolated_owner_with_netsim_args(
+        module_path!(),
+        "test_netsim_args_env_redirects_instance_logs_and_redacts_wifi_password",
+        &["--no-shutdown"],
+        Some(netsim_args.as_str()),
+        || {},
+    ) else {
+        return;
+    };
+
+    // Then instance 4 log files receive redirected output with wifi_password redacted and no default log files exist
+    output.then_redirected_logs_written(
+        "netsim_4_stdout.log",
+        "netsim_4_stderr.log",
+        WIFI_SECRET_PROBE,
+    );
+    output.then_no_default_log_files_created();
+}
+
 // Scenario: Toggle capture using generic patch
 //   Given I start netsimd
 //   When a device is created and its capture is toggled
