@@ -60,7 +60,7 @@ impl ChipClient for CellClient {
     }
 
     async fn reset(&self, id: ChipId) -> Result<Chip, ClientError> {
-        // Not implemented
+        self.perform_action(id, crate::CellAction::Reset).await?;
         self.read(id).await
     }
 

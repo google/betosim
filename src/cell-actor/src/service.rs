@@ -168,6 +168,8 @@ impl ActorService for CellActor {
         // 1. Add Stream
         ctx.add_stream(chip_id, Box::pin(stream));
 
+        let initial_network_configs = network_configs.clone();
+
         // 2. Add to Controller directly (Sync)
         if let Err(e) = self.controller.add_modem_with_options(
             chip_id.0,
@@ -191,7 +193,8 @@ impl ActorService for CellActor {
             self.controller.set_host_radio_enabled(chip_id.0, false)?;
         }
 
-        self.active_chips.insert(chip_id, ChipState { device_id, enabled });
+        self.active_chips
+            .insert(chip_id, ChipState { device_id, enabled, initial_network_configs });
 
         Ok(chip_id)
     }
@@ -273,13 +276,20 @@ impl ActorService for CellActor {
             CellError::Chip(ChipError::InvalidArguments("missing chip id".into()))
         })?;
 
-        if !self.active_chips.contains_key(&chip_id) {
+        let Some(state) = self.active_chips.get_mut(&chip_id) else {
             return Err(CellError::Chip(ChipError::ChipNotFound(chip_id)));
-        }
+        };
 
         action.validate().map_err(CellError::Chip)?;
 
         let modem_action = match action {
+            CellAction::Reset => {
+                self.controller
+                    .update_network_configs(chip_id.0, state.initial_network_configs.clone())?;
+                self.controller.reset_modem(chip_id.0)?;
+                state.enabled = true;
+                return Ok(CellActionResult::Success);
+            }
             CellAction::IncomingCall { number } => {
                 ModemAction::IncomingCall { target_id: chip_id, number }
             }

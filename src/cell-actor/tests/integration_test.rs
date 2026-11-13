@@ -22,11 +22,15 @@ use netsim_model::{
 
 use crate::world::{
     AT_CREG_ENABLE_CMD, ATTACH_URC_PREFIX, CREG_DETACH_URC, OK_RESP, SLIRP_FIRST_V4,
-    SLIRP_FIRST_V6, World,
+    SLIRP_FIRST_V6, SLIRP_SECOND_V4, World,
 };
 
 const CHIP_1: u32 = 1;
 const CHIP_2: u32 = 2;
+const DEFAULT_RSSI: u32 = 20;
+const DEFAULT_BER: u32 = 99;
+const DIRTY_RSSI: u32 = 15;
+const DIRTY_BER: u32 = 2;
 const CALLER_NUMBER: &str = "123456";
 const SMS_TEXT: &str = "hello";
 const SHORT_DIAL_CMD: &str = "ATD123;\r\n";
@@ -34,9 +38,18 @@ const DIAL_CMD: &str = "ATD12345;\r\n";
 const DIAL_MODEM_1_CMD: &str = "ATD15555211001;\r\n";
 const AT_CMD: &str = "AT\r\n";
 const AT_CFUN_QUERY_CMD: &str = "AT+CFUN?\r\n";
+const AT_CGDCONT_CMD: &str = "AT+CGDCONT=1,\"IP\",\"internet\"\r\n";
+const AT_CGACT_QUERY_CMD: &str = "AT+CGACT?\r\n";
+const AT_CMGW_CMD: &str = "AT+CMGW=16\r\n";
+const AT_CMGW_PDU_PAYLOAD: &str = "0011000B915155255155F40000AA02C832\x1a";
+const AT_CMEE_QUERY_CMD: &str = "AT+CMEE?\r\n";
 const RING_URC: &str = "RING\r\n";
 const NO_CARRIER_URC: &str = "NO CARRIER\r\n";
 const CFUN_FULL_RESP: &str = "+CFUN: 1\r\nOK\r\n";
+const CGACT_ACTIVE_RESP: &str = "+CGACT: 1,1\r\nOK\r\n";
+const CMGW_PROMPT: &str = "> ";
+const CMGW_INDEX_1_RESP: &str = "+CMGW: 1\r\nOK\r\n";
+const CMEE_DISABLED_RESP: &str = "+CMEE: 0\r\nOK\r\n";
 const CME_NO_NETWORK_RESP: &str = "+CME ERROR: 30\r\n";
 
 /// Scenario: Creating a cellular chip initializes an active idle modem in the actor
@@ -382,6 +395,122 @@ async fn test_cell_radio_state_update_takes_precedence_over_chip_enabled() {
     world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
 }
 
+/// Scenario: Resetting a disabled cell chip restores network registration and idle state
+#[tokio::test]
+async fn test_reset_restores_registration_of_disabled_chip() {
+    // Given an initially enabled cell chip that was registered and then disabled
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_registered_chip_disabled(CHIP_1).await;
+
+    // When the chip is reset
+    world.when_reset_chip(CHIP_1).await;
+
+    // Then the guest re-attaches and chip state returns to enabled, idle, and registered
+    world.then_reset_chip_is(CHIP_1, true, MODEM_STATE_IDLE);
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
+}
+
+/// Scenario: Resetting an already-enabled modem cleans dirty AT, PDP, SMS, signal, and call state
+#[tokio::test]
+async fn test_reset_on_already_enabled_modem_cleans_dirty_state() {
+    // Given an enabled, registered cell chip with CMEE=1, active PDP context, stored SMS, dirty signal, and ringing call
+    let mut world = World::new().await;
+    world.given_cell_chip(CHIP_1).await;
+    world.given_guest_registered(CHIP_1).await;
+    world.given_guest_cme_errors_numeric(CHIP_1).await;
+
+    world.when_guest_sends(CHIP_1, AT_CGDCONT_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+    world.when_guest_sends(CHIP_1, AT_CGACT_QUERY_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, CGACT_ACTIVE_RESP).await;
+
+    world.when_guest_sends(CHIP_1, AT_CMGW_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, CMGW_PROMPT).await;
+    world.when_guest_sends(CHIP_1, AT_CMGW_PDU_PAYLOAD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, CMGW_INDEX_1_RESP).await;
+    world.then_cell_sms_count_is(CHIP_1, 1).await;
+
+    world.when_set_signal_strength(CHIP_1, DIRTY_RSSI, DIRTY_BER).await;
+    world.then_guest_receives_packet_starting_with(CHIP_1, "+CSQ:").await;
+    world
+        .then_cell_status_is(
+            CHIP_1,
+            DIRTY_RSSI,
+            DIRTY_BER,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+
+    world.when_incoming_call(CHIP_1, CALLER_NUMBER).await;
+    world.then_guest_receives_exact_packet(CHIP_1, RING_URC).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_RINGING).await;
+
+    // When the already-enabled chip is reset
+    world.when_reset_chip(CHIP_1).await;
+
+    // Then the call drops with NO CARRIER, registration detaches and re-attaches, and all dirty state is cleared
+    world.then_reset_chip_is(CHIP_1, true, MODEM_STATE_IDLE);
+    world.then_guest_receives_exact_packet(CHIP_1, NO_CARRIER_URC).await;
+    world.then_guest_receives_exact_packet(CHIP_1, CREG_DETACH_URC).await;
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
+    world.then_active_calls_are(CHIP_1, &[]).await;
+    world.then_cell_sms_count_is(CHIP_1, 0).await;
+    world
+        .then_cell_status_is(
+            CHIP_1,
+            DEFAULT_RSSI,
+            DEFAULT_BER,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+    world.when_guest_sends(CHIP_1, AT_CGACT_QUERY_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+    world.when_guest_sends(CHIP_1, AT_CMEE_QUERY_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, CMEE_DISABLED_RESP).await;
+}
+
+/// Scenario: Resetting a start-disabled cell chip unconditionally enables the modem and attaches
+#[tokio::test]
+async fn test_reset_on_start_disabled_chip_enables_modem() {
+    // Given a start-disabled cell chip with AT+CREG=1 subscribed
+    let mut world = World::new().await;
+    world.given_disabled_cell_chip(CHIP_1).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_DOWN).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, false, MODEM_STATE_DOWN)]).await;
+    world.when_guest_sends(CHIP_1, AT_CREG_ENABLE_CMD).await;
+    world.then_guest_receives_exact_packet(CHIP_1, OK_RESP).await;
+
+    // When the chip is reset
+    world.when_reset_chip(CHIP_1).await;
+
+    // Then the modem attaches and reports enabled, idle, and RegisteredHome
+    world.then_reset_chip_is(CHIP_1, true, MODEM_STATE_IDLE);
+    world.then_guest_receives_packet_starting_with(CHIP_1, ATTACH_URC_PREFIX).await;
+    world.then_cell_state_is(CHIP_1, MODEM_STATE_IDLE).await;
+    world.then_listed_cell_states_are(&[(CHIP_1, true, MODEM_STATE_IDLE)]).await;
+    world
+        .then_cell_registrations_are(
+            CHIP_1,
+            RegistrationStatus::RegisteredHome,
+            RegistrationStatus::RegisteredHome,
+        )
+        .await;
+}
+
 /// Scenario: A disabled cell chip suppresses inbound SMS delivery
 #[tokio::test]
 async fn test_disabled_chip_does_not_deliver_incoming_sms() {
@@ -551,21 +680,35 @@ async fn test_incoming_call_invalid_number() {
     world.then_last_error_contains("Invalid phone number");
 }
 
+fn test_network_config(
+    ip: Ipv4Addr,
+    prefixlen: u8,
+    gateway: Ipv4Addr,
+    dns: Ipv4Addr,
+) -> CellNetworkConfig {
+    CellNetworkConfig {
+        ip_address: IpAddr::V4(ip),
+        prefixlen,
+        gateway: IpAddr::V4(gateway),
+        dns: IpAddr::V4(dns),
+    }
+}
+
 /// Scenario: Creating a cellular chip with initial network configs and updating them via ChipVariantUpdate::Cell
 #[tokio::test]
 async fn test_network_config_lifecycle_and_update() {
-    let initial_config = CellNetworkConfig {
-        ip_address: IpAddr::V4(Ipv4Addr::new(192, 168, 97, 2)),
-        prefixlen: 30,
-        gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 97, 1)),
-        dns: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-    };
-    let updated_config = CellNetworkConfig {
-        ip_address: IpAddr::V4(Ipv4Addr::new(192, 168, 97, 6)),
-        prefixlen: 30,
-        gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 97, 5)),
-        dns: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-    };
+    let initial_config = test_network_config(
+        Ipv4Addr::new(192, 168, 97, 2),
+        30,
+        Ipv4Addr::new(192, 168, 97, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+    );
+    let updated_config = test_network_config(
+        Ipv4Addr::new(192, 168, 97, 6),
+        30,
+        Ipv4Addr::new(192, 168, 97, 5),
+        Ipv4Addr::new(1, 1, 1, 1),
+    );
 
     let mut world = World::new().await;
 
@@ -578,6 +721,63 @@ async fn test_network_config_lifecycle_and_update() {
 
     // Then reading chip 1 returns the updated IPv4 network config
     world.then_cell_network_configs_are(1, &[updated_config]).await;
+}
+
+/// Scenario: Resetting a cell chip restores its creation-time network configurations across repeated resets
+#[tokio::test]
+async fn test_reset_restores_initial_network_configs() {
+    let initial_config = test_network_config(
+        Ipv4Addr::new(192, 168, 97, 2),
+        30,
+        Ipv4Addr::new(192, 168, 97, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+    );
+    let updated_config = test_network_config(
+        Ipv4Addr::new(192, 168, 97, 6),
+        30,
+        Ipv4Addr::new(192, 168, 97, 5),
+        Ipv4Addr::new(1, 1, 1, 1),
+    );
+
+    // Given a cell chip created with initial network configs and updated to new configs
+    let mut world = World::new().await;
+    world.given_cell_chip_with_configs(CHIP_1, vec![initial_config.clone()]).await;
+    world.when_update_network_configs(CHIP_1, vec![updated_config.clone()]).await;
+    world.then_cell_network_configs_are(CHIP_1, std::slice::from_ref(&updated_config)).await;
+
+    // When the chip is reset
+    world.when_reset_chip(CHIP_1).await;
+
+    // Then reset returns and persists the initial network configs across repeated update/reset cycles
+    world.then_reset_chip_is(CHIP_1, true, MODEM_STATE_IDLE);
+    world.then_reset_chip_network_configs_are(CHIP_1, std::slice::from_ref(&initial_config));
+    world.then_cell_network_configs_are(CHIP_1, std::slice::from_ref(&initial_config)).await;
+
+    world.when_update_network_configs(CHIP_1, vec![updated_config.clone()]).await;
+    world.then_cell_network_configs_are(CHIP_1, std::slice::from_ref(&updated_config)).await;
+    world.when_reset_chip(CHIP_1).await;
+    world.then_reset_chip_network_configs_are(CHIP_1, std::slice::from_ref(&initial_config));
+    world.then_cell_network_configs_are(CHIP_1, std::slice::from_ref(&initial_config)).await;
+}
+
+/// Scenario: Resetting a Goldfish cell chip restores and retains its dynamically allocated slirp lease
+#[tokio::test]
+async fn test_reset_keeps_dynamic_slirp_lease() {
+    // Given a Goldfish cell chip with a dynamically allocated dual-stack slirp lease that was subsequently cleared
+    let goldfish_quirks = Quirks { dynamic_slirp_lease: true, ..Default::default() };
+    let mut world = World::new().await;
+    world.given_cell_chip_with_quirks(CHIP_1, goldfish_quirks, Vec::new()).await;
+    world.when_update_network_configs(CHIP_1, Vec::new()).await;
+    world.then_cell_network_configs_are(CHIP_1, &[]).await;
+
+    // When the chip is reset
+    world.when_reset_chip(CHIP_1).await;
+
+    // Then the initial dual-stack slirp lease is returned and remains intact
+    world.then_reset_chip_is(CHIP_1, true, MODEM_STATE_IDLE);
+    world.then_reset_chip_has_dual_stack_lease(CHIP_1, SLIRP_FIRST_V4, SLIRP_FIRST_V6);
+    world.then_cell_has_dual_stack_lease(CHIP_1, SLIRP_FIRST_V4, SLIRP_FIRST_V6).await;
+    world.then_slirp_allocates_ipv4_lease(CHIP_2, SLIRP_SECOND_V4).await;
 }
 
 /// Scenario: Goldfish dynamic SLIRP lease allocates a dual-stack IP on create and releases it on delete
@@ -604,12 +804,12 @@ async fn test_goldfish_leases_and_releases_slirp_ip() {
 async fn test_cuttlefish_and_provided_configs_do_not_lease_slirp_ip() {
     // Given a cell actor and a custom IPv4 network configuration
     let cuttlefish_quirks = Quirks { is_cuttlefish: true, ..Default::default() };
-    let custom_config = vec![CellNetworkConfig {
-        ip_address: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
-        prefixlen: 24,
-        gateway: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
-        dns: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-    }];
+    let custom_config = vec![test_network_config(
+        Ipv4Addr::new(192, 168, 1, 10),
+        24,
+        Ipv4Addr::new(192, 168, 1, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+    )];
 
     let mut world = World::new().await;
 
@@ -793,8 +993,11 @@ async fn test_negative_create_duplicate_missing_streams_and_invalid_actions() {
     world.then_last_error_contains("Missing packet stream or sink");
     world.then_chip_not_found(3).await;
 
-    // When performing an action or update on a non-existent chip 999
+    // When performing an action, reset, or update on a non-existent chip 999
     world.when_try_action_on_chip(999, CellAction::EndCall).await;
+    world.then_last_error_is_chip_not_found(999);
+
+    world.when_try_reset_chip(999).await;
     world.then_last_error_is_chip_not_found(999);
 
     world.when_try_update_chip_enabled(999, false).await;

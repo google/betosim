@@ -38,6 +38,7 @@ const DEVICE_ID: DeviceId = DeviceId(1);
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
 const NO_PACKET_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const SLIRP_FIRST_V4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 32);
+pub(crate) const SLIRP_SECOND_V4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 33);
 pub(crate) const SLIRP_FIRST_V6: Ipv6Addr = Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0x20);
 pub(crate) const AT_CMEE_NUMERIC_CMD: &str = "AT+CMEE=1\r\n";
 pub(crate) const AT_CREG_ENABLE_CMD: &str = "AT+CREG=1\r\n";
@@ -62,6 +63,7 @@ pub(crate) struct World {
     server_handle: JoinHandle<()>,
     slirp_handle: JoinHandle<()>,
     last_error: Option<ClientError>,
+    last_reset_chip: Option<Chip>,
 }
 
 impl Drop for World {
@@ -107,6 +109,7 @@ impl World {
             server_handle,
             slirp_handle,
             last_error: None,
+            last_reset_chip: None,
         }
     }
 
@@ -394,6 +397,16 @@ impl World {
             .expect("update chip enabled and cell radio state");
     }
 
+    pub(crate) async fn when_reset_chip(&mut self, id: u32) {
+        self.last_error = None;
+        self.last_reset_chip = Some(self.client.reset(ChipId(id)).await.expect("reset chip"));
+    }
+
+    pub(crate) async fn when_try_reset_chip(&mut self, id: u32) {
+        self.last_reset_chip = None;
+        self.last_error = self.client.reset(ChipId(id)).await.err();
+    }
+
     pub(crate) async fn when_guest_sends(&mut self, id: u32, command: &str) {
         self.when_guest_sends_packet(id, command.as_bytes()).await;
     }
@@ -447,7 +460,11 @@ impl World {
     }
 
     pub(crate) fn then_last_error_is_chip_not_found(&self, expected_id: u32) {
-        self.then_last_error_contains(&format!("Chip not found error: {expected_id}"));
+        let err = self.last_error.as_ref().expect("expected error, got Ok");
+        let Some(NetsimChipError::ChipNotFound(actual_id)) = err.as_chip_error() else {
+            panic!("expected ChipNotFound({expected_id}), got {err:?}");
+        };
+        assert_eq!(*actual_id, ChipId(expected_id));
     }
 
     pub(crate) async fn then_device_notified_chip_removed(&mut self, expected_id: u32) {
@@ -662,6 +679,36 @@ impl World {
         assert_eq!(self.read_cell(id).await.network_configs, expected);
     }
 
+    pub(crate) fn then_reset_chip_is(&self, id: u32, expected_enabled: bool, expected_state: &str) {
+        let chip = self.last_reset_chip.as_ref().expect("expected reset chip");
+        assert_eq!(chip.id, id);
+        assert_eq!(chip.enabled, expected_enabled);
+        let cell = extract_cell_ref(chip);
+        assert_eq!(cell.radio.state, Some(expected_enabled));
+        assert_eq!(cell.state, expected_state);
+    }
+
+    pub(crate) fn then_reset_chip_network_configs_are(
+        &self,
+        id: u32,
+        expected: &[CellNetworkConfig],
+    ) {
+        let chip = self.last_reset_chip.as_ref().expect("expected reset chip");
+        assert_eq!(chip.id, id);
+        assert_eq!(extract_cell_ref(chip).network_configs, expected);
+    }
+
+    pub(crate) fn then_reset_chip_has_dual_stack_lease(
+        &self,
+        id: u32,
+        expected_v4: Ipv4Addr,
+        expected_v6: Ipv6Addr,
+    ) {
+        let chip = self.last_reset_chip.as_ref().expect("expected reset chip");
+        assert_eq!(chip.id, id);
+        assert_dual_stack_lease(extract_cell_ref(chip), expected_v4, expected_v6);
+    }
+
     pub(crate) async fn then_cell_has_dual_stack_lease(
         &self,
         id: u32,
@@ -669,9 +716,7 @@ impl World {
         expected_v6: Ipv6Addr,
     ) {
         let cell = self.read_cell(id).await;
-        assert_eq!(cell.network_configs.len(), 2, "must allocate dual-stack v4 and v6 configs");
-        assert_eq!(cell.network_configs[0].ip_address, IpAddr::V4(expected_v4));
-        assert_eq!(cell.network_configs[1].ip_address, IpAddr::V6(expected_v6));
+        assert_dual_stack_lease(&cell, expected_v4, expected_v6);
     }
 
     pub(crate) async fn then_slirp_allocates_ipv4_lease(&self, id: u32, expected_v4: Ipv4Addr) {
@@ -682,6 +727,19 @@ impl World {
             .expect("allocate lease")
             .expect("lease returned");
         assert_eq!(lease.v4.ip_address, expected_v4);
+    }
+}
+
+fn assert_dual_stack_lease(cell: &Cell, expected_v4: Ipv4Addr, expected_v6: Ipv6Addr) {
+    assert_eq!(cell.network_configs.len(), 2, "must allocate dual-stack v4 and v6 configs");
+    assert_eq!(cell.network_configs[0].ip_address, IpAddr::V4(expected_v4));
+    assert_eq!(cell.network_configs[1].ip_address, IpAddr::V6(expected_v6));
+}
+
+fn extract_cell_ref(chip: &Chip) -> &Cell {
+    match &chip.variant {
+        Some(ChipVariant::Cell(cell_chip)) => cell_chip,
+        other => panic!("expected Cell variant for chip {}, got {other:?}", chip.id),
     }
 }
 

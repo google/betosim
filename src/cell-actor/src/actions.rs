@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CellAction {
+    Reset,
     IncomingCall { number: String },
     UpdateCall,
     EndCall,
@@ -130,6 +131,8 @@ mod tests {
 
     #[test]
     fn test_validate_action() {
+        assert!(CellAction::Reset.validate().is_ok());
+
         let valid_call = CellAction::IncomingCall { number: "+15551234567".into() };
         assert!(valid_call.validate().is_ok());
 

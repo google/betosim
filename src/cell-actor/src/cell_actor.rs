@@ -16,13 +16,14 @@ use std::collections::HashMap;
 
 use device_actor::DeviceClient;
 use modem_rs::{ModemNetworkSimulator, modem_network::ModemNetworkInterface};
-use netsim_model::ChipId;
+use netsim_model::{CellNetworkConfig, ChipId};
 use slirp_actor::SlirpClient;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct ChipState {
     pub(crate) device_id: device_api::DeviceId,
     pub(crate) enabled: bool,
+    pub(crate) initial_network_configs: Vec<CellNetworkConfig>,
 }
 
 pub struct CellActor {
