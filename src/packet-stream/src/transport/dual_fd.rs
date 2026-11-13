@@ -112,7 +112,11 @@ struct AsyncGenericFd(AsyncFd<OwnedFd>);
 
 impl AsyncGenericFd {
     fn new(fd: OwnedFd) -> Result<Self> {
-        let async_fd = AsyncFd::new(fd).map_err(PacketStreamError::Io)?;
+        // SAFETY: `fd` is an exclusively owned `OwnedFd` moved into `AsyncFd`; `AsyncFd::drop`
+        // deregisters it before `OwnedFd::drop` closes it, and `AsyncGenericFd` never calls
+        // `get_mut()` or `into_inner()`.
+        let async_fd =
+            unsafe { AsyncFd::register(fd) }.map_err(|e| PacketStreamError::Io(e.into()))?;
         Ok(Self(async_fd))
     }
 }
@@ -203,7 +207,10 @@ impl DualFdListener {
 
                 if is_listening_socket(&in_fd) {
                     set_nonblocking(&in_fd)?;
-                    let async_fd = AsyncFd::new(in_fd).map_err(|e| {
+                    // SAFETY: `in_fd` is an exclusively owned `OwnedFd` moved into `AsyncFd`;
+                    // `AsyncFd::drop` deregisters it before `OwnedFd::drop` closes it, and
+                    // `DualFdListener` never calls `get_mut()` or `into_inner()`.
+                    let async_fd = unsafe { AsyncFd::register(in_fd) }.map_err(|e| {
                         PacketStreamError::InvalidConfig(format!(
                             "Failed to create AsyncFd for listening socket: {e}"
                         ))
