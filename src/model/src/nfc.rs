@@ -176,6 +176,121 @@ impl FromStr for NfcTagProtocol {
     }
 }
 
+/// Trigger condition for simulating NFC RF link loss / faults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NfcFaultTrigger {
+    #[default]
+    None,
+    OnNextApdu,
+    OnFirstWrite,
+    AfterNApdus(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NfcFaultTriggerKind {
+    #[serde(alias = "NONE")]
+    None,
+    #[serde(alias = "ON_NEXT_APDU")]
+    OnNextApdu,
+    #[serde(alias = "ON_FIRST_WRITE")]
+    OnFirstWrite,
+    #[serde(alias = "AFTER_N_APDUS")]
+    AfterNApdus,
+}
+
+const MISSING_APDU_COUNT_ERR: &str =
+    "`fault_trigger_apdu_count` is required when `fault_trigger` is `after_n_apdus`";
+const UNEXPECTED_APDU_COUNT_ERR: &str =
+    "`fault_trigger_apdu_count` is only valid when `fault_trigger` is `after_n_apdus`";
+const CONFLICTING_FAULT_TRIGGER_ERR: &str =
+    "conflicting fault_trigger and disconnect_on_transceive";
+
+impl NfcFaultTrigger {
+    const fn into_wire_parts(self) -> (NfcFaultTriggerKind, Option<u32>) {
+        match self {
+            Self::None => (NfcFaultTriggerKind::None, None),
+            Self::OnNextApdu => (NfcFaultTriggerKind::OnNextApdu, None),
+            Self::OnFirstWrite => (NfcFaultTriggerKind::OnFirstWrite, None),
+            Self::AfterNApdus(count) => (NfcFaultTriggerKind::AfterNApdus, Some(count)),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct FaultWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disconnect_on_transceive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fault_trigger: Option<NfcFaultTriggerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fault_trigger_apdu_count: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WithFault<B> {
+    #[serde(flatten)]
+    base: B,
+    #[serde(flatten)]
+    fault: FaultWire,
+}
+
+impl FaultWire {
+    const fn from_trigger(trigger: NfcFaultTrigger) -> Self {
+        let (kind, fault_trigger_apdu_count) = trigger.into_wire_parts();
+        let disconnect_on_transceive = Some(!matches!(trigger, NfcFaultTrigger::None));
+        Self { disconnect_on_transceive, fault_trigger: Some(kind), fault_trigger_apdu_count }
+    }
+
+    fn from_update(t: Option<NfcFaultTrigger>, d: Option<bool>) -> Result<Self, &'static str> {
+        match (t, d) {
+            (Some(t), Some(d)) if d != (t != NfcFaultTrigger::None) => {
+                Err(CONFLICTING_FAULT_TRIGGER_ERR)
+            }
+            (Some(t), disconnect_on_transceive) => {
+                let (kind, fault_trigger_apdu_count) = t.into_wire_parts();
+                Ok(Self {
+                    disconnect_on_transceive,
+                    fault_trigger: Some(kind),
+                    fault_trigger_apdu_count,
+                })
+            }
+            (None, disconnect_on_transceive) => {
+                Ok(Self { disconnect_on_transceive, ..Self::default() })
+            }
+        }
+    }
+
+    fn decode(self) -> Result<(Option<NfcFaultTrigger>, Option<bool>), &'static str> {
+        use NfcFaultTriggerKind as K;
+        let trigger = match (self.fault_trigger, self.fault_trigger_apdu_count) {
+            (None, None) => None,
+            (Some(K::None), None) => Some(NfcFaultTrigger::None),
+            (Some(K::OnNextApdu), None) => Some(NfcFaultTrigger::OnNextApdu),
+            (Some(K::OnFirstWrite), None) => Some(NfcFaultTrigger::OnFirstWrite),
+            (Some(K::AfterNApdus), Some(n)) => Some(NfcFaultTrigger::AfterNApdus(n)),
+            (Some(K::AfterNApdus), None) => return Err(MISSING_APDU_COUNT_ERR),
+            (_, Some(_)) => return Err(UNEXPECTED_APDU_COUNT_ERR),
+        };
+        match (trigger, self.disconnect_on_transceive) {
+            (Some(t), Some(d)) if d != (t != NfcFaultTrigger::None) => {
+                Err(CONFLICTING_FAULT_TRIGGER_ERR)
+            }
+            _ => Ok((trigger, self.disconnect_on_transceive)),
+        }
+    }
+
+    fn resolve(self, require_disconnect: bool) -> Result<NfcFaultTrigger, &'static str> {
+        match self.decode()? {
+            (Some(t), _) => Ok(t),
+            (None, Some(true)) => Ok(NfcFaultTrigger::OnFirstWrite),
+            (None, Some(false)) => Ok(NfcFaultTrigger::None),
+            (None, None) if require_disconnect => Err("missing field `disconnect_on_transceive`"),
+            (None, None) => Ok(NfcFaultTrigger::None),
+        }
+    }
+}
+
 /// Validation and encoding errors for virtual NFC tag configurations and NDEF
 /// payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -206,6 +321,7 @@ fn default_true() -> bool {
 
 /// Virtual NFC tag managed by `NfcActor`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct NfcTag {
     pub id: NfcTagId,
     pub name: String,
@@ -220,11 +336,35 @@ pub struct NfcTag {
     pub read_only: bool,
     #[serde(default = "default_true")]
     pub formatted: bool,
-    pub disconnect_on_transceive: bool,
+    #[serde(skip)]
+    pub fault_trigger: NfcFaultTrigger,
     #[serde(default)]
     pub tx_count: u32,
     #[serde(default)]
     pub rx_count: u32,
+}
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct NfcTagBorrow<'a>(#[serde(with = "NfcTag")] &'a NfcTag);
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct NfcTagBase(#[serde(with = "NfcTag")] NfcTag);
+
+impl Serialize for NfcTag {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let fault = FaultWire::from_trigger(self.fault_trigger);
+        WithFault { base: NfcTagBorrow(self), fault }.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for NfcTag {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let WithFault { base: NfcTagBase(mut tag), fault } = WithFault::deserialize(d)?;
+        tag.fault_trigger = fault.resolve(true).map_err(serde::de::Error::custom)?;
+        Ok(tag)
+    }
 }
 
 impl NfcTag {
@@ -264,14 +404,12 @@ impl NfcTag {
             ndef_bytes: raw_ndef_bytes,
             read_only,
             formatted,
-            disconnect_on_transceive,
+            fault_trigger,
         } = create;
 
         let name = Self::resolve_name(id, name);
-
         let uid =
             if uid.trim().is_empty() { Self::default_uid(id) } else { normalize_uid_hex(&uid)? };
-
         let decoded_ndef = decode_ndef_hex(&raw_ndef_bytes, protocol)?;
         let ndef_bytes = encode_hex_lower(&decoded_ndef);
         let payload_text = decode_ndef_payload_text(&decoded_ndef);
@@ -287,7 +425,7 @@ impl NfcTag {
             payload_text,
             read_only,
             formatted,
-            disconnect_on_transceive,
+            fault_trigger,
             tx_count: 0,
             rx_count: 0,
         })
@@ -302,7 +440,7 @@ impl NfcTag {
 
 /// Parameters for creating a virtual NFC tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(remote = "Self", default)]
 pub struct NfcTagCreate {
     pub name: String,
     pub protocol: NfcTagProtocol,
@@ -312,7 +450,11 @@ pub struct NfcTagCreate {
     pub ndef_bytes: String,
     pub read_only: bool,
     pub formatted: bool,
-    pub disconnect_on_transceive: bool,
+    /// Fault trigger condition. In JSON deserialization, conflicting
+    /// `disconnect_on_transceive` values are rejected; when `fault_trigger` is
+    /// omitted, legacy `disconnect_on_transceive: true` maps to `OnFirstWrite`.
+    #[serde(skip)]
+    pub fault_trigger: NfcFaultTrigger,
 }
 
 impl Default for NfcTagCreate {
@@ -326,13 +468,40 @@ impl Default for NfcTagCreate {
             ndef_bytes: String::new(),
             read_only: false,
             formatted: true,
-            disconnect_on_transceive: false,
+            fault_trigger: NfcFaultTrigger::None,
         }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct NfcTagCreateBorrow<'a>(#[serde(with = "NfcTagCreate")] &'a NfcTagCreate);
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct NfcTagCreateBase(#[serde(with = "NfcTagCreate")] NfcTagCreate);
+
+impl Serialize for NfcTagCreate {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        WithFault {
+            base: NfcTagCreateBorrow(self),
+            fault: FaultWire::from_trigger(self.fault_trigger),
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for NfcTagCreate {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let WithFault { base: NfcTagCreateBase(mut create), fault } = WithFault::deserialize(d)?;
+        create.fault_trigger = fault.resolve(false).map_err(serde::de::Error::custom)?;
+        Ok(create)
     }
 }
 
 /// Parameters for updating a virtual NFC tag.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self", default)]
 pub struct NfcTagUpdate {
     pub name: Option<String>,
     pub position: Option<Position>,
@@ -340,10 +509,52 @@ pub struct NfcTagUpdate {
     pub ndef_bytes: Option<String>,
     pub read_only: Option<bool>,
     pub formatted: Option<bool>,
+    #[serde(skip)]
     pub disconnect_on_transceive: Option<bool>,
+    #[serde(skip)]
+    pub fault_trigger: Option<NfcFaultTrigger>,
+}
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct NfcTagUpdateBorrow<'a>(#[serde(with = "NfcTagUpdate")] &'a NfcTagUpdate);
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct NfcTagUpdateBase(#[serde(with = "NfcTagUpdate")] NfcTagUpdate);
+
+impl Serialize for NfcTagUpdate {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let fault = FaultWire::from_update(self.fault_trigger, self.disconnect_on_transceive)
+            .map_err(serde::ser::Error::custom)?;
+        WithFault { base: NfcTagUpdateBorrow(self), fault }.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for NfcTagUpdate {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let WithFault { base: NfcTagUpdateBase(mut update), fault } = WithFault::deserialize(d)?;
+        (update.fault_trigger, update.disconnect_on_transceive) =
+            fault.decode().map_err(serde::de::Error::custom)?;
+        Ok(update)
+    }
 }
 
 impl NfcTagUpdate {
+    /// Resolves next trigger (`Some(_)` wins; `false` clears; `true` keeps or `OnFirstWrite`).
+    #[must_use]
+    pub const fn resolved_fault_trigger(&self, cur: NfcFaultTrigger) -> Option<NfcFaultTrigger> {
+        match (self.fault_trigger, self.disconnect_on_transceive) {
+            (Some(trigger), _) => Some(trigger),
+            (None, Some(true)) => Some(match cur {
+                NfcFaultTrigger::None => NfcFaultTrigger::OnFirstWrite,
+                other => other,
+            }),
+            (None, Some(false)) => Some(NfcFaultTrigger::None),
+            (None, None) => None,
+        }
+    }
+
     /// Applies updates to an existing [`NfcTag`].
     ///
     /// # Errors
@@ -358,7 +569,8 @@ impl NfcTagUpdate {
             ndef_bytes,
             read_only,
             formatted,
-            disconnect_on_transceive,
+            disconnect_on_transceive: _,
+            fault_trigger: _,
         } = self;
 
         let decoded_ndef =
@@ -379,8 +591,8 @@ impl NfcTagUpdate {
         if let &Some(formatted) = formatted {
             tag.formatted = formatted;
         }
-        if let &Some(disconnect) = disconnect_on_transceive {
-            tag.disconnect_on_transceive = disconnect;
+        if let Some(next_trigger) = self.resolved_fault_trigger(tag.fault_trigger) {
+            tag.fault_trigger = next_trigger;
         }
         if let Some(bytes) = decoded_ndef {
             tag.set_ndef_bytes(&bytes);
@@ -789,7 +1001,7 @@ mod tests {
         assert!(tag.payload_text.is_none());
         assert!(!tag.read_only);
         assert!(tag.formatted);
-        assert!(!tag.disconnect_on_transceive);
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::None);
         assert_eq!(tag.tx_count, 0);
         assert_eq!(tag.rx_count, 0);
     }
@@ -809,7 +1021,7 @@ mod tests {
             ndef_bytes: ndef_hex,
             read_only: true,
             formatted: true,
-            disconnect_on_transceive: true,
+            fault_trigger: NfcFaultTrigger::OnFirstWrite,
         };
 
         let tag = NfcTag::try_from_create(NfcTagId(5), create).expect("custom create must succeed");
@@ -823,7 +1035,7 @@ mod tests {
         assert_eq!(tag.payload_text.as_deref(), Some("Hello, world!"));
         assert!(tag.read_only);
         assert!(tag.formatted);
-        assert!(tag.disconnect_on_transceive);
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::OnFirstWrite);
         assert_eq!(tag.tx_count, 0);
         assert_eq!(tag.rx_count, 0);
     }
@@ -1018,6 +1230,288 @@ mod tests {
     }
 
     #[test]
+    fn fault_trigger_after_n_apdus_flat_json_round_trip() {
+        let json = r#"{"fault_trigger": "after_n_apdus", "fault_trigger_apdu_count": 5}"#;
+        let create: NfcTagCreate = serde_json::from_str(json).expect("deserialize create");
+        let tag = NfcTag::try_from_create(NfcTagId(3), create).expect("create tag");
+        let serialized_val = serde_json::to_value(&tag).expect("serialize tag");
+        let round_tripped: NfcTag =
+            serde_json::from_value(serialized_val.clone()).expect("deserialize tag");
+
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::AfterNApdus(5));
+        assert_eq!(
+            serialized_val.get("fault_trigger").and_then(serde_json::Value::as_str),
+            Some("after_n_apdus")
+        );
+        assert_eq!(
+            serialized_val.get("fault_trigger_apdu_count").and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(round_tripped.fault_trigger, NfcFaultTrigger::AfterNApdus(5));
+    }
+
+    #[test]
+    fn fault_trigger_unit_variant_omits_apdu_count_in_json() {
+        let create: NfcTagCreate =
+            serde_json::from_str(r#"{"fault_trigger": "on_first_write"}"#).expect("deserialize");
+        let tag = NfcTag::try_from_create(NfcTagId(2), create.clone()).expect("create tag");
+        let tag_val = serde_json::to_value(&tag).expect("serialize tag");
+        let create_val = serde_json::to_value(&create).expect("serialize create");
+
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::OnFirstWrite);
+        assert_eq!(
+            tag_val.get("fault_trigger").and_then(serde_json::Value::as_str),
+            Some("on_first_write")
+        );
+        assert_eq!(tag_val.get("fault_trigger_apdu_count"), None);
+        assert_eq!(create_val.get("fault_trigger_apdu_count"), None);
+    }
+
+    #[test]
+    fn fault_trigger_uppercase_after_n_apdus_alias_deserializes_and_serializes_snake_case() {
+        let create: NfcTagCreate = serde_json::from_str(
+            r#"{"fault_trigger": "AFTER_N_APDUS", "fault_trigger_apdu_count": 4}"#,
+        )
+        .expect("AFTER_N_APDUS must deserialize");
+        let serialized_val = serde_json::to_value(&create).expect("serialize create");
+
+        assert_eq!(create.fault_trigger, NfcFaultTrigger::AfterNApdus(4));
+        assert_eq!(
+            serialized_val.get("fault_trigger").and_then(serde_json::Value::as_str),
+            Some("after_n_apdus")
+        );
+    }
+
+    #[test]
+    fn fault_trigger_uppercase_none_alias_deserializes() {
+        let update: NfcTagUpdate =
+            serde_json::from_str(r#"{"fault_trigger": "NONE"}"#).expect("NONE must deserialize");
+
+        assert_eq!(update.fault_trigger, Some(NfcFaultTrigger::None));
+    }
+
+    #[test]
+    fn fault_trigger_uppercase_on_next_apdu_alias_deserializes() {
+        let create: NfcTagCreate = serde_json::from_str(r#"{"fault_trigger": "ON_NEXT_APDU"}"#)
+            .expect("ON_NEXT_APDU must deserialize");
+
+        assert_eq!(create.fault_trigger, NfcFaultTrigger::OnNextApdu);
+    }
+
+    #[test]
+    fn fault_trigger_uppercase_on_first_write_alias_deserializes() {
+        let create: NfcTagCreate = serde_json::from_str(r#"{"fault_trigger": "ON_FIRST_WRITE"}"#)
+            .expect("ON_FIRST_WRITE must deserialize");
+
+        assert_eq!(create.fault_trigger, NfcFaultTrigger::OnFirstWrite);
+    }
+
+    #[test]
+    fn tag_create_deserialize_upgrades_legacy_disconnect_on_transceive_true_to_on_first_write() {
+        let create: NfcTagCreate = serde_json::from_str(r#"{"disconnect_on_transceive": true}"#)
+            .expect("legacy create must deserialize");
+
+        assert_eq!(create.fault_trigger, NfcFaultTrigger::OnFirstWrite);
+    }
+
+    #[test]
+    fn tag_deserialize_upgrades_legacy_disconnect_on_transceive_true_to_on_first_write() {
+        let json = r#"{
+            "id": 1,
+            "name": "tag-1",
+            "protocol": "T4AT",
+            "uid": "04010203040001",
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "ndef_bytes": "",
+            "read_only": false,
+            "disconnect_on_transceive": true
+        }"#;
+        let tag: NfcTag = serde_json::from_str(json).expect("legacy tag must deserialize");
+
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::OnFirstWrite);
+    }
+
+    #[test]
+    fn tag_deserialize_requires_disconnect_on_transceive_when_fault_trigger_is_omitted() {
+        let json = r#"{
+            "id": 1,
+            "name": "tag-1",
+            "protocol": "T4AT",
+            "uid": "04010203040001",
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "ndef_bytes": "",
+            "read_only": false
+        }"#;
+        let err = serde_json::from_str::<NfcTag>(json)
+            .expect_err("missing both fault fields on NfcTag must fail");
+
+        assert!(err.to_string().contains("disconnect_on_transceive"));
+    }
+
+    #[test]
+    fn tag_serialize_generates_legacy_disconnect_on_transceive_true_for_non_none_trigger() {
+        let mut tag =
+            NfcTag::try_from_create(NfcTagId(1), NfcTagCreate::default()).expect("create tag");
+        tag.fault_trigger = NfcFaultTrigger::OnNextApdu;
+
+        let val = serde_json::to_value(&tag).expect("serialize tag");
+        assert_eq!(
+            val.get("disconnect_on_transceive").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tag_update_omitted_fault_trigger_deserializes_as_none_and_omits_null_disconnect() {
+        let update: NfcTagUpdate =
+            serde_json::from_str(r#"{"visible": true}"#).expect("deserialize omitted");
+        let serialized_val = serde_json::to_value(&update).expect("serialize update");
+
+        assert_eq!(update.fault_trigger, None);
+        assert_eq!(update.resolved_fault_trigger(NfcFaultTrigger::OnFirstWrite), None);
+        assert!(serialized_val.get("disconnect_on_transceive").is_none());
+    }
+
+    #[test]
+    fn tag_update_explicit_none_fault_trigger_clears_active_trigger() {
+        let mut tag = NfcTag::try_from_create(
+            NfcTagId(1),
+            NfcTagCreate { fault_trigger: NfcFaultTrigger::OnFirstWrite, ..Default::default() },
+        )
+        .expect("create tag");
+        let update: NfcTagUpdate =
+            serde_json::from_str(r#"{"fault_trigger": "none"}"#).expect("deserialize none");
+
+        let serialized_val = serde_json::to_value(&update).expect("serialize update");
+        update.apply(&mut tag).expect("apply clear");
+
+        assert_eq!(
+            serialized_val.get("fault_trigger").and_then(serde_json::Value::as_str),
+            Some("none")
+        );
+        assert!(serialized_val.get("disconnect_on_transceive").is_none());
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::None);
+    }
+
+    #[test]
+    fn tag_update_after_n_apdus_round_trips_flat_json() {
+        let update: NfcTagUpdate = serde_json::from_str(
+            r#"{"fault_trigger": "after_n_apdus", "fault_trigger_apdu_count": 5}"#,
+        )
+        .expect("deserialize after_n_apdus");
+        let serialized = serde_json::to_string(&update).expect("serialize update");
+        let round_tripped: NfcTagUpdate =
+            serde_json::from_str(&serialized).expect("round-trip update");
+
+        assert_eq!(round_tripped, update);
+    }
+
+    #[test]
+    fn tag_update_serialize_rejects_conflicting_fault_trigger_and_disconnect_on_transceive() {
+        let update = NfcTagUpdate {
+            fault_trigger: Some(NfcFaultTrigger::OnFirstWrite),
+            disconnect_on_transceive: Some(false),
+            ..Default::default()
+        };
+        let err = serde_json::to_string(&update).expect_err("conflicting update serialize fails");
+
+        assert!(err.to_string().contains(CONFLICTING_FAULT_TRIGGER_ERR));
+    }
+
+    #[test]
+    fn tag_create_rejects_after_n_apdus_without_apdu_count() {
+        let err = serde_json::from_str::<NfcTagCreate>(r#"{"fault_trigger": "after_n_apdus"}"#)
+            .expect_err("missing apdu count must fail");
+
+        assert!(err.to_string().contains(MISSING_APDU_COUNT_ERR));
+    }
+
+    #[test]
+    fn tag_update_rejects_apdu_count_without_fault_trigger() {
+        let err = serde_json::from_str::<NfcTagUpdate>(r#"{"fault_trigger_apdu_count": 5}"#)
+            .expect_err("orphan apdu count must fail");
+
+        assert!(err.to_string().contains(UNEXPECTED_APDU_COUNT_ERR));
+    }
+
+    #[test]
+    fn tag_create_rejects_apdu_count_on_unit_fault_trigger() {
+        let err = serde_json::from_str::<NfcTagCreate>(
+            r#"{"fault_trigger": "on_next_apdu", "fault_trigger_apdu_count": 5}"#,
+        )
+        .expect_err("apdu count on unit trigger must fail");
+
+        assert!(err.to_string().contains(UNEXPECTED_APDU_COUNT_ERR));
+    }
+
+    #[test]
+    fn tag_deserialize_rejects_conflicting_fault_trigger_and_disconnect_on_transceive() {
+        let json = r#"{
+            "id": 1,
+            "name": "tag-1",
+            "protocol": "T4AT",
+            "uid": "04010203040001",
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "ndef_bytes": "",
+            "read_only": false,
+            "fault_trigger": "none",
+            "disconnect_on_transceive": true
+        }"#;
+        let err =
+            serde_json::from_str::<NfcTag>(json).expect_err("conflicting tag fields must fail");
+
+        assert!(err.to_string().contains(CONFLICTING_FAULT_TRIGGER_ERR));
+    }
+
+    #[test]
+    fn tag_create_deserialize_rejects_conflicting_fault_trigger_and_disconnect_on_transceive() {
+        let err = serde_json::from_str::<NfcTagCreate>(
+            r#"{"fault_trigger": "on_next_apdu", "disconnect_on_transceive": false}"#,
+        )
+        .expect_err("conflicting create fields must fail");
+
+        assert!(err.to_string().contains(CONFLICTING_FAULT_TRIGGER_ERR));
+    }
+
+    #[test]
+    fn tag_update_deserialize_rejects_conflicting_fault_trigger_and_disconnect_on_transceive() {
+        let err = serde_json::from_str::<NfcTagUpdate>(
+            r#"{"fault_trigger": "on_first_write", "disconnect_on_transceive": false}"#,
+        )
+        .expect_err("conflicting update fields must fail");
+
+        assert!(err.to_string().contains(CONFLICTING_FAULT_TRIGGER_ERR));
+    }
+
+    #[test]
+    fn tag_update_disconnect_on_transceive_true_preserves_existing_non_none_trigger() {
+        let mut tag = NfcTag::try_from_create(
+            NfcTagId(1),
+            NfcTagCreate { fault_trigger: NfcFaultTrigger::AfterNApdus(3), ..Default::default() },
+        )
+        .expect("create tag");
+        let patch = NfcTagUpdate { disconnect_on_transceive: Some(true), ..Default::default() };
+
+        patch.apply(&mut tag).expect("apply disconnect=true");
+
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::AfterNApdus(3));
+    }
+
+    #[test]
+    fn tag_update_disconnect_on_transceive_false_clears_fault_trigger() {
+        let mut tag = NfcTag::try_from_create(
+            NfcTagId(1),
+            NfcTagCreate { fault_trigger: NfcFaultTrigger::OnFirstWrite, ..Default::default() },
+        )
+        .expect("create tag");
+        let patch = NfcTagUpdate { disconnect_on_transceive: Some(false), ..Default::default() };
+
+        patch.apply(&mut tag).expect("apply disconnect=false");
+
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::None);
+    }
+
+    #[test]
     fn update_apply_atomicity_and_mutation() {
         let mut tag =
             NfcTag::try_from_create(NfcTagId(1), NfcTagCreate::default()).expect("create tag");
@@ -1085,6 +1579,7 @@ mod tests {
             read_only: Some(true),
             formatted: Some(true),
             disconnect_on_transceive: Some(true),
+            fault_trigger: None,
         };
         valid_update.apply(&mut tag).expect("valid update apply");
         assert_eq!(tag.name, "updated-tag");
@@ -1094,6 +1589,6 @@ mod tests {
         assert_eq!(tag.payload_text.as_deref(), Some("Updated payload"));
         assert!(tag.read_only);
         assert!(tag.formatted);
-        assert!(tag.disconnect_on_transceive);
+        assert_eq!(tag.fault_trigger, NfcFaultTrigger::OnFirstWrite);
     }
 }

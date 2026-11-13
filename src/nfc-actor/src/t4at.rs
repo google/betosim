@@ -110,7 +110,7 @@ pub struct T4atTag {
     visible: bool,
     read_only: bool,
     formatted: bool,
-    disconnect_on_transceive: bool,
+    fault_trigger: netsim_model::NfcFaultTrigger,
     tx_count: u32,
     rx_count: u32,
     active_reader: Option<u16>,
@@ -188,7 +188,7 @@ impl T4atTag {
             visible: tag.visible,
             read_only: tag.read_only,
             formatted: tag.formatted,
-            disconnect_on_transceive: tag.disconnect_on_transceive,
+            fault_trigger: tag.fault_trigger,
             tx_count: 0,
             rx_count: 0,
             active_reader: None,
@@ -468,8 +468,8 @@ impl RfAccessory for T4atTag {
                 self.active_reader = None;
             }
         }
-        if let Some(disconnect) = patch.disconnect_on_transceive {
-            self.disconnect_on_transceive = disconnect;
+        if let Some(trigger) = patch.resolved_fault_trigger(self.fault_trigger) {
+            self.fault_trigger = trigger;
         }
         if let Some(read_only) = patch.read_only {
             self.read_only = read_only;
@@ -510,7 +510,7 @@ impl RfAccessory for T4atTag {
         tag.visible = self.visible;
         tag.read_only = self.read_only;
         tag.formatted = self.formatted;
-        tag.disconnect_on_transceive = self.disconnect_on_transceive;
+        tag.fault_trigger = self.fault_trigger;
         tag.tx_count = self.tx_count;
         tag.rx_count = self.rx_count;
         if self.formatted {
@@ -565,7 +565,7 @@ mod tests {
             payload_text: if ndef_text.is_empty() { None } else { Some(ndef_text.to_string()) },
             read_only,
             formatted,
-            disconnect_on_transceive: false,
+            fault_trigger: netsim_model::NfcFaultTrigger::None,
             tx_count: 0,
             rx_count: 0,
         }
@@ -1084,7 +1084,7 @@ mod tests {
             formatted: Some(true),
             ndef_bytes: Some(encode_hex_lower(&new_ndef)),
             read_only: Some(true),
-            disconnect_on_transceive: Some(true),
+            fault_trigger: Some(netsim_model::NfcFaultTrigger::OnFirstWrite),
             ..Default::default()
         };
         tag.apply_update(&restore_patch).expect("restore succeeds");
@@ -1096,7 +1096,7 @@ mod tests {
 
         let mut synced = model;
         tag.sync_to_model(&mut synced);
-        assert!(synced.disconnect_on_transceive);
+        assert_eq!(synced.fault_trigger, netsim_model::NfcFaultTrigger::OnFirstWrite);
         assert_eq!(synced.ndef_bytes, encode_hex_lower(&new_ndef));
     }
 
