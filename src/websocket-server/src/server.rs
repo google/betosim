@@ -235,3 +235,156 @@ async fn perform_handshake(
 
     Ok((websocket_reader, websocket_writer, chip_kind, queries))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    type HandshakeSuccess = (
+        tungstenite::WebSocket<std::net::TcpStream>,
+        tungstenite::WebSocket<std::net::TcpStream>,
+        ChipKind,
+        HashMap<String, String>,
+    );
+
+    const HANDSHAKE_TEST_TIMEOUT: Duration = Duration::from_secs(2);
+    const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(2);
+    const RESPONSE_READ_CHUNK_SIZE: usize = 1024;
+    const HTTP_HEADER_END: &[u8] = b"\r\n\r\n";
+    const PREMATURE_EOF_REQUEST: &[u8] = b"GET /v1/websocket/bt HTTP/1.1\r\nHost: localhost";
+    const MALFORMED_HTTP_REQUEST: &[u8] = b"NOT_HTTP_AT_ALL\r\n\r\n";
+    const PIPELINED_REQUEST_HEAD: &[u8] = concat!(
+        "GET /v1/websocket/bt HTTP/1.1\r\n",
+        "Host: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+        "Sec-WebSocket-Version: 13\r\n\r\n",
+    )
+    .as_bytes();
+    const PIPELINED_PAYLOAD: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
+    // Masked RFC 6455 binary frame for PIPELINED_PAYLOAD using mask [0x11, 0x22, 0x33, 0x44].
+    const PIPELINED_MASKED_FRAME: &[u8] =
+        &[0x82, 0x84, 0x11, 0x22, 0x33, 0x44, 0xBB, 0x99, 0xFF, 0x99];
+
+    async fn run_handshake_with_bytes(
+        request_bytes: &[u8],
+    ) -> (Result<HandshakeSuccess, ServerError>, Vec<u8>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let (client_res, accept_res) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let mut client = client_res.expect("connect test client");
+        let (server_stream, _) = accept_res.expect("accept server stream");
+
+        client.write_all(request_bytes).await.expect("write request bytes");
+        client.shutdown().await.expect("shutdown client write half");
+
+        let result = perform_handshake(server_stream).await;
+
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(HANDSHAKE_TEST_TIMEOUT, async {
+            let mut chunk = [0u8; RESPONSE_READ_CHUNK_SIZE];
+            while !resp_bytes.windows(HTTP_HEADER_END.len()).any(|w| w == HTTP_HEADER_END) {
+                let n = client.read(&mut chunk).await.expect("read handshake response");
+                if n == 0 {
+                    break;
+                }
+                resp_bytes.extend_from_slice(&chunk[..n]);
+            }
+        })
+        .await
+        .expect("timed out reading handshake response");
+
+        (result, resp_bytes)
+    }
+
+    #[test]
+    fn test_is_loopback_accepts_only_one_and_true() {
+        assert!(!is_loopback(&HashMap::new()));
+        for (value, expected) in
+            [("1", true), ("true", true), ("0", false), ("false", false), ("TRUE", false)]
+        {
+            let queries = HashMap::from([("loopback".to_string(), value.to_string())]);
+            assert_eq!(is_loopback(&queries), expected, "unexpected result for loopback={value}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_chip_kind_valid_unspecified_and_invalid_paths() {
+        for (path, expected) in [
+            ("/v1/websocket/bt", Some(ChipKind::BLUETOOTH)),
+            ("/v1/websocket/wifi", Some(ChipKind::WIFI)),
+            ("/v1/websocket/unspecified", None),
+            ("/other/bt", None),
+            ("/v1/websocket/unknown", None),
+        ] {
+            assert_eq!(resolve_chip_kind(path), expected, "unexpected result for path={path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake_premature_eof_returns_handshake_failed() {
+        for partial_bytes in [b"".as_slice(), PREMATURE_EOF_REQUEST] {
+            let (result, resp_bytes) = run_handshake_with_bytes(partial_bytes).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(ServerError::HandshakeFailed(ref msg))
+                        if msg.contains("Client disconnected before sending full request")
+                ),
+                "expected HandshakeFailed on premature EOF for input={partial_bytes:?}, got: {:?}",
+                result.err()
+            );
+            assert!(
+                resp_bytes.is_empty(),
+                "expected empty response on premature EOF for input={partial_bytes:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake_malformed_http_writes_400_and_returns_http_parse() {
+        let (result, resp_bytes) = run_handshake_with_bytes(MALFORMED_HTTP_REQUEST).await;
+        assert!(
+            matches!(result, Err(ServerError::HttpParse(_))),
+            "expected HttpParse on malformed HTTP request, got: {:?}",
+            result.err()
+        );
+        let resp_text = std::str::from_utf8(&resp_bytes).expect("valid UTF-8 400 response");
+        assert!(
+            resp_text.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "expected HTTP 400 status line, got: {resp_text:?}"
+        );
+        assert!(
+            resp_text.to_ascii_lowercase().contains("connection: close\r\n"),
+            "expected connection: close header, got: {resp_text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake_preserves_pipelined_binary_frame() {
+        let mut request_bytes =
+            Vec::with_capacity(PIPELINED_REQUEST_HEAD.len() + PIPELINED_MASKED_FRAME.len());
+        request_bytes.extend_from_slice(PIPELINED_REQUEST_HEAD);
+        request_bytes.extend_from_slice(PIPELINED_MASKED_FRAME);
+
+        let (result, _resp_bytes) = run_handshake_with_bytes(&request_bytes).await;
+        let (mut websocket_reader, _websocket_writer, _chip_kind, _queries) =
+            result.expect("valid upgrade with pipelined frame should succeed");
+
+        websocket_reader
+            .get_ref()
+            .set_read_timeout(Some(SOCKET_READ_TIMEOUT))
+            .expect("set socket read timeout");
+        let msg = tokio::task::spawn_blocking(move || websocket_reader.read())
+            .await
+            .expect("reader task panicked")
+            .expect("read pipelined binary frame");
+        let tungstenite::Message::Binary(data) = msg else {
+            panic!("expected pipelined Binary frame, got: {msg:?}");
+        };
+        assert_eq!(data.as_ref(), PIPELINED_PAYLOAD);
+    }
+}

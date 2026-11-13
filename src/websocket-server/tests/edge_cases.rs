@@ -14,6 +14,20 @@
 
 use crate::world::TestWorld;
 
+const RAW_UPGRADE_UNSUPPORTED_VERSION: &str = concat!(
+    "GET /v1/websocket/bt HTTP/1.1\r\nHost: localhost\r\n",
+    "Upgrade: websocket\r\nConnection: Upgrade\r\n",
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 12\r\n\r\n",
+);
+const RAW_UPGRADE_MISSING_KEY: &str = concat!(
+    "GET /v1/websocket/bt HTTP/1.1\r\nHost: localhost\r\n",
+    "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\r\n",
+);
+const WIFI_PATH: &str = "/v1/websocket/wifi";
+const BT_PRESET_CONFIG_TEXT: &str = r#"{"preset":"laird_bl654"}"#;
+const INVALID_JSON_TEXT: &str = "{invalid-json";
+const EMPTY_JSON_TEXT: &str = "{}";
+
 #[tokio::test]
 async fn test_default_query_parameters() {
     let mut world = TestWorld::new().await;
@@ -160,4 +174,67 @@ async fn test_large_data_payloads() {
 
     world.when_backend_sends_packet(client_idx, &large_packet).await;
     world.then_client_receives_packet(client_idx, &large_packet).await;
+}
+
+// Scenario: WebSocket handshake rejects unsupported Sec-WebSocket-Version with 426 Upgrade Required
+//   Given a running WebSocket server
+//   When a raw HTTP upgrade request specifies Sec-WebSocket-Version 12
+//   Then the handshake fails with HTTP 426 Upgrade Required
+#[tokio::test]
+async fn test_handshake_unsupported_websocket_version_returns_426() {
+    let mut world = TestWorld::new().await;
+
+    world.when_raw_http_request_is_sent(RAW_UPGRADE_UNSUPPORTED_VERSION).await;
+    world.then_the_connection_fails_with_status(http::StatusCode::UPGRADE_REQUIRED.as_u16());
+}
+
+// Scenario: WebSocket handshake rejects upgrade requests missing Sec-WebSocket-Key with 400 Bad Request
+//   Given a running WebSocket server
+//   When a raw HTTP upgrade request omits the Sec-WebSocket-Key header
+//   Then the handshake fails with HTTP 400 Bad Request
+#[tokio::test]
+async fn test_handshake_missing_key_header_returns_400() {
+    let mut world = TestWorld::new().await;
+
+    world.when_raw_http_request_is_sent(RAW_UPGRADE_MISSING_KEY).await;
+    world.then_the_connection_fails_with_status(http::StatusCode::BAD_REQUEST.as_u16());
+}
+
+// Scenario: Pre-binary Text config frame is ignored for non-Bluetooth chips
+//   Given a Wi-Fi WebSocket client connected to the server
+//   When the client sends a Bluetooth config Text frame before any binary packet
+//   Then the text frame is ignored without a device update
+#[tokio::test]
+async fn test_text_config_ignored_for_non_bluetooth_chip() {
+    let mut world = TestWorld::new().await;
+    let wifi = world.given_a_websocket_client_connected_at_path(WIFI_PATH).await;
+
+    world.when_client_sends_text(wifi, BT_PRESET_CONFIG_TEXT).await;
+    world.then_text_frame_is_ignored_before_next_packet(wifi).await;
+}
+
+// Scenario: Invalid JSON pre-binary Text config frame is ignored for Bluetooth chips
+//   Given a Bluetooth WebSocket client connected to the server
+//   When the client sends an invalid JSON Text frame before any binary packet
+//   Then the text frame is ignored without a device update
+#[tokio::test]
+async fn test_invalid_json_text_config_ignored_for_bluetooth() {
+    let mut world = TestWorld::new().await;
+    let bt = world.given_a_websocket_client_connected(None, None).await;
+
+    world.when_client_sends_text(bt, INVALID_JSON_TEXT).await;
+    world.then_text_frame_is_ignored_before_next_packet(bt).await;
+}
+
+// Scenario: Empty JSON pre-binary Text config frame is ignored for Bluetooth chips
+//   Given a Bluetooth WebSocket client connected to the server
+//   When the client sends an empty JSON Text frame before any binary packet
+//   Then the text frame is ignored without a device update
+#[tokio::test]
+async fn test_empty_json_text_config_ignored_for_bluetooth() {
+    let mut world = TestWorld::new().await;
+    let bt = world.given_a_websocket_client_connected(None, None).await;
+
+    world.when_client_sends_text(bt, EMPTY_JSON_TEXT).await;
+    world.then_text_frame_is_ignored_before_next_packet(bt).await;
 }

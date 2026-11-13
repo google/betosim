@@ -27,8 +27,17 @@ use device_actor::{DeviceActor, DeviceClient};
 use device_api::{DeviceAction, DeviceActionResult, DeviceAddChip, DeviceId};
 use futures::{SinkExt, StreamExt};
 use netsim_model::{ChipId, PacketSink, PacketStream};
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::mpsc,
+};
 use websocket_server::{ClientError, ManualWebSocketClient, server};
+
+const RAW_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RAW_RESPONSE_HEADERS: usize = 32;
+const RAW_HTTP_READ_CHUNK_SIZE: usize = 256;
+const SYNC_PACKET: &[u8] = b"\x09\x08";
 
 pub struct TestClientContext {
     pub client: ManualWebSocketClient,
@@ -224,6 +233,13 @@ impl TestWorld {
         assert!(self.update_rx.try_recv().is_err(), "expected no device update");
     }
 
+    pub async fn then_text_frame_is_ignored_before_next_packet(&mut self, client_idx: usize) {
+        // Send a binary packet barrier so the reader loop processes the preceding text frame first.
+        self.when_client_sends_packet(client_idx, SYNC_PACKET).await;
+        self.then_backend_receives_packet(client_idx, SYNC_PACKET).await;
+        self.then_no_device_update();
+    }
+
     pub async fn then_backend_receives_packet(&mut self, client_idx: usize, expected: &[u8]) {
         let received = self.clients[client_idx]
             .packet_stream
@@ -303,6 +319,36 @@ impl TestWorld {
 
     pub fn then_backend_deletes_nothing(&mut self) {
         assert!(self.delete_chip_rx.try_recv().is_err(), "loopback must not delete a device");
+    }
+
+    pub async fn when_raw_http_request_is_sent(&mut self, request: &str) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))
+            .await
+            .expect("Failed to connect raw TCP stream");
+        stream.write_all(request.as_bytes()).await.expect("Failed to write raw HTTP request");
+        stream.shutdown().await.expect("Failed to shut down raw TCP write half");
+        self.last_handshake_error = tokio::time::timeout(RAW_HTTP_READ_TIMEOUT, async {
+            let mut buf = Vec::new();
+            let mut scratch = [0u8; RAW_HTTP_READ_CHUNK_SIZE];
+            loop {
+                let mut headers = [httparse::EMPTY_HEADER; MAX_RAW_RESPONSE_HEADERS];
+                let mut resp = httparse::Response::new(&mut headers);
+                let status = resp.parse(&buf).unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to parse raw HTTP response ({e}): {:?}",
+                        String::from_utf8_lossy(&buf)
+                    )
+                });
+                if matches!(status, httparse::Status::Complete(_)) {
+                    return resp.code;
+                }
+                let n = stream.read(&mut scratch).await.expect("Failed to read raw HTTP response");
+                assert!(n > 0, "Incomplete raw HTTP response: {:?}", String::from_utf8_lossy(&buf));
+                buf.extend_from_slice(&scratch[..n]);
+            }
+        })
+        .await
+        .expect("Timed out reading raw HTTP response");
     }
 }
 
