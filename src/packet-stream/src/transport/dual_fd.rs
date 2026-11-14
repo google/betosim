@@ -405,21 +405,126 @@ impl TransportListener for DualFdListener {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        os::unix::{
+            io::{IntoRawFd, OwnedFd},
+            net::{UnixListener, UnixStream},
+        },
+        path::Path,
+    };
+
+    use nix::unistd::pipe;
+
     use super::*;
+
+    const EXPECTED_CHIP_COUNT: i32 = 2;
+    const EXPECTED_DEVICE_COUNT: i32 = 1;
+
+    fn prepare_test_socket(socket_path: &Path) -> UnixListener {
+        match std::fs::remove_file(socket_path) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => panic!("failed to remove stale socket {socket_path:?}: {e}"),
+        }
+        UnixListener::bind(socket_path).unwrap()
+    }
+
+    async fn assert_listening_socket_roundtrip(
+        socket_path: std::path::PathBuf,
+        mut listener: DualFdListener,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const SERVER_MSG: &[u8] = b"hello from server\n";
+        let client_path = socket_path.clone();
+        let client_task = tokio::spawn(async move {
+            let mut stream = tokio::net::UnixStream::connect(client_path).await.unwrap();
+            stream.write_all(b"hello from client\n").await.unwrap();
+
+            let mut buf = [0u8; SERVER_MSG.len()];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, SERVER_MSG);
+        });
+
+        let (mut stream, mut sink, chip_info, _guid) = listener.accept().await.unwrap();
+        let dev_info = chip_info.device_info.unwrap();
+        assert_eq!(dev_info.name, "cvd-1");
+        assert_eq!(dev_info.kind, "CUTTLEFISH");
+        assert_eq!(chip_info.chip.unwrap().name, "CELLULAR");
+
+        let bytes = stream.next().await.unwrap().unwrap();
+        assert_eq!(bytes.as_ref(), b"hello from client");
+
+        sink.send(bytes::Bytes::from_static(SERVER_MSG)).await.unwrap();
+
+        client_task.await.unwrap();
+        std::fs::remove_file(&socket_path).unwrap();
+    }
+
+    async fn assert_multi_chip_static_streams_roundtrip(
+        mut listener: DualFdListener,
+        expected_device_name: &str,
+        mut guest_sock: UnixStream,
+        guest_to_host_w: OwnedFd,
+        host_to_guest_r: OwnedFd,
+        expected_sim_type: i32,
+        expected_sim_profile: &str,
+    ) {
+        assert!(matches!(
+            listener.local_addr().unwrap(),
+            StreamAddress::Fd { in_fd, out_fd: Some(out) }
+                if in_fd == EXPECTED_CHIP_COUNT && out == EXPECTED_DEVICE_COUNT
+        ));
+
+        let (mut stream0, mut sink0, chip_info0, _guid) = listener.accept().await.unwrap();
+        assert_eq!(chip_info0.device_info.unwrap().name, expected_device_name);
+        assert_eq!(chip_info0.chip.unwrap().name, "CELLULAR");
+
+        guest_sock.write_all(b"hello from guest 0\n").unwrap();
+
+        let frame0 = stream0.next().await.unwrap().unwrap();
+        assert_eq!(frame0.as_ref(), b"hello from guest 0");
+
+        drop(stream0);
+
+        const SERVER_MSG_0: &[u8] = b"hello from server 0\n";
+        sink0.send(bytes::Bytes::from_static(SERVER_MSG_0)).await.unwrap();
+
+        let mut guest_buf0 = [0u8; SERVER_MSG_0.len()];
+        guest_sock.read_exact(&mut guest_buf0).unwrap();
+        assert_eq!(&guest_buf0, SERVER_MSG_0);
+
+        let (mut stream1, mut sink1, chip_info1, _guid) = listener.accept().await.unwrap();
+        let chip1 = chip_info1.chip.unwrap();
+        assert_eq!(chip1.name, "BLUETOOTH");
+        assert_eq!(chip1.sim_type, Some(expected_sim_type));
+        assert_eq!(chip1.sim_profile.as_deref(), Some(expected_sim_profile));
+
+        const HCI_RESET_CMD: &[u8] = &[1, 0x03, 0x0c, 0x00];
+        nix::unistd::write(&guest_to_host_w, HCI_RESET_CMD).unwrap();
+
+        let frame1 = stream1.next().await.unwrap().unwrap();
+        assert_eq!(frame1.as_ref(), HCI_RESET_CMD);
+
+        const HCI_EVENT: &[u8] = &[4, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00];
+        sink1.send(bytes::Bytes::from_static(HCI_EVENT)).await.unwrap();
+
+        let mut guest_buf1 = [0u8; HCI_EVENT.len()];
+        let mut offset = 0;
+        while offset < guest_buf1.len() {
+            let n = nix::unistd::read(&host_to_guest_r, &mut guest_buf1[offset..]).unwrap();
+            assert!(n > 0, "unexpected EOF on host_to_guest_r");
+            offset += n;
+        }
+        assert_eq!(&guest_buf1, HCI_EVENT);
+    }
 
     #[tokio::test]
     async fn test_dual_fd_listener_listening_socket() {
-        use std::os::unix::{io::IntoRawFd, net::UnixListener};
-
-        use futures::{SinkExt, StreamExt};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let socket_path =
             std::env::temp_dir().join(format!("test_vsock_comm_{}.sock", std::process::id()));
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
-        let std_listener = UnixListener::bind(&socket_path).unwrap();
+        let std_listener = prepare_test_socket(&socket_path);
         let listener_fd = std_listener.into_raw_fd();
 
         let json_config = format!(
@@ -445,40 +550,12 @@ mod tests {
         );
 
         let config: DualFdConfig = serde_json::from_str(&json_config).unwrap();
-        let mut listener = DualFdListener::new(config).unwrap();
-
-        let client_path = socket_path.clone();
-        let client_task = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let mut stream = tokio::net::UnixStream::connect(client_path).await.unwrap();
-            stream.write_all(b"hello from client\n").await.unwrap();
-
-            let mut buf = [0; 18];
-            stream.read_exact(&mut buf).await.unwrap();
-            assert_eq!(&buf, b"hello from server\n");
-        });
-
-        let (mut stream, mut sink, chip_info, _guid) = listener.accept().await.unwrap();
-        let dev_info = chip_info.device_info.unwrap();
-        assert_eq!(dev_info.name, "cvd-1");
-        assert_eq!(dev_info.kind, "CUTTLEFISH");
-        assert_eq!(chip_info.chip.unwrap().name, "CELLULAR");
-
-        let bytes = stream.next().await.unwrap().unwrap();
-        assert_eq!(bytes.as_ref(), b"hello from client");
-
-        sink.send(bytes::Bytes::from("hello from server\n")).await.unwrap();
-
-        client_task.await.unwrap();
-        let _ = std::fs::remove_file(&socket_path);
+        let listener = DualFdListener::new(config).unwrap();
+        assert_listening_socket_roundtrip(socket_path, listener).await;
     }
 
     #[tokio::test]
     async fn test_dual_fd_listener_device_info_resolution() {
-        use std::os::unix::io::IntoRawFd;
-
-        use nix::unistd::pipe;
-
         struct TestCase {
             name: &'static str,
             extra_json: &'static str,
@@ -555,8 +632,8 @@ mod tests {
             let (r_fd, w_fd) = pipe().unwrap();
             let json_config = format!(
                 r#"{{"devices": [{{"chips": [{{"kind": "CELLULAR", "fdIn": {}, "fdOut": {}}}], {} }}]}}"#,
-                r_fd.into_raw_fd(),
                 w_fd.into_raw_fd(),
+                r_fd.into_raw_fd(),
                 tc.extra_json
             );
 
@@ -572,5 +649,53 @@ mod tests {
                 tc.name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_dual_fd_listener_multi_chip_static_streams() {
+        const CHIP1_SIM_TYPE: i32 = 1;
+        const CHIP1_SIM_PROFILE: &str = "test-profile-1";
+
+        let (guest_sock, host_sock) = UnixStream::pair().unwrap();
+        let sock_fd = host_sock.into_raw_fd();
+        let (host_to_guest_r, host_to_guest_w) = pipe().unwrap();
+        let (guest_to_host_r, guest_to_host_w) = pipe().unwrap();
+        let json_config = format!(
+            r#"{{
+                "devices": [
+                    {{
+                        "name": "multi-chip-dev",
+                        "chips": [
+                            {{
+                                "kind": "CELLULAR",
+                                "fdIn": {sock_fd},
+                                "fdOut": {sock_fd}
+                            }},
+                            {{
+                                "kind": "BLUETOOTH",
+                                "fdIn": {},
+                                "fdOut": {},
+                                "simType": {CHIP1_SIM_TYPE},
+                                "simProfile": "{CHIP1_SIM_PROFILE}"
+                            }}
+                        ]
+                    }}
+                ]
+            }}"#,
+            host_to_guest_w.into_raw_fd(),
+            guest_to_host_r.into_raw_fd()
+        );
+        let config: DualFdConfig = serde_json::from_str(&json_config).unwrap();
+        let listener = DualFdListener::new(config).unwrap();
+        assert_multi_chip_static_streams_roundtrip(
+            listener,
+            "multi-chip-dev",
+            guest_sock,
+            guest_to_host_w,
+            host_to_guest_r,
+            CHIP1_SIM_TYPE,
+            CHIP1_SIM_PROFILE,
+        )
+        .await;
     }
 }
