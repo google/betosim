@@ -15,7 +15,7 @@
 
 use std::{
     io::Write as _,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, OnceLock},
@@ -389,6 +389,7 @@ pub struct World {
     pub nfc_client: NfcServiceClient,
     pub packet_client: PacketStreamerClient,
     pub capture_client: capture_actor::CaptureClient,
+    pub slirp_client: slirp_actor::SlirpClient,
     pub packet_sender:
         Option<grpcio::ClientDuplexSender<netsim_proto::packet_streamer::PacketRequest>>,
     pub packet_receiver:
@@ -482,6 +483,7 @@ impl World {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let capture_client = daemon.capture_client().clone();
+        let slirp_client = daemon.slirp_client().clone();
 
         let env = SHARED_ENV.get_or_init(|| Arc::new(grpcio::Environment::new(1))).clone();
         let ch = ChannelBuilder::new(Arc::clone(&env)).connect(&format!("localhost:{}", grpc_port));
@@ -498,6 +500,7 @@ impl World {
             nfc_client,
             packet_client,
             capture_client,
+            slirp_client,
             packet_sender: None,
             packet_receiver: None,
             grpc_port,
@@ -1896,5 +1899,14 @@ impl World {
         let mut actual: Vec<String> = matched.into_iter().map(|d| d.adb_serial).collect();
         actual.sort();
         assert_eq!(actual, expected);
+    }
+
+    /// Then SlirpActor reports `expected` as its configured DNS servers.
+    pub async fn then_slirp_configured_dns_servers_are(&mut self, expected: &[IpAddr]) {
+        let status = self.slirp_client.status().await.expect("Failed to query SlirpActor status");
+        assert_eq!(
+            status.configured_dns_servers, expected,
+            "Unexpected Slirp configured DNS servers"
+        );
     }
 }

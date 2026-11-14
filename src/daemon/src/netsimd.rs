@@ -488,6 +488,11 @@ impl NetsimDaemon {
         self.device_client.clone()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub fn slirp_client(&self) -> &SlirpClient {
+        &self.slirp_client
+    }
+
     /// Creates a new `NetsimDaemon` instance or returns config for forwarding.
     ///
     /// Returns:

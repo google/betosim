@@ -259,6 +259,7 @@ async fn resolve_dns_servers(host_dns: &str) -> Vec<IpAddr> {
 #[derive(Clone, Debug)]
 pub struct SlirpStatus {
     pub initialized: bool,
+    pub configured_dns_servers: Vec<IpAddr>,
 }
 
 impl SlirpActor {
@@ -315,6 +316,17 @@ impl SlirpActor {
 
     pub fn http_proxy(&self) -> Option<&str> {
         self.http_proxy.as_deref()
+    }
+
+    pub(crate) fn configured_dns_servers(&self) -> Vec<IpAddr> {
+        #[cfg(not(feature = "cuttlefish"))]
+        {
+            self.config.host_dns.iter().map(SocketAddr::ip).collect()
+        }
+        #[cfg(feature = "cuttlefish")]
+        {
+            self.config.dns_servers.clone()
+        }
     }
 
     #[cfg(not(feature = "cuttlefish"))]
@@ -515,6 +527,8 @@ mod tests {
 
     use super::*;
 
+    const DEFAULT_SLIRP_DNS_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+
     #[test]
     fn test_validate_ambient_http_proxy_unreachable_loopback_cleared() {
         let (reserved_v4, reserved_v6, closed_port) = (0..10)
@@ -560,5 +574,97 @@ mod tests {
 
         let ip_proxy = "http://192.168.1.10:3128".to_string();
         assert_eq!(validate_ambient_http_proxy(Some(ip_proxy.clone())), Some(ip_proxy));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dns_servers_empty_returns_empty() {
+        assert_eq!(resolve_dns_servers("").await, Vec::<IpAddr>::new());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dns_servers_parses_multi_entry_ips_and_socket_addrs() {
+        let resolved = resolve_dns_servers(
+            " 192.0.2.1 , 2001:db8::53 , 198.51.100.2:5353, [2001:db8::1]:8053 ",
+        )
+        .await;
+        let expected: Vec<IpAddr> = vec![
+            "192.0.2.1".parse().unwrap(),
+            "2001:db8::53".parse().unwrap(),
+            "198.51.100.2".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ];
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dns_servers_resolves_localhost_hostname() {
+        let resolved = resolve_dns_servers("localhost").await;
+        assert!(!resolved.is_empty());
+        assert!(resolved.iter().all(IpAddr::is_loopback));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dns_servers_drops_invalid_entries() {
+        let resolved =
+            resolve_dns_servers("192.0.2.1, badhost:notaport, host:99999, host:, 2001:db8::2")
+                .await;
+        let expected: Vec<IpAddr> =
+            vec!["192.0.2.1".parse().unwrap(), "2001:db8::2".parse().unwrap()];
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn test_new_with_backend_none_host_dns_preserves_default_dns() {
+        let actor = SlirpActor::new_with_backend(
+            SlirpConfig::default(),
+            None,
+            None,
+            SlirpBackend::default(),
+        )
+        .await;
+        let expected = match SlirpBackend::default() {
+            SlirpBackend::Native => vec![DEFAULT_SLIRP_DNS_V4],
+            SlirpBackend::CFfi => vec![],
+        };
+        assert_eq!(actor.configured_dns_servers(), expected);
+    }
+
+    fn config_with_sentinel_dns(sentinel: IpAddr) -> SlirpConfig {
+        let mut config = SlirpConfig::default();
+        #[cfg(not(feature = "cuttlefish"))]
+        {
+            config.host_dns = vec![SocketAddr::new(sentinel, 53)];
+        }
+        #[cfg(feature = "cuttlefish")]
+        {
+            config.dns_servers = vec![sentinel];
+        }
+        config
+    }
+
+    #[tokio::test]
+    async fn test_new_with_backend_all_invalid_host_dns_preserves_existing_dns() {
+        let sentinel: IpAddr = "198.51.100.53".parse().unwrap();
+        let actor = SlirpActor::new_with_backend(
+            config_with_sentinel_dns(sentinel),
+            None,
+            Some("badhost:notaport,host:99999".to_string()),
+            SlirpBackend::default(),
+        )
+        .await;
+        assert_eq!(actor.configured_dns_servers(), vec![sentinel]);
+    }
+
+    #[tokio::test]
+    async fn test_new_with_backend_valid_host_dns_overrides_existing_dns() {
+        let sentinel: IpAddr = "198.51.100.53".parse().unwrap();
+        let actor = SlirpActor::new_with_backend(
+            config_with_sentinel_dns(sentinel),
+            None,
+            Some("192.0.2.1".to_string()),
+            SlirpBackend::default(),
+        )
+        .await;
+        assert_eq!(actor.configured_dns_servers(), vec!["192.0.2.1".parse::<IpAddr>().unwrap()]);
     }
 }

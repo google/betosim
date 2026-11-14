@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -968,4 +972,43 @@ async fn test_disable_address_reuse_rejects_duplicate_bluetooth_mac() {
     World::then_rpc_error_contains(res, "address already in use");
     world.then_device_list_contains(id1, "BtStrict1").await;
     world.then_device_list_does_not_contain_by_name("BtStrict2").await;
+}
+
+const DEFAULT_SLIRP_DNS_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+const TEST_DNS_V4: &str = "192.0.2.53";
+const TEST_DNS_V6: &str = "2001:db8::53";
+
+// Scenario: Default daemon launch configures backend-default SlirpActor DNS servers
+#[tokio::test]
+async fn test_default_host_dns_reports_backend_default_slirp_dns() {
+    // Given a daemon launched with --no-shutdown and no --host-dns flag
+    let mut world = World::new_with_cli_args(&["--no-shutdown"]).await;
+    // When the daemon is spawned
+    world.when_spawn_daemon().await;
+    // Then SlirpActor reports [8.8.8.8] on Native and an empty list on CFfi
+    match slirp_actor::SlirpBackend::default() {
+        slirp_actor::SlirpBackend::Native => {
+            world.then_slirp_configured_dns_servers_are(&[DEFAULT_SLIRP_DNS_V4]).await;
+        }
+        slirp_actor::SlirpBackend::CFfi => {
+            world.then_slirp_configured_dns_servers_are(&[]).await;
+        }
+    }
+}
+
+// Scenario: --host-dns configures SlirpActor DNS servers and drops invalid entries
+#[tokio::test]
+async fn test_host_dns_cli_flag_configures_slirp_and_drops_invalid() {
+    // Given a daemon launched with --no-shutdown and --host-dns with valid and invalid entries
+    let host_dns_flag = format!("--host-dns={TEST_DNS_V4}, {TEST_DNS_V6}, badhost:notaport");
+    let mut world = World::new_with_cli_args(&["--no-shutdown", &host_dns_flag]).await;
+    // When the daemon is spawned
+    world.when_spawn_daemon().await;
+    // Then only the valid IPv4 and IPv6 DNS servers are configured
+    world
+        .then_slirp_configured_dns_servers_are(&[
+            TEST_DNS_V4.parse().unwrap(),
+            TEST_DNS_V6.parse().unwrap(),
+        ])
+        .await;
 }

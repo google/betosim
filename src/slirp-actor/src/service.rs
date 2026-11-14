@@ -222,7 +222,10 @@ impl ActorService for SlirpActor {
         _id: Self::Id,
         _: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
-        Ok(Some(SlirpStatus { initialized: self.backend_instance.is_some() }))
+        Ok(Some(SlirpStatus {
+            initialized: self.backend_instance.is_some(),
+            configured_dns_servers: self.configured_dns_servers(),
+        }))
     }
 
     async fn handle_update(

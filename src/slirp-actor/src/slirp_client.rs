@@ -16,7 +16,7 @@ use actor_framework::ResourceClient;
 use netsim_model::{ChipId, ClientError, PacketSink, PacketStream};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
-use crate::slirp_actor::{SlirpActor, SlirpCreate, SlirpLease, SlirpReq};
+use crate::slirp_actor::{SlirpActor, SlirpCreate, SlirpLease, SlirpReq, SlirpStatus};
 
 #[derive(Clone, Debug)]
 pub struct SlirpClient {
@@ -96,6 +96,14 @@ impl SlirpClient {
             .await
             .map_err(|e| ClientError::Send(e.to_string()))?;
         Ok(())
+    }
+
+    pub async fn status(&self) -> Result<SlirpStatus, ClientError> {
+        self.client
+            .get(0)
+            .await
+            .map_err(|e| ClientError::Send(e.to_string()))?
+            .ok_or_else(|| ClientError::Recv("SlirpActor returned no status".into()))
     }
 
     pub async fn shutdown(&self) -> Result<(), ClientError> {
