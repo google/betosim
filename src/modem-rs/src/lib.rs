@@ -63,5 +63,6 @@ pub use profiles::{
     parse_xml_profile,
 };
 pub use types::{
-    AT_ERROR, AT_OK, HostEvent, ModemError, ModemId, ModemSink, PhoneNumber, Plmn, PlmnError,
+    AT_ERROR, AT_OK, HostEvent, ModemError, ModemId, ModemSink, ParsePhoneNumberError, PhoneNumber,
+    Plmn, PlmnError,
 };

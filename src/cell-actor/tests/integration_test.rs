@@ -671,13 +671,52 @@ async fn test_incoming_call_invalid_number() {
     let mut world = World::new().await;
 
     // Given an active cellular chip 1
-    world.given_cell_chip(1).await;
+    world.given_cell_chip(CHIP_1).await;
 
     // When IncomingCall is called with alphabetic characters in the phone number
-    world.when_try_incoming_call(1, "12345abc").await;
+    world.when_try_incoming_call(CHIP_1, "12345abc").await;
 
     // Then the action fails with an Invalid phone number error
     world.then_last_error_contains("Invalid phone number");
+    world.then_last_error_is_invalid_arguments();
+}
+
+/// Scenario: An incoming call with formatted phone number delivers a RING
+/// packet to the guest
+#[tokio::test]
+async fn test_incoming_call_formatted_number_delivers_ring() {
+    let mut world = World::new().await;
+
+    // Given a voice-registered cellular chip 1
+    world.given_cell_chip(CHIP_1).await;
+    world.given_voice_registered_home(CHIP_1).await;
+
+    // When an incoming call with formatted number is injected
+    world.when_incoming_call(CHIP_1, "+1 (650) 555-1234").await;
+
+    // Then the guest receives a RING packet and active call reflects
+    // normalized number
+    world.then_guest_receives_exact_packet(CHIP_1, "RING\r\n").await;
+    world.then_mt_call_state_is(CHIP_1, "+16505551234", CallState::Incoming).await;
+}
+
+/// Scenario: An incoming call with dotted phone number delivers a RING packet
+/// to the guest
+#[tokio::test]
+async fn test_incoming_call_dotted_number_delivers_ring() {
+    let mut world = World::new().await;
+
+    // Given a voice-registered cellular chip 1
+    world.given_cell_chip(CHIP_1).await;
+    world.given_voice_registered_home(CHIP_1).await;
+
+    // When an incoming call with dotted number is injected
+    world.when_incoming_call(CHIP_1, "650.555.1234").await;
+
+    // Then the guest receives a RING packet and active call reflects
+    // normalized number
+    world.then_guest_receives_exact_packet(CHIP_1, "RING\r\n").await;
+    world.then_mt_call_state_is(CHIP_1, "6505551234", CallState::Incoming).await;
 }
 
 fn test_network_config(

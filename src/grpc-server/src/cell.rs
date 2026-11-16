@@ -285,14 +285,72 @@ impl CellService for CellServiceImpl {
                 }
                 Err(error) => {
                     error!(%error, "Execute cell action failed");
-                    let _ = sink
-                        .fail(grpcio::RpcStatus::with_message(
-                            grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to execute action: {}", error),
-                        ))
-                        .await;
+                    let _ = sink.fail(execute_error_to_rpc_status(&error)).await;
                 }
             }
         });
+    }
+}
+
+fn find_chip_error<'a>(
+    mut err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a netsim_model::ChipError> {
+    loop {
+        if let Some(chip_err) = err.downcast_ref::<netsim_model::ChipError>() {
+            return Some(chip_err);
+        }
+        err = err.source()?;
+    }
+}
+
+fn execute_error_to_rpc_status(error: &netsim_model::ClientError) -> grpcio::RpcStatus {
+    match find_chip_error(error) {
+        Some(netsim_model::ChipError::InvalidArguments(_)) => grpcio::RpcStatus::with_message(
+            grpcio::RpcStatusCode::INVALID_ARGUMENT,
+            format!("Invalid argument: {error}"),
+        ),
+        _ => grpcio::RpcStatus::with_message(
+            grpcio::RpcStatusCode::INTERNAL,
+            format!("Failed to execute action: {error}"),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use actor_framework::FrameworkError;
+    use cell_actor::CellError;
+    use netsim_model::{ChipError, ClientError};
+
+    use super::*;
+
+    #[test]
+    fn test_execute_error_invalid_arguments_maps_to_invalid_argument() {
+        let error: ClientError = FrameworkError::ServiceError(CellError::Chip(
+            ChipError::InvalidArguments("Invalid phone number: 123abc".into()),
+        ))
+        .into();
+
+        let status = execute_error_to_rpc_status(&error);
+
+        assert_eq!(status.code(), grpcio::RpcStatusCode::INVALID_ARGUMENT);
+        assert_eq!(
+            status.message(),
+            "Invalid argument: Framework error: Service error: Chip error: \
+             Invalid arguments: Invalid phone number: 123abc"
+        );
+    }
+
+    #[test]
+    fn test_execute_error_generic_maps_to_internal() {
+        let error = ClientError::Send("connection refused".to_string());
+
+        let status = execute_error_to_rpc_status(&error);
+
+        assert_eq!(status.code(), grpcio::RpcStatusCode::INTERNAL);
+        assert_eq!(
+            status.message(),
+            "Failed to execute action: Failed to send command: connection refused"
+        );
     }
 }

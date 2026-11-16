@@ -16,6 +16,9 @@ use netsim_model::RegistrationStatus;
 
 use crate::{common::constants::*, steps::*, world::World};
 
+const FORMATTED_CALLER_NUMBER: &str = "+1 (650) 555-1234";
+const NORMALIZED_CALLER_NUMBER: &str = "16505551234";
+
 // Scenario: Emergency Call
 //   Given a modem "A"
 //   When AT command "ATD911@;" is sent to "A"
@@ -227,6 +230,45 @@ fn test_external_incoming_call() {
     // ID=1, Direction=1(Incoming), State=4(Incoming), Voice=0(Voice), Multiparty=0,
     // Number="123456", Type=129
     world.assert_clcc("A", &[&format!("+CLCC: 1,1,4,0,0,{TEST_PHONE_NUMBER},{}", TOA_NATIONAL)]);
+
+    // Wait for timeout
+    world.when_time_advances_ms(30100);
+
+    // Call should be gone
+    world.assert_idle("A");
+}
+
+// Scenario: External incoming call with formatted phone number
+//   Given a modem "A" with number TEST_PHONE_NUMBER_LONG_A
+//   When external call from "+1 (650) 555-1234" matches "A"
+//   Then response from "A" is "RING"
+//   And response from "A" contains '+CLIP: "16505551234",145,,,,0'
+//   When time advances > 30s (call ring timeout)
+//   Then check "A" is idle
+#[test]
+fn test_incoming_call_formatted_phone_number() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+
+    // Enable CLIP
+    world.send_and_expect_ok("A", "AT+CLIP=1");
+
+    // Inject call with formatted number
+    when_incoming_call_received(&mut world, "A", FORMATTED_CALLER_NUMBER);
+
+    // Expect RING
+    world.then_response_is("A", "RING");
+    // Expect +CLIP with stripped international number and TOA 145
+    world.then_response_contains(
+        "A",
+        &format!("+CLIP: \"{NORMALIZED_CALLER_NUMBER}\",{TOA_INTERNATIONAL}"),
+    );
+
+    // Verify call state (Incoming)
+    world.assert_clcc(
+        "A",
+        &[&format!("+CLCC: 1,1,4,0,0,{NORMALIZED_CALLER_NUMBER},{TOA_INTERNATIONAL}")],
+    );
 
     // Wait for timeout
     world.when_time_advances_ms(30100);

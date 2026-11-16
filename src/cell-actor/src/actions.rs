@@ -35,19 +35,12 @@ pub enum CellAction {
 }
 
 impl CellAction {
-    /// Validates whether a phone number contains only allowed dialing characters.
+    /// Returns true if `PhoneNumber::parse_formatted` accepts the number.
+    ///
+    /// It rejects double quotes, strips the separators ` `, `-`, `(`, `)`,
+    /// and `.`, then applies strict 3GPP phone number validation.
     fn is_valid_phone_number(s: &str) -> bool {
-        !s.is_empty()
-            && s.chars().all(|c| {
-                c.is_ascii_digit()
-                    || c == '+'
-                    || c == '-'
-                    || c == ' '
-                    || c == '('
-                    || c == ')'
-                    || c == '*'
-                    || c == '#'
-            })
+        modem_rs::PhoneNumber::parse_formatted(s).is_ok()
     }
 
     /// Validates whether an SMS sender identifier contains only allowed characters.
@@ -106,9 +99,16 @@ mod tests {
         assert!(CellAction::is_valid_phone_number("+1234567890"));
         assert!(CellAction::is_valid_phone_number("123-456-7890"));
         assert!(CellAction::is_valid_phone_number("(555) 123 4567"));
+        assert!(CellAction::is_valid_phone_number("+1 (650) 555-1234"));
+        assert!(CellAction::is_valid_phone_number("650.555.1234"));
         assert!(CellAction::is_valid_phone_number("*#06#"));
         assert!(!CellAction::is_valid_phone_number(""));
+        assert!(!CellAction::is_valid_phone_number("   "));
+        assert!(!CellAction::is_valid_phone_number("+"));
+        assert!(!CellAction::is_valid_phone_number("()"));
+        assert!(!CellAction::is_valid_phone_number("1+2"));
         assert!(!CellAction::is_valid_phone_number("123abc456"));
+        assert!(!CellAction::is_valid_phone_number("\"123\""));
     }
 
     #[test]

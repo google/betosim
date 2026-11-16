@@ -467,6 +467,14 @@ impl World {
         assert_eq!(*actual_id, ChipId(expected_id));
     }
 
+    pub(crate) fn then_last_error_is_invalid_arguments(&self) {
+        let err = self.last_error.as_ref().expect("expected error, got Ok");
+        match err.as_chip_error() {
+            Some(NetsimChipError::InvalidArguments(_)) => {}
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
     pub(crate) async fn then_device_notified_chip_removed(&mut self, expected_id: u32) {
         self.then_device_receives_chip_removed_unacked(expected_id).await;
         self.ack_pending_device_reply();

@@ -36,7 +36,7 @@ use crate::{
     time::{Clock, SystemClock},
     types::{
         CommandAction, HangupReason, HostEvent, ModemError, ModemId, ModemSink, NumberPresentation,
-        Parsable, PhoneNumber,
+        PhoneNumber,
     },
 };
 
@@ -831,14 +831,10 @@ impl ModemNetworkSimulator {
         target_id: ModemId,
         number: &str,
     ) -> Vec<NetworkEvent> {
-        let Ok((rem, phone)) = PhoneNumber::parse(number.as_bytes()) else {
+        let Ok(phone) = PhoneNumber::parse_formatted(number) else {
             warn!("Invalid incoming call number: {}", number);
             return Vec::new();
         };
-        if !rem.is_empty() {
-            warn!("Invalid incoming call number: {}", number);
-            return Vec::new();
-        }
         self.apply_to_modem(target_id, |modem| {
             modem
                 .trigger_incoming_call(Some(&phone), NumberPresentation::Allowed, None)

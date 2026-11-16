@@ -475,6 +475,79 @@ mod tests {
         drop(server);
     }
 
+    fn incoming_call_request(chip_id: u32, number: &str) -> ExecuteCellRequest {
+        let mut req = ExecuteCellRequest::new();
+        req.id = chip_id;
+        let mut incoming_call = netsim_proto::cell::IncomingCall::new();
+        incoming_call.number = number.to_string();
+        req.set_incoming_call(incoming_call);
+        req
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cell_service_execute_invalid_number_returns_invalid_argument() {
+        let (server, addr, mut cell_rx, _) = setup_test_server().await;
+
+        let env = Arc::new(Environment::new(1));
+        let ch = ChannelBuilder::new(env).connect(&format!("localhost:{}", addr));
+        let client = CellServiceClient::new(ch);
+
+        tokio::spawn(async move {
+            if let Some(actor_framework::ResourceRequest::Action { respond_to, .. }) =
+                cell_rx.recv().await
+            {
+                let _ = respond_to.send(Err(cell_actor::CellError::Chip(
+                    netsim_model::ChipError::InvalidArguments(
+                        "Invalid phone number: 123abc".into(),
+                    ),
+                )));
+            }
+        });
+
+        let response = client.execute(&incoming_call_request(1, "123abc"));
+        match response.unwrap_err() {
+            grpcio::Error::RpcFailure(status) => {
+                assert_eq!(status.code(), RpcStatusCode::INVALID_ARGUMENT);
+            }
+            err => panic!("Expected RpcFailure, got {:?}", err),
+        }
+
+        drop(server);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cell_service_execute_formatted_incoming_call_success() {
+        const FORMATTED_NUMBERS: [&str; 2] = ["+1 (650) 555-1234", "650.555.1234"];
+        let (server, addr, mut cell_rx, _) = setup_test_server().await;
+
+        let env = Arc::new(Environment::new(1));
+        let ch = ChannelBuilder::new(env).connect(&format!("localhost:{}", addr));
+        let client = CellServiceClient::new(ch);
+
+        tokio::spawn(async move {
+            for expected in FORMATTED_NUMBERS {
+                if let Some(actor_framework::ResourceRequest::Action {
+                    action, respond_to, ..
+                }) = cell_rx.recv().await
+                {
+                    match action {
+                        CellAction::IncomingCall { number } => {
+                            assert_eq!(number, expected);
+                            let _ = respond_to.send(Ok(CellActionResult::Success));
+                        }
+                        _ => panic!("Unexpected action: {:?}", action),
+                    }
+                }
+            }
+        });
+
+        for number in FORMATTED_NUMBERS {
+            assert!(client.execute(&incoming_call_request(1, number)).is_ok());
+        }
+
+        drop(server);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_nfc_service_get_status_list_success() {
         let (server, addr, _, mut nfc_rx) = setup_test_server().await;

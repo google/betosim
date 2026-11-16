@@ -469,6 +469,18 @@ impl PhoneNumber {
             && self.0.ends_with('#')
             && self.0.as_bytes().get(3).is_some_and(|&c| c == b'*' || c == b'#')
     }
+
+    /// Parses an externally formatted phone number by stripping common
+    /// separators (` `, `-`, `(`, `)`, `.`) before strict 3GPP validation.
+    pub fn parse_formatted(s: &str) -> Result<Self, ParsePhoneNumberError> {
+        // Reject quotes because strict PhoneNumber::parse accepts QuotedString.
+        if s.contains('"') {
+            return Err(ParsePhoneNumberError::InvalidCharacters(s.to_string()));
+        }
+        let stripped: String =
+            s.chars().filter(|c| !matches!(c, ' ' | '-' | '(' | ')' | '.')).collect();
+        Self::try_from(stripped.as_str())
+    }
 }
 
 /// Abbreviated Dialling Number (ADN) record per 3GPP TS 31.102 §4.4.2.3 and
@@ -2767,6 +2779,36 @@ mod tests {
         let (rem, phone) = PhoneNumber::parse(b"12+34").unwrap();
         assert_eq!(rem, b"+34");
         assert_eq!(phone.as_str(), "12");
+    }
+
+    #[test]
+    fn test_phone_number_parse_formatted_strips_separators() {
+        assert_eq!(
+            PhoneNumber::parse_formatted("+1 (650) 555-1234").unwrap().as_str(),
+            "+16505551234"
+        );
+        assert_eq!(PhoneNumber::parse_formatted("650-555-1234").unwrap().as_str(), "6505551234");
+        assert_eq!(PhoneNumber::parse_formatted("650.555.1234").unwrap().as_str(), "6505551234");
+        assert_eq!(PhoneNumber::parse_formatted("*#06#").unwrap().as_str(), "*#06#");
+    }
+
+    #[test]
+    fn test_phone_number_parse_formatted_rejects_invalid() {
+        assert!(PhoneNumber::parse_formatted("").is_err());
+        assert!(PhoneNumber::parse_formatted("   ").is_err());
+        assert!(PhoneNumber::parse_formatted("--- ( ) .").is_err());
+        assert!(PhoneNumber::parse_formatted("+").is_err());
+        assert!(PhoneNumber::parse_formatted("1+2").is_err());
+        assert!(PhoneNumber::parse_formatted("123abc").is_err());
+        assert!(PhoneNumber::parse_formatted("123\n456").is_err());
+        assert!(PhoneNumber::parse_formatted("\"123\"").is_err());
+    }
+
+    #[test]
+    fn test_phone_number_strict_parse_rejects_separators() {
+        assert!(PhoneNumber::try_from("+1 (650) 555-1234").is_err());
+        assert!(PhoneNumber::try_from("650-555-1234").is_err());
+        assert!(PhoneNumber::try_from("650.555.1234").is_err());
     }
 
     #[test]
