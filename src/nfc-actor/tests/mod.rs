@@ -12,5 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod error_stats_test;
 mod nfc_actor_tests;
 mod world;

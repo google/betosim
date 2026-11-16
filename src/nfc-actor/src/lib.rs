@@ -14,6 +14,7 @@
 
 mod accessory;
 mod apdu;
+pub mod err;
 mod error;
 mod lifecycle;
 mod nfc_actor;
@@ -21,6 +22,8 @@ mod scene;
 mod service;
 mod stats;
 mod t4at;
+#[cfg(test)]
+mod test_utils;
 
 mod client;
 

@@ -32,9 +32,10 @@ use parking_lot::Mutex;
 use pdl_runtime::Packet;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_util::codec::{Decoder, FramedRead};
-use tracing::{error, info};
+use tracing::{error, info, instrument::WithSubscriber};
 
 use crate::{
+    err::Code,
     error::NfcError,
     nfc_actor::{ChipState, NciMessageType, NfcAction, NfcActor, NfcMode},
     stats::NfcApi,
@@ -108,6 +109,79 @@ fn mode_from_notification(packet: &ControlPacket) -> Option<NfcMode> {
     }
 }
 
+async fn forward_casimir_to_guest<R, S>(
+    mut stream: FramedRead<R, NciCodec>,
+    mut packet_sink: S,
+    chip_id: ChipId,
+    enabled: Arc<AtomicBool>,
+    mode: Arc<AtomicU8>,
+    nfc_stats: Arc<crate::stats::NfcStats>,
+    rx_count: Arc<AtomicU64>,
+) -> ChipId
+where
+    R: tokio::io::AsyncRead + Unpin,
+    S: futures::Sink<Bytes, Error = std::io::Error> + Unpin,
+{
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(bytes) => {
+                if !enabled.load(Ordering::Acquire) {
+                    continue;
+                }
+                if let &[b0, _, _, ..] = bytes.as_ref() {
+                    match NciMessageType::from_header_byte(b0) {
+                        Some(NciMessageType::Data) => {
+                            nfc_stats.incr_nci_data_tx();
+                            match NfcMode::try_from(mode.load(Ordering::Acquire)) {
+                                Ok(NfcMode::Listen) => {
+                                    nfc_stats.incr(NfcApi::CardEmulationProcessCommandApdu);
+                                    nfc_stats.incr_card_emulation_count();
+                                }
+                                Ok(NfcMode::Poll) => {
+                                    nfc_stats.incr_tag_emulation_count();
+                                }
+                                _ => {}
+                            }
+                            rx_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Some(NciMessageType::Response) => {
+                            nfc_stats.incr_nci_responses_tx();
+                            rx_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Some(NciMessageType::Notification) => {
+                            nfc_stats.incr_nci_notifications_tx();
+                            if let Ok(packet) = ControlPacket::decode_full(&bytes)
+                                && let Some(next_mode) = mode_from_notification(&packet)
+                            {
+                                mode.store(next_mode.as_u8(), Ordering::Release);
+                            }
+                            rx_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                }
+                if let Err(error) = packet_sink.send(bytes).await {
+                    error!(
+                        ?error,
+                        code = Code::GuestPacketSendFailed as u32,
+                        "Failed to send packet to guest"
+                    );
+                    break;
+                }
+            }
+            Err(error) => {
+                // NciCodec::decode never returns Err; decode_eof errors only on
+                // mid-frame EOF.
+                error!(?error, code = Code::NciReaderError as u32, "NFC reader error");
+                nfc_stats.incr_nci_error();
+                break;
+            }
+        }
+    }
+    info!("NFC forward loop finished");
+    chip_id
+}
+
 impl ActorService for NfcActor {
     type Id = ChipId;
     type Create = ChipCreate;
@@ -132,7 +206,7 @@ impl ActorService for NfcActor {
         }
 
         let packet_stream = params.packet_stream.take().ok_or(NfcError::MissingStreamSink)?;
-        let mut packet_sink = params.packet_sink.take().ok_or(NfcError::MissingStreamSink)?;
+        let packet_sink = params.packet_sink.take().ok_or(NfcError::MissingStreamSink)?;
 
         let scene_client = self
             .scene_client
@@ -218,72 +292,24 @@ impl ActorService for NfcActor {
 
         // Bridge Casimir -> Guest
         let (nfc_reader, nfc_writer) = tokio::io::split(nfc_io);
-        let mut stream = FramedRead::new(nfc_reader, NciCodec);
-        let enabled_clone = enabled.clone();
-        let chip_id_clone = chip_id;
-        let nfc_stats_clone = self.nfc_stats.clone();
+        let stream = FramedRead::new(nfc_reader, NciCodec);
         let tx_count = Arc::new(AtomicU64::new(0));
         let rx_count = Arc::new(AtomicU64::new(0));
         let tx_count_clone = tx_count.clone();
-        let rx_count_clone = rx_count.clone();
         let mode = Arc::new(AtomicU8::new(NfcMode::Idle.as_u8()));
-        let mode_clone = mode.clone();
 
-        let task_1 = Box::pin(async move {
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(bytes) => {
-                        if !enabled_clone.load(Ordering::Acquire) {
-                            continue;
-                        }
-                        if let &[b0, _, _, ..] = bytes.as_ref() {
-                            match NciMessageType::from_header_byte(b0) {
-                                Some(NciMessageType::Data) => {
-                                    nfc_stats_clone.incr_nci_data_tx();
-                                    match NfcMode::try_from(mode_clone.load(Ordering::Acquire)) {
-                                        Ok(NfcMode::Listen) => {
-                                            nfc_stats_clone
-                                                .incr(NfcApi::CardEmulationProcessCommandApdu);
-                                            nfc_stats_clone.incr_card_emulation_count();
-                                        }
-                                        Ok(NfcMode::Poll) => {
-                                            nfc_stats_clone.incr_tag_emulation_count();
-                                        }
-                                        _ => {}
-                                    }
-                                    rx_count_clone.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Some(NciMessageType::Response) => {
-                                    nfc_stats_clone.incr_nci_responses_tx();
-                                    rx_count_clone.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Some(NciMessageType::Notification) => {
-                                    nfc_stats_clone.incr_nci_notifications_tx();
-                                    if let Ok(packet) = ControlPacket::decode_full(&bytes)
-                                        && let Some(mode) = mode_from_notification(&packet)
-                                    {
-                                        mode_clone.store(mode.as_u8(), Ordering::Release);
-                                    }
-                                    rx_count_clone.fetch_add(1, Ordering::Relaxed);
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Err(error) = packet_sink.send(bytes).await {
-                            error!(?error, "Failed to send packet to guest");
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        error!(?error, "NFC reader error");
-                        nfc_stats_clone.incr_nci_error();
-                        break;
-                    }
-                }
-            }
-            info!("NFC forward loop finished");
-            chip_id_clone
-        });
+        let task_1 = Box::pin(
+            forward_casimir_to_guest(
+                stream,
+                packet_sink,
+                chip_id,
+                enabled.clone(),
+                mode.clone(),
+                self.nfc_stats.clone(),
+                rx_count.clone(),
+            )
+            .with_current_subscriber(),
+        );
         ctx.spawn(chip_id, task_1);
 
         // Bridge Guest -> Casimir
@@ -374,7 +400,9 @@ impl ActorService for NfcActor {
             {
                 error!(
                     ?error,
-                    "Failed to remove device {} from Casimir scene", state.casimir_device_id
+                    code = Code::DeviceRemoveFailed as u32,
+                    "Failed to remove device {} from Casimir scene",
+                    state.casimir_device_id
                 );
             }
         }
@@ -490,7 +518,11 @@ impl ActorService for NfcActor {
                         }
                         Err(error) => {
                             let err_msg = format!("Failed to add RF device to Casimir: {error}");
-                            error!(%error, "NfcActor: Failed to add RF device to Casimir");
+                            error!(
+                                %error,
+                                code = Code::AddRfDeviceFailed as u32,
+                                "NfcActor: Failed to add RF device to Casimir"
+                            );
                             self.nfc_stats.incr_casimir_error();
                             let _ = respond_to.send(Err(NfcError::Internal(err_msg)));
                             Ok(crate::nfc_actor::NfcActionResult::Ok)
@@ -498,7 +530,7 @@ impl ActorService for NfcActor {
                     }
                 } else {
                     let err_msg = "Casimir scene not started".to_string();
-                    error!("NfcActor: {}", err_msg);
+                    error!(code = Code::SceneNotStarted as u32, "NfcActor: {}", err_msg);
                     self.nfc_stats.incr_casimir_error();
                     let _ = respond_to.send(Err(NfcError::Internal(err_msg)));
                     Ok(crate::nfc_actor::NfcActionResult::Ok)
@@ -770,5 +802,88 @@ mod tests {
         let disc_pkt =
             make_deactivate(DeactivationType::Discovery, DeactivationReason::EndpointRequest);
         assert_eq!(mode_from_notification(&disc_pkt), None);
+    }
+
+    #[tokio::test]
+    async fn test_scene_not_started_records_error_stat() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(crate::stats::NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats.clone());
+        let mut ctx = DummyContext;
+        let (table, subscriber, _multi_dispatch_guard) =
+            crate::test_utils::setup_error_stats_test();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        WithSubscriber::with_subscriber(
+            actor.handle_action(None, NfcAction::CreateControlChannel { respond_to: tx }, &mut ctx),
+            subscriber,
+        )
+        .await
+        .expect("handle_action must return Ok");
+
+        assert!(matches!(rx.await, Ok(Err(NfcError::Internal(_)))));
+        assert_eq!(table.snapshot(), vec![(Code::SceneNotStarted as u32, 1)]);
+        assert_eq!(stats.to_proto().casimir_errors(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_device_remove_failed_records_error_stat() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(crate::stats::NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats);
+        let mut ctx = DummyContext;
+        let chip_id = ChipId(43);
+        let (nfc_io, _peer) = tokio::io::duplex(1024);
+        let (_rx, nfc_writer) = tokio::io::split(nfc_io);
+        actor.active_chips.insert(chip_id, ChipState::for_test(chip_id, nfc_writer));
+        let (cmd_tx, cmd_rx) = unbounded_channel();
+        drop(cmd_rx);
+        actor.scene_client = Some(crate::scene::SceneClient::new(cmd_tx));
+
+        let (table, subscriber, _multi_dispatch_guard) =
+            crate::test_utils::setup_error_stats_test();
+
+        WithSubscriber::with_subscriber(actor.handle_delete(chip_id, &mut ctx), subscriber)
+            .await
+            .expect("handle_delete must return Ok");
+
+        assert!(!actor.is_chip_active(&chip_id));
+        assert_eq!(table.snapshot(), vec![(Code::DeviceRemoveFailed as u32, 1)]);
+    }
+
+    #[tokio::test]
+    async fn test_forward_casimir_to_guest_reader_error_records_error_stat() {
+        let (table, subscriber, _multi_dispatch_guard) =
+            crate::test_utils::setup_error_stats_test();
+        let stats = Arc::new(crate::stats::NfcStats::new());
+
+        WithSubscriber::with_subscriber(
+            async {
+                let (mut writer, reader) = tokio::io::duplex(64);
+                tokio::io::AsyncWriteExt::write_all(&mut writer, &[0x40, 0x00, 0x05, 0xAA])
+                    .await
+                    .unwrap();
+                drop(writer);
+
+                let stream = FramedRead::new(reader, NciCodec);
+                let packet_sink = futures::sink::drain().sink_map_err(|e| match e {});
+                let returned_chip_id = forward_casimir_to_guest(
+                    stream,
+                    packet_sink,
+                    ChipId(1),
+                    Arc::new(AtomicBool::new(true)),
+                    Arc::new(AtomicU8::new(NfcMode::Idle.as_u8())),
+                    stats.clone(),
+                    Arc::new(AtomicU64::new(0)),
+                )
+                .await;
+                assert_eq!(returned_chip_id, ChipId(1));
+            },
+            subscriber,
+        )
+        .await;
+
+        assert_eq!(table.snapshot(), vec![(Code::NciReaderError as u32, 1)]);
+        assert_eq!(stats.to_proto().nci_errors(), 1);
     }
 }

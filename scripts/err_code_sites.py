@@ -81,6 +81,7 @@ CRATE_RANGES = {
     "model": (30000, 39999, 500, 999),
     "wifi-actor": (60000, 69999, 0, 999),
     "ap-actor": (70000, 79999, 0, 999),
+    "nfc-actor": (80000, 89999, 0, 499),
 }
 
 MACRO_START_RE = re.compile(r"\b(?:error|warn)!\s*\(")

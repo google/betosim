@@ -22,6 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info};
 
 use crate::{
+    err::Code,
     nfc_actor::{NciMessageType, NfcActor, NfcMode},
     stats::NfcApi,
 };
@@ -51,6 +52,7 @@ impl ActorLifecycle for NfcActor {
             // Data Packet
             if message.len() < 3 {
                 tracing::warn!(
+                    code = Code::DataPacketDecodeFailed as u32,
                     "Failed to decode DataPacket (invalid length), bytes: {:?}",
                     message
                 );
@@ -149,7 +151,11 @@ impl ActorLifecycle for NfcActor {
                     _ => {}
                 }
             } else {
-                tracing::warn!("Failed to decode ControlPacket, bytes: {:?}", message);
+                tracing::warn!(
+                    code = Code::ControlPacketDecodeFailed as u32,
+                    "Failed to decode ControlPacket, bytes: {:?}",
+                    message
+                );
                 self.nfc_stats.incr_nci_error();
             }
         }
@@ -157,7 +163,11 @@ impl ActorLifecycle for NfcActor {
         if let Some(state) = self.get_chip_mut(&id)
             && let Err(error) = state.nfc_writer.write_all(&message).await
         {
-            error!(?error, "Failed to write guest packet to Casimir");
+            error!(
+                ?error,
+                code = Code::CasimirPacketWriteFailed as u32,
+                "Failed to write guest packet to Casimir"
+            );
             self.nfc_stats.incr_casimir_error();
         }
     }
@@ -189,7 +199,9 @@ mod tests {
         RfDiscoverSelectCommand, RfDiscoveryId, RfInterfaceType, RfProtocolType,
         RfSetListenModeRoutingCommand, RfTechnologyAndMode,
     };
+    use common::util::netsim_logger::ErrorStatsTable;
     use netsim_model::{ChipId, DeviceId};
+    use tracing::instrument::WithSubscriber;
 
     use super::*;
     use crate::{
@@ -482,5 +494,76 @@ mod tests {
         packet.push(u8::try_from(payload.len()).expect("payload fits in u8"));
         packet.extend_from_slice(payload);
         Bytes::from(packet)
+    }
+
+    const TRUNCATED_DATA_PACKET: [u8; 2] = [0x00, 0x00];
+
+    struct ErrorStatsHarness<S> {
+        actor: NfcActor,
+        ctx: DummyContext,
+        table: Arc<ErrorStatsTable>,
+        subscriber: S,
+        _multi_dispatch_guard: tracing::Dispatch,
+        stats: Arc<NfcStats>,
+        chip_id: ChipId,
+        _casimir_peer: Option<tokio::io::DuplexStream>,
+    }
+
+    fn setup_error_stats_actor(
+        drop_casimir_peer: bool,
+    ) -> ErrorStatsHarness<impl tracing::Subscriber> {
+        let (_runner, device_client) = device_actor::new();
+        let stats = Arc::new(NfcStats::new());
+        let mut actor = NfcActor::new(device_client, stats.clone());
+        let chip_id = ChipId(1);
+
+        let (nfc_io, peer) = tokio::io::duplex(1024);
+        let (_reader, nfc_writer) = tokio::io::split(nfc_io);
+        actor.active_chips.insert(chip_id, ChipState::for_test(chip_id, nfc_writer));
+        let casimir_peer = if drop_casimir_peer { None } else { Some(peer) };
+
+        let (table, subscriber, _multi_dispatch_guard) =
+            crate::test_utils::setup_error_stats_test();
+
+        ErrorStatsHarness {
+            actor,
+            ctx: DummyContext,
+            table,
+            subscriber,
+            _multi_dispatch_guard,
+            stats,
+            chip_id,
+            _casimir_peer: casimir_peer,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_length_data_packet_records_error_stat() {
+        let mut h = setup_error_stats_actor(false);
+
+        WithSubscriber::with_subscriber(
+            h.actor.on_stream(h.chip_id, Bytes::from_static(&TRUNCATED_DATA_PACKET), &mut h.ctx),
+            h.subscriber,
+        )
+        .await;
+
+        assert_eq!(h.table.snapshot(), vec![(Code::DataPacketDecodeFailed as u32, 1)]);
+        assert_eq!(h.stats.to_proto().nci_errors(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_casimir_write_failed_records_error_stat() {
+        let mut h = setup_error_stats_actor(true);
+        let cmd = CoreResetCommand { reset_type: ResetType::KeepConfig };
+        let payload = Bytes::from(cmd.encode_to_vec().expect("encode CoreResetCommand"));
+
+        WithSubscriber::with_subscriber(
+            h.actor.on_stream(h.chip_id, payload, &mut h.ctx),
+            h.subscriber,
+        )
+        .await;
+
+        assert_eq!(h.table.snapshot(), vec![(Code::CasimirPacketWriteFailed as u32, 1)]);
+        assert_eq!(h.stats.to_proto().casimir_errors(), 1);
     }
 }

@@ -135,6 +135,26 @@ impl ChipState {
     }
 }
 
+#[cfg(test)]
+impl ChipState {
+    pub(crate) fn for_test(id: ChipId, nfc_writer: WriteHalf<DuplexStream>) -> Self {
+        Self {
+            id,
+            device_id: device_api::DeviceId(1),
+            chip: Default::default(),
+            initial_chip: Default::default(),
+            enabled: Arc::new(AtomicBool::new(true)),
+            casimir_device_id: 1,
+            nfc_writer,
+            tx_count: Arc::new(AtomicU64::new(0)),
+            rx_count: Arc::new(AtomicU64::new(0)),
+            p2p_tx_count: Arc::new(AtomicU64::new(0)),
+            p2p_rx_count: Arc::new(AtomicU64::new(0)),
+            mode: Arc::new(AtomicU8::new(NfcMode::Idle.as_u8())),
+        }
+    }
+}
+
 use crate::stats::NfcStats;
 
 pub struct NfcActor {

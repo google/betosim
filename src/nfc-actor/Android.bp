@@ -95,6 +95,7 @@ rust_test_host {
         "libcasimir",
         "libfutures",
         "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_common_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_device_api_testing",
         "libnetsim_next_model_testing",
@@ -122,6 +123,7 @@ rust_test_host {
         "general_tests",
     ],
     srcs: [
+        "tests/error_stats_test.rs",
         "tests/mod.rs",
         "tests/nfc_actor_tests.rs",
         "tests/world.rs",
@@ -137,6 +139,7 @@ rust_test_host {
         "libcasimir",
         "libfutures",
         "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_common_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_device_api_testing",
         "libnetsim_next_model_testing",

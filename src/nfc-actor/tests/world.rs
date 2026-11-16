@@ -30,6 +30,7 @@ use casimir::packets::nci::{
     RfDeactivateResponse, RfDiscoverCommand, RfDiscoverResponse, RfPacketChild,
     RfSetListenModeRoutingCommand, RfSetListenModeRoutingResponse, RfTechnologyAndMode, Status,
 };
+use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
 use device_actor::DeviceActor;
 use futures::{StreamExt, future::BoxFuture};
 use netsim_model::{
@@ -40,6 +41,8 @@ use nfc_actor::{NfcActor, NfcApi, NfcClient};
 use pdl_runtime::Packet;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::layer::SubscriberExt;
 
 // --- Mock Helpers ---
 
@@ -204,6 +207,51 @@ impl futures::Sink<Bytes> for MockSink {
     }
 }
 
+struct ClosableMockSink(mpsc::Sender<Bytes>);
+impl futures::Sink<Bytes> for ClosableMockSink {
+    type Error = std::io::Error;
+    fn poll_ready(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        if self.0.is_closed() {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "guest sink closed",
+            )))
+        } else {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    fn start_send(self: std::pin::Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
+        self.0.try_send(item).map_err(|err| match err {
+            mpsc::error::TrySendError::Closed(_) => {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "guest sink closed")
+            }
+            mpsc::error::TrySendError::Full(_) => {
+                std::io::Error::new(std::io::ErrorKind::WouldBlock, "guest sink full")
+            }
+        })
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+enum SinkMode {
+    IgnoreClose,
+    FailOnClose,
+}
+
 // --- BDD World ---
 
 pub(crate) struct NfcWorld {
@@ -334,6 +382,10 @@ pub(crate) struct NfcClientWorld {
     packet_senders: HashMap<ChipId, mpsc::Sender<Bytes>>,
     mock_device_client: MockDeviceActorClient,
     last_reset_chip: Option<Chip>,
+    last_control_channel_error: Option<netsim_model::ClientError>,
+    error_stats: Arc<ErrorStatsTable>,
+    held_control_channels: Vec<(tokio::io::DuplexStream, u16)>,
+    _multi_dispatch_guard: Option<tracing::Dispatch>,
     actor_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -347,13 +399,29 @@ impl Drop for NfcClientWorld {
 
 impl NfcClientWorld {
     pub(crate) async fn new() -> Self {
+        Self::build(false).await
+    }
+
+    pub(crate) async fn with_error_stats() -> Self {
+        Self::build(true).await
+    }
+
+    async fn build(record_error_stats: bool) -> Self {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         let mock_device_client = MockDeviceActorClient::default();
         let device_client = device_actor::DeviceClient::new(Box::new(mock_device_client.clone()));
         let (runner, client) = nfc_actor::new();
         let actor = NfcActor::new(device_client, client.stats());
-        let actor_task = tokio::spawn(runner.run(actor));
+        let error_stats = Arc::new(ErrorStatsTable::new());
+        let (actor_task, _multi_dispatch_guard) = if record_error_stats {
+            let guard = tracing::Dispatch::new(tracing_subscriber::registry());
+            let subscriber = tracing_subscriber::registry()
+                .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
+            (tokio::spawn(runner.run(actor).with_subscriber(subscriber)), Some(guard))
+        } else {
+            (tokio::spawn(runner.run(actor)), None)
+        };
 
         Self {
             client,
@@ -361,6 +429,10 @@ impl NfcClientWorld {
             packet_senders: HashMap::new(),
             mock_device_client,
             last_reset_chip: None,
+            last_control_channel_error: None,
+            error_stats,
+            held_control_channels: Vec::new(),
+            _multi_dispatch_guard,
             actor_task: Some(actor_task),
         }
     }
@@ -370,6 +442,7 @@ impl NfcClientWorld {
         if let Some(task) = self.actor_task.take() {
             let _ = task.await;
         }
+        self.held_control_channels.clear();
     }
 
     fn encode_nci_packet<P: Packet>(packet: P) -> Bytes {
@@ -381,12 +454,22 @@ impl NfcClientWorld {
     }
 
     async fn create_chip(&mut self, chip_id: ChipId, chip: Chip) {
+        self.create_chip_with_sink(chip_id, chip, SinkMode::IgnoreClose).await;
+    }
+
+    async fn create_chip_with_sink(&mut self, chip_id: ChipId, chip: Chip, sink_mode: SinkMode) {
         let (tx_stream, rx_stream) = mpsc::channel(CLIENT_STREAM_CHANNEL_CAPACITY);
         let (tx_sink, rx_sink) = mpsc::channel(CLIENT_STREAM_CHANNEL_CAPACITY);
+        let packet_sink: std::pin::Pin<
+            Box<dyn futures::Sink<Bytes, Error = std::io::Error> + Send + Sync>,
+        > = match sink_mode {
+            SinkMode::IgnoreClose => Box::pin(MockSink(tx_sink)),
+            SinkMode::FailOnClose => Box::pin(ClosableMockSink(tx_sink)),
+        };
 
         let params = ChipCreate {
             packet_stream: Some(Box::new(ReceiverStream::new(rx_stream))),
-            packet_sink: Some(Box::pin(MockSink(tx_sink))),
+            packet_sink: Some(packet_sink),
             chip,
         };
 
@@ -465,6 +548,11 @@ impl NfcClientWorld {
     }
 
     pub(crate) async fn given_nci_core_initialized(&mut self, chip_id: ChipId) {
+        self.when_nci_core_reset_completed(chip_id).await;
+        self.when_nci_core_init_completed(chip_id).await;
+    }
+
+    pub(crate) async fn when_nci_core_reset_completed(&mut self, chip_id: ChipId) {
         let reset_cmd = CoreResetCommand { reset_type: ResetType::KeepConfig };
         self.send_raw_nci(chip_id, Self::encode_nci_packet(reset_cmd)).await;
 
@@ -475,8 +563,6 @@ impl NfcClientWorld {
 
         let reset_ntf_bytes = self.recv_nci_packet(chip_id).await;
         CoreResetNotification::decode_full(&reset_ntf_bytes).expect("decode CoreResetNotification");
-
-        self.when_nci_core_init_completed(chip_id).await;
     }
 
     pub(crate) async fn given_nci_listen_mode_routing_configured(&mut self, chip_id: ChipId) {
@@ -919,5 +1005,61 @@ impl NfcClientWorld {
         assert_eq!(stats.to_proto().card_emulation_count(), 2);
         assert_eq!(stats.get(NfcApi::TagTransceive), 1);
         assert_eq!(stats.to_proto().tag_emulation_count(), 2);
+    }
+
+    pub(crate) async fn given_chip_with_closable_sink(
+        &mut self,
+        chip_id: ChipId,
+        device_id: DeviceId,
+    ) {
+        self.mock_device_client.set_position(
+            device_id,
+            Position { x: ORIGIN_METERS, y: ORIGIN_METERS, z: ORIGIN_METERS },
+        );
+        self.create_chip_with_sink(
+            chip_id,
+            Chip { device_id, ..Default::default() },
+            SinkMode::FailOnClose,
+        )
+        .await;
+    }
+
+    pub(crate) fn when_guest_packet_receiver_closed(&mut self, chip_id: ChipId) {
+        assert!(
+            self.packet_receivers.remove(&chip_id).is_some(),
+            "guest packet receiver for chip {chip_id} must exist"
+        );
+    }
+
+    pub(crate) async fn when_raw_nci_packet_sent(&self, chip_id: ChipId, raw: &'static [u8]) {
+        self.send_raw_nci(chip_id, Bytes::from_static(raw)).await;
+    }
+
+    pub(crate) async fn given_max_casimir_devices_occupied(&mut self) {
+        for _ in 0..casimir::MAX_DEVICES {
+            let channel =
+                self.client.create_control_channel().await.expect("occupy Casimir device slot");
+            self.held_control_channels.push(channel);
+        }
+    }
+
+    pub(crate) async fn when_control_channel_create_fails(&mut self) {
+        self.last_control_channel_error = self.client.create_control_channel().await.err();
+    }
+
+    pub(crate) fn then_control_channel_create_failed(&self) {
+        assert!(
+            self.last_control_channel_error.is_some(),
+            "expected create_control_channel to fail when Casimir scene is full"
+        );
+    }
+
+    /// Waits up to 2s for recorded error stats to equal `expected`.
+    pub(crate) async fn then_error_stats_are(&self, expected: &[(u32, u32)]) {
+        let start = std::time::Instant::now();
+        while self.error_stats.snapshot() != expected && start.elapsed() < PACKET_TIMEOUT {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        assert_eq!(self.error_stats.snapshot(), expected);
     }
 }
