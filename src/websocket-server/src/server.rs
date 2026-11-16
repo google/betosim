@@ -119,6 +119,15 @@ fn resolve_chip_kind(base_path: &str) -> Option<ChipKind> {
     }
 }
 
+async fn write_bad_request_close(stream: &mut TcpStream) -> Result<(), ServerError> {
+    let response = Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(CONNECTION, "close")
+        .body(Vec::new())?;
+    let _ = write_http_response(stream, response).await;
+    Ok(())
+}
+
 /// Performs the initial HTTP handshake and upgrades to WebSocket.
 ///
 /// Ref: RFC 6455, Section 1.3 - Opening Handshake
@@ -138,18 +147,9 @@ async fn perform_handshake(
     let header_len = loop {
         let n = stream.read_buf(&mut buffer).await?;
         if n == 0 {
-            if buffer.len() == buffer.capacity() {
-                let response = Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .header(CONNECTION, "close")
-                    .body(Vec::new())?;
-                let _ = write_http_response(&mut stream, response).await;
-                return Err(ServerError::HandshakeFailed("Request too large".to_string()));
-            } else {
-                return Err(ServerError::HandshakeFailed(
-                    "Client disconnected before sending full request".to_string(),
-                ));
-            }
+            return Err(ServerError::HandshakeFailed(
+                "Client disconnected before sending full request".to_string(),
+            ));
         }
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -159,12 +159,12 @@ async fn perform_handshake(
                 break header_len;
             }
             Err(err) => {
-                let response = Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .header(CONNECTION, "close")
-                    .body(Vec::new())?;
-                let _ = write_http_response(&mut stream, response).await;
+                write_bad_request_close(&mut stream).await?;
                 return Err(err.into());
+            }
+            Ok(httparse::Status::Partial) if buffer.len() >= MAX_HTTP_BUFFER_SIZE => {
+                write_bad_request_close(&mut stream).await?;
+                return Err(ServerError::HandshakeFailed("Request too large".to_string()));
             }
             Ok(httparse::Status::Partial) => {}
         }
@@ -268,10 +268,28 @@ mod tests {
     // Masked RFC 6455 binary frame for PIPELINED_PAYLOAD using mask [0x11, 0x22, 0x33, 0x44].
     const PIPELINED_MASKED_FRAME: &[u8] =
         &[0x82, 0x84, 0x11, 0x22, 0x33, 0x44, 0xBB, 0x99, 0xFF, 0x99];
+    const OVERSIZED_HEADER_BYTES: usize = MAX_HTTP_BUFFER_SIZE + 1024;
+    const VALID_UPGRADE_HEADERS: &[u8] = concat!(
+        "Host: localhost\r\n",
+        "Upgrade: websocket\r\n",
+        "Connection: Upgrade\r\n",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+        "Sec-WebSocket-Version: 13\r\n\r\n",
+    )
+    .as_bytes();
 
     async fn run_handshake_with_bytes(
         request_bytes: &[u8],
     ) -> (Result<HandshakeSuccess, ServerError>, Vec<u8>) {
+        let (result, resp_bytes, _saw_reset) =
+            run_handshake_with_options(request_bytes, true).await;
+        (result, resp_bytes)
+    }
+
+    async fn run_handshake_with_options(
+        request_bytes: &[u8],
+        close_write_half: bool,
+    ) -> (Result<HandshakeSuccess, ServerError>, Vec<u8>, bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback listener");
         let addr = listener.local_addr().expect("listener local addr");
         let (client_res, accept_res) = tokio::join!(TcpStream::connect(addr), listener.accept());
@@ -279,25 +297,40 @@ mod tests {
         let (server_stream, _) = accept_res.expect("accept server stream");
 
         client.write_all(request_bytes).await.expect("write request bytes");
-        client.shutdown().await.expect("shutdown client write half");
+        if close_write_half {
+            client.shutdown().await.expect("shutdown client write half");
+        }
 
-        let result = perform_handshake(server_stream).await;
+        let handshake_fut = async {
+            tokio::time::timeout(HANDSHAKE_TEST_TIMEOUT, perform_handshake(server_stream))
+                .await
+                .expect("timed out waiting for perform_handshake")
+        };
 
-        let mut resp_bytes = Vec::new();
-        tokio::time::timeout(HANDSHAKE_TEST_TIMEOUT, async {
-            let mut chunk = [0u8; RESPONSE_READ_CHUNK_SIZE];
-            while !resp_bytes.windows(HTTP_HEADER_END.len()).any(|w| w == HTTP_HEADER_END) {
-                let n = client.read(&mut chunk).await.expect("read handshake response");
-                if n == 0 {
-                    break;
+        let read_fut = async {
+            let mut resp_bytes = Vec::new();
+            let mut saw_reset = false;
+            tokio::time::timeout(HANDSHAKE_TEST_TIMEOUT, async {
+                let mut chunk = [0u8; RESPONSE_READ_CHUNK_SIZE];
+                while !resp_bytes.windows(HTTP_HEADER_END.len()).any(|w| w == HTTP_HEADER_END) {
+                    match client.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => resp_bytes.extend_from_slice(&chunk[..n]),
+                        Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => {
+                            saw_reset = true;
+                            break;
+                        }
+                        Err(err) => panic!("read handshake response: {err}"),
+                    }
                 }
-                resp_bytes.extend_from_slice(&chunk[..n]);
-            }
-        })
-        .await
-        .expect("timed out reading handshake response");
+            })
+            .await
+            .expect("timed out reading handshake response");
+            (resp_bytes, saw_reset)
+        };
 
-        (result, resp_bytes)
+        let (result, (resp_bytes, saw_reset)) = tokio::join!(handshake_fut, read_fut);
+        (result, resp_bytes, saw_reset)
     }
 
     #[test]
@@ -386,5 +419,93 @@ mod tests {
             panic!("expected pipelined Binary frame, got: {msg:?}");
         };
         assert_eq!(data.as_ref(), PIPELINED_PAYLOAD);
+    }
+
+    fn assert_request_too_large(result: Result<HandshakeSuccess, ServerError>) {
+        assert!(
+            matches!(
+                result,
+                Err(ServerError::HandshakeFailed(ref msg)) if msg == "Request too large"
+            ),
+            "expected HandshakeFailed(\"Request too large\"), got: {:?}",
+            result.err()
+        );
+    }
+
+    fn assert_oversized_400_response(resp_bytes: &[u8], saw_reset: bool) {
+        // Closing the server socket with unread request bytes triggers TCP RST, which on
+        // non-Linux stacks can purge the already-sent 400 response before the client reads it.
+        if cfg!(target_os = "linux") || !saw_reset || !resp_bytes.is_empty() {
+            assert!(
+                resp_bytes.starts_with(b"HTTP/1.1 400"),
+                "expected HTTP 400 response, got: {:?}",
+                String::from_utf8_lossy(resp_bytes)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake_oversized_partial_writes_400_and_returns_request_too_large() {
+        const PREFIX: &[u8] = b"GET /v1/websocket/bt HTTP/1.1\r\nHost: localhost\r\nX-Pad: ";
+        let mut exact_max_partial = Vec::from(PREFIX);
+        exact_max_partial.resize(MAX_HTTP_BUFFER_SIZE, b'a');
+        assert_eq!(exact_max_partial.len(), MAX_HTTP_BUFFER_SIZE);
+
+        let (result, resp_bytes, _saw_reset) =
+            run_handshake_with_options(&exact_max_partial, false).await;
+        assert_request_too_large(result);
+        assert!(
+            resp_bytes.starts_with(b"HTTP/1.1 400"),
+            "expected HTTP 400 response, got: {:?}",
+            String::from_utf8_lossy(&resp_bytes)
+        );
+
+        let mut over_max_partial = Vec::from(PREFIX);
+        over_max_partial.resize(OVERSIZED_HEADER_BYTES, b'a');
+
+        let (result, resp_bytes, saw_reset) =
+            run_handshake_with_options(&over_max_partial, false).await;
+        assert_request_too_large(result);
+        assert_oversized_400_response(&resp_bytes, saw_reset);
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake_oversized_header_with_valid_tail_writes_400() {
+        let mut request_bytes = Vec::from(b"GET /v1/websocket/bt HTTP/1.1\r\nX-Pad: ".as_slice());
+        request_bytes.resize(OVERSIZED_HEADER_BYTES, b'a');
+        request_bytes.extend_from_slice(b"\r\n");
+        request_bytes.extend_from_slice(VALID_UPGRADE_HEADERS);
+
+        let (result, resp_bytes, saw_reset) =
+            run_handshake_with_options(&request_bytes, false).await;
+        assert_request_too_large(result);
+        assert_oversized_400_response(&resp_bytes, saw_reset);
+    }
+
+    #[tokio::test]
+    async fn test_perform_handshake_exact_max_buffer_size_succeeds() {
+        const PREFIX: &[u8] = b"GET /v1/websocket/bt HTTP/1.1\r\nX-Pad: ";
+        const CRLF: &[u8] = b"\r\n";
+        let pad_len =
+            MAX_HTTP_BUFFER_SIZE - PREFIX.len() - CRLF.len() - VALID_UPGRADE_HEADERS.len();
+        let mut request_bytes = Vec::with_capacity(MAX_HTTP_BUFFER_SIZE);
+        request_bytes.extend_from_slice(PREFIX);
+        request_bytes.resize(request_bytes.len() + pad_len, b'a');
+        request_bytes.extend_from_slice(CRLF);
+        request_bytes.extend_from_slice(VALID_UPGRADE_HEADERS);
+        assert_eq!(request_bytes.len(), MAX_HTTP_BUFFER_SIZE);
+
+        let (result, resp_bytes, _saw_reset) =
+            run_handshake_with_options(&request_bytes, false).await;
+        assert!(
+            result.is_ok(),
+            "expected exact MAX_HTTP_BUFFER_SIZE handshake to succeed, got: {:?}",
+            result.err()
+        );
+        assert!(
+            resp_bytes.starts_with(b"HTTP/1.1 101"),
+            "expected HTTP 101 response, got: {:?}",
+            String::from_utf8_lossy(&resp_bytes)
+        );
     }
 }
