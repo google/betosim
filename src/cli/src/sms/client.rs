@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_proto::cell::{ExecuteCellRequest, ReceivePdu, ReceiveSms};
+use netsim_proto::cell::{ReceivePdu, ReceiveSms};
 
 use super::args::SmsCommand;
 use crate::{
-    cell_helper::{CellClient, resolve_cell_id},
+    cell_helper::{CellClient, execute_cell_action, resolve_cell_id, send_cell_request},
     error::Result,
 };
 
@@ -28,22 +28,19 @@ pub(crate) fn execute(cmd: SmsCommand, client: &impl CellClient, verbose: bool) 
             if verbose {
                 println!("SMS from {} received on cell {}.", args.sender, id);
             }
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = ReceiveSms::new();
-            action.sender = args.sender;
-            action.text = args.text.join(" ");
-            req.set_receive_sms(action);
-            client.execute(&req)?;
+            send_cell_request(id, client, |req| {
+                let mut action = ReceiveSms::new();
+                action.sender = args.sender;
+                action.text = args.text.join(" ");
+                req.set_receive_sms(action);
+            })?;
         }
         SmsCommand::Pdu(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = ReceivePdu::new();
-            action.pdu = args.pdu;
-            req.set_receive_pdu(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = ReceivePdu::new();
+                action.pdu = args.pdu;
+                req.set_receive_pdu(action);
+            })?;
             if verbose {
                 println!("PDU received on cell {}.", id);
             }

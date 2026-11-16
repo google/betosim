@@ -13,31 +13,33 @@
 // limitations under the License.
 
 use netsim_proto::cell::{
-    EndCall, ExecuteCellRequest, GetCellRequest, IncomingCall, ListCellsRequest,
-    RegistrationStatus, RemoteAnswer, RemoteHold, SetDataRegistration, SetNetworkTechnology,
-    SetSignalStrength, SetSimStatus, SetVoiceRegistration,
+    EndCall, GetCellRequest, IncomingCall, ListCellsRequest, RegistrationStatus, RemoteAnswer,
+    RemoteHold, SetDataRegistration, SetNetworkTechnology, SetSignalStrength, SetSimStatus,
+    SetVoiceRegistration,
 };
 
 use super::args::{
     GsmCommand, HoldStateOption, RadioTechnologyOption, RegistrationStatusOption, SimStateOption,
 };
 use crate::{
-    cell_helper::{CellClient, resolve_cell_id},
+    cell_helper::{CellClient, execute_cell_action, resolve_cell_id, send_cell_request},
     display::DisplayExt,
     error::{Error, Result},
 };
 
-fn map_registration_status(opt: RegistrationStatusOption) -> RegistrationStatus {
-    match opt {
-        RegistrationStatusOption::Unregistered => RegistrationStatus::NOT_REGISTERED,
-        RegistrationStatusOption::Home => RegistrationStatus::REGISTERED_HOME,
-        RegistrationStatusOption::Searching => RegistrationStatus::SEARCHING,
-        RegistrationStatusOption::Denied => RegistrationStatus::DENIED,
-        RegistrationStatusOption::Unknown => RegistrationStatus::UNKNOWN,
-        RegistrationStatusOption::Roaming => RegistrationStatus::ROAMING,
-        RegistrationStatusOption::SmsOnlyHome => RegistrationStatus::SMS_ONLY_HOME,
-        RegistrationStatusOption::SmsOnlyRoaming => RegistrationStatus::SMS_ONLY_ROAMING,
-        RegistrationStatusOption::Emergency => RegistrationStatus::EMERGENCY,
+impl From<RegistrationStatusOption> for RegistrationStatus {
+    fn from(opt: RegistrationStatusOption) -> Self {
+        match opt {
+            RegistrationStatusOption::Unregistered => Self::NOT_REGISTERED,
+            RegistrationStatusOption::Home => Self::REGISTERED_HOME,
+            RegistrationStatusOption::Searching => Self::SEARCHING,
+            RegistrationStatusOption::Denied => Self::DENIED,
+            RegistrationStatusOption::Unknown => Self::UNKNOWN,
+            RegistrationStatusOption::Roaming => Self::ROAMING,
+            RegistrationStatusOption::SmsOnlyHome => Self::SMS_ONLY_HOME,
+            RegistrationStatusOption::SmsOnlyRoaming => Self::SMS_ONLY_ROAMING,
+            RegistrationStatusOption::Emergency => Self::EMERGENCY,
+        }
     }
 }
 
@@ -61,35 +63,28 @@ pub(crate) fn execute(cmd: GsmCommand, client: &impl CellClient, verbose: bool) 
             if verbose {
                 println!("Incoming call from {} triggered for cell {}.", args.number, id);
             }
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = IncomingCall::new();
-            action.number = args.number;
-            req.set_incoming_call(action);
-            client.execute(&req)?;
+            send_cell_request(id, client, |req| {
+                let mut action = IncomingCall::new();
+                action.number = args.number;
+                req.set_incoming_call(action);
+            })?;
         }
         GsmCommand::Accept(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            // TODO(b/514348948): Pass args.number to target a specific call when cell.proto
-            // and backend support multi-calling targeting.
-            let action = RemoteAnswer::new();
-            req.set_remote_answer(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                // TODO(b/514348948): Pass args.number to target a specific call when cell.proto
+                // and backend support multi-calling targeting.
+                req.set_remote_answer(RemoteAnswer::new());
+            })?;
             if verbose {
                 println!("Accepted call from {} on cell {}.", args.number, id);
             }
         }
         GsmCommand::Cancel(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            // TODO(b/514348948): Pass args.number to target a specific call when cell.proto
-            // and backend support multi-calling targeting.
-            let action = EndCall::new();
-            req.set_end_call(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                // TODO(b/514348948): Pass args.number to target a specific call when cell.proto
+                // and backend support multi-calling targeting.
+                req.set_end_call(EndCall::new());
+            })?;
             if verbose {
                 println!("Cancelled call from {} on cell {}.", args.number, id);
             }
@@ -117,27 +112,24 @@ pub(crate) fn execute(cmd: GsmCommand, client: &impl CellClient, verbose: bool) 
                 }
             };
 
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            // TODO(b/514348948): Pass args.number to target a specific call when cell.proto
-            // and backend support multi-calling targeting.
-            let mut action = RemoteHold::new();
-            action.on_hold = on_hold;
-            req.set_remote_hold(action);
-            client.execute(&req)?;
+            send_cell_request(id, client, |req| {
+                // TODO(b/514348948): Pass args.number to target a specific call when cell.proto
+                // and backend support multi-calling targeting.
+                let mut action = RemoteHold::new();
+                action.on_hold = on_hold;
+                req.set_remote_hold(action);
+            })?;
             if verbose {
                 println!("Remote hold set to {} for cell {}.", on_hold, id);
             }
         }
         GsmCommand::Signal(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = SetSignalStrength::new();
-            action.rssi = args.rssi;
-            action.ber = args.ber;
-            req.set_set_signal_strength(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = SetSignalStrength::new();
+                action.rssi = args.rssi;
+                action.ber = args.ber;
+                req.set_set_signal_strength(action);
+            })?;
             if verbose {
                 println!(
                     "Signal strength set (RSSI: {}, BER: {}) for cell {}.",
@@ -146,74 +138,66 @@ pub(crate) fn execute(cmd: GsmCommand, client: &impl CellClient, verbose: bool) 
             }
         }
         GsmCommand::Voice(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = SetVoiceRegistration::new();
-            action.status = protobuf::EnumOrUnknown::new(map_registration_status(args.status));
-            req.set_set_voice_registration(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = SetVoiceRegistration::new();
+                action.status = protobuf::EnumOrUnknown::new(args.status.into());
+                req.set_set_voice_registration(action);
+            })?;
             if verbose {
                 println!("Voice registration status set to {:?} for cell {}.", args.status, id);
             }
         }
         GsmCommand::Data(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = SetDataRegistration::new();
-            action.status = protobuf::EnumOrUnknown::new(map_registration_status(args.status));
-            req.set_set_data_registration(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = SetDataRegistration::new();
+                action.status = protobuf::EnumOrUnknown::new(args.status.into());
+                req.set_set_data_registration(action);
+            })?;
             if verbose {
                 println!("Data registration status set to {:?} for cell {}.", args.status, id);
             }
         }
         GsmCommand::Sim(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = SetSimStatus::new();
-            action.state = protobuf::EnumOrUnknown::new(match args.state {
-                SimStateOption::Present => netsim_proto::cell::set_sim_status::SimState::PRESENT,
-                SimStateOption::Absent => netsim_proto::cell::set_sim_status::SimState::ABSENT,
-            });
-            req.set_set_sim_status(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = SetSimStatus::new();
+                action.state = protobuf::EnumOrUnknown::new(match args.state {
+                    SimStateOption::Present => {
+                        netsim_proto::cell::set_sim_status::SimState::PRESENT
+                    }
+                    SimStateOption::Absent => netsim_proto::cell::set_sim_status::SimState::ABSENT,
+                });
+                req.set_set_sim_status(action);
+            })?;
             if verbose {
                 println!("SIM status set to {:?} for cell {}.", args.state, id);
             }
         }
         GsmCommand::Tech(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = SetNetworkTechnology::new();
-            action.tech = protobuf::EnumOrUnknown::new(match args.tech {
-                RadioTechnologyOption::Gsm => {
-                    netsim_proto::cell::set_network_technology::RadioTechnology::GSM
-                }
-                RadioTechnologyOption::Lte => {
-                    netsim_proto::cell::set_network_technology::RadioTechnology::LTE
-                }
-                RadioTechnologyOption::Nr => {
-                    netsim_proto::cell::set_network_technology::RadioTechnology::NR
-                }
-            });
-            req.set_set_network_technology(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = SetNetworkTechnology::new();
+                action.tech = protobuf::EnumOrUnknown::new(match args.tech {
+                    RadioTechnologyOption::Gsm => {
+                        netsim_proto::cell::set_network_technology::RadioTechnology::GSM
+                    }
+                    RadioTechnologyOption::Lte => {
+                        netsim_proto::cell::set_network_technology::RadioTechnology::LTE
+                    }
+                    RadioTechnologyOption::Nr => {
+                        netsim_proto::cell::set_network_technology::RadioTechnology::NR
+                    }
+                });
+                req.set_set_network_technology(action);
+            })?;
             if verbose {
                 println!("Network technology set to {:?} for cell {}.", args.tech, id);
             }
         }
         GsmCommand::Operator(args) => {
-            let id = resolve_cell_id(args.id, client)?;
-            let mut req = ExecuteCellRequest::new();
-            req.id = id;
-            let mut action = netsim_proto::cell::SetOperator::new();
-            action.operator = args.operator.clone();
-            req.set_set_operator(action);
-            client.execute(&req)?;
+            let id = execute_cell_action(args.id, client, |req| {
+                let mut action = netsim_proto::cell::SetOperator::new();
+                action.operator = args.operator.clone();
+                req.set_set_operator(action);
+            })?;
             if verbose {
                 println!("Network operator set to '{}' for cell {}.", args.operator, id);
             }
@@ -229,8 +213,8 @@ mod tests {
 
     use super::{
         super::args::{
-            GsmAccept, GsmCall, GsmCancel, GsmData, GsmHold, GsmSignal, GsmSim, GsmStatus, GsmTech,
-            GsmVoice, RadioTechnologyOption, SimStateOption,
+            GsmAccept, GsmCall, GsmCancel, GsmData, GsmHold, GsmOperator, GsmSignal, GsmSim,
+            GsmStatus, GsmTech, GsmVoice, RadioTechnologyOption, SimStateOption,
         },
         *,
     };
@@ -239,39 +223,39 @@ mod tests {
     #[test]
     fn test_map_registration_status() {
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Unregistered),
+            RegistrationStatus::from(RegistrationStatusOption::Unregistered),
             RegistrationStatus::NOT_REGISTERED
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Home),
+            RegistrationStatus::from(RegistrationStatusOption::Home),
             RegistrationStatus::REGISTERED_HOME
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Searching),
+            RegistrationStatus::from(RegistrationStatusOption::Searching),
             RegistrationStatus::SEARCHING
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Denied),
+            RegistrationStatus::from(RegistrationStatusOption::Denied),
             RegistrationStatus::DENIED
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Unknown),
+            RegistrationStatus::from(RegistrationStatusOption::Unknown),
             RegistrationStatus::UNKNOWN
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Roaming),
+            RegistrationStatus::from(RegistrationStatusOption::Roaming),
             RegistrationStatus::ROAMING
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::SmsOnlyHome),
+            RegistrationStatus::from(RegistrationStatusOption::SmsOnlyHome),
             RegistrationStatus::SMS_ONLY_HOME
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::SmsOnlyRoaming),
+            RegistrationStatus::from(RegistrationStatusOption::SmsOnlyRoaming),
             RegistrationStatus::SMS_ONLY_ROAMING
         );
         assert_eq!(
-            map_registration_status(RegistrationStatusOption::Emergency),
+            RegistrationStatus::from(RegistrationStatusOption::Emergency),
             RegistrationStatus::EMERGENCY
         );
     }
@@ -481,5 +465,84 @@ mod tests {
             req.set_network_technology().tech.enum_value(),
             Ok(netsim_proto::cell::set_network_technology::RadioTechnology::LTE)
         );
+    }
+
+    const TEST_CELL_ID: u32 = 1;
+    const TEST_CALL_NUMBER: &str = "1234";
+    const TEST_OPERATOR_NAME: &str = "TestCarrier";
+
+    #[test]
+    fn test_gsm_operator() {
+        let client = MockCellClient::default();
+        let cmd = GsmCommand::Operator(GsmOperator {
+            operator: TEST_OPERATOR_NAME.to_string(),
+            id: Some(TEST_CELL_ID),
+        });
+        client.execute_responses.lock().unwrap().push_back(Ok(Empty::new()));
+
+        let result = execute(cmd, &client, false);
+        assert!(result.is_ok());
+        assert_eq!(client.execute_calls.lock().unwrap().len(), 1);
+        let req = &client.execute_calls.lock().unwrap()[0];
+        assert_eq!(req.id, TEST_CELL_ID);
+        assert!(req.has_set_operator());
+        assert_eq!(req.set_operator().operator, TEST_OPERATOR_NAME);
+    }
+
+    #[test]
+    fn test_gsm_hold_toggle_not_found() {
+        let client = MockCellClient::default();
+        let cmd = GsmCommand::Hold(GsmHold {
+            number: TEST_CALL_NUMBER.to_string(),
+            state: None,
+            id: Some(TEST_CELL_ID),
+        });
+        let mut cell = Cell::new();
+        cell.id = TEST_CELL_ID;
+        client.get_responses.lock().unwrap().push_back(Ok(cell));
+
+        let result = execute(cmd, &client, false);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!("No active call found with number {TEST_CALL_NUMBER}.")
+        );
+        assert_eq!(client.get_calls.lock().unwrap().len(), 1);
+        assert!(client.execute_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_gsm_hold_none_id_toggle_to_off_calls_list_once() {
+        let client = MockCellClient::default();
+        let cmd = GsmCommand::Hold(GsmHold {
+            number: TEST_CALL_NUMBER.to_string(),
+            state: None,
+            id: None,
+        });
+
+        let mut list_resp = ListCellsResponse::new();
+        let mut listed_cell = Cell::new();
+        listed_cell.id = TEST_CELL_ID;
+        list_resp.cells.push(listed_cell);
+        client.list_responses.lock().unwrap().push_back(Ok(list_resp));
+
+        let mut cell = Cell::new();
+        cell.id = TEST_CELL_ID;
+        let mut call = netsim_proto::cell::Call::new();
+        call.number = TEST_CALL_NUMBER.to_string();
+        call.state = netsim_proto::cell::call::State::HOLDING.into();
+        cell.active_calls.push(call);
+        client.get_responses.lock().unwrap().push_back(Ok(cell));
+        client.execute_responses.lock().unwrap().push_back(Ok(Empty::new()));
+
+        let result = execute(cmd, &client, false);
+        assert!(result.is_ok());
+        assert_eq!(client.list_calls.lock().unwrap().len(), 1);
+        assert_eq!(client.get_calls.lock().unwrap().len(), 1);
+        assert_eq!(client.get_calls.lock().unwrap()[0].id, TEST_CELL_ID);
+        let calls = client.execute_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, TEST_CELL_ID);
+        assert!(calls[0].has_remote_hold());
+        assert!(!calls[0].remote_hold().on_hold);
     }
 }

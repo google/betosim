@@ -66,6 +66,30 @@ pub(crate) fn resolve_cell_id(id: Option<u32>, client: &impl CellClient) -> Resu
     }
 }
 
+/// Builds and sends an `ExecuteCellRequest` for cellular device `id`.
+pub(crate) fn send_cell_request(
+    id: u32,
+    client: &impl CellClient,
+    build_req: impl FnOnce(&mut ExecuteCellRequest),
+) -> Result<()> {
+    let mut req = ExecuteCellRequest::new();
+    req.id = id;
+    build_req(&mut req);
+    client.execute(&req)?;
+    Ok(())
+}
+
+/// Resolves `id` (or selects the sole cell) and executes an action request.
+pub(crate) fn execute_cell_action(
+    id: Option<u32>,
+    client: &impl CellClient,
+    build_req: impl FnOnce(&mut ExecuteCellRequest),
+) -> Result<u32> {
+    let id = resolve_cell_id(id, client)?;
+    send_cell_request(id, client, build_req)?;
+    Ok(id)
+}
+
 #[cfg(test)]
 pub mod test_utils {
     use std::{
@@ -172,5 +196,78 @@ mod tests {
             result.unwrap_err().to_string().contains("Multiple simulated cellular devices found")
         );
         assert_eq!(client.list_calls.lock().unwrap().len(), 1);
+    }
+
+    const TEST_CELL_ID: u32 = 42;
+
+    #[test]
+    fn test_send_cell_request_populates_id_and_executes() {
+        let client = MockCellClient::default();
+        client.execute_responses.lock().unwrap().push_back(Ok(Empty::new()));
+
+        let result = send_cell_request(TEST_CELL_ID, &client, |req| {
+            req.set_end_call(netsim_proto::cell::EndCall::new());
+        });
+
+        assert!(result.is_ok());
+        assert!(client.list_calls.lock().unwrap().is_empty());
+        let calls = client.execute_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, TEST_CELL_ID);
+        assert!(calls[0].has_end_call());
+    }
+
+    #[test]
+    fn test_send_cell_request_propagates_execute_error() {
+        let client = MockCellClient::default();
+        client.execute_responses.lock().unwrap().push_back(Err(grpcio::Error::RpcFailure(
+            grpcio::RpcStatus::new(grpcio::RpcStatusCode::INTERNAL),
+        )));
+
+        let result = send_cell_request(TEST_CELL_ID, &client, |req| {
+            req.set_end_call(netsim_proto::cell::EndCall::new());
+        });
+
+        let Err(Error::Grpc(grpcio::Error::RpcFailure(status))) = result else {
+            panic!("expected gRPC RpcFailure, got {result:?}");
+        };
+        assert_eq!(status.code(), grpcio::RpcStatusCode::INTERNAL);
+        assert_eq!(client.execute_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_execute_cell_action_resolves_none_id_and_returns_id() {
+        let client = MockCellClient::default();
+        let mut response = ListCellsResponse::new();
+        let mut cell = Cell::new();
+        cell.id = TEST_CELL_ID;
+        response.cells.push(cell);
+        client.list_responses.lock().unwrap().push_back(Ok(response));
+        client.execute_responses.lock().unwrap().push_back(Ok(Empty::new()));
+
+        let result = execute_cell_action(None, &client, |req| {
+            req.set_end_call(netsim_proto::cell::EndCall::new());
+        });
+
+        assert_eq!(result.unwrap(), TEST_CELL_ID);
+        assert_eq!(client.list_calls.lock().unwrap().len(), 1);
+        let calls = client.execute_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, TEST_CELL_ID);
+        assert!(calls[0].has_end_call());
+    }
+
+    #[test]
+    fn test_execute_cell_action_skips_execute_when_resolve_fails() {
+        let client = MockCellClient::default();
+        client.list_responses.lock().unwrap().push_back(Ok(ListCellsResponse::new()));
+
+        let result = execute_cell_action(None, &client, |req| {
+            req.set_end_call(netsim_proto::cell::EndCall::new());
+        });
+
+        assert_eq!(result.unwrap_err().to_string(), "No simulated cellular devices found.");
+        assert_eq!(client.list_calls.lock().unwrap().len(), 1);
+        assert!(client.execute_calls.lock().unwrap().is_empty());
     }
 }
