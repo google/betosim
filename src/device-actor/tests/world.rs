@@ -2162,4 +2162,77 @@ impl World {
             "New keepalive acquire must fail after shutdown"
         );
     }
+
+    fn position_patch_update(position: device_api::Position) -> DeviceUpdate {
+        DeviceUpdate {
+            pose: device_api::PoseUpdate { position: Some(position), ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    /// BDD Step: When I delete an API-created device by ID.
+    pub async fn when_delete_api_device(&self, id: DeviceId) {
+        self.client.delete_device(id).await.expect("delete_device should succeed");
+    }
+
+    /// BDD Step: When I try to delete a device by ID via delete_device.
+    pub async fn when_try_delete_api_device(&self, id: DeviceId) {
+        let result = self.client.delete_device(id).await;
+        *self.last_error.lock().unwrap() = result.err();
+    }
+
+    /// BDD Step: When I resolve a device ID by name.
+    pub async fn when_resolve_device_id(&self, name: &str) -> DeviceId {
+        self.client.resolve_id_by_name(name).await.expect("resolve_id_by_name should succeed")
+    }
+
+    /// BDD Step: When I try to resolve a device ID by name.
+    pub async fn when_try_resolve_device_id(&self, name: &str) {
+        let result = self.client.resolve_id_by_name(name).await;
+        *self.last_error.lock().unwrap() = result.err();
+    }
+
+    /// BDD Step: When I patch a device position by optional ID or name.
+    pub async fn when_patch_device_position(
+        &self,
+        id: Option<u32>,
+        name: Option<&str>,
+        position: device_api::Position,
+    ) {
+        self.client
+            .patch(id, name, Self::position_patch_update(position))
+            .await
+            .expect("patch should succeed");
+    }
+
+    /// BDD Step: When I try to patch a device position by optional ID or name.
+    pub async fn when_try_patch_device_position(
+        &self,
+        id: Option<u32>,
+        name: Option<&str>,
+        position: device_api::Position,
+    ) {
+        let result = self.client.patch(id, name, Self::position_patch_update(position)).await;
+        *self.last_error.lock().unwrap() = result.err();
+    }
+
+    /// BDD Step: Then the last error is ClientError::Send with the expected message.
+    pub fn then_error_is_client_send(&self, expected_msg: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(err, ClientError::Send(msg) if msg == expected_msg),
+            "Expected ClientError::Send({expected_msg}), got: {err:?}"
+        );
+    }
+
+    /// BDD Step: Then the last error is ClientError::Framework with the expected message.
+    pub fn then_error_is_framework_message(&self, expected_msg: &str) {
+        let err_guard = self.last_error.lock().unwrap();
+        let err = err_guard.as_ref().expect("Expected error, but last_error was None");
+        assert!(
+            matches!(err, ClientError::Framework(inner) if inner.to_string() == expected_msg),
+            "Expected ClientError::Framework({expected_msg}), got: {err:?}"
+        );
+    }
 }

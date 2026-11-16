@@ -1694,9 +1694,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_acquire_keepalive_rejected_when_shutting_down() {
-        let mut actor = DeviceActor::new(
+    fn test_actor() -> DeviceActor {
+        DeviceActor::new(
             HashMap::new(),
             Arc::new(AtomicU32::new(1)),
             None,
@@ -1707,7 +1706,12 @@ mod tests {
             None,
             None,
             Arc::new(netsim_model::FrontendStats::default()),
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn test_acquire_keepalive_rejected_when_shutting_down() {
+        let mut actor = test_actor();
         let mut ctx = DummyContext;
         actor.on_startup_timeout(&mut ctx);
 
@@ -1872,5 +1876,83 @@ mod tests {
         }];
         let resolved = resolve_chip_updates(id, &internal_device, &devices, update).unwrap();
         assert!(resolved.contains_key(&0));
+    }
+
+    #[test]
+    fn test_match_target_chip_substring_match_rejects_mismatched_kind() {
+        const BT_CHIP_ID: u32 = 10;
+        let chips = vec![Chip {
+            id: BT_CHIP_ID,
+            name: "bt-0".to_string(),
+            kind: ChipKind::BLUETOOTH,
+            ..Default::default()
+        }];
+
+        let err = DeviceActor::match_target_chip(&chips, Some(ChipKind::WIFI), "bt", "dev-0")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DeviceError::MismatchedChipKind {
+                expected: ChipKind::WIFI,
+                actual: ChipKind::BLUETOOTH,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_notify_chip_removed_rejects_mismatched_actor_id() {
+        const BT_CHIP_ID: u32 = 10;
+        const MISMATCHED_DEVICE_ID: DeviceId = DeviceId(99);
+        let (device_id, internal_device, _) = device_with_chips(vec![Chip {
+            id: BT_CHIP_ID,
+            name: "bt-0".to_string(),
+            kind: ChipKind::BLUETOOTH,
+            ..Default::default()
+        }]);
+        let mut actor = test_actor();
+        actor.devices.insert(device_id, internal_device);
+        let mut ctx = DummyContext;
+
+        let res = actor
+            .handle_action(
+                Some(MISMATCHED_DEVICE_ID),
+                DeviceAction::NotifyChipRemoved(device_id, ChipId(BT_CHIP_ID)),
+                &mut ctx,
+            )
+            .await;
+        assert!(matches!(
+            &res,
+            Err(DeviceError::NotFound(msg))
+                if msg == &format!("Device ID mismatch: {} vs {}", MISMATCHED_DEVICE_ID, device_id)
+        ));
+        assert!(
+            actor.devices.get(&device_id).is_some_and(|d| d
+                .device
+                .chips
+                .iter()
+                .any(|c| c.id == BT_CHIP_ID))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_chip_action_rejects_missing_device_id() {
+        let mut actor = test_actor();
+        let mut ctx = DummyContext;
+
+        let res = actor
+            .handle_action(
+                None,
+                DeviceAction::AddChip {
+                    chip_config: Box::new(device_api::DeviceChipCreate::default()),
+                    packet_stream: None,
+                    packet_sink: None,
+                },
+                &mut ctx,
+            )
+            .await;
+        assert!(matches!(
+            res,
+            Err(DeviceError::NotFound(msg)) if msg == "AddChip requires a device ID"
+        ));
     }
 }

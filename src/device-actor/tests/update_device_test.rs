@@ -506,6 +506,7 @@ const BROADCAST_POS_X: f32 = 50.0;
 const BROADCAST_POS_Y: f32 = 60.0;
 const BROADCAST_POS_Z: f32 = 70.0;
 const BROADCAST_YAW: f32 = 1.5;
+const DEFAULT_YAW: f32 = 0.0;
 
 // Scenario: Update chip metadata succeeds and updates device view
 #[tokio::test]
@@ -1110,4 +1111,107 @@ async fn test_auto_naming_with_empty_device_name_uses_kind_and_id() {
     world
         .then_chip_name_by_id_is(device_id, second_chip_id, &format!("WIFI-{}", second_chip_id.0))
         .await;
+}
+
+// Scenario: Resolving an existing device ID by name returns the created DeviceId
+//   Given a running Device Actor with a distractor device and an API-created target device
+//   When I resolve the target device ID by name
+//   Then the returned DeviceId matches the created target device
+#[tokio::test]
+async fn test_resolve_id_by_name_returns_created_device_id() {
+    const DISTRACTOR_DEVICE_NAME: &str = "distractor-dev";
+    const TARGET_DEVICE_NAME: &str = "lookup-dev";
+
+    // Given a running Device Actor with a distractor device and an API-created target device
+    let world = World::new().await;
+    let _distractor_id = world.given_device_created(DISTRACTOR_DEVICE_NAME).await;
+    let device_id = world.given_device_created(TARGET_DEVICE_NAME).await;
+
+    // When I resolve the target device ID by name
+    let resolved_id = world.when_resolve_device_id(TARGET_DEVICE_NAME).await;
+
+    // Then the returned DeviceId matches the created target device
+    assert_eq!(resolved_id, device_id);
+}
+
+// Scenario: Resolving an unknown device name returns a framework not-found error
+//   Given a running Device Actor with an existing non-matching device
+//   When I try to resolve an unknown device name
+//   Then the call fails with the framework "device not found" error
+#[tokio::test]
+async fn test_resolve_id_by_name_unknown_returns_error() {
+    const EXISTING_DEVICE_NAME: &str = "existing-dev";
+    const UNKNOWN_DEVICE_NAME: &str = "unknown-device";
+
+    // Given a running Device Actor with an existing non-matching device
+    let world = World::new().await;
+    let _existing_id = world.given_device_created(EXISTING_DEVICE_NAME).await;
+
+    // When I try to resolve an unknown device name
+    world.when_try_resolve_device_id(UNKNOWN_DEVICE_NAME).await;
+
+    // Then the call fails with the framework "device not found" error
+    world.then_error_is_framework_message("device not found");
+}
+
+// Scenario: Patching a device by ID updates its position and chip positions
+//   Given a running Device Actor with an API-created device at default pose
+//   When I patch the device position using its numeric ID
+//   Then the device and its chips report the updated position
+#[tokio::test]
+async fn test_patch_device_by_id_updates_position() {
+    let pos = device_api::Position { x: BROADCAST_POS_X, y: BROADCAST_POS_Y, z: BROADCAST_POS_Z };
+
+    // Given a running Device Actor with an API-created device at default pose
+    let world = World::new().await;
+    let device_id = world.given_device_created("patch-by-id-dev").await;
+
+    // When I patch the device position using its numeric ID
+    world.when_patch_device_position(Some(device_id.0), None, pos).await;
+
+    // Then the device and its chips report the updated position
+    world.then_device_and_chips_pose_is(device_id, pos.x, pos.y, pos.z, DEFAULT_YAW).await;
+}
+
+// Scenario: Patching a device with zero ID falls back to resolving by name
+//   Given a running Device Actor with a distractor device and a target device at default pose
+//   When I patch the target device position passing Some(0) as ID and the target device name
+//   Then the target device and its chips report the updated position while the distractor stays at origin
+#[tokio::test]
+async fn test_patch_device_zero_id_falls_back_to_name() {
+    const DISTRACTOR_DEVICE_NAME: &str = "distractor-patch-dev";
+    const DEVICE_NAME: &str = "patch-by-name-dev";
+    const ZERO_DEVICE_ID: u32 = 0;
+    const ORIGIN: f32 = 0.0;
+    let pos = device_api::Position { x: BROADCAST_POS_X, y: BROADCAST_POS_Y, z: BROADCAST_POS_Z };
+
+    // Given a running Device Actor with a distractor device and a target device at default pose
+    let world = World::new().await;
+    let distractor_id = world.given_device_created(DISTRACTOR_DEVICE_NAME).await;
+    let device_id = world.given_device_created(DEVICE_NAME).await;
+
+    // When I patch the target device position passing Some(0) as ID and the target device name
+    world.when_patch_device_position(Some(ZERO_DEVICE_ID), Some(DEVICE_NAME), pos).await;
+
+    // Then the target device and its chips report the updated position while the distractor stays at origin
+    world.then_device_and_chips_pose_is(device_id, pos.x, pos.y, pos.z, DEFAULT_YAW).await;
+    world.then_device_and_chips_pose_is(distractor_id, ORIGIN, ORIGIN, ORIGIN, DEFAULT_YAW).await;
+}
+
+// Scenario: Patching a device without ID or name returns a ClientError::Send error
+//   Given a running Device Actor
+//   When I try to patch a device with neither ID nor name
+//   Then the call fails with ClientError::Send
+#[tokio::test]
+async fn test_patch_device_missing_selector_returns_send_error() {
+    let pos = device_api::Position { x: BROADCAST_POS_X, y: BROADCAST_POS_Y, z: BROADCAST_POS_Z };
+
+    // Given a running Device Actor
+    let world = World::new().await;
+
+    // When I try to patch a device with neither ID nor name
+    world.when_try_patch_device_position(None, None, pos).await;
+
+    // Then the call fails with ClientError::Send
+    world.then_error_is_client_send("Device ID or Name must be provided");
 }

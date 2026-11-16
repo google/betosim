@@ -273,3 +273,56 @@ async fn test_delete_chip_on_multi_chip_external_device_returns_not_found() {
     world.then_chip_count_is(device_id, 2).await;
     world.then_mock_chip_present(first_chip_id, true);
 }
+
+// Scenario: Deleting an API-created device removes it
+//   Given a running Device Actor with an API-created device
+//   When I delete the device via delete_device
+//   Then the device is no longer retrievable
+#[tokio::test]
+async fn test_delete_api_device_removes_created_device() {
+    // Given a running Device Actor with an API-created device
+    let world = World::new().await;
+    let device_id = world.given_device_created("api-dev").await;
+
+    // When I delete the device via delete_device
+    world.when_delete_api_device(device_id).await;
+
+    // Then the device is no longer retrievable
+    world.then_device_get_is_none(device_id).await;
+}
+
+// Scenario: Deleting an external device via delete_device returns NotFound
+//   Given a running Device Actor with an external device registered by GUID
+//   When I try to delete the external device via delete_device
+//   Then the call fails with NotFound and the external device remains
+#[tokio::test]
+async fn test_delete_api_device_rejects_external_guid_device() {
+    // Given a running Device Actor with an external device registered by GUID
+    let world = World::new().await;
+    let device_id = world.when_add_chip("guid-ext-delete", "bt-0").await;
+
+    // When I try to delete the external device via delete_device
+    world.when_try_delete_api_device(device_id).await;
+
+    // Then the call fails with NotFound and the external device remains
+    world.then_error_is_not_found("Cannot delete external device");
+    world.then_device_exists(device_id).await;
+}
+
+// Scenario: Deleting an unknown device ID via delete_device returns NotFound
+//   Given a running Device Actor
+//   When I try to delete an unknown device ID via delete_device
+//   Then the call fails with NotFound
+#[tokio::test]
+async fn test_delete_api_device_unknown_id_returns_not_found() {
+    const UNKNOWN_DEVICE_ID: device_api::DeviceId = device_api::DeviceId(999);
+
+    // Given a running Device Actor
+    let world = World::new().await;
+
+    // When I try to delete an unknown device ID via delete_device
+    world.when_try_delete_api_device(UNKNOWN_DEVICE_ID).await;
+
+    // Then the call fails with NotFound
+    world.then_error_is_not_found("Device not found");
+}
