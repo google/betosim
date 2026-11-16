@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::BTreeMap, io::Write};
+use std::{borrow::Cow, collections::BTreeMap, io::Write};
 
 use common::util::time_display::TimeDisplay;
 use netsim_packets::{
@@ -48,11 +48,7 @@ pub(super) fn parse_scan_packet(
     let mut events = Vec::new();
     let timestamp = TimeDisplay::from_duration(duration).utc_display_hms();
 
-    let hex_packet = if verbose {
-        packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
-    } else {
-        String::new()
-    };
+    let hex_packet = if verbose { format_hex_data(packet) } else { String::new() };
 
     let payload = match packet {
         [H4_EVENT_PACKET_TYPE, rest @ ..] => rest,
@@ -129,49 +125,41 @@ fn parse_ad_structures(data: &[u8], is_scan_rsp: bool) -> BTreeMap<u16, AdPayloa
             GapDataType::INCOMPLETE_16BIT_UUIDS | GapDataType::COMPLETE_16BIT_UUIDS
                 if ad_data.len().is_multiple_of(2) =>
             {
-                let mut uuids = Vec::new();
-                for &[b0, b1] in ad_data.as_chunks::<2>().0 {
-                    uuids.push(format!("0x{:02x}{:02x}", b1, b0));
-                }
+                let uuids: Vec<String> =
+                    ad_data.as_chunks::<2>().0.iter().copied().map(format_16bit_uuid).collect();
                 uuids.join(", ")
             }
             GapDataType::INCOMPLETE_32BIT_UUIDS | GapDataType::COMPLETE_32BIT_UUIDS
                 if ad_data.len().is_multiple_of(4) =>
             {
-                let mut uuids = Vec::new();
-                for &[b0, b1, b2, b3] in ad_data.as_chunks::<4>().0 {
-                    uuids.push(format!("0x{:02x}{:02x}{:02x}{:02x}", b3, b2, b1, b0));
-                }
+                let uuids: Vec<String> =
+                    ad_data.as_chunks::<4>().0.iter().copied().map(format_32bit_uuid).collect();
                 uuids.join(", ")
             }
             GapDataType::INCOMPLETE_128BIT_UUIDS | GapDataType::COMPLETE_128BIT_UUIDS
                 if ad_data.len().is_multiple_of(16) =>
             {
-                let mut uuids = Vec::new();
-                for chunk in ad_data.as_chunks::<16>().0 {
-                    uuids.push(format_128bit_uuid(chunk));
-                }
+                let uuids: Vec<String> =
+                    ad_data.as_chunks::<16>().0.iter().map(format_128bit_uuid).collect();
                 uuids.join(", ")
             }
             GapDataType::SERVICE_DATA_16BIT => {
-                if let [b0, b1, rest_data @ ..] = ad_data {
-                    let uuid = format!("0x{:02x}{:02x}", b1, b0);
-                    format_uuid_service_data(uuid, rest_data)
+                if let Some((&uuid_chunk, rest_data)) = ad_data.split_first_chunk::<2>() {
+                    format_uuid_service_data(&format_16bit_uuid(uuid_chunk), rest_data)
                 } else {
                     format_hex_data(ad_data)
                 }
             }
             GapDataType::SERVICE_DATA_32BIT => {
-                if let [b0, b1, b2, b3, rest_data @ ..] = ad_data {
-                    let uuid = format!("0x{:02x}{:02x}{:02x}{:02x}", b3, b2, b1, b0);
-                    format_uuid_service_data(uuid, rest_data)
+                if let Some((&uuid_chunk, rest_data)) = ad_data.split_first_chunk::<4>() {
+                    format_uuid_service_data(&format_32bit_uuid(uuid_chunk), rest_data)
                 } else {
                     format_hex_data(ad_data)
                 }
             }
             GapDataType::SERVICE_DATA_128BIT => {
                 if let Some((uuid_chunk, rest_data)) = ad_data.split_first_chunk::<16>() {
-                    format_uuid_service_data(format_128bit_uuid(uuid_chunk), rest_data)
+                    format_uuid_service_data(&format_128bit_uuid(uuid_chunk), rest_data)
                 } else {
                     format_hex_data(ad_data)
                 }
@@ -189,6 +177,14 @@ fn parse_ad_structures(data: &[u8], is_scan_rsp: bool) -> BTreeMap<u16, AdPayloa
     outputs
 }
 
+fn format_16bit_uuid(uuid: [u8; 2]) -> String {
+    format!("0x{:04x}", u16::from_le_bytes(uuid))
+}
+
+fn format_32bit_uuid(uuid: [u8; 4]) -> String {
+    format!("0x{:08x}", u32::from_le_bytes(uuid))
+}
+
 fn format_128bit_uuid(uuid: &[u8; 16]) -> String {
     let &[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15] = uuid;
     format!(
@@ -197,13 +193,14 @@ fn format_128bit_uuid(uuid: &[u8; 16]) -> String {
     )
 }
 
-fn format_uuid_service_data(uuid: String, data: &[u8]) -> String {
+fn format_uuid_service_data(uuid: &str, data: &[u8]) -> String {
     let data_str = if data.is_empty() { String::from("None") } else { format_hex_data(data) };
-    format!("UUID: {}, Data: {}", uuid, data_str)
+    format!("UUID: {uuid}, Data: {data_str}")
 }
 
 fn format_hex_data(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+    let bytes: Vec<String> = data.iter().map(|b| format!("{b:02x}")).collect();
+    bytes.join(" ")
 }
 
 pub(super) fn write_json_event(
@@ -266,10 +263,10 @@ pub(super) fn write_sniff_packet(
     duration: std::time::Duration,
 ) -> std::io::Result<()> {
     let timestamp = TimeDisplay::from_duration(duration).utc_display_hms();
-    let hex_packet = packet.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+    let hex_packet = hex::encode(packet);
 
-    let packet_type = match packet.first() {
-        None => "EMPTY".to_string(),
+    let packet_type: Cow<'static, str> = match packet.first() {
+        None => Cow::Borrowed("EMPTY"),
         Some(&byte) => {
             let name: Option<&'static str> = match byte {
                 0x00 => Some("UNKNOWN"),
@@ -296,20 +293,20 @@ pub(super) fn write_sniff_packet(
                 0x41 => Some("LLCP"),
                 _ => None,
             };
-            name.map(str::to_string).unwrap_or_else(|| format!("0x{byte:02X}"))
+            name.map_or_else(|| Cow::Owned(format!("0x{byte:02X}")), Cow::Borrowed)
         }
     };
 
     #[derive(Serialize)]
-    struct JsonSniffResponse {
-        timestamp: String,
-        packet_type: String,
+    struct JsonSniffResponse<'a> {
+        timestamp: &'a str,
+        packet_type: Cow<'static, str>,
         baseband_packet: String,
         length: usize,
     }
 
     let out = JsonSniffResponse {
-        timestamp: timestamp.to_string(),
+        timestamp: &timestamp,
         packet_type,
         baseband_packet: hex_packet,
         length: packet.len(),
@@ -321,4 +318,272 @@ pub(super) fn write_sniff_packet(
         writeln!(writer, "[{}] Baseband Packet: {}", timestamp, out.baseband_packet)?;
     }
     writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    const LE_META_EVENT_CODE: u8 = 0x3E;
+    const LE_ADVERTISING_REPORT_SUBEVENT: u8 = 0x02;
+    const SINGLE_REPORT: u8 = 0x01;
+    const ADV_IND_EVENT: u8 = 0x00;
+    const PUBLIC_ADDR_TYPE: u8 = 0x00;
+    const ZERO_AD_DATA_LEN: u8 = 0x00;
+    const SAMPLE_RSSI: u8 = 0xCE;
+
+    const UUID_16_PAIR_FORMATTED: &str = "0x180d, 0x180f";
+    const UUID_32_FORMATTED: &str = "0x12345678";
+    const UUID_128_FORMATTED: &str = "0f0e0d0c-0b0a-0908-0706-050403020100";
+
+    const SNIFF_DURATION_SECS: u64 = 1;
+    const SNIFF_EXPECTED_TIMESTAMP: &str = "00:00:01";
+    const SNIFF_ACL_OPCODE: u8 = 0x01;
+    const SNIFF_ACL_NAME: &str = "ACL";
+    const SNIFF_ACL_HEX: &str = "0102ff";
+    const SNIFF_UNKNOWN_OPCODE: u8 = 0xFF;
+    const SNIFF_UNKNOWN_NAME: &str = "0xFF";
+    const SNIFF_UNKNOWN_HEX: &str = "ffab";
+    const SNIFF_EMPTY_NAME: &str = "EMPTY";
+
+    const UUID_16_BYTES_PAIR: [u8; 4] = [0x0d, 0x18, 0x0f, 0x18];
+    const UUID_32_BYTES: [u8; 4] = [0x78, 0x56, 0x34, 0x12];
+    const UUID_128_BYTES: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+
+    const SERVICE_DATA_16_BYTES: [u8; 4] = [0x0d, 0x18, 0xaa, 0xbb];
+    const SERVICE_DATA_128_BYTES: [u8; 18] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0xde, 0xad,
+    ];
+    const SERVICE_DATA_16_EXPECTED: &str = "UUID: 0x180d, Data: aa bb";
+    const SERVICE_DATA_32_EXPECTED: &str = "UUID: 0x12345678, Data: None";
+    const SERVICE_DATA_128_EXPECTED: &str =
+        "UUID: 0f0e0d0c-0b0a-0908-0706-050403020100, Data: de ad";
+    const INCOMPLETE_16_BYTES: u8 = 0xfa;
+    const INCOMPLETE_16_EXPECTED: &str = "fa";
+
+    const SHORT_SERVICE_16_BYTES: u8 = 0x0d;
+    const SHORT_SERVICE_32_BYTES: [u8; 3] = [0x01, 0x02, 0x03];
+    const SHORT_SERVICE_128_BYTES: [u8; 2] = [0x04, 0x05];
+    const SHORT_SERVICE_16_EXPECTED: &str = "0d";
+    const SHORT_SERVICE_32_EXPECTED: &str = "01 02 03";
+    const SHORT_SERVICE_128_EXPECTED: &str = "04 05";
+
+    const VERBOSE_PARAM_LEN: u8 = 12;
+    const VERBOSE_BD_ADDR: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+    const VERBOSE_EXPECTED_HEX: &str = "04 3e 0c 02 01 00 00 11 22 33 44 55 66 00 ce";
+
+    const SNIFF_ACL_PAYLOAD: [u8; 2] = [0x02, 0xff];
+    const SNIFF_UNKNOWN_PAYLOAD: u8 = 0xab;
+
+    fn sniff_json(packet: &[u8]) -> serde_json::Value {
+        let mut buf = Vec::new();
+        write_sniff_packet(&mut buf, packet, Duration::from_secs(SNIFF_DURATION_SECS)).unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    #[test]
+    fn test_parse_ad_structures_uuid_lists() {
+        let data = [
+            5,
+            GapDataType::COMPLETE_16BIT_UUIDS.0,
+            UUID_16_BYTES_PAIR[0],
+            UUID_16_BYTES_PAIR[1],
+            UUID_16_BYTES_PAIR[2],
+            UUID_16_BYTES_PAIR[3],
+            5,
+            GapDataType::INCOMPLETE_32BIT_UUIDS.0,
+            UUID_32_BYTES[0],
+            UUID_32_BYTES[1],
+            UUID_32_BYTES[2],
+            UUID_32_BYTES[3],
+            17,
+            GapDataType::COMPLETE_128BIT_UUIDS.0,
+            UUID_128_BYTES[0],
+            UUID_128_BYTES[1],
+            UUID_128_BYTES[2],
+            UUID_128_BYTES[3],
+            UUID_128_BYTES[4],
+            UUID_128_BYTES[5],
+            UUID_128_BYTES[6],
+            UUID_128_BYTES[7],
+            UUID_128_BYTES[8],
+            UUID_128_BYTES[9],
+            UUID_128_BYTES[10],
+            UUID_128_BYTES[11],
+            UUID_128_BYTES[12],
+            UUID_128_BYTES[13],
+            UUID_128_BYTES[14],
+            UUID_128_BYTES[15],
+        ];
+
+        let parsed = parse_ad_structures(&data, false);
+        assert_eq!(
+            parsed.get(&(GapDataType::COMPLETE_16BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            UUID_16_PAIR_FORMATTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::INCOMPLETE_32BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            UUID_32_FORMATTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::COMPLETE_128BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            UUID_128_FORMATTED
+        );
+    }
+
+    #[test]
+    fn test_parse_ad_structures_service_data_variants_and_fallbacks() {
+        let data = [
+            5,
+            GapDataType::SERVICE_DATA_16BIT.0,
+            SERVICE_DATA_16_BYTES[0],
+            SERVICE_DATA_16_BYTES[1],
+            SERVICE_DATA_16_BYTES[2],
+            SERVICE_DATA_16_BYTES[3],
+            5,
+            GapDataType::SERVICE_DATA_32BIT.0,
+            UUID_32_BYTES[0],
+            UUID_32_BYTES[1],
+            UUID_32_BYTES[2],
+            UUID_32_BYTES[3],
+            19,
+            GapDataType::SERVICE_DATA_128BIT.0,
+            SERVICE_DATA_128_BYTES[0],
+            SERVICE_DATA_128_BYTES[1],
+            SERVICE_DATA_128_BYTES[2],
+            SERVICE_DATA_128_BYTES[3],
+            SERVICE_DATA_128_BYTES[4],
+            SERVICE_DATA_128_BYTES[5],
+            SERVICE_DATA_128_BYTES[6],
+            SERVICE_DATA_128_BYTES[7],
+            SERVICE_DATA_128_BYTES[8],
+            SERVICE_DATA_128_BYTES[9],
+            SERVICE_DATA_128_BYTES[10],
+            SERVICE_DATA_128_BYTES[11],
+            SERVICE_DATA_128_BYTES[12],
+            SERVICE_DATA_128_BYTES[13],
+            SERVICE_DATA_128_BYTES[14],
+            SERVICE_DATA_128_BYTES[15],
+            SERVICE_DATA_128_BYTES[16],
+            SERVICE_DATA_128_BYTES[17],
+            2,
+            GapDataType::INCOMPLETE_16BIT_UUIDS.0,
+            INCOMPLETE_16_BYTES,
+        ];
+
+        let parsed = parse_ad_structures(&data, false);
+        assert_eq!(
+            parsed.get(&(GapDataType::SERVICE_DATA_16BIT.0 as u16)).unwrap().decoded_val,
+            SERVICE_DATA_16_EXPECTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::SERVICE_DATA_32BIT.0 as u16)).unwrap().decoded_val,
+            SERVICE_DATA_32_EXPECTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::SERVICE_DATA_128BIT.0 as u16)).unwrap().decoded_val,
+            SERVICE_DATA_128_EXPECTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::INCOMPLETE_16BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            INCOMPLETE_16_EXPECTED
+        );
+    }
+
+    #[test]
+    fn test_parse_ad_structures_short_service_data_falls_back_to_hex() {
+        let data = [
+            2,
+            GapDataType::SERVICE_DATA_16BIT.0,
+            SHORT_SERVICE_16_BYTES,
+            4,
+            GapDataType::SERVICE_DATA_32BIT.0,
+            SHORT_SERVICE_32_BYTES[0],
+            SHORT_SERVICE_32_BYTES[1],
+            SHORT_SERVICE_32_BYTES[2],
+            3,
+            GapDataType::SERVICE_DATA_128BIT.0,
+            SHORT_SERVICE_128_BYTES[0],
+            SHORT_SERVICE_128_BYTES[1],
+        ];
+
+        let parsed = parse_ad_structures(&data, false);
+        assert_eq!(
+            parsed.get(&(GapDataType::SERVICE_DATA_16BIT.0 as u16)).unwrap().decoded_val,
+            SHORT_SERVICE_16_EXPECTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::SERVICE_DATA_32BIT.0 as u16)).unwrap().decoded_val,
+            SHORT_SERVICE_32_EXPECTED
+        );
+        assert_eq!(
+            parsed.get(&(GapDataType::SERVICE_DATA_128BIT.0 as u16)).unwrap().decoded_val,
+            SHORT_SERVICE_128_EXPECTED
+        );
+    }
+
+    #[test]
+    fn test_parse_scan_packet_verbose_formats_raw_hex() {
+        let packet = [
+            H4_EVENT_PACKET_TYPE,
+            LE_META_EVENT_CODE,
+            VERBOSE_PARAM_LEN,
+            LE_ADVERTISING_REPORT_SUBEVENT,
+            SINGLE_REPORT,
+            ADV_IND_EVENT,
+            PUBLIC_ADDR_TYPE,
+            VERBOSE_BD_ADDR[0],
+            VERBOSE_BD_ADDR[1],
+            VERBOSE_BD_ADDR[2],
+            VERBOSE_BD_ADDR[3],
+            VERBOSE_BD_ADDR[4],
+            VERBOSE_BD_ADDR[5],
+            ZERO_AD_DATA_LEN,
+            SAMPLE_RSSI,
+        ];
+        let duration = Duration::from_secs(SNIFF_DURATION_SECS);
+
+        let verbose_events = parse_scan_packet(&packet, duration, true);
+        assert_eq!(verbose_events.len(), 1);
+        assert_eq!(verbose_events[0].raw_hex, VERBOSE_EXPECTED_HEX);
+
+        let quiet_events = parse_scan_packet(&packet, duration, false);
+        assert_eq!(quiet_events.len(), 1);
+        assert!(quiet_events[0].raw_hex.is_empty());
+    }
+
+    #[test]
+    fn test_write_sniff_packet_empty_json() {
+        let json = sniff_json(&[]);
+        assert_eq!(json["timestamp"], SNIFF_EXPECTED_TIMESTAMP);
+        assert_eq!(json["packet_type"], SNIFF_EMPTY_NAME);
+        assert_eq!(json["baseband_packet"], "");
+        assert_eq!(json["length"], 0);
+    }
+
+    #[test]
+    fn test_write_sniff_packet_acl_json() {
+        let packet = [SNIFF_ACL_OPCODE, SNIFF_ACL_PAYLOAD[0], SNIFF_ACL_PAYLOAD[1]];
+        let json = sniff_json(&packet);
+        assert_eq!(json["timestamp"], SNIFF_EXPECTED_TIMESTAMP);
+        assert_eq!(json["packet_type"], SNIFF_ACL_NAME);
+        assert_eq!(json["baseband_packet"], SNIFF_ACL_HEX);
+        assert_eq!(json["length"], packet.len());
+    }
+
+    #[test]
+    fn test_write_sniff_packet_unknown_opcode_json() {
+        let packet = [SNIFF_UNKNOWN_OPCODE, SNIFF_UNKNOWN_PAYLOAD];
+        let json = sniff_json(&packet);
+        assert_eq!(json["timestamp"], SNIFF_EXPECTED_TIMESTAMP);
+        assert_eq!(json["packet_type"], SNIFF_UNKNOWN_NAME);
+        assert_eq!(json["baseband_packet"], SNIFF_UNKNOWN_HEX);
+        assert_eq!(json["length"], packet.len());
+    }
 }
