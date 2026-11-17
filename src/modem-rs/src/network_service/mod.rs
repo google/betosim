@@ -20,8 +20,8 @@ use std::iter::once;
 
 use modem_rs_derive::CommandParser;
 use netsim_model::{Quirks, RegistrationStatus};
-use physical_channel::{CellConnectionStatus, PhysicalChannelTimer};
-pub use physical_channel::{PhysicalChannelConfig, PhysicalChannelToken};
+pub(crate) use physical_channel::PhysicalChannelToken;
+use physical_channel::{CellConnectionStatus, PhysicalChannelConfig, PhysicalChannelTimer};
 use tracing::{info, warn};
 
 use crate::{
@@ -84,10 +84,10 @@ const DUMMY_CID: &str = "0000B804";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorInfo {
     pub status: OperatorStatus,
-    pub long_name: String,
-    pub short_name: String,
-    pub numeric: String,
-    pub act: AccessTechnology,
+    long_name: String,
+    short_name: String,
+    numeric: String,
+    act: AccessTechnology,
 }
 
 impl std::fmt::Display for OperatorInfo {
@@ -102,9 +102,9 @@ impl std::fmt::Display for OperatorInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationLocation {
-    pub lac: String,
-    pub cid: String,
-    pub act: AccessTechnology,
+    lac: String,
+    cid: String,
+    act: AccessTechnology,
 }
 
 impl std::fmt::Display for RegistrationLocation {
@@ -121,7 +121,7 @@ pub enum RegistrationType {
 }
 
 impl RegistrationType {
-    pub const fn as_prefix(&self) -> &'static str {
+    const fn as_prefix(&self) -> &'static str {
         match self {
             RegistrationType::Voice => "+CREG",
             RegistrationType::Data => "+CGREG",
@@ -298,7 +298,7 @@ impl std::fmt::Display for NetworkResponse {
 type NetworkResult = Result<Option<NetworkResponse>, ExecutionResult>;
 
 // Holds all state related to the network.
-pub struct NetworkService {
+pub(crate) struct NetworkService {
     host_enabled: bool,
     voice_registration: RegistrationStatus,
     data_registration: RegistrationStatus,
@@ -314,12 +314,12 @@ pub struct NetworkService {
     preferred_network_mode: CtecPreferredMask,
     is_attached: bool,
     act: AccessTechnology,
-    pub(crate) quirks: Quirks,
+    quirks: Quirks,
     phys_chan_timer: PhysicalChannelTimer,
 }
 
 impl NetworkService {
-    pub fn new(quirks: Quirks, home_plmn: Option<Plmn>) -> Self {
+    pub(crate) fn new(quirks: Quirks, home_plmn: Option<Plmn>) -> Self {
         Self {
             host_enabled: true,
             voice_registration: RegistrationStatus::NotRegistered,
@@ -351,7 +351,7 @@ impl NetworkService {
 }
 
 impl NetworkService {
-    pub fn is_attached(&self) -> bool {
+    pub(crate) fn is_attached(&self) -> bool {
         self.is_attached
     }
 
@@ -380,7 +380,7 @@ impl NetworkService {
     /// detach URCs for previously registered domains while preserving guest
     /// `+CREG`/`+CGREG`/`+CEREG` subscriptions so Android RIL observes the
     /// detach and subsequent re-attach without re-bootstrapping).
-    pub fn reset(&mut self) -> Vec<NetworkUrc> {
+    pub(crate) fn reset(&mut self) -> Vec<NetworkUrc> {
         self.host_enabled = true;
         self.radio_power = RadioPowerLevel::Full;
         self.signal_quality = SignalQuality::default();
@@ -394,7 +394,7 @@ impl NetworkService {
 
     /// Returns whether RF is on: the host has not disabled the radio and the
     /// guest has set full functionality (`AT+CFUN=1`).
-    pub fn is_radio_on(&self) -> bool {
+    pub(crate) fn is_radio_on(&self) -> bool {
         self.host_enabled && self.radio_power == RadioPowerLevel::Full
     }
 
@@ -419,22 +419,22 @@ impl NetworkService {
         self.detach_and_format_urcs()
     }
 
-    pub fn voice_registration(&self) -> RegistrationStatus {
+    pub(crate) fn voice_registration(&self) -> RegistrationStatus {
         self.voice_registration
     }
-    pub fn data_registration(&self) -> RegistrationStatus {
+    pub(crate) fn data_registration(&self) -> RegistrationStatus {
         self.data_registration
     }
-    pub fn signal_quality(&self) -> SignalQuality {
+    pub(crate) fn signal_quality(&self) -> SignalQuality {
         self.signal_quality
     }
 
-    pub fn detach_network(&mut self) {
+    pub(crate) fn detach_network(&mut self) {
         self.is_attached = false;
         self.phys_chan_timer.cancel();
     }
 
-    pub fn set_home_plmn(&mut self, plmn: Option<Plmn>) {
+    pub(crate) fn set_home_plmn(&mut self, plmn: Option<Plmn>) {
         self.plmn = plmn;
     }
 
@@ -542,7 +542,7 @@ impl NetworkService {
         matched.then(|| this.physical_channel_config_urcs(data)).into_iter().flatten()
     }
 
-    pub fn set_registration(
+    pub(crate) fn set_registration(
         &mut self,
         reg_type: RegistrationType,
         status: RegistrationStatus,
@@ -628,7 +628,7 @@ impl NetworkService {
     }
 
     /// Sets the signal strength and bit error rate.
-    pub fn set_signal_strength(&mut self, rssi: u8, ber: u8) -> Option<String> {
+    pub(crate) fn set_signal_strength(&mut self, rssi: u8, ber: u8) -> Option<String> {
         self.signal_quality = SignalQuality::new(rssi, ber);
         if self.is_radio_on() {
             Some(NetworkUrc::SignalQuality(self.current_signal_strength()).to_string())
