@@ -35,6 +35,34 @@ use crate::{
     stats::WifiApi,
 };
 
+const MGMT_FIXED_PARAMS_LEN: usize = size_of::<netsim_packets::BeaconFixedFields>();
+const P2P_ATTR_CAPABILITY: u8 = 2;
+const P2P_GROUP_CAP_GROUP_OWNER: u8 = 0x01;
+// P2P_ATTR_LISTEN_CHANNEL (ID 6): Country(3) + RegClass(1) + Channel(1)
+const P2P_ATTR_LISTEN_CHANNEL: u8 = 6;
+
+fn p2p_ie_bodies(ies: &[u8]) -> impl Iterator<Item = &[u8]> {
+    use netsim_packets::{IeIterator, p2p, tags};
+
+    IeIterator::new(ies).filter_map(|ie| {
+        if ie.id == tags::VENDOR_SPECIFIC
+            && let Some((&p2p::OUI, &[p2p::OUI_TYPE, ref rest @ ..])) =
+                ie.body.split_first_chunk::<3>()
+        {
+            Some(rest)
+        } else {
+            None
+        }
+    })
+}
+
+// Wi-Fi Direct (P2P) attributes share the WFA (u8 id, le u16 len, value) TLV layout with NAN.
+fn p2p_attrs(ies: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
+    use netsim_packets::NanAttributeIterator;
+
+    p2p_ie_bodies(ies).flat_map(NanAttributeIterator::new).map(|attr| (attr.id, attr.val))
+}
+
 // Packets flowing from Medium to Guest (Destination)
 impl Medium {
     /// Encodes a HwsimMsg and pushes it to the output queue.
@@ -482,40 +510,24 @@ impl Medium {
     }
 
     fn p2p_listen_freq(&self, ieee80211: &Ieee80211) -> Option<u32> {
-        use netsim_packets::{IeIterator, p2p, tags};
-
-        for ie in IeIterator::new(&ieee80211.get_payload()) {
-            if ie.id == tags::VENDOR_SPECIFIC
-                && let Some((&p2p::OUI, &[p2p::OUI_TYPE, ref rest @ ..])) =
-                    ie.body.split_first_chunk::<3>()
+        p2p_attrs(&ieee80211.get_payload()).find_map(|(attr_id, attr_val)| {
+            if attr_id == P2P_ATTR_LISTEN_CHANNEL
+                && let &[_, _, _, _, ch @ 1..=13, ..] = attr_val
             {
-                let mut attr_bytes = rest;
-                while let &[attr_id, len_l, len_h, ref remaining @ ..] = attr_bytes {
-                    let attr_len = u16::from_le_bytes([len_l, len_h]) as usize;
-                    let Some((attr_val, next)) = remaining.split_at_checked(attr_len) else {
-                        break;
-                    };
-                    // P2P_ATTR_LISTEN_CHANNEL (ID 6): Country(3) + RegClass(1) + Channel(1)
-                    const P2P_ATTR_LISTEN_CHANNEL: u8 = 6;
-                    if attr_id == P2P_ATTR_LISTEN_CHANNEL
-                        && let &[_, _, _, _, ch @ 1..=13, ..] = attr_val
-                    {
-                        return Some(2407 + 5 * u32::from(ch));
-                    }
-                    attr_bytes = next;
-                }
+                Some(2407 + 5 * u32::from(ch))
+            } else {
+                None
             }
-        }
-        None
+        })
     }
 
     pub(crate) fn has_p2p_ie(&self, ieee80211: &Ieee80211) -> bool {
-        use netsim_packets::{IeIterator, management_subtype, p2p, tags};
+        use netsim_packets::management_subtype;
 
         let payload = ieee80211.get_payload();
         let offset = match ieee80211.stype() {
             management_subtype::PROBE_REQUEST => 0,
-            management_subtype::PROBE_RESPONSE => 12,
+            management_subtype::PROBE_RESPONSE => MGMT_FIXED_PARAMS_LEN,
             _ => return false,
         };
 
@@ -523,23 +535,17 @@ impl Medium {
             return false;
         };
 
-        for ie in IeIterator::new(ies) {
-            if ie.id == tags::VENDOR_SPECIFIC
-                && let Some((&p2p::OUI, &[p2p::OUI_TYPE, ..])) = ie.body.split_first_chunk::<3>()
-            {
-                return true;
-            }
-        }
-        false
+        p2p_ie_bodies(ies).next().is_some()
     }
 
     fn is_p2p_go(&self, ieee80211: &Ieee80211) -> bool {
-        use netsim_packets::{IeIterator, management_subtype, p2p, tags};
+        use netsim_packets::management_subtype;
 
         let payload = ieee80211.get_payload();
         let offset = match ieee80211.stype() {
-            management_subtype::BEACON => 12,
-            management_subtype::PROBE_RESPONSE => 12,
+            management_subtype::BEACON | management_subtype::PROBE_RESPONSE => {
+                MGMT_FIXED_PARAMS_LEN
+            }
             _ => return false,
         };
 
@@ -547,27 +553,12 @@ impl Medium {
             return false;
         };
 
-        for ie in IeIterator::new(ies) {
-            if ie.id == tags::VENDOR_SPECIFIC
-                && let Some((&p2p::OUI, &[p2p::OUI_TYPE, ref rest @ ..])) =
-                    ie.body.split_first_chunk::<3>()
-            {
-                let mut attr_bytes = rest;
-                while let &[attr_id, len_l, len_h, ref remaining @ ..] = attr_bytes {
-                    let attr_len = u16::from_le_bytes([len_l, len_h]) as usize;
-                    let Some((attr_val, next)) = remaining.split_at_checked(attr_len) else {
-                        break;
-                    };
-                    if attr_id == 2
-                        && attr_val.get(1).is_some_and(|&group_cap| group_cap & 0x01 != 0)
-                    {
-                        return true;
-                    }
-                    attr_bytes = next;
-                }
-            }
-        }
-        false
+        p2p_attrs(ies).any(|(attr_id, attr_val)| {
+            attr_id == P2P_ATTR_CAPABILITY
+                && attr_val
+                    .get(1)
+                    .is_some_and(|&group_cap| group_cap & P2P_GROUP_CAP_GROUP_OWNER != 0)
+        })
     }
 
     fn parse_nan_action(&mut self, sharing_payload: &[u8]) {
@@ -681,10 +672,14 @@ mod tests {
     use ap_actor::SharedKeyStore;
     use netsim_packets::{
         DataSubType, FrameControl, FrameType, HwsimFrame, Ieee80211, MacAddr, MacAddress,
-        MacHeader3Addr, SequenceControl,
+        MacHeader3Addr, SequenceControl, management_subtype, nan, p2p, tags,
     };
     use zerocopy::IntoBytes;
 
+    use super::{
+        MGMT_FIXED_PARAMS_LEN, P2P_ATTR_CAPABILITY, P2P_ATTR_LISTEN_CHANNEL,
+        P2P_GROUP_CAP_GROUP_OWNER,
+    };
     use crate::{
         DebugArgs,
         medium::{core::Medium, types::Station, utils::create_hwsim_msg_from_frame},
@@ -692,12 +687,77 @@ mod tests {
     };
 
     const FREQ_2412: u32 = 2412;
+    const FREQ_2462: u32 = 2462;
+    const CH_1: u8 = 1;
+    const CH_11: u8 = 11;
+    const INVALID_CH_LOW: u8 = 0;
+    const INVALID_CH_HIGH: u8 = 14;
+    const LISTEN_CH_ATTR_LEN: u8 = 5;
+    const LISTEN_CH_COUNTRY: [u8; 3] = [b'X', b'X', 0x04];
+    const LISTEN_CH_REG_CLASS: u8 = 81;
+    const P2P_CAP_ATTR_LEN: u8 = 2;
+    const NO_GROUP_CAP: u8 = 0x00;
+    const TRUNCATED_CAP_LEN: u8 = 10;
+    const NON_WFA_VENDOR_IE: [u8; 7] = [tags::VENDOR_SPECIFIC, 5, 0x00, 0x50, 0xF2, 0x01, 0x00];
 
     fn test_medium() -> Medium {
         let key_store = Arc::new(SharedKeyStore::new());
         let wifi_stats = WifiStats::new(Arc::new(SystemClock));
         let debug = Arc::new(DebugArgs::default());
         Medium::new(key_store, wifi_stats, debug)
+    }
+
+    fn mgmt_frame(subtype: u8, body: &[u8]) -> Ieee80211 {
+        let header = MacHeader3Addr {
+            frame_control: FrameControl::new(u16::from(subtype) << 4),
+            duration_id: zerocopy::U16::new(0),
+            addr1: MacAddr::new([0xff; 6]),
+            addr2: MacAddr::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]),
+            addr3: MacAddr::new([0x02, 0x15, 0xb2, 0x00, 0x01, 0x00]),
+            sequence_control: SequenceControl::new(0),
+        };
+        let mut raw = header.as_bytes().to_vec();
+        raw.extend_from_slice(body);
+        Ieee80211::decode(&raw).unwrap()
+    }
+
+    fn mgmt_frame_with_fixed_params(subtype: u8, ies: &[u8]) -> Ieee80211 {
+        // 0xFF at byte 1 exceeds the remaining payload length so an offset-0 IeIterator stops.
+        let mut fixed_params = [0u8; MGMT_FIXED_PARAMS_LEN];
+        fixed_params[1] = 0xFF;
+        mgmt_frame(subtype, &[fixed_params.as_slice(), ies].concat())
+    }
+
+    fn wfa_ie(oui_type: u8, attrs: &[u8]) -> Vec<u8> {
+        let len = u8::try_from(4 + attrs.len()).expect("WFA IE test payload fits in u8");
+        let mut ie = vec![tags::VENDOR_SPECIFIC, len];
+        ie.extend_from_slice(&p2p::OUI);
+        ie.push(oui_type);
+        ie.extend_from_slice(attrs);
+        ie
+    }
+
+    fn p2p_ie(attrs: &[u8]) -> Vec<u8> {
+        wfa_ie(p2p::OUI_TYPE, attrs)
+    }
+
+    fn p2p_cap_attr(group_cap: u8) -> [u8; 5] {
+        [P2P_ATTR_CAPABILITY, P2P_CAP_ATTR_LEN, 0, 0x00, group_cap]
+    }
+
+    fn p2p_go_ie() -> Vec<u8> {
+        p2p_ie(&p2p_cap_attr(P2P_GROUP_CAP_GROUP_OWNER))
+    }
+
+    fn fixed_params_with_embedded_go_ie() -> Vec<u8> {
+        let mut buf = p2p_go_ie();
+        buf.resize(MGMT_FIXED_PARAMS_LEN, 0x00);
+        buf
+    }
+
+    fn listen_ch_attr(ch: u8) -> [u8; 8] {
+        let [c0, c1, c2] = LISTEN_CH_COUNTRY;
+        [P2P_ATTR_LISTEN_CHANNEL, LISTEN_CH_ATTR_LEN, 0, c0, c1, c2, LISTEN_CH_REG_CLASS, ch]
     }
 
     #[test]
@@ -786,5 +846,118 @@ mod tests {
         assert!(res.is_ok());
         assert_eq!(warn_count, 0, "unknown station unicast drop should not log warn");
         assert_eq!(debug_count, 1, "unknown station unicast drop should log debug");
+    }
+
+    #[test]
+    fn test_p2p_listen_freq_skips_non_p2p_ies_and_prior_attrs() {
+        let medium = test_medium();
+        let nan_ie = wfa_ie(nan::OUI_TYPE, &listen_ch_attr(CH_11));
+        assert_eq!(
+            medium.p2p_listen_freq(&mgmt_frame(management_subtype::PROBE_REQUEST, &nan_ie)),
+            None
+        );
+
+        let mut body = NON_WFA_VENDOR_IE.to_vec();
+        body.extend_from_slice(&nan_ie);
+        let mut attrs = p2p_cap_attr(NO_GROUP_CAP).to_vec();
+        attrs.extend_from_slice(&listen_ch_attr(CH_11));
+        body.extend(p2p_ie(&attrs));
+
+        let frame = mgmt_frame(management_subtype::PROBE_REQUEST, &body);
+        assert_eq!(medium.p2p_listen_freq(&frame), Some(FREQ_2462));
+    }
+
+    #[test]
+    fn test_p2p_listen_freq_handles_malformed_tlv_and_invalid_channel() {
+        let medium = test_medium();
+        for ch in [INVALID_CH_LOW, INVALID_CH_HIGH] {
+            let frame = mgmt_frame(management_subtype::PROBE_REQUEST, &p2p_ie(&listen_ch_attr(ch)));
+            assert_eq!(medium.p2p_listen_freq(&frame), None);
+        }
+
+        // Truncated TLV in first P2P IE should not block valid Listen Channel in second P2P IE.
+        let mut multi_body = p2p_ie(&[P2P_ATTR_CAPABILITY, TRUNCATED_CAP_LEN, 0, 0x00]);
+        multi_body.extend(p2p_ie(&listen_ch_attr(CH_1)));
+        let multi_ie = mgmt_frame(management_subtype::PROBE_REQUEST, &multi_body);
+        assert_eq!(medium.p2p_listen_freq(&multi_ie), Some(FREQ_2412));
+    }
+
+    #[test]
+    fn test_is_p2p_go_honors_fixed_params_offset() {
+        let medium = test_medium();
+        let go_ie = p2p_go_ie();
+        assert!(
+            medium.is_p2p_go(&mgmt_frame_with_fixed_params(management_subtype::BEACON, &go_ie))
+        );
+        assert!(
+            medium.is_p2p_go(&mgmt_frame_with_fixed_params(
+                management_subtype::PROBE_RESPONSE,
+                &go_ie
+            ))
+        );
+
+        let fixed_params_with_p2p = fixed_params_with_embedded_go_ie();
+        assert!(!medium.is_p2p_go(&mgmt_frame(management_subtype::BEACON, &fixed_params_with_p2p)));
+        assert!(
+            !medium
+                .is_p2p_go(&mgmt_frame(management_subtype::PROBE_RESPONSE, &fixed_params_with_p2p))
+        );
+        assert!(!medium.is_p2p_go(&mgmt_frame(
+            management_subtype::BEACON,
+            &fixed_params_with_p2p[..MGMT_FIXED_PARAMS_LEN - 1]
+        )));
+    }
+
+    #[test]
+    fn test_is_p2p_go_requires_go_cap_bit_and_beacon_or_probe_resp() {
+        let medium = test_medium();
+        let non_go_ie = p2p_ie(&p2p_cap_attr(NO_GROUP_CAP));
+        assert!(
+            !medium
+                .is_p2p_go(&mgmt_frame_with_fixed_params(management_subtype::BEACON, &non_go_ie))
+        );
+        assert!(!medium.is_p2p_go(&mgmt_frame_with_fixed_params(
+            management_subtype::PROBE_RESPONSE,
+            &non_go_ie
+        )));
+
+        let go_ie = p2p_go_ie();
+        assert!(!medium.is_p2p_go(&mgmt_frame(management_subtype::PROBE_REQUEST, &go_ie)));
+    }
+
+    #[test]
+    fn test_has_p2p_ie_respects_subtype_offset_and_empty_body() {
+        let medium = test_medium();
+        let go_ie = p2p_go_ie();
+        assert!(
+            medium.has_p2p_ie(&mgmt_frame_with_fixed_params(
+                management_subtype::PROBE_RESPONSE,
+                &go_ie
+            ))
+        );
+
+        let fixed_params_with_p2p = fixed_params_with_embedded_go_ie();
+        assert!(
+            !medium.has_p2p_ie(&mgmt_frame(
+                management_subtype::PROBE_RESPONSE,
+                &fixed_params_with_p2p
+            ))
+        );
+        assert!(!medium.has_p2p_ie(&mgmt_frame(
+            management_subtype::PROBE_RESPONSE,
+            &fixed_params_with_p2p[..MGMT_FIXED_PARAMS_LEN - 1]
+        )));
+
+        let nan_ie = wfa_ie(nan::OUI_TYPE, &[]);
+        assert!(!medium.has_p2p_ie(&mgmt_frame(management_subtype::PROBE_REQUEST, &nan_ie)));
+
+        let empty_p2p_ie = p2p_ie(&[]);
+        assert!(medium.has_p2p_ie(&mgmt_frame(management_subtype::PROBE_REQUEST, &empty_p2p_ie)));
+        assert!(
+            !medium.has_p2p_ie(&mgmt_frame_with_fixed_params(
+                management_subtype::BEACON,
+                &empty_p2p_ie
+            ))
+        );
     }
 }
