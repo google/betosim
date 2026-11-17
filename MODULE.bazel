@@ -235,6 +235,7 @@ use_repo(
     "ipnet",
     "itoa",
     "jiff",
+    "jiff-tzdb",
     "lazy_static",
     "libc",
     "libslirp",

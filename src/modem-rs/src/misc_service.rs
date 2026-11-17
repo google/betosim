@@ -545,7 +545,6 @@ mod tests {
     use crate::time::MockClock;
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
     fn test_nitz_time_formatting() {
         let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
         let nitz = NitzTime::from(zoned);
@@ -637,7 +636,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
     fn test_cclk_at_commands() {
         let clock = Arc::new(MockClock::default());
         let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
@@ -685,7 +683,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
     fn test_from_nitz_to_cclk() {
         let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
         let nitz = NitzTime::from(zoned);

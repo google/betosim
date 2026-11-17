@@ -97,6 +97,7 @@ _CRATES = {
     "ipnet": ("2.12.2", "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"),
     "itoa": ("1.0.18", "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"),
     "jiff": ("0.2.32", "961d16382652bfdd8c6f68b223b26a8c93e0d475c672f414411db31c6c5c900e"),
+    "jiff-tzdb": ("0.1.8", "142bd39932ad231f10513df9ab62661fead8719872150b7ad02a2df79f4e141e"),
     "lazy_static": ("1.5.0", "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"),
     "libc": ("0.2.189", "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"),
     "libz-sys": ("1.1.29", "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"),
@@ -284,7 +285,7 @@ def _lrc_impl(module_ctx):
 
     # 1. Custom Path Crates
     _CUSTOM_PATH_CRATES = [
-        struct(name = "getrandom_v0_2", path = "/".join([workspace_root, "external", "rust", "android-crates-io-pinned", "crates", "getrandom"])),
+        struct(name = "getrandom_v0_2", path = "/".join([workspace_root, "external", "rust", "android-crates-io", "extra_versions", "crates", "getrandom"])),
         struct(name = "pica", path = workspace_root + "/third_party/rust/crates/pica"),
         struct(name = "protobuf-rust", path = android_crates_io + "/protobuf"),
     ]

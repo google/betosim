@@ -30,7 +30,12 @@ rust_library(
         "tz-system",
         "tzdb-concatenated",
         "tzdb-zoneinfo",
-    ],
+    ] + select({
+        "@platforms//os:windows": [
+            "tzdb-bundle-always",
+        ],
+        "//conditions:default": [],
+    }),
     crate_name = "jiff",
     crate_root = "src/lib.rs",
     edition = "2021",
@@ -39,6 +44,7 @@ rust_library(
     ],
     deps = select({
         "@platforms//os:windows": [
+            "@jiff-tzdb",
             "@windows-link",
         ],
         "//conditions:default": [],

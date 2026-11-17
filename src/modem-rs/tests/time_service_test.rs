@@ -12,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(not(target_os = "windows"))]
 use jiff::Zoned;
-#[cfg(not(target_os = "windows"))]
 use modem_rs::test_utils::MockModemHandler;
 
-#[cfg(not(target_os = "windows"))]
-use crate::common::constants::RESP_CSQ_LTE_DEFAULT;
-use crate::{steps::*, world::World};
+use crate::{common::constants::RESP_CSQ_LTE_DEFAULT, steps::*, world::World};
 
 // Scenario: Set and Query Time
 //   Given a modem "A"
@@ -52,7 +48,6 @@ fn test_set_and_query_time() {
 //   Then response from "A" matches "+CCLK: ..."
 //   And response from "A" is "OK"
 #[test]
-#[cfg(not(target_os = "windows"))]
 fn test_update_network_time() {
     let mut world = World::new();
     given_modem(&mut world, "A");
@@ -96,7 +91,6 @@ fn test_ctzv_command() {
 }
 
 #[test]
-#[cfg(not(target_os = "windows"))]
 fn test_auto_ctzv_on_attach() {
     let mut world = World::new();
     let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
@@ -131,7 +125,6 @@ fn test_auto_ctzv_on_attach() {
 }
 
 #[test]
-#[cfg(not(target_os = "windows"))]
 fn test_auto_ctzv_disabled_by_default() {
     let mut world = World::new();
     let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
@@ -158,7 +151,6 @@ fn test_auto_ctzv_disabled_by_default() {
 }
 
 #[test]
-#[cfg(not(target_os = "windows"))]
 fn test_auto_ctzv_suppressed_on_locked_sim() {
     let mut world = World::new();
     let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();
@@ -185,7 +177,6 @@ fn test_auto_ctzv_suppressed_on_locked_sim() {
 }
 
 #[test]
-#[cfg(not(target_os = "windows"))]
 fn test_auto_ctzv_emitted_on_locked_sim_when_quirk_enabled() {
     let mut world = World::new();
     let zoned: Zoned = "2026-06-15T12:30:45-07:00[America/Los_Angeles]".parse().unwrap();

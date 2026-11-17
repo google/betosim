@@ -53,3 +53,8 @@ tempfile = "3"
 [features]
 test-utils = []
 testing = []
+
+[target.'cfg(windows)'.dependencies]
+jiff = { version = "0.2.32", default-features = false, features = [
+  "tzdb-bundle-always",
+] }
