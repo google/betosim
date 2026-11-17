@@ -293,13 +293,7 @@ pub use utils::checksum::{
 };
 
 pub mod link_layer {
-    #[allow(
-        warnings,
-        clippy::all,
-        clippy::unwrap_in_result,
-        clippy::map_err_ignore,
-        clippy::indexing_slicing
-    )]
+    #[allow(warnings, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
     mod pdl_generated {
         include!(concat!(env!("OUT_DIR"), "/link_layer_packets.rs"));
     }

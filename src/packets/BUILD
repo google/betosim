@@ -34,9 +34,6 @@ netsim_rust_library(
     rustc_env = {
         "OUT_DIR": "../../..",
     },
-    # TODO(b/584801057): Scope --cap-lints=allow to generated PDL code so rust_clippy lints
-    # handwritten sources.
-    rustc_flags = ["--cap-lints=allow"],
     deps = [
         "@bytes",
         "@hex",
