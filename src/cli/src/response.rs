@@ -15,7 +15,7 @@
 use std::cmp::max;
 
 use common::util::time_display::TimeDisplay;
-use netsim_proto::frontend;
+use netsim_proto::{frontend, model};
 use netsim_rest_api::CaptureInfo;
 use protobuf::MessageField;
 
@@ -121,10 +121,7 @@ impl args::Command {
                         // fall back to args (wildcards)
                         let (sender, receiver) = match request {
                             Some(GrpcRequest::PatchLink(req)) => {
-                                match &req.link.clone().into_option() {
-                                    Some(link) => (Some(link.sender_id), Some(link.receiver_id)),
-                                    None => (args.sender, args.receiver),
-                                }
+                                link_endpoints(req.link.as_ref(), (args.sender, args.receiver))
                             }
                             _ => (args.sender, args.receiver),
                         };
@@ -141,16 +138,13 @@ impl args::Command {
                 Link::Delete(args) => {
                     if verbose {
                         // Extract specific link info from request if available
-                        let (sender, receiver) = if let Some(GrpcRequest::DeleteLink(req)) = request
-                        {
-                            #[allow(deprecated)]
-                            if let Some(link) = &req.link.clone().into_option() {
-                                (Some(link.sender_id), Some(link.receiver_id))
-                            } else {
-                                (args.sender, args.receiver)
+                        let (sender, receiver) = match request {
+                            Some(GrpcRequest::DeleteLink(req)) => {
+                                #[allow(deprecated)]
+                                let link = req.link.as_ref();
+                                link_endpoints(link, (args.sender, args.receiver))
                             }
-                        } else {
-                            (args.sender, args.receiver)
+                            _ => (args.sender, args.receiver),
                         };
 
                         println!(
@@ -260,6 +254,16 @@ pub(crate) fn filter_captures(captures: &mut Vec<CaptureInfo>, keys: &[String]) 
     });
 }
 
+fn link_endpoints(
+    link: Option<&model::Link>,
+    fallback: (Option<u32>, Option<u32>),
+) -> (Option<u32>, Option<u32>) {
+    match link {
+        Some(link) => (Some(link.sender_id), Some(link.receiver_id)),
+        None => fallback,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use netsim_model::{ChipId, ChipKind};
@@ -362,5 +366,31 @@ mod tests {
             vec!["device 1".to_string(), "wifi".to_string()],
             vec![capture_1_wifi()],
         );
+    }
+
+    const TEST_LINK_SENDER_ID: u32 = 101;
+    const TEST_LINK_RECEIVER_ID: u32 = 202;
+    const FALLBACK_SENDER_ID: u32 = 303;
+    const FALLBACK_RECEIVER_ID: u32 = 404;
+
+    #[test]
+    fn test_link_endpoints_uses_link_ids_when_present() {
+        let mut link = model::Link::new();
+        link.sender_id = TEST_LINK_SENDER_ID;
+        link.receiver_id = TEST_LINK_RECEIVER_ID;
+
+        let (sender, receiver) =
+            link_endpoints(Some(&link), (Some(FALLBACK_SENDER_ID), Some(FALLBACK_RECEIVER_ID)));
+
+        assert_eq!(sender, Some(TEST_LINK_SENDER_ID));
+        assert_eq!(receiver, Some(TEST_LINK_RECEIVER_ID));
+    }
+
+    #[test]
+    fn test_link_endpoints_falls_back_when_none() {
+        let (sender, receiver) = link_endpoints(None, (Some(FALLBACK_SENDER_ID), None));
+
+        assert_eq!(sender, Some(FALLBACK_SENDER_ID));
+        assert_eq!(receiver, None);
     }
 }
