@@ -16,5 +16,6 @@
 //!
 //! A collection of utilities for netsimd and netsim.
 
+pub(crate) mod err;
 pub mod system;
 pub mod util;

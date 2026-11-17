@@ -31,7 +31,7 @@ use tracing::{debug, error, warn};
 
 use crate::{
     ActorLifecycle, ActorService, DynContext, client::ResourceClient, context::FrameworkContext,
-    message::ResourceRequest,
+    err, message::ResourceRequest,
 };
 
 const DEFAULT_STALL_THRESHOLD: Duration = Duration::from_millis(100);
@@ -48,8 +48,12 @@ fn stall_warning_ms(elapsed: Duration, threshold: Duration) -> Option<(u64, u64)
 fn warn_if_elapsed_exceeds<T>(elapsed: Duration, threshold: Duration, event: &'static str) {
     if let Some((elapsed_ms, threshold_ms)) = stall_warning_ms(elapsed, threshold) {
         warn!(
+            code = err::Code::ActorLoopStalled as u32,
             actor = std::any::type_name::<T>(),
-            event, elapsed_ms, threshold_ms, "Actor loop stalled"
+            event,
+            elapsed_ms,
+            threshold_ms,
+            "Actor loop stalled"
         );
     }
 }
@@ -306,7 +310,13 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                             .await;
                         }
                         Err(error) if error.is_cancelled() => debug!(%error, "Monitored task cancelled"),
-                        Err(error) => error!(%error, "Monitored task failed"),
+                        Err(error) => {
+                            error!(
+                                code = err::Code::MonitoredTaskFailed as u32,
+                                %error,
+                                "Monitored task failed"
+                            )
+                        }
                     }
                 }
                 _ = &mut self.shutdown_rx => {
@@ -413,6 +423,8 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
 mod tests {
     use std::time::Duration;
 
+    use common::util::netsim_logger::isolated_error_stats;
+
     use super::*;
 
     #[test]
@@ -428,5 +440,118 @@ mod tests {
         assert_eq!(stall_warning_ms(Duration::from_millis(125), threshold), Some((125, 100)));
         assert_eq!(stall_warning_ms(Duration::from_micros(100_500), threshold), Some((100, 100)));
         assert_eq!(stall_warning_ms(Duration::MAX, threshold), Some((u64::MAX, 100)));
+    }
+
+    #[test]
+    fn test_warn_if_elapsed_exceeds_records_actor_loop_stalled() {
+        let (table, _guard) = isolated_error_stats();
+        let threshold = Duration::from_millis(100);
+
+        warn_if_elapsed_exceeds::<()>(Duration::from_millis(50), threshold, "handle_get");
+        assert!(table.snapshot().is_empty());
+
+        warn_if_elapsed_exceeds::<()>(Duration::from_millis(250), threshold, "handle_action");
+        assert_eq!(table.snapshot(), vec![(err::Code::ActorLoopStalled as u32, 1)]);
+    }
+
+    #[derive(Clone, Debug)]
+    struct PanickingTaskActor;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("test actor error")]
+    struct TestActorError;
+
+    impl From<String> for TestActorError {
+        fn from(_: String) -> Self {
+            Self
+        }
+    }
+
+    impl ActorService for PanickingTaskActor {
+        type Id = u32;
+        type Create = ();
+        type Update = ();
+        type Action = ();
+        type ActionResult = ();
+        type Error = TestActorError;
+        type Entity = Self;
+        type TypedStream = ();
+
+        async fn handle_create(
+            &mut self,
+            id: Option<u32>,
+            (): (),
+            _: &mut DynContext<Self>,
+        ) -> Result<u32, Self::Error> {
+            Ok(id.unwrap_or(0))
+        }
+
+        async fn handle_get(
+            &self,
+            _: u32,
+            _: &mut DynContext<Self>,
+        ) -> Result<Option<Self::Entity>, Self::Error> {
+            Ok(Some(self.clone()))
+        }
+
+        async fn handle_update(
+            &mut self,
+            _: u32,
+            (): (),
+            _: &mut DynContext<Self>,
+        ) -> Result<Self::Entity, Self::Error> {
+            Ok(self.clone())
+        }
+
+        async fn handle_delete(
+            &mut self,
+            _: u32,
+            _: &mut DynContext<Self>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn handle_action(
+            &mut self,
+            _: Option<u32>,
+            (): (),
+            _: &mut DynContext<Self>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn handle_list(
+            &mut self,
+            _: &mut DynContext<Self>,
+        ) -> Result<Vec<Self::Entity>, Self::Error> {
+            Ok(vec![])
+        }
+    }
+
+    impl ActorLifecycle for PanickingTaskActor {
+        async fn on_start(&mut self, ctx: &mut DynContext<Self>) {
+            ctx.spawn(1u32, Box::pin(async { panic!("monitored task panic") }));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_monitored_task_panic_records_monitored_task_failed() {
+        let (table, _guard) = isolated_error_stats();
+
+        let (actor, client) = ResourceActor::<PanickingTaskActor>::new(4);
+        let actor = actor.with_stall_threshold(Duration::from_secs(60));
+        let handle = tokio::spawn(actor.run(PanickingTaskActor));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while table.snapshot().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        client.shutdown().await.unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(table.snapshot(), vec![(err::Code::MonitoredTaskFailed as u32, 1)]);
     }
 }

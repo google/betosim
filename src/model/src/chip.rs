@@ -28,6 +28,7 @@ use crate::{
     chip_error::ChipError,
     client_error::ClientError,
     device::{DeviceId, Pose, api::PoseUpdate},
+    err,
     stats::NetsimRadioStats,
 };
 
@@ -553,7 +554,12 @@ impl ChipVariantUpdate {
                 update.apply(nfc);
             }
             (u, v) => {
-                tracing::warn!("ChipVariantUpdate mismatch with ChipVariant: {:?} vs {:?}", u, v);
+                tracing::warn!(
+                    code = err::Code::ChipVariantMismatch as u32,
+                    "ChipVariantUpdate mismatch with ChipVariant: {:?} vs {:?}",
+                    u,
+                    v
+                );
             }
         }
     }
@@ -857,5 +863,16 @@ mod tests {
         base.merge(incoming);
         assert_eq!(base.kind, None);
         assert_eq!(base.manufacturer.as_deref(), Some("Updated"));
+    }
+
+    #[test]
+    fn test_chip_variant_update_mismatch_records_error_code() {
+        let (table, _guard) = common::util::netsim_logger::isolated_error_stats();
+
+        let mut variant = ChipVariant::Wifi(crate::wifi::Wifi::default());
+        ChipVariantUpdate::Uwb(crate::uwb::UwbUpdate::default()).apply(&mut variant);
+
+        assert!(matches!(variant, ChipVariant::Wifi(_)));
+        assert_eq!(table.snapshot(), vec![(err::Code::ChipVariantMismatch as u32, 1)]);
     }
 }

@@ -62,7 +62,10 @@ where
     let mut path = match get_env(DISCOVERY.root_env) {
         Ok(env_p) => PathBuf::from(env_p),
         Err(_) => {
-            warn!("No discovery env for {}, using /tmp", DISCOVERY.root_env);
+            warn!(
+                code = crate::err::Code::DiscoveryEnvMissing as u32,
+                "No discovery env for {}, using /tmp", DISCOVERY.root_env
+            );
             PathBuf::from("/tmp")
         }
     };
@@ -250,5 +253,16 @@ mod tests {
         // hci_port_flag = 0 should fall back to the default
         assert_eq!(get_hci_port(0, 0), DEFAULT_HCI_PORT);
         assert_eq!(get_hci_port(0, 1), DEFAULT_HCI_PORT + 1);
+    }
+
+    #[test]
+    fn test_get_discovery_directory_missing_env_records_error_code() {
+        let (table, _guard) = crate::util::netsim_logger::isolated_error_stats();
+        let actual = get_discovery_directory_with_env(|_key| Err(env::VarError::NotPresent));
+
+        let mut expected = PathBuf::from("/tmp");
+        expected.push(DISCOVERY.subdir);
+        assert_eq!(actual, expected);
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::DiscoveryEnvMissing as u32, 1)]);
     }
 }

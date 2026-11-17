@@ -538,6 +538,7 @@
 mod actor;
 mod client;
 mod context;
+pub(crate) mod err;
 mod error;
 mod lifecycle;
 mod message;

@@ -40,5 +40,6 @@ tokio-stream = "0.1.17"
 tracing = "0.1"
 
 [dev-dependencies]
+common = { package = "netsim-common", path = "../common", features = ["testing"] }
 mockall = "0.14.0"
 serde_json = "1.0"

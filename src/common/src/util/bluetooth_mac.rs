@@ -30,6 +30,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use super::ini_file::{IniParserOptions, parse_ini};
+use crate::err;
 
 #[derive(Debug, Default, PartialEq)]
 struct NetsimConfig {
@@ -178,6 +179,7 @@ fn read_all_bluetooth_addresses(avd_root: &Path) -> Result<HashSet<String>, Box<
             }
             Err(error) => {
                 warn!(
+                    code = err::Code::NetsimIniReadFailed as u32,
                     %error,
                     path = %ini_path.display(),
                     "Failed to read netsim.ini, skipping address scan"
@@ -239,12 +241,15 @@ fn get_or_create_bluetooth_mac(
                     return Ok(normalized);
                 }
                 warn!(
-                    "Configured MAC {normalized} for AVD {avd_ini_path} collides with an active device; generating a new MAC"
+                    code = err::Code::AvdMacCollision as u32,
+                    "Configured MAC {normalized} for AVD {avd_ini_path} collides with an active \
+                     device; generating a new MAC"
                 );
             }
         }
         Err(error) => {
             warn!(
+                code = err::Code::AvdConfigReadFailed as u32,
                 %error,
                 "Error reading config for {}. Will attempt to create/overwrite.",
                 avd_ini_path
@@ -313,7 +318,9 @@ fn resolve_in_memory_bluetooth_mac(
     if !provided_address.is_empty() {
         if !is_valid_mac_address(provided_address) {
             warn!(
-                "Refusing to persist invalid MAC address '{provided_address}' for device {device_name}"
+                code = err::Code::InMemoryMacInvalid as u32,
+                "Refusing to persist invalid MAC address '{provided_address}' for device \
+                 {device_name}"
             );
             return String::new();
         }
@@ -336,7 +343,11 @@ fn resolve_in_memory_bluetooth_mac(
             new_mac
         }
         Err(error) => {
-            warn!(%error, "Failed to generate in-memory MAC for device {device_name}");
+            warn!(
+                code = err::Code::InMemoryMacGenerateFailed as u32,
+                %error,
+                "Failed to generate in-memory MAC for device {device_name}"
+            );
             String::new()
         }
     }
@@ -370,41 +381,236 @@ pub async fn resolve_bluetooth_mac_for_device(
     let address = provided_address.to_string();
     tokio::task::spawn_blocking(move || {
         let cache = guard.get_or_insert_with(BluetoothMacCache::default);
-        if address.is_empty() {
-            match get_or_create_bluetooth_mac(&avd_path, cache) {
-                Ok(addr) => {
-                    if !device_name.is_empty() && device_name != "Unknown" {
-                        cache.by_device.insert(device_name, addr.clone());
-                    }
-                    info!("Assigned persistent MAC {addr} to AVD {avd_path}");
-                    addr
-                }
-                Err(error) => {
-                    warn!(%error, "Failed to get/create MAC for {avd_path}");
-                    String::new()
-                }
-            }
-        } else {
-            if !is_valid_mac_address(&address) {
-                warn!("Refusing to persist invalid MAC address '{address}' for AVD {avd_path}");
-                return String::new();
-            }
-            let normalized = normalize_mac_address(&address);
-            if let Err(error) = set_bluetooth_mac(&avd_path, &normalized) {
-                warn!(%error, "Failed to persist MAC {normalized} for AVD {avd_path}");
-                return String::new();
-            }
-            cache.by_avd_path.insert(avd_path, normalized.clone());
-            cache.used_macs.insert(normalized.clone());
-            if !device_name.is_empty() && device_name != "Unknown" {
-                cache.by_device.insert(device_name, normalized.clone());
-            }
-            normalized
-        }
+        resolve_bluetooth_mac_blocking(cache, &avd_path, &device_name, &address)
     })
     .await
     .unwrap_or_else(|error| {
-        warn!(%error, "Failed to join spawn_blocking for resolve_bluetooth_mac");
+        warn!(
+            code = err::Code::BtMacResolveJoinFailed as u32,
+            %error,
+            "Failed to join spawn_blocking for resolve_bluetooth_mac"
+        );
         String::new()
     })
+}
+
+fn resolve_bluetooth_mac_blocking(
+    cache: &mut BluetoothMacCache,
+    avd_path: &str,
+    device_name: &str,
+    address: &str,
+) -> String {
+    if address.is_empty() {
+        match get_or_create_bluetooth_mac(avd_path, cache) {
+            Ok(addr) => {
+                if !device_name.is_empty() && device_name != "Unknown" {
+                    cache.by_device.insert(device_name.to_string(), addr.clone());
+                }
+                info!("Assigned persistent MAC {addr} to AVD {avd_path}");
+                addr
+            }
+            Err(error) => {
+                warn!(
+                    code = err::Code::MacResolveFailed as u32,
+                    %error,
+                    "Failed to get/create MAC for {avd_path}"
+                );
+                String::new()
+            }
+        }
+    } else {
+        if !is_valid_mac_address(address) {
+            warn!(
+                code = err::Code::AvdMacInvalid as u32,
+                "Refusing to persist invalid MAC address '{address}' for AVD {avd_path}"
+            );
+            return String::new();
+        }
+        let normalized = normalize_mac_address(address);
+        if let Err(error) = set_bluetooth_mac(avd_path, &normalized) {
+            warn!(
+                code = err::Code::MacPersistFailed as u32,
+                %error,
+                "Failed to persist MAC {normalized} for AVD {avd_path}"
+            );
+            return String::new();
+        }
+        cache.by_avd_path.insert(avd_path.to_string(), normalized.clone());
+        cache.used_macs.insert(normalized.clone());
+        if !device_name.is_empty() && device_name != "Unknown" {
+            cache.by_device.insert(device_name.to_string(), normalized.clone());
+        }
+        normalized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::netsim_logger::isolated_error_stats;
+
+    #[test]
+    fn test_read_all_bluetooth_addresses_skips_corrupt_netsim_ini() {
+        let dir = tempfile::tempdir().unwrap();
+        let good_avd = dir.path().join("good.avd");
+        fs::create_dir_all(&good_avd).unwrap();
+        fs::write(good_avd.join("netsim.ini"), "bluetooth.address = BB:BB:BB:00:00:02\n").unwrap();
+
+        let bad_avd = dir.path().join("bad.avd");
+        fs::create_dir_all(&bad_avd).unwrap();
+        fs::write(bad_avd.join("netsim.ini"), "corrupt_line_without_equals\n").unwrap();
+
+        let (table, _guard) = isolated_error_stats();
+        let used = read_all_bluetooth_addresses(dir.path()).unwrap();
+
+        assert_eq!(used, HashSet::from(["BB:BB:BB:00:00:02".to_string()]));
+        assert_eq!(table.snapshot(), vec![(err::Code::NetsimIniReadFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_get_or_create_bluetooth_mac_corrupt_ini_recovers_with_new_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let avd_root = dir.path().join("ini");
+        let avds = dir.path().join("avds");
+        fs::create_dir_all(&avd_root).unwrap();
+        let corrupt_avd = avds.join("corrupt.avd");
+        fs::create_dir_all(&corrupt_avd).unwrap();
+        fs::write(corrupt_avd.join("netsim.ini"), "corrupt_entry\n").unwrap();
+        let corrupt_ini = avd_root.join("corrupt.ini");
+        fs::write(&corrupt_ini, format!("path={}\n", corrupt_avd.display())).unwrap();
+
+        let mut cache = BluetoothMacCache::default();
+        let (table, _guard) = isolated_error_stats();
+        let recovered =
+            get_or_create_bluetooth_mac(corrupt_ini.to_str().unwrap(), &mut cache).unwrap();
+
+        assert_eq!(recovered, "BB:BB:BB:00:00:01");
+        assert_eq!(
+            table.snapshot(),
+            vec![
+                (err::Code::NetsimIniReadFailed as u32, 1),
+                (err::Code::AvdConfigReadFailed as u32, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_or_create_bluetooth_mac_collision_reassigns_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let avd_root = dir.path().join("ini");
+        let avds = dir.path().join("avds");
+        fs::create_dir_all(&avd_root).unwrap();
+
+        let claimed = "BB:BB:BB:00:00:01";
+        let mut cache = BluetoothMacCache::default();
+        cache.by_device.insert("mem-dev".to_string(), claimed.to_string());
+        cache.used_macs.insert(claimed.to_string());
+
+        let collide_avd = avds.join("collide.avd");
+        fs::create_dir_all(&collide_avd).unwrap();
+        fs::write(collide_avd.join("netsim.ini"), format!("bluetooth.address = {claimed}\n"))
+            .unwrap();
+        let collide_ini = avd_root.join("collide.ini");
+        fs::write(&collide_ini, format!("path={}\n", collide_avd.display())).unwrap();
+
+        let (table, _guard) = isolated_error_stats();
+        let reassigned =
+            get_or_create_bluetooth_mac(collide_ini.to_str().unwrap(), &mut cache).unwrap();
+
+        assert_eq!(reassigned, "BB:BB:BB:00:00:02");
+        assert_eq!(table.snapshot(), vec![(err::Code::AvdMacCollision as u32, 1)]);
+    }
+
+    #[test]
+    fn test_resolve_in_memory_bluetooth_mac_invalid_records_error_code() {
+        let mut cache = BluetoothMacCache::default();
+        let (table, _guard) = isolated_error_stats();
+
+        assert_eq!(resolve_in_memory_bluetooth_mac(&mut cache, "qemu-dev", "not-a-mac"), "");
+        assert_eq!(table.snapshot(), vec![(err::Code::InMemoryMacInvalid as u32, 1)]);
+    }
+
+    #[test]
+    fn test_resolve_in_memory_bluetooth_mac_generates_and_reuses_mac() {
+        let mut cache = BluetoothMacCache::default();
+        let (table, _guard) = isolated_error_stats();
+
+        let assigned = resolve_in_memory_bluetooth_mac(&mut cache, "qemu-dev", "");
+        assert_eq!(assigned, "BB:BB:BB:00:00:01");
+        assert_eq!(resolve_in_memory_bluetooth_mac(&mut cache, "qemu-dev", ""), assigned);
+        assert!(table.snapshot().is_empty());
+    }
+
+    #[test]
+    fn test_resolve_bluetooth_mac_blocking_invalid_mac_records_error_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid_avd = dir.path().join("valid.avd");
+        fs::create_dir_all(&valid_avd).unwrap();
+        let (table, _guard) = isolated_error_stats();
+
+        assert_eq!(
+            resolve_bluetooth_mac_blocking(
+                &mut BluetoothMacCache::default(),
+                valid_avd.to_str().unwrap(),
+                "dev-invalid",
+                "bad-mac"
+            ),
+            ""
+        );
+        assert_eq!(table.snapshot(), vec![(err::Code::AvdMacInvalid as u32, 1)]);
+    }
+
+    #[test]
+    fn test_resolve_bluetooth_mac_blocking_persist_failure_records_error_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_ini = dir.path().join("missing.ini");
+        let (table, _guard) = isolated_error_stats();
+
+        assert_eq!(
+            resolve_bluetooth_mac_blocking(
+                &mut BluetoothMacCache::default(),
+                missing_ini.to_str().unwrap(),
+                "dev-persist",
+                "BB:BB:BB:00:00:55"
+            ),
+            ""
+        );
+        assert_eq!(table.snapshot(), vec![(err::Code::MacPersistFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_resolve_bluetooth_mac_blocking_missing_avd_records_error_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_ini = dir.path().join("missing.ini");
+        let (table, _guard) = isolated_error_stats();
+
+        assert_eq!(
+            resolve_bluetooth_mac_blocking(
+                &mut BluetoothMacCache::default(),
+                missing_ini.to_str().unwrap(),
+                "dev-resolve",
+                ""
+            ),
+            ""
+        );
+        assert_eq!(
+            table.snapshot(),
+            vec![
+                (err::Code::AvdConfigReadFailed as u32, 1),
+                (err::Code::MacResolveFailed as u32, 1),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_resolve_bluetooth_mac_for_device_invalid_mac_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let avd_dir = dir.path().join("valid.avd");
+        fs::create_dir_all(&avd_dir).unwrap();
+
+        let mac =
+            resolve_bluetooth_mac_for_device(avd_dir.to_str().unwrap(), "test-dev", "not-a-mac")
+                .await;
+        assert_eq!(mac, "");
+    }
 }

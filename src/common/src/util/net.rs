@@ -70,7 +70,11 @@ pub fn bind_tcp_loopback(port: u16) -> std::io::Result<TcpListener> {
         Ok(l) => Ok(l),
         Err(e) => {
             if is_ipv4_unsupported(&e) {
-                warn!(error = %e, "IPv4 loopback unavailable on host, trying [::1]:{port}");
+                warn!(
+                    code = crate::err::Code::LoopbackV4Unavailable as u32,
+                    error = %e,
+                    "IPv4 loopback unavailable on host, trying [::1]:{port}"
+                );
                 create_listener(Domain::IPV6, SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
             } else {
                 Err(e)
@@ -91,18 +95,35 @@ pub fn bind_tcp_loopback_with_ephemeral_fallback(
     is_explicit: bool,
     server_name: &str,
 ) -> std::io::Result<Option<TcpListener>> {
-    match bind_tcp_loopback(requested_port) {
+    bind_tcp_loopback_with_fallback_fn(requested_port, is_explicit, server_name, bind_tcp_loopback)
+}
+
+fn bind_tcp_loopback_with_fallback_fn<F>(
+    requested_port: u16,
+    is_explicit: bool,
+    server_name: &str,
+    mut bind_fn: F,
+) -> std::io::Result<Option<TcpListener>>
+where
+    F: FnMut(u16) -> std::io::Result<TcpListener>,
+{
+    match bind_fn(requested_port) {
         Ok(listener) => Ok(Some(listener)),
         Err(error) if !is_explicit && error.kind() == std::io::ErrorKind::AddrInUse => {
             warn!(
+                code = crate::err::Code::LoopbackPortInUseFallback as u32,
                 %error,
                 requested_port,
                 "{server_name} port {requested_port} in use; falling back to ephemeral port 0"
             );
-            match bind_tcp_loopback(0) {
+            match bind_fn(0) {
                 Ok(listener) => Ok(Some(listener)),
                 Err(fallback_error) => {
-                    warn!(%fallback_error, "Failed to bind {server_name} on ephemeral port");
+                    warn!(
+                        code = crate::err::Code::LoopbackEphemeralBindFailed as u32,
+                        %fallback_error,
+                        "Failed to bind {server_name} on ephemeral port"
+                    );
                     Ok(None)
                 }
             }
@@ -111,7 +132,11 @@ pub fn bind_tcp_loopback_with_ephemeral_fallback(
             if is_explicit {
                 Err(error)
             } else {
-                warn!(%error, "Failed to start {server_name}");
+                warn!(
+                    code = crate::err::Code::LoopbackServerBindFailed as u32,
+                    %error,
+                    "Failed to start {server_name}"
+                );
                 Ok(None)
             }
         }
@@ -207,12 +232,12 @@ mod tests {
         assert_eq!(&buf, b"ping");
     }
 
-    #[tokio::test]
-    async fn test_bind_tcp_loopback_with_ephemeral_fallback() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_bind_tcp_loopback_ephemeral_fallback_success() {
         let occupied = bind_tcp_loopback(0).unwrap();
         let occupied_port = occupied.local_addr().unwrap().port();
 
-        // Implicit default port in use falls back to OS-assigned ephemeral port 0.
+        let (table, _guard) = crate::util::netsim_logger::isolated_error_stats();
         let fallback =
             bind_tcp_loopback_with_ephemeral_fallback(occupied_port, false, "HCI socket server")
                 .unwrap()
@@ -220,11 +245,49 @@ mod tests {
         let fallback_port = fallback.local_addr().unwrap().port();
         assert_ne!(fallback_port, 0);
         assert_ne!(fallback_port, occupied_port);
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::LoopbackPortInUseFallback as u32, 1)]);
+    }
 
-        // Explicitly requested port in use fails with AddrInUse.
+    #[tokio::test]
+    async fn test_bind_tcp_loopback_explicit_port_in_use_error() {
+        let occupied = bind_tcp_loopback(0).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
         let explicit_err =
             bind_tcp_loopback_with_ephemeral_fallback(occupied_port, true, "HCI socket server")
                 .unwrap_err();
         assert_eq!(explicit_err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn test_bind_tcp_loopback_non_addr_in_use_records_server_bind_failed() {
+        let (table, _guard) = crate::util::netsim_logger::isolated_error_stats();
+        let result = bind_tcp_loopback_with_fallback_fn(6402, false, "HCI socket server", |_| {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::LoopbackServerBindFailed as u32, 1)]);
+    }
+
+    #[test]
+    fn test_bind_tcp_loopback_ephemeral_retry_failure_records_ephemeral_bind_failed() {
+        let (table, _guard) = crate::util::netsim_logger::isolated_error_stats();
+        let result = bind_tcp_loopback_with_fallback_fn(6402, false, "HCI socket server", |port| {
+            if port != 0 {
+                Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use"))
+            } else {
+                Err(std::io::Error::other("ephemeral exhausted"))
+            }
+        })
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(
+            table.snapshot(),
+            vec![
+                (crate::err::Code::LoopbackEphemeralBindFailed as u32, 1),
+                (crate::err::Code::LoopbackPortInUseFallback as u32, 1),
+            ]
+        );
     }
 }

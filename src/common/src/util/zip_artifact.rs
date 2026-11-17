@@ -71,7 +71,11 @@ fn recurse_files(root: &Path) -> Result<Vec<(PathBuf, String)>> {
                 {
                     result.push((entry.path(), filename));
                 } else {
-                    warn!("Unable to fetch filename for file: {}", entry.path().display());
+                    warn!(
+                        code = crate::err::Code::ArtifactFilenameUnavailable as u32,
+                        "Unable to fetch filename for file: {}",
+                        entry.path().display()
+                    );
                 }
             }
         }
@@ -106,7 +110,14 @@ fn remove_zip_files_in_dir(root: &Path) -> Result<usize> {
     for file in zip_files {
         match std::fs::remove_file(&file) {
             Ok(()) => removed += 1,
-            Err(err) => warn!(error = %err, "Failed to remove file {}", file.display()),
+            Err(err) => {
+                warn!(
+                    code = crate::err::Code::ArtifactZipFileRemoveFailed as u32,
+                    error = %err,
+                    "Failed to remove file {}",
+                    file.display()
+                )
+            }
         }
     }
     Ok(removed)
@@ -119,7 +130,12 @@ fn clear_pcap_files_in_dir(root: &Path) -> bool {
         Ok(()) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => {
-            warn!(error = %err, "Failed to remove directory {}", path.display());
+            warn!(
+                code = crate::err::Code::ArtifactDirRemoveFailed as u32,
+                error = %err,
+                "Failed to remove directory {}",
+                path.display()
+            );
             false
         }
     }
@@ -134,7 +150,14 @@ pub fn remove_old_artifacts_in_dir(root: &Path) {
         }
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => error!(error = %err, "Failed to remove zip files in {}", root.display()),
+        Err(err) => {
+            error!(
+                code = crate::err::Code::ArtifactZipCleanupFailed as u32,
+                error = %err,
+                "Failed to remove zip files in {}",
+                root.display()
+            )
+        }
     }
 
     // Clear all pcap files
@@ -150,6 +173,11 @@ pub fn remove_old_artifacts() {
 
 /// Zip the whole specified directory and store the archive in the same
 /// directory.
+///
+/// Runs during daemon shutdown after `DeviceActor` has flushed
+/// `netsim_session_stats.json`, so error codes emitted here are recorded only
+/// in the in-memory `ErrorStatsTable` (not in log output or
+/// `netsim_session_stats.json`) until b/582765574 reorders shutdown flushing.
 pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
     let files = match recurse_files(root) {
         Ok(files) => files,
@@ -175,7 +203,12 @@ pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
                 Ok(f) => f,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
-                    warn!(error = %err, "Failed to open artifact file {}", file.display());
+                    warn!(
+                        code = crate::err::Code::ArtifactOpenFailed as u32,
+                        error = %err,
+                        "Failed to open artifact file {}",
+                        file.display()
+                    );
                     continue;
                 }
             };
@@ -194,7 +227,14 @@ pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
         match remove_file(&file) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => warn!(error = %err, "Failed to remove artifact file {}", file.display()),
+            Err(err) => {
+                warn!(
+                    code = crate::err::Code::ArtifactZippedFileRemoveFailed as u32,
+                    error = %err,
+                    "Failed to remove artifact file {}",
+                    file.display()
+                )
+            }
         }
     }
 
@@ -211,6 +251,7 @@ pub fn zip_artifacts() -> ZipResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::netsim_logger::isolated_error_stats;
 
     #[test]
     fn test_recurse_files() {
@@ -327,5 +368,120 @@ mod tests {
         // Target file and symlink must remain untouched (not archived or deleted)
         assert!(target_file.exists(), "Symlink target must not be deleted");
         assert!(symlink_path.symlink_metadata().is_ok(), "Symlink itself should be ignored");
+    }
+
+    #[test]
+    fn test_remove_old_artifacts_in_dir_non_directory_root_records_zip_cleanup_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("not_a_dir");
+        File::create(&root).unwrap();
+        let (table, _guard) = isolated_error_stats();
+
+        remove_old_artifacts_in_dir(&root);
+
+        assert!(root.is_file());
+        let expected = if cfg!(windows) {
+            vec![(crate::err::Code::ArtifactZipCleanupFailed as u32, 1)]
+        } else {
+            vec![
+                (crate::err::Code::ArtifactDirRemoveFailed as u32, 1),
+                (crate::err::Code::ArtifactZipCleanupFailed as u32, 1),
+            ]
+        };
+        assert_eq!(table.snapshot(), expected);
+    }
+
+    #[test]
+    fn test_clear_pcap_files_in_dir_non_directory_pcaps_records_dir_remove_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let pcaps_file = dir.path().join("pcaps");
+        File::create(&pcaps_file).unwrap();
+        let (table, _guard) = isolated_error_stats();
+
+        assert!(!clear_pcap_files_in_dir(dir.path()));
+        assert!(pcaps_file.is_file());
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::ArtifactDirRemoveFailed as u32, 1)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_zip_artifacts_unreadable_file_records_open_failed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("unreadable.txt");
+        std::fs::write(&unreadable, b"secret").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        if File::open(&unreadable).is_ok() {
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).unwrap();
+            return;
+        }
+
+        let (table, _guard) = isolated_error_stats();
+        let res = zip_artifacts_in_dir(dir.path());
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(res.is_ok());
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::ArtifactOpenFailed as u32, 1)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_zip_artifacts_locked_dir_records_zipped_file_remove_failed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked_dir = dir.path().join("locked_sub");
+        std::fs::create_dir(&locked_dir).unwrap();
+        let pinned_file = locked_dir.join("pinned.txt");
+        std::fs::write(&pinned_file, b"pinned").unwrap();
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let probe = locked_dir.join(".probe");
+        if File::create(&probe).is_ok() {
+            let _ = remove_file(&probe);
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let (table, _guard) = isolated_error_stats();
+        let res = zip_artifacts_in_dir(dir.path());
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(res.is_ok());
+        assert!(pinned_file.exists());
+        assert_eq!(
+            table.snapshot(),
+            vec![(crate::err::Code::ArtifactZippedFileRemoveFailed as u32, 1)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_zip_files_in_readonly_dir_records_remove_failed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip_file = dir.path().join("netsim_artifacts_2025-01-01.zip");
+        File::create(&zip_file).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let probe = dir.path().join(".probe");
+        if File::create(&probe).is_ok() {
+            let _ = remove_file(&probe);
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let (table, _guard) = isolated_error_stats();
+        let res = remove_zip_files_in_dir(dir.path());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(res.unwrap(), 0);
+        assert_eq!(
+            table.snapshot(),
+            vec![(crate::err::Code::ArtifactZipFileRemoveFailed as u32, 1)]
+        );
     }
 }

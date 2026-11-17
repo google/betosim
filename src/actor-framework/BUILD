@@ -36,6 +36,9 @@ netsim_rust_library(
     proc_macro_deps = [
         "@async-trait",
     ],
+    test_deps = [
+        "//src/common",
+    ],
     testing_deps = ["@mockall"],
     deps = DEPS,
 )

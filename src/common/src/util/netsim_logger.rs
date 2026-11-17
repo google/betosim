@@ -126,14 +126,13 @@ pub fn snapshot_error_stats() -> Vec<(u32, u32)> {
     ERROR_STATS_TABLE.snapshot()
 }
 
-/// Per-subsystem `CRATE_DEFAULT` (`X0000`) error code bases.
+/// Per-subsystem (`X0000`) fallback error code bases.
 ///
 /// Each crate owns its specific error codes in its own `err.rs` and tags call
-/// sites with `error!(code = err::CODE, %error, ...)`. These named bases are the single
-/// definition of each subsystem's range: crate `err.rs` modules set their
-/// `CRATE_DEFAULT` from them, and [`default_error_code_for_target`] uses them as
-/// the fallback for untyped `error!` events. `netsim-common` sits at the bottom of
-/// the crate graph, so it cannot import constants from the crates themselves.
+/// sites with `error!(code = err::Code::Variant as u32, %error, ...)`.
+/// [`default_error_code_for_target`] uses these `X0000` bases as the fallback
+/// for untyped `ERROR` events. `netsim-common` sits at the bottom of the crate
+/// graph, so it cannot import constants from the crates themselves.
 pub mod err_bases {
     /// Daemon & startup (`daemon`, `common`).
     pub const DAEMON: u32 = 10_000;
@@ -185,11 +184,11 @@ pub mod err_bases {
 }
 
 /// Maps a `tracing` metadata target (or `log::` crate prefix) to its subsystem
-/// `CRATE_DEFAULT` (`X0000`) fallback error code.
+/// `X0000` fallback error code in [`err_bases`].
 ///
 /// Only used when an `ERROR` event carries no integer `code` field.
 /// Crates own their specific codes in `err.rs` and pass them explicitly via
-/// `error!(code = err::CODE, %error, ...)`.
+/// `error!(code = err::Code::Variant as u32, %error, ...)`.
 pub fn default_error_code_for_target(target: &str) -> u32 {
     use err_bases::*;
     let crate_prefix = target.split("::").next().unwrap_or(target);
@@ -250,8 +249,9 @@ impl ErrorStatsLayer {
 }
 
 /// Name of the dedicated error-code field at log sites, e.g.
-/// `error!(code = err::CODE, %error, "...")`. `%error` (or any other field) keeps
-/// carrying the `Display` chain for stderr; only this integer field is counted.
+/// `error!(code = err::Code::Variant as u32, %error, "...")`. `%error` (or any
+/// other field) keeps carrying the `Display` chain for stderr; only this
+/// integer field is counted.
 /// Other names (including `err`) are deliberately not read, to avoid clashing
 /// with common `Err(err)` / `%err` bindings.
 pub const ERROR_CODE_FIELD: &str = "code";
@@ -369,6 +369,14 @@ pub fn init_for_test() {
             .with_filter(LevelFilter::INFO);
         let _ = tracing_subscriber::registry().with(error_stats_layer).with(fmt_layer).try_init();
     }
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn isolated_error_stats() -> (Arc<ErrorStatsTable>, tracing::subscriber::DefaultGuard) {
+    let table = Arc::new(ErrorStatsTable::new());
+    let layer = ErrorStatsLayer::with_table(Arc::clone(&table));
+    let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+    (table, guard)
 }
 
 struct CustomFormatter {

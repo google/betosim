@@ -83,6 +83,7 @@ rust_test_host {
         "libfutures",
         "libmockall",
         "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_common_testing",
         "libnetsim_next_types_testing",
         "libserde",
         "libserde_json",

@@ -58,6 +58,7 @@ pub(crate) mod chip_error;
 pub(crate) mod client_error;
 pub(crate) mod device;
 pub(crate) mod device_error;
+pub(crate) mod err;
 pub(crate) mod ethernet;
 pub(crate) mod initial_info;
 pub(crate) mod link;

@@ -136,32 +136,35 @@ where
 {
     let filepath = get_ini_filepath_with_env(get_env, instance_num);
     if !filepath.exists() {
-        error!("Unable to find netsim ini file: {filepath:?}");
+        error!(
+            code = crate::err::Code::CommonIniNotFound as u32,
+            "Unable to find netsim ini file: {filepath:?}"
+        );
         return None;
     }
     if !filepath.is_file() {
-        error!("Not a file: {filepath:?}");
+        error!(code = crate::err::Code::CommonIniNotAFile as u32, "Not a file: {filepath:?}");
         return None;
     }
     let content = match std::fs::read_to_string(&filepath) {
         Ok(c) => c,
         Err(err) => {
-            error!(error = %err, "Error reading ini file");
+            error!(
+                code = crate::err::Code::CommonIniReadFailed as u32,
+                error = %err,
+                "Error reading ini file"
+            );
             return None;
         }
     };
-    let map = match parse_ini(&content, &IniParserOptions::default()) {
-        Ok(m) => m,
-        Err(err) => {
-            error!(error = %err, "Error parsing ini file");
-            return None;
-        }
-    };
+    // Non-strict `parse_ini` (`strict: false`) never returns `Err`.
+    let map = parse_ini(&content, &IniParserOptions::default()).ok()?;
     let addr = map
         .get(key)
         .map(|s| if s.contains(':') { s.to_string() } else { format!("localhost:{s}") })?;
     if !is_server_reachable(&addr) {
         warn!(
+            code = crate::err::Code::IniServerAddrUnreachable as u32,
             key,
             %addr,
             ?filepath,
@@ -210,6 +213,7 @@ mod tests {
     use std::{env, path::PathBuf};
 
     use super::{IniParseErrorKind, IniParserOptions, get_ini_filepath_with_env, parse_ini};
+    use crate::util::netsim_logger::isolated_error_stats;
 
     #[test]
     fn test_read() {
@@ -393,5 +397,79 @@ mod tests {
         assert!(super::get_address_by_key_with_env(&mock_env, 1, "http.port").is_none());
 
         drop((reserved_v4, reserved_v6));
+    }
+
+    fn mock_tmpdir_env(
+        tmpdir: &std::path::Path,
+    ) -> impl Fn(&str) -> Result<String, env::VarError> + use<> {
+        let tmpdir_str = tmpdir.to_str().unwrap().to_string();
+        move |key: &str| {
+            if key == "TMPDIR" { Ok(tmpdir_str.clone()) } else { Err(env::VarError::NotPresent) }
+        }
+    }
+
+    fn assert_error_code_recorded(
+        table: &crate::util::netsim_logger::ErrorStatsTable,
+        expected_code: u32,
+    ) {
+        assert_eq!(table.snapshot(), vec![(expected_code, 1)]);
+    }
+
+    #[test]
+    fn test_get_address_by_key_missing_ini_records_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mock_env = mock_tmpdir_env(temp_dir.path());
+        let (table, _guard) = isolated_error_stats();
+
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "grpc.port").is_none());
+        assert_error_code_recorded(&table, crate::err::Code::CommonIniNotFound as u32);
+    }
+
+    #[test]
+    fn test_get_address_by_key_directory_path_records_not_a_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp_dir.path().join("netsim.ini")).unwrap();
+        let mock_env = mock_tmpdir_env(temp_dir.path());
+        let (table, _guard) = isolated_error_stats();
+
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "grpc.port").is_none());
+        assert_error_code_recorded(&table, crate::err::Code::CommonIniNotAFile as u32);
+    }
+
+    #[test]
+    fn test_get_address_by_key_invalid_utf8_records_read_failed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("netsim.ini"), [0xff, 0xfe, 0xfd]).unwrap();
+        let mock_env = mock_tmpdir_env(temp_dir.path());
+        let (table, _guard) = isolated_error_stats();
+
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "grpc.port").is_none());
+        assert_error_code_recorded(&table, crate::err::Code::CommonIniReadFailed as u32);
+    }
+
+    #[test]
+    fn test_get_address_by_key_unreachable_port_records_error_code() {
+        let reserved = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .unwrap();
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        reserved.bind(&addr.into()).unwrap();
+        let reserved_port = reserved.local_addr().unwrap().as_socket().unwrap().port();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("netsim.ini"),
+            format!("grpc.port=127.0.0.1:{reserved_port}\n"),
+        )
+        .unwrap();
+        let mock_env = mock_tmpdir_env(temp_dir.path());
+        let (table, _guard) = isolated_error_stats();
+
+        assert!(super::get_address_by_key_with_env(&mock_env, 1, "grpc.port").is_none());
+        assert_error_code_recorded(&table, crate::err::Code::IniServerAddrUnreachable as u32);
+        drop(reserved);
     }
 }
