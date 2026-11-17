@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, cmp::max, collections::HashMap, fmt};
 
 use netsim_model::{
     AdvertiseData, AdvertiseSettings, BleBeacon, BluetoothMode, CallState, Chip, ChipVariant,
@@ -134,22 +134,23 @@ impl fmt::Display for Displayer<&ListDeviceResponse> {
     }
 }
 
+fn device_label(device: &Device) -> Cow<'_, str> {
+    match device.adb_serial() {
+        Some(serial) if serial != device.name => Cow::Owned(format!("{} ({serial})", device.name)),
+        _ => Cow::Borrowed(&device.name),
+    }
+}
+
 impl fmt::Display for Displayer<&Device> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
         let width = 9;
-        let display_name: Cow<'_, str> = match self.value.adb_serial() {
-            Some(serial) if serial != self.value.name => {
-                Cow::Owned(format!("{} ({serial})", self.value.name))
-            }
-            _ => Cow::Borrowed(&self.value.name),
-        };
 
         write!(
             f,
             "{:indent$}{:width$} {}",
             "",
-            display_name,
+            device_label(self.value),
             Displayer::new(&self.value.pose.position, self.verbose)
         )?;
 
@@ -496,69 +497,87 @@ impl fmt::Display for LinkChipIdDisplay {
     }
 }
 
-impl fmt::Display for Displayer<&ListLinkResponse> {
+pub(crate) struct LinkTable<'a> {
+    pub(crate) links: &'a ListLinkResponse,
+    pub(crate) devices: &'a ListDeviceResponse,
+}
+
+impl fmt::Display for Displayer<LinkTable<'_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
-        let chip_width = 10;
-        let rssi_width = 6;
-        let phykind_width = 12;
+        if self.value.links.links.is_empty() {
+            return write!(f, "{:indent$}No links with properties are currently set.", "");
+        }
 
-        if self.value.links.is_empty() {
-            write!(f, "{:indent$}No links with properties are currently set.", "")?;
-        } else {
-            // Print a header for the table
+        let chip_to_device: HashMap<u32, Cow<'_, str>> = self
+            .value
+            .devices
+            .devices
+            .iter()
+            .flat_map(|device| {
+                let label = device_label(device);
+                device.chips.iter().map(move |chip| (chip.id, label.clone()))
+            })
+            .collect();
+        let endpoint = |id: u32| -> Cow<'_, str> {
+            chip_to_device
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| Cow::Owned(LinkChipIdDisplay(id).to_string()))
+        };
+
+        let mut id_width = 4;
+        let mut sender_width = 10;
+        let mut receiver_width = 10;
+        let mut phykind_width = 12;
+        let mut rssi_width = 6;
+        let mut rows = Vec::with_capacity(self.value.links.links.len() + 1);
+        rows.push((
+            Cow::Borrowed("ID"),
+            Cow::Borrowed("Sender"),
+            Cow::Borrowed("Receiver"),
+            Cow::Borrowed("Type"),
+            Cow::Borrowed("RSSI"),
+        ));
+        for link in &self.value.links.links {
+            let id: Cow<'_, str> = Cow::Owned(link.id.0.to_string());
+            let sender = endpoint(link.sender.0);
+            let receiver = endpoint(link.receiver.0);
+            let kind: Cow<'_, str> = Cow::Owned(format!("{:?}", link.kind));
+            let rssi: Cow<'_, str> = Cow::Owned(link.rssi.to_string());
+            id_width = max(id_width, id.chars().count());
+            sender_width = max(sender_width, sender.chars().count());
+            receiver_width = max(receiver_width, receiver.chars().count());
+            phykind_width = max(phykind_width, kind.chars().count());
+            rssi_width = max(rssi_width, rssi.chars().count());
+            rows.push((id, sender, receiver, kind, rssi));
+        }
+
+        for (idx, (id, sender, receiver, kind, rssi)) in rows.iter().enumerate() {
+            if idx > 0 {
+                writeln!(f)?;
+            }
             if self.verbose {
-                let id_width = 4;
-                write!(
-                    f,
-                    "{:indent$}{:id_width$} | {:chip_width$} | {:chip_width$} | {:phykind_width$} | {:rssi_width$}",
-                    "", "ID", "Sender", "Receiver", "Type", "RSSI"
-                )?;
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:-<id_width$}-+-{:-<chip_width$}-+-{:-<chip_width$}-+-{:-<phykind_width$}-+-{:-<rssi_width$}",
-                    "", "", "", "", "", ""
-                )?;
-                // Iterate through the links and print each one as a row
-                for link in self.value.links.iter() {
-                    writeln!(f)?;
-                    write!(
-                        f,
-                        "{:indent$}{:<id_width$} | {:<chip_width$} | {:<chip_width$} | {:<phykind_width$} | {:<rssi_width$}",
-                        "",
-                        link.id.0,
-                        format!("{}", LinkChipIdDisplay(link.sender.0)),
-                        format!("{}", LinkChipIdDisplay(link.receiver.0)),
-                        format!("{:?}", link.kind),
-                        link.rssi,
-                    )?;
-                }
+                write!(f, "{:indent$}{id:<id_width$} | ", "")?;
             } else {
-                write!(
-                    f,
-                    "{:indent$}{:chip_width$} | {:chip_width$} | {:phykind_width$} | {:rssi_width$}",
-                    "", "Sender", "Receiver", "Type", "RSSI"
-                )?;
+                write!(f, "{:indent$}", "")?;
+            }
+            write!(
+                f,
+                "{sender:<sender_width$} | {receiver:<receiver_width$} | {kind:<phykind_width$} | {rssi:<rssi_width$}"
+            )?;
+            if idx == 0 {
                 writeln!(f)?;
+                if self.verbose {
+                    write!(f, "{:indent$}{:-<id_width$}-+-", "", "")?;
+                } else {
+                    write!(f, "{:indent$}", "")?;
+                }
                 write!(
                     f,
-                    "{:indent$}{:-<chip_width$}-+-{:-<chip_width$}-+-{:-<phykind_width$}-+-{:-<rssi_width$}",
-                    "", "", "", "", ""
+                    "{:-<sender_width$}-+-{:-<receiver_width$}-+-{:-<phykind_width$}-+-{:-<rssi_width$}",
+                    "", "", "", ""
                 )?;
-                // Iterate through the links and print each one as a row
-                for link in self.value.links.iter() {
-                    writeln!(f)?;
-                    write!(
-                        f,
-                        "{:indent$}{:<chip_width$} | {:<chip_width$} | {:<phykind_width$} | {:<rssi_width$}",
-                        "",
-                        format!("{}", LinkChipIdDisplay(link.sender.0)),
-                        format!("{}", LinkChipIdDisplay(link.receiver.0)),
-                        format!("{:?}", link.kind),
-                        link.rssi,
-                    )?;
-                }
             }
         }
         Ok(())
@@ -735,12 +754,103 @@ mod tests {
                 rssi: -65,
             }],
         };
+        let devices = ListDeviceResponse { devices: vec![] };
 
-        let output = format!("{}", Displayer::new(&resp, false));
+        let output =
+            format!("{}", Displayer::new(LinkTable { links: &resp, devices: &devices }, false));
         let expected = concat!(
             "Sender     | Receiver   | Type         | RSSI  \n",
             "-----------+------------+--------------+-------\n",
             "1000       | 1001       | BLUETOOTH    | -65   "
+        );
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_display_rest_list_link_response_with_devices() {
+        let resp = ListLinkResponse {
+            links: vec![netsim_model::Link {
+                id: netsim_model::LinkId(1),
+                sender: netsim_model::ChipId(1000),
+                receiver: netsim_model::ChipId(1001),
+                kind: netsim_model::ChipKind::CELLULAR_DATA,
+                rssi: -70,
+            }],
+        };
+        let devices = ListDeviceResponse {
+            devices: vec![
+                Device {
+                    id: 1,
+                    name: "Pixel_8".to_string(),
+                    chips: vec![Chip { id: 1000, ..Default::default() }],
+                    device_info: Some(netsim_model::DeviceInfo {
+                        adb_serial: "emulator-5554".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                Device {
+                    id: 2,
+                    name: "Long_Device_Name".to_string(),
+                    chips: vec![Chip { id: 1001, ..Default::default() }],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let table = LinkTable { links: &resp, devices: &devices };
+        let expected_normal = concat!(
+            "Sender                  | Receiver         | Type          | RSSI  \n",
+            "------------------------+------------------+---------------+-------\n",
+            "Pixel_8 (emulator-5554) | Long_Device_Name | CELLULAR_DATA | -70   "
+        );
+        assert_eq!(format!("{}", Displayer::new(table, false)), expected_normal);
+
+        let table_verbose = LinkTable { links: &resp, devices: &devices };
+        let expected_verbose = concat!(
+            "ID   | Sender                  | Receiver         | Type          | RSSI  \n",
+            "-----+-------------------------+------------------+---------------+-------\n",
+            "1    | Pixel_8 (emulator-5554) | Long_Device_Name | CELLULAR_DATA | -70   "
+        );
+        assert_eq!(format!("{}", Displayer::new(table_verbose, true)), expected_verbose);
+    }
+
+    #[test]
+    fn test_display_rest_list_link_response_fallback() {
+        let resp = ListLinkResponse {
+            links: vec![
+                netsim_model::Link {
+                    id: netsim_model::LinkId(1),
+                    sender: netsim_model::ChipId(1002),
+                    receiver: netsim_model::ChipId(0),
+                    kind: netsim_model::ChipKind::WIFI,
+                    rssi: -50,
+                },
+                netsim_model::Link {
+                    id: netsim_model::LinkId(2),
+                    sender: netsim_model::ChipId(9999),
+                    receiver: netsim_model::ChipId(1002),
+                    kind: netsim_model::ChipKind::BLUETOOTH,
+                    rssi: -65,
+                },
+            ],
+        };
+        let devices = ListDeviceResponse {
+            devices: vec![Device {
+                id: 3,
+                name: "Watch".to_string(),
+                chips: vec![Chip { id: 1002, ..Default::default() }],
+                ..Default::default()
+            }],
+        };
+
+        let output =
+            format!("{}", Displayer::new(LinkTable { links: &resp, devices: &devices }, false));
+        let expected = concat!(
+            "Sender     | Receiver   | Type         | RSSI  \n",
+            "-----------+------------+--------------+-------\n",
+            "Watch      | ALL        | WIFI         | -50   \n",
+            "9999       | Watch      | BLUETOOTH    | -65   "
         );
         assert_eq!(output, expected);
     }

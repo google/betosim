@@ -253,7 +253,21 @@ fn run_rest(
             }
         }),
         args::Command::Link(args::Link::List) => {
-            rest.get_links().send_blocking().map(|resp| println!("{}", resp.display(verbose)))
+            rest.get_links().send_blocking().and_then(|links| {
+                let devices = if links.links.is_empty() {
+                    ListDeviceResponse { devices: Vec::new() }
+                } else {
+                    rest.get_devices().send_blocking()?
+                };
+                println!(
+                    "{}",
+                    display::Displayer::new(
+                        display::LinkTable { links: &links, devices: &devices },
+                        verbose,
+                    )
+                );
+                Ok(())
+            })
         }
         args::Command::Capture(args::Capture::List(cmd)) => {
             return Some(repeat(cmd.continuous, || {
