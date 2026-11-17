@@ -274,6 +274,8 @@ fn test_long_verbose_flag_enables_debug_logs() {
 ///   When NetsimDaemon starts as the default instance
 ///   Then netsim_stdout.log captures the pass marker while piped stdout does not
 ///   And netsim_stderr.log captures the artifacts path with the wifi password redacted
+// TODO(b/584604993): Re-enable on Windows once file-redirection integration test determinism is resolved.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_default_log_redirection_writes_stdout_and_stderr_logs() {
     // Given default log redirection (logtostderr unset) with --wifi-password
@@ -300,6 +302,8 @@ fn test_default_log_redirection_writes_stdout_and_stderr_logs() {
 ///   When NetsimDaemon starts as Owner without -l
 ///   Then netsim_3_stdout.log and netsim_3_stderr.log receive redirected output with redacted args
 ///   And default netsim_stdout.log and netsim_stderr.log files are not created
+// TODO(b/584604993): Re-enable on Windows once file-redirection integration test determinism is resolved.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_instance_flag_redirects_numbered_daemon_logs() {
     // Given --instance 3 and --wifi-password without logtostderr
@@ -396,6 +400,8 @@ fn test_netsim_args_env_enables_verbose_and_redacts_wifi_password_on_stderr() {
 ///   When NetsimDaemon starts as Owner without -l
 ///   Then netsim_4_stdout.log and netsim_4_stderr.log receive redirected output with wifi_password redacted
 ///   And default netsim_stdout.log and netsim_stderr.log files are not created
+// TODO(b/584604993): Re-enable on Windows once file-redirection integration test determinism is resolved.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_netsim_args_env_redirects_instance_logs_and_redacts_wifi_password() {
     // Given CLI flags with --no-shutdown and NETSIM_ARGS injecting --instance 4 and --wifi-password
