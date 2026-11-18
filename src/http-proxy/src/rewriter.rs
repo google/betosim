@@ -174,11 +174,16 @@ pub(crate) async fn connect_with_header_rewrite(
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpSocket,
         sync::oneshot,
+        time::timeout,
     };
 
     use super::*;
@@ -335,8 +340,20 @@ mod tests {
     /// Test 2: Destination server is unreachable.
     #[tokio::test]
     async fn test_unreachable_destination() {
-        let unreachable_addr: SocketAddr = "127.0.0.1:59999".parse().unwrap();
-        let result = connect_with_header_rewrite(unreachable_addr, None).await;
+        const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+        // macOS XNU drops SYN without RST on TCPS_CLOSED sockets; hold one
+        // accepted stream after dropping listener so SYN gets immediate RST.
+        let reserved = TcpSocket::new_v4().unwrap();
+        reserved.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let unreachable_addr = reserved.local_addr().unwrap();
+        let listener = reserved.listen(1).unwrap();
+        let (guard_client, (guard_server, _)) =
+            tokio::try_join!(TcpStream::connect(unreachable_addr), listener.accept()).unwrap();
+        drop(listener);
+        let result = timeout(CONNECT_TIMEOUT, connect_with_header_rewrite(unreachable_addr, None))
+            .await
+            .unwrap();
+        drop((guard_client, guard_server));
         assert!(result.is_err(), "Function should fail when destination is unreachable");
         if let Err(Error::IoError(e)) = result {
             assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
