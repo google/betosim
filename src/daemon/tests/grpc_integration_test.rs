@@ -507,3 +507,57 @@ async fn test_grpc_bt_properties_disable_cis_feature() {
 
     world.when_close_packet_stream().await;
 }
+
+// Scenario: Daemon --grpc-uds-path binds a Unix domain socket, advertises uds.path, and serves gRPC
+#[cfg(unix)]
+#[tokio::test]
+async fn test_daemon_grpc_uds_path_creates_socket_and_serves_grpc() {
+    use std::{os::unix::fs::FileTypeExt, sync::Arc};
+
+    // Given a short UDS path (< 100 bytes for macOS 104B / Linux 108B sun_path) declared before World for drop order
+    let sys_tmp = std::env::temp_dir();
+    let uds_dir = tempfile::Builder::new()
+        .prefix("nsu_")
+        .tempdir_in(&sys_tmp)
+        .ok()
+        .filter(|dir| dir.path().join("g.sock").as_os_str().len() < 100)
+        .unwrap_or_else(|| {
+            tempfile::Builder::new().prefix("nsu_").tempdir_in("/tmp").expect("short /tmp uds dir")
+        });
+    let uds_path = uds_dir.path().join("g.sock");
+    let uds_path_str = uds_path.to_str().expect("uds_path must be valid UTF-8");
+
+    // When netsimd starts with --grpc-uds-path (omitting --instance so World keeps ephemeral test ports)
+    let mut world =
+        World::new_with_cli_args(&["--no-shutdown", "--grpc-uds-path", uds_path_str]).await;
+    world.when_spawn_daemon().await;
+
+    // Then the UDS file is a socket, netsim.ini advertises uds.path, and GetVersion succeeds over unix:<path>
+    let metadata = std::fs::symlink_metadata(&uds_path).expect("uds metadata");
+    assert!(FileTypeExt::is_socket(&metadata.file_type()), "expected UDS socket at {uds_path_str}");
+
+    let ini_file =
+        daemon::IniFile::new_for_dir(world.get_temp_dir().to_path_buf(), 1).expect("open IniFile");
+    match ini_file.try_acquire() {
+        Ok(daemon::IniFileAccess::Reader(config)) => {
+            assert_eq!(config.uds_path.as_deref(), Some(uds_path_str));
+        }
+        other => panic!("expected Reader with uds.path {uds_path_str}, got {other:?}"),
+    }
+
+    let env = Arc::new(grpcio::Environment::new(1));
+    let target = format!("unix:{uds_path_str}");
+    let client = netsim_proto::frontend_grpc::FrontendServiceClient::new(
+        grpcio::ChannelBuilder::new(env).connect(&target),
+    );
+    let resp = client
+        .get_version_async(&netsim_proto::empty::Empty::new())
+        .unwrap_or_else(|e| panic!("GetVersion failed on {target}: {e}"))
+        .await
+        .unwrap_or_else(|e| panic!("GetVersion RPC failed on {target}: {e}"));
+    assert!(
+        resp.version.starts_with("1."),
+        "expected 1.x version over {target}, got {}",
+        resp.version
+    );
+}
