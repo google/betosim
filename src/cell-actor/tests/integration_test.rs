@@ -954,7 +954,7 @@ async fn test_call_lifecycle_actions_incoming_answer_hold_update_and_end() {
     world.then_mo_call_state_is(1, "+15557654321", CallState::Dialing).await;
 
     world.when_remote_answer(1).await;
-    world.then_guest_receives_exact_packet(1, "OK\r\n").await;
+    world.then_guest_receives_exact_packet(1, "RING\r\n").await;
     world.then_mo_call_state_is(1, "+15557654321", CallState::Active).await;
 
     world.when_end_call(1).await;

@@ -282,10 +282,10 @@ fn test_incoming_call_formatted_phone_number() {
 //   When AT command "ATD123;" is sent to "A"
 //   Then response from "A" is "OK"
 //   When external answer triggered for "A"
-//   Then response from "A" is "OK" (representing CONNECT)
+//   Then response from "A" is "RING"
 //   And check call state is Active
 //   When external hangup triggered for "A"
-//   Then response from "A" is "RING"
+//   Then response from "A" is "NO CARRIER"
 //   And check call state is Idle
 #[test]
 fn test_external_call_control() {
@@ -297,7 +297,8 @@ fn test_external_call_control() {
 
     // Remote Answer
     when_external_call_answered(&mut world, "A");
-    world.then_response_is("A", "OK");
+    world.then_response_is("A", "RING");
+    world.then_no_response("A");
 
     // Verify Active
     world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_EXT},{}", TOA_NATIONAL)]);
@@ -315,7 +316,7 @@ fn test_external_call_control() {
 //   When AT command "ATD123;" is sent to "A"
 //   Then response from "A" is "OK"
 //   When external answer triggered
-//   Then response from "A" is "OK"
+//   Then response from "A" is "RING"
 //   When external hold (on) triggered
 //   Then AT+CLCC indicates Held (State 1)
 //   When external hold (off) triggered
@@ -328,7 +329,8 @@ fn test_external_call_hold() {
     // Dial and Answer to get Active call
     world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_EXT};"));
     when_external_call_answered(&mut world, "A");
-    world.then_response_is("A", "OK");
+    world.then_response_is("A", "RING");
+    world.then_no_response("A");
 
     // Hold ON
     when_external_call_held(&mut world, "A", true);
@@ -341,6 +343,38 @@ fn test_external_call_hold() {
 
     // Check State (Active = 0)
     world.assert_clcc("A", &[&format!("+CLCC: 1,0,0,0,0,{CALL_PEER_EXT},{}", TOA_NATIONAL)]);
+}
+
+#[test]
+fn test_external_call_answered_ignores_incoming_mt_call() {
+    let mut world = World::new();
+    world.given_modem_with_number("A", TEST_PHONE_NUMBER_LONG_A);
+    world.send_and_expect_ok("A", "AT+CLIP=1");
+
+    when_incoming_call_received(&mut world, "A", TEST_PHONE_NUMBER);
+    world.then_response_is("A", "RING");
+    world.then_response_contains("A", &format!("+CLIP: \"{TEST_PHONE_NUMBER}\",{TOA_NATIONAL}"));
+
+    when_external_call_answered(&mut world, "A");
+    world.then_no_response("A");
+    world.assert_clcc("A", &[&format!("+CLCC: 1,1,4,0,0,{TEST_PHONE_NUMBER},{TOA_NATIONAL}")]);
+}
+
+#[test]
+fn test_goldfish_37_external_call_answered_emits_cr_ring() {
+    let mut world = World::new();
+    world.given_goldfish_37_modem("A");
+    let (id_a, _) = world.get_modem("A");
+    world
+        .manager
+        .get_modem_mut(id_a)
+        .unwrap()
+        .set_voice_registration(RegistrationStatus::RegisteredHome);
+
+    world.send_and_expect_ok("A", &format!("ATD{CALL_PEER_EXT};"));
+    when_external_call_answered(&mut world, "A");
+    world.then_response_is("A", "RING");
+    world.then_no_response("A");
 }
 
 #[test]

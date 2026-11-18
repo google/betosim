@@ -34,8 +34,8 @@ use crate::{
     sup_service::SupService,
     time::Clock,
     types::{
-        AT_OK, CallForwardCondition, CmeError, CommandAction, CopsMode, ExecutionResult,
-        HangupReason, ModemError, ModemId, NumberPresentation, PhoneNumber, RadioPowerLevel,
+        CallForwardCondition, CmeError, CommandAction, CopsMode, ExecutionResult, HangupReason,
+        ModemError, ModemId, NumberPresentation, PhoneNumber, RadioPowerLevel,
         RegistrationUnsolicitedMode, Response, SignalQuality,
     },
 };
@@ -153,7 +153,7 @@ impl ModemImpl {
     pub fn trigger_remote_answer(&mut self) -> Vec<ModemEffect> {
         let mut effects = Vec::new();
         if self.call_service.remote_answer() {
-            effects.push(ModemEffect::Response(AT_OK.to_vec()));
+            effects.push(ModemEffect::Response(CallResponse::Ring.to_string().into_bytes()));
         }
         effects
     }
