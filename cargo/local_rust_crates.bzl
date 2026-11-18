@@ -286,7 +286,7 @@ def _lrc_impl(module_ctx):
     # 1. Custom Path Crates
     _CUSTOM_PATH_CRATES = [
         struct(name = "getrandom_v0_2", path = "/".join([workspace_root, "external", "rust", "android-crates-io", "extra_versions", "crates", "getrandom"])),
-        struct(name = "pica", path = workspace_root + "/third_party/rust/crates/pica"),
+        struct(name = "pica", path = workspace_root + "/external/rust/pica"),
         struct(name = "protobuf-rust", path = android_crates_io + "/protobuf"),
     ]
 
