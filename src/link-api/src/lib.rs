@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! # Link API
 //!
 //! This crate defines the public API for the Link Actor in Netsim.

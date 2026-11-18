@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 use std::{
     collections::{HashMap, hash_map::Entry},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},

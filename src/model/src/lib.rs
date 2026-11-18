@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! A shared, dependency-free crate that defines the shared data structures
 //! and command enums for the netsim control plane.
 

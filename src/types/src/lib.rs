@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! Netsim Common Types
 //!
 //! This crate contains common, low-level data structures used across Netsim
