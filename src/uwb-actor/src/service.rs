@@ -12,15 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    error::Error as StdError,
+    io,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use actor_framework::{ActorService, DynContext};
+use actor_framework::{ActorService, DynContext, FrameworkError};
 use bytes::Bytes;
+use device_actor::{DeviceClient, DeviceError};
 use futures::{FutureExt, SinkExt};
-use netsim_model::{Chip, ChipCreate, ChipError, ChipId, ChipUpdate, ChipVariant, UwbMode};
+use netsim_model::{
+    Chip, ChipCreate, ChipError, ChipId, ChipUpdate, ChipVariant, ClientError, UwbMode,
+};
 use pdl_runtime::Packet;
 use pica::{Handle, MacAddress, packets::uci};
 use tokio::sync::mpsc;
+use tracing::{instrument::WithSubscriber, warn};
 
 use crate::{
     UwbAction, UwbActionResult,
@@ -29,6 +37,52 @@ use crate::{
 };
 
 const BROADCAST_SHORT_MAC: u16 = u16::MAX;
+
+fn leaf_io_error_kind(err: &io::Error) -> io::ErrorKind {
+    let mut kind = err.kind();
+    let mut curr: Option<&(dyn StdError + 'static)> = Some(err);
+    while let Some(err_ref) = curr {
+        if let Some(io_err) = err_ref.downcast_ref::<io::Error>() {
+            if io_err.kind() != io::ErrorKind::Other {
+                kind = io_err.kind();
+            }
+            curr = io_err
+                .get_ref()
+                .map(|inner| inner as &(dyn StdError + 'static))
+                .or_else(|| io_err.source());
+        } else {
+            curr = err_ref.source();
+        }
+    }
+    kind
+}
+
+fn should_record_sink_error(err: &io::Error, device_client: &DeviceClient) -> bool {
+    !device_client.is_shutting_down()
+        && !matches!(
+            leaf_io_error_kind(err),
+            io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::NotConnected
+                | io::ErrorKind::UnexpectedEof
+        )
+}
+
+fn is_expected_chip_remove_error(err: &ClientError, shutting_down: bool) -> bool {
+    if matches!(DeviceError::downcast_from(err), Some(DeviceError::DeviceNotFound(_))) {
+        return true;
+    }
+    shutting_down
+        && matches!(
+            err,
+            ClientError::Framework(fw)
+                if matches!(
+                    fw.downcast_ref::<FrameworkError<DeviceError>>(),
+                    Some(FrameworkError::ActorClosed(_) | FrameworkError::ActorDropped(_))
+                )
+        )
+}
 
 impl UwbActor {
     fn allocate_anchor_mac(&mut self) -> Result<(Handle, MacAddress), ChipError> {
@@ -170,19 +224,29 @@ impl ActorService for UwbActor {
                 let mut sink = Box::pin(packet_sink.ok_or(UwbError::PacketSinkMissing)?);
                 let handle = self.pica.add_device();
                 let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<Bytes>();
+                let device_client = self.device_client.clone();
 
                 ctx.add_stream(chip_id, Box::pin(stream));
                 ctx.spawn(
                     chip_id,
                     async move {
                         while let Some(p) = sink_rx.recv().await {
-                            if sink.send(p).await.is_err() {
-                                break;
+                            if let Err(error) = sink.send(p).await {
+                                if should_record_sink_error(&error, &device_client) {
+                                    warn!(
+                                        %error,
+                                        code = crate::err::Code::PacketSinkSendFailed as u32,
+                                        %chip_id,
+                                        "Failed to send packet to UWB guest sink"
+                                    );
+                                }
+                                return chip_id;
                             }
                         }
                         let _ = sink.close().await;
                         chip_id
                     }
+                    .with_current_subscriber()
                     .boxed(),
                 );
 
@@ -253,9 +317,22 @@ impl ActorService for UwbActor {
 
         let device_client = self.device_client.clone();
         let device_id = state.chip.device_id;
-        tokio::spawn(async move {
-            let _ = device_client.notify_chip_removed(device_id, id).await;
-        });
+        tokio::spawn(
+            async move {
+                if let Err(err) = device_client.notify_chip_removed(device_id, id).await
+                    && !is_expected_chip_remove_error(&err, device_client.is_shutting_down())
+                {
+                    warn!(
+                        %err,
+                        code = crate::err::Code::DeviceNotifyChipRemovedFailed as u32,
+                        %device_id,
+                        chip_id = %id,
+                        "Failed to notify DeviceActor of UWB chip removal"
+                    );
+                }
+            }
+            .with_current_subscriber(),
+        );
 
         self.drain_packets();
         self.reschedule_tick(ctx);
@@ -757,5 +834,155 @@ mod tests {
         parse_and_count_uci_data_receive(&rcv_bytes, &stats);
         assert_eq!(stats.get(UwbApi::SendData), 0);
         assert_eq!(stats.get(UwbApi::OnDataReceived), 1);
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("wrapped transport io: {0}")]
+    struct WrappedTransportError(#[from] io::Error);
+
+    fn service_client_error(err: DeviceError) -> ClientError {
+        ClientError::from(FrameworkError::ServiceError(err))
+    }
+
+    fn actor_closed_client_error() -> ClientError {
+        ClientError::from(FrameworkError::<DeviceError>::ActorClosed(Box::new(io::Error::from(
+            io::ErrorKind::BrokenPipe,
+        ))))
+    }
+
+    fn actor_dropped_client_error() -> ClientError {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        drop(tx);
+        let recv_err = rx.now_or_never().unwrap().unwrap_err();
+        ClientError::from(FrameworkError::<DeviceError>::ActorDropped(recv_err))
+    }
+
+    #[test]
+    fn test_leaf_io_error_kind_unwraps_direct_broken_pipe() {
+        let broken_pipe = io::Error::other(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert_eq!(leaf_io_error_kind(&broken_pipe), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn test_leaf_io_error_kind_unwraps_direct_invalid_data() {
+        let invalid_data = io::Error::other(io::Error::from(io::ErrorKind::InvalidData));
+        assert_eq!(leaf_io_error_kind(&invalid_data), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_leaf_io_error_kind_unwraps_chained_thiserror_source() {
+        let wrapped_reset = io::Error::other(WrappedTransportError(io::Error::from(
+            io::ErrorKind::ConnectionReset,
+        )));
+        assert_eq!(leaf_io_error_kind(&wrapped_reset), io::ErrorKind::ConnectionReset);
+    }
+
+    #[test]
+    fn test_leaf_io_error_kind_preserves_other_for_opaque_error() {
+        let remote_stopped = io::Error::other("RemoteStopped");
+        assert_eq!(leaf_io_error_kind(&remote_stopped), io::ErrorKind::Other);
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_when_device_shutting_down() {
+        let (device_actor, device_client) = device_actor::new();
+        drop(device_actor);
+        let _ = device_client.shutdown().await;
+        assert!(device_client.is_shutting_down());
+        let err = io::Error::from(io::ErrorKind::InvalidData);
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_on_broken_pipe() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::from(io::ErrorKind::BrokenPipe);
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_on_connection_reset() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::from(io::ErrorKind::ConnectionReset);
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_on_connection_aborted() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::from(io::ErrorKind::ConnectionAborted);
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_on_not_connected() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::from(io::ErrorKind::NotConnected);
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_on_unexpected_eof() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::from(io::ErrorKind::UnexpectedEof);
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_false_on_nested_grpc_connection_reset() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err =
+            io::Error::other(io::Error::new(io::ErrorKind::ConnectionReset, "Remote is stopped"));
+        assert!(!should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_true_on_invalid_data() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::from(io::ErrorKind::InvalidData);
+        assert!(should_record_sink_error(&err, &device_client));
+    }
+
+    #[tokio::test]
+    async fn test_should_record_sink_error_true_on_other_rpc_failure() {
+        let (_device_actor, device_client) = device_actor::new();
+        let err = io::Error::other("RpcFailure(INTERNAL)");
+        assert!(should_record_sink_error(&err, &device_client));
+    }
+
+    #[test]
+    fn test_is_expected_chip_remove_error_accepts_device_not_found() {
+        let err = service_client_error(DeviceError::DeviceNotFound("dev-1".to_string()));
+        assert!(is_expected_chip_remove_error(&err, false));
+    }
+
+    #[test]
+    fn test_is_expected_chip_remove_error_rejects_other_device_error_during_shutdown() {
+        let err = service_client_error(DeviceError::NotFound("dev-1".to_string()));
+        assert!(!is_expected_chip_remove_error(&err, true));
+    }
+
+    #[test]
+    fn test_is_expected_chip_remove_error_accepts_actor_closed_during_shutdown() {
+        let err = actor_closed_client_error();
+        assert!(is_expected_chip_remove_error(&err, true));
+    }
+
+    #[test]
+    fn test_is_expected_chip_remove_error_rejects_unexpected_actor_closed() {
+        let err = actor_closed_client_error();
+        assert!(!is_expected_chip_remove_error(&err, false));
+    }
+
+    #[test]
+    fn test_is_expected_chip_remove_error_accepts_actor_dropped_during_shutdown() {
+        let err = actor_dropped_client_error();
+        assert!(is_expected_chip_remove_error(&err, true));
+    }
+
+    #[test]
+    fn test_is_expected_chip_remove_error_rejects_unexpected_actor_dropped() {
+        let err = actor_dropped_client_error();
+        assert!(!is_expected_chip_remove_error(&err, false));
     }
 }

@@ -44,7 +44,21 @@ impl PacketStreamerService {
 }
 
 fn grpc_error_to_packet_error(e: grpcio::Error) -> PacketStreamError {
-    PacketStreamError::Io(std::io::Error::other(e.to_string()))
+    let kind = match &e {
+        grpcio::Error::RemoteStopped
+        | grpcio::Error::QueueShutdown
+        | grpcio::Error::RpcFinished(None) => std::io::ErrorKind::ConnectionReset,
+        grpcio::Error::RpcFinished(Some(s))
+            if matches!(s.code(), grpcio::RpcStatusCode::OK | grpcio::RpcStatusCode::CANCELLED) =>
+        {
+            std::io::ErrorKind::ConnectionReset
+        }
+        grpcio::Error::RpcFailure(s) if s.code() == grpcio::RpcStatusCode::CANCELLED => {
+            std::io::ErrorKind::ConnectionReset
+        }
+        _ => std::io::ErrorKind::Other,
+    };
+    PacketStreamError::Io(std::io::Error::new(kind, e.to_string()))
 }
 
 async fn handle_grpc_initial_info(
@@ -186,5 +200,106 @@ impl packet_stream::transport::traits::TransportListener for ChannelTransportLis
     }
     async fn shutdown(&mut self) -> packet_stream::error::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, ErrorKind};
+
+    use grpcio::{Error, RpcStatus, RpcStatusCode};
+
+    use super::*;
+
+    fn into_io_error(err: Error) -> io::Error {
+        match grpc_error_to_packet_error(err) {
+            PacketStreamError::Io(io_err) => io_err,
+            other => panic!("expected PacketStreamError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_grpc_error_remote_stopped_maps_to_connection_reset() {
+        let io_err = into_io_error(Error::RemoteStopped);
+        assert_eq!(io_err.kind(), ErrorKind::ConnectionReset);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_queue_shutdown_maps_to_connection_reset() {
+        let io_err = into_io_error(Error::QueueShutdown);
+        assert_eq!(io_err.kind(), ErrorKind::ConnectionReset);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_rpc_finished_none_maps_to_connection_reset() {
+        let io_err = into_io_error(Error::RpcFinished(None));
+        assert_eq!(io_err.kind(), ErrorKind::ConnectionReset);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_rpc_finished_ok_maps_to_connection_reset() {
+        let io_err = into_io_error(Error::RpcFinished(Some(RpcStatus::ok())));
+        assert_eq!(io_err.kind(), ErrorKind::ConnectionReset);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_rpc_finished_cancelled_maps_to_connection_reset() {
+        let io_err =
+            into_io_error(Error::RpcFinished(Some(RpcStatus::new(RpcStatusCode::CANCELLED))));
+        assert_eq!(io_err.kind(), ErrorKind::ConnectionReset);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_rpc_failure_cancelled_maps_to_connection_reset() {
+        let io_err = into_io_error(Error::RpcFailure(RpcStatus::new(RpcStatusCode::CANCELLED)));
+        assert_eq!(io_err.kind(), ErrorKind::ConnectionReset);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_rpc_failure_internal_maps_to_other() {
+        let io_err = into_io_error(Error::RpcFailure(RpcStatus::with_message(
+            RpcStatusCode::INTERNAL,
+            "internal failure".to_string(),
+        )));
+        assert_eq!(io_err.kind(), ErrorKind::Other);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_rpc_finished_internal_maps_to_other() {
+        let io_err = into_io_error(Error::RpcFinished(Some(RpcStatus::with_message(
+            RpcStatusCode::INTERNAL,
+            "stream internal".to_string(),
+        ))));
+        assert_eq!(io_err.kind(), ErrorKind::Other);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_shutdown_failed_maps_to_other() {
+        let io_err = into_io_error(Error::ShutdownFailed);
+        assert_eq!(io_err.kind(), ErrorKind::Other);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_invalid_metadata_maps_to_other() {
+        let io_err = into_io_error(Error::InvalidMetadata("bad header".to_string()));
+        assert_eq!(io_err.kind(), ErrorKind::Other);
+        assert!(!io_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_error_codec_maps_to_other() {
+        let io_err =
+            into_io_error(Error::Codec(Box::new(io::Error::new(ErrorKind::InvalidData, "decode"))));
+        assert_eq!(io_err.kind(), ErrorKind::Other);
+        assert!(!io_err.to_string().is_empty());
     }
 }

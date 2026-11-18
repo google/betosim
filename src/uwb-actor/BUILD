@@ -46,8 +46,10 @@ netsim_rust_library(
         "@async-trait",
     ],
     test_deps = [
+        "//src/common",
         "//src/device-api:testing",
         "//src/testing",
+        "@tracing-subscriber",
     ],
     deps = DEPS,
 )

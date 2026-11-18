@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 use pica::{Handle, RangingEstimator, RangingMeasurement};
 use tracing::warn;
 
-use crate::{radio_model::RangingDataSet, ranging::Pose, uwb_actor::UwbChipState};
+use crate::{err::Code, radio_model::RangingDataSet, ranging::Pose, uwb_actor::UwbChipState};
 
 /// UWB Ranging Estimator that uses shared chip state to calculate ranging
 /// measurements.
@@ -60,7 +60,11 @@ impl RangingEstimator for UwbRangingEstimator {
                 })
             }
             Err(error) => {
-                warn!(%error, "Failed to estimate ranging measurement");
+                warn!(
+                    %error,
+                    code = Code::RangingEstimateFailed as u32,
+                    "Failed to estimate ranging measurement"
+                );
                 None
             }
         }
@@ -74,9 +78,11 @@ mod tests {
         sync::{Arc, atomic::AtomicU64},
     };
 
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
     use netsim_model::{Chip, ChipVariant, Pose as ModelPose, Position, Uwb, UwbMode};
     use parking_lot::RwLock;
     use pica::{Handle, RangingEstimator};
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
 
@@ -216,5 +222,36 @@ mod tests {
         assert!((-3..=3).contains(&m_a_to_b.elevation));
         assert!(m_b_to_a.azimuth >= 177 || m_b_to_a.azimuth <= -177);
         assert!((-3..=3).contains(&m_b_to_a.elevation));
+    }
+
+    #[test]
+    fn test_estimate_with_nan_position_records_error_stats() {
+        // Given
+        let shared_chips = Arc::new(RwLock::new(HashMap::new()));
+        let estimator = UwbRangingEstimator::new(shared_chips.clone());
+
+        let handle_a: Handle = 1;
+        let handle_b: Handle = 2;
+
+        let chip_a = create_chip_state(0.0, 0.0, 0.0, UwbMode::Device);
+        let chip_b = create_chip_state(f32::NAN, 0.0, 0.0, UwbMode::Device);
+
+        shared_chips.write().insert(handle_a, chip_a);
+        shared_chips.write().insert(handle_b, chip_b);
+
+        let table = Arc::new(ErrorStatsTable::new());
+        let layer = ErrorStatsLayer::with_table(Arc::clone(&table));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        // When
+        // Keep >= 2 live Dispatchers to avoid Rebuilder::JustOne caching.
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+        let measurement = tracing::subscriber::with_default(subscriber, || {
+            estimator.estimate(&handle_a, &handle_b)
+        });
+
+        // Then
+        assert!(measurement.is_none());
+        assert_eq!(table.snapshot(), vec![(Code::RangingEstimateFailed as u32, 1)]);
     }
 }

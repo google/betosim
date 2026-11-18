@@ -14,6 +14,7 @@
 
 mod chip_create_test;
 mod chip_lifecycle_test;
+mod error_stats_test;
 mod pica_exchange_test;
 mod ranging_test;
 mod reset_test;

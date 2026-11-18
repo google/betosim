@@ -143,6 +143,32 @@ async fn test_device_client_add_chip_repeated() {
     client.add_chip(params2).await.unwrap();
 }
 
+// Scenario: Client shares shutting_down state across clones on shutdown
+//   Given a DeviceClient and a cloned handle backed by a mock ActorClient
+//   When shutdown is called on the original client
+//   Then is_shutting_down transitions from false to true on both handles
+#[tokio::test]
+async fn test_device_client_shutdown_updates_cloned_state() {
+    // Given
+    let mut mock = actor_framework::MockActorClient::<DeviceActor>::new();
+    mock.expect_clone_box()
+        .once()
+        .returning(|| Box::new(actor_framework::MockActorClient::<DeviceActor>::new()));
+    mock.expect_shutdown().once().returning(|| Ok(()));
+
+    let client = DeviceClient::new(Box::new(mock));
+    let cloned = client.clone();
+    assert!(!client.is_shutting_down());
+    assert!(!cloned.is_shutting_down());
+
+    // When
+    client.shutdown().await.unwrap();
+
+    // Then
+    assert!(client.is_shutting_down());
+    assert!(cloned.is_shutting_down());
+}
+
 fn create_add_chip_params(guid: &str, chip_name: &str) -> device_api::DeviceAddChip {
     device_api::DeviceAddChip {
         device_guid: guid.to_string(),

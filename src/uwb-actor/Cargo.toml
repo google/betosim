@@ -49,6 +49,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 [dev-dependencies]
+common = { package = "netsim-common", path = "../common" }
 device-api = { path = "../device-api", features = ["testing"] }
 netsim-testing = { path = "../testing", features = ["testing"] }
+tracing-subscriber = "0.3"
 uwb-actor = { path = ".", features = ["testing"] }

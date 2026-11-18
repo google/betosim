@@ -16,6 +16,11 @@
 //!
 //! Provides the [`DeviceClient`] struct for interacting with Device actors.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use actor_framework::ActorClient;
 use device_api::{DeviceAction, DeviceActionResult, DeviceCreate, DeviceId};
 use futures::TryFutureExt;
@@ -27,6 +32,7 @@ use crate::DeviceActor;
 #[derive(Clone)]
 pub struct DeviceClient {
     pub(crate) inner: Box<dyn ActorClient<DeviceActor>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for DeviceClient {
@@ -37,7 +43,7 @@ impl std::fmt::Debug for DeviceClient {
 
 impl DeviceClient {
     pub fn new(inner: Box<dyn ActorClient<DeviceActor>>) -> Self {
-        Self { inner }
+        Self { inner, shutting_down: Arc::new(AtomicBool::new(false)) }
     }
 }
 
@@ -284,7 +290,13 @@ impl DeviceClient {
     /// Shuts down the device actor.
     pub async fn shutdown(&self) -> Result<(), ClientError> {
         debug!("Sending shutdown request");
+        self.shutting_down.store(true, Ordering::Release);
         self.inner.shutdown().err_into::<ClientError>().await
+    }
+
+    /// Returns true once a normal [`Self::shutdown`] has been initiated.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
     }
 
     /// Triggers a persistence of the current statistics to disk.

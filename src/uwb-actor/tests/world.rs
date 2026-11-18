@@ -12,27 +12,169 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    io::{self, ErrorKind},
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
+use actor_framework::{FrameworkError, MockActorClient};
 use bytes::Bytes;
-use device_actor::DeviceClient;
+use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
+use device_actor::{DeviceActor, DeviceClient, DeviceError};
+use device_api::{DeviceAction, DeviceActionResult};
+use futures::{FutureExt, Sink, SinkExt};
 use netsim_model::{
     Chip, ChipClient, ChipCreate, ChipError, ChipId, ChipUpdate, ClientError, DeviceId, Position,
 };
-use netsim_testing::{mock_sink, mock_stream};
+use netsim_testing::{PinnedSink, mock_sink, mock_stream};
+use parking_lot::Mutex;
 use pdl_runtime::Packet;
 use pica::packets::uci::{self, ShortAddressTwoWayRangingMeasurement};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::layer::SubscriberExt;
 use uwb_actor::{UwbActor, UwbClient};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum NotifyBehavior {
+    #[default]
+    Success,
+    DeviceNotFound,
+    ActorClosed,
+    ActorDropped,
+}
+
+enum SinkFault {
+    FailWrite(ErrorKind),
+    DisconnectOnNextWrite {
+        packet_tx: Sender<Bytes>,
+        packet_rx: Option<Receiver<Vec<u8>>>,
+        use_grpc_disconnect: bool,
+    },
+}
+
+#[derive(Default)]
+struct FaultySinkState {
+    fault: Option<SinkFault>,
+    faulted: bool,
+}
+
+struct FaultySink {
+    inner: PinnedSink,
+    state: Arc<Mutex<FaultySinkState>>,
+}
+
+impl FaultySink {
+    fn check_injected_fault(&self) -> Result<(), io::Error> {
+        let taken_fault = {
+            let mut state = self.state.lock();
+            let fault = state.fault.take();
+            if fault.is_some() {
+                state.faulted = true;
+            }
+            fault
+        };
+        match taken_fault {
+            None => Ok(()),
+            Some(SinkFault::FailWrite(kind)) => {
+                Err(io::Error::new(kind, "injected sink write error"))
+            }
+            Some(SinkFault::DisconnectOnNextWrite {
+                packet_tx,
+                packet_rx,
+                use_grpc_disconnect,
+            }) => {
+                drop(packet_tx);
+                drop(packet_rx);
+                if use_grpc_disconnect {
+                    Err(io::Error::new(ErrorKind::ConnectionReset, "Remote is stopped"))
+                } else {
+                    Err(io::Error::new(ErrorKind::BrokenPipe, "guest disconnected"))
+                }
+            }
+        }
+    }
+}
+
+impl Sink<Bytes> for FaultySink {
+    type Error = io::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if let Err(err) = self.check_injected_fault() {
+            return Poll::Ready(Err(err));
+        }
+        self.inner.as_mut().poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
+        self.inner.as_mut().start_send(item)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let already_faulted = self.state.lock().faulted;
+        if already_faulted {
+            return Poll::Ready(Err(io::Error::other("sink closed after write fault")));
+        }
+        self.inner.as_mut().poll_close(cx)
+    }
+}
+
+fn mock_actor_client(
+    behavior: Arc<Mutex<NotifyBehavior>>,
+    notify_tx: mpsc::UnboundedSender<()>,
+) -> MockActorClient<DeviceActor> {
+    let mut mock = MockActorClient::new();
+    let action_behavior = Arc::clone(&behavior);
+    let action_tx = notify_tx.clone();
+    mock.expect_perform_action().returning(move |_, action| {
+        if matches!(action, DeviceAction::NotifyChipRemoved(..)) {
+            let _ = action_tx.send(());
+        }
+        let current_behavior = *action_behavior.lock();
+        match current_behavior {
+            NotifyBehavior::Success => Ok(DeviceActionResult::Success),
+            NotifyBehavior::DeviceNotFound => {
+                Err(FrameworkError::ServiceError(DeviceError::DeviceNotFound("test".to_string())))
+            }
+            NotifyBehavior::ActorClosed => Err(FrameworkError::ActorClosed(Box::new(
+                io::Error::new(ErrorKind::BrokenPipe, "closed"),
+            ))),
+            NotifyBehavior::ActorDropped => {
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                drop(tx);
+                let recv_err = rx.now_or_never().unwrap().unwrap_err();
+                Err(FrameworkError::ActorDropped(recv_err))
+            }
+        }
+    });
+    mock.expect_shutdown().returning(|| Ok(()));
+    mock.expect_clone_box()
+        .returning(move || Box::new(mock_actor_client(Arc::clone(&behavior), notify_tx.clone())));
+    mock
+}
 
 /// The BDD World for UWB Actor tests.
 pub struct World {
     pub client: UwbClient,
-    pub _device_client: DeviceClient, /* Keep reference if we need to check notifications, or
-                                       * use a Mock */
+    device_client: DeviceClient,
     pub packet_txs: HashMap<ChipId, Sender<Bytes>>,
     pub packet_rxs: HashMap<ChipId, Receiver<Vec<u8>>>,
+    sink_states: HashMap<ChipId, Arc<Mutex<FaultySinkState>>>,
+    error_stats: Arc<ErrorStatsTable>,
+    notify_behavior: Arc<Mutex<NotifyBehavior>>,
+    notify_called_rx: mpsc::UnboundedReceiver<()>,
     _actor_task: tokio::task::JoinHandle<()>,
+    // Keeps >= 2 live Dispatchers so tracing_core Rebuilder::JustOne cannot
+    // cache Interest::never() when parallel NoSubscriber tests run.
+    _multi_dispatch_guard: Option<tracing::Dispatch>,
 }
 
 impl Drop for World {
@@ -43,50 +185,100 @@ impl Drop for World {
 
 impl World {
     pub async fn new() -> Self {
+        Self::build(false).await
+    }
+
+    pub(crate) async fn with_error_stats() -> Self {
+        Self::build(true).await
+    }
+
+    async fn build(record_error_stats: bool) -> Self {
         let (runner, client) = uwb_actor::new();
-
-        // Use MockActorClient for the DeviceClient
-        let mut mock_device_client = actor_framework::MockActorClient::new();
-        mock_device_client
-            .expect_perform_action()
-            .returning(|_, _| Ok(device_api::DeviceActionResult::Success));
-        mock_device_client.expect_clone_box().returning(|| {
-            let mut new_mock = actor_framework::MockActorClient::new();
-            new_mock
-                .expect_perform_action()
-                .returning(|_, _| Ok(device_api::DeviceActionResult::Success));
-            // Expect clone_box recursively if needed, but UwbActor probably doesn't clone
-            // it again? Better to be safe:
-            new_mock.expect_clone_box().returning(|| {
-                let mut inner_mock = actor_framework::MockActorClient::new();
-                inner_mock
-                    .expect_perform_action()
-                    .returning(|_, _| Ok(device_api::DeviceActionResult::Success));
-                inner_mock.expect_clone_box().returning(|| {
-                    let mut deep_mock = actor_framework::MockActorClient::new();
-                    deep_mock
-                        .expect_perform_action()
-                        .returning(|_, _| Ok(device_api::DeviceActionResult::Success));
-                    // Hope we don't need deeper than this (Mock4)
-                    Box::new(deep_mock)
-                });
-                Box::new(inner_mock)
-            });
-            Box::new(new_mock)
-        });
-
+        let notify_behavior = Arc::new(Mutex::new(NotifyBehavior::default()));
+        let (notify_tx, notify_called_rx) = mpsc::unbounded_channel();
+        let mock_device_client = mock_actor_client(Arc::clone(&notify_behavior), notify_tx);
         let device_client = DeviceClient::new(Box::new(mock_device_client));
 
         // Spawn actor
         let actor = UwbActor::new(device_client.clone());
-        let actor_task = tokio::spawn(runner.run(actor));
+        let error_stats = Arc::new(ErrorStatsTable::new());
+        let (_actor_task, _multi_dispatch_guard) = if record_error_stats {
+            let guard = tracing::Dispatch::new(tracing_subscriber::registry());
+            let subscriber = tracing_subscriber::registry()
+                .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
+            (tokio::spawn(runner.run(actor).with_subscriber(subscriber)), Some(guard))
+        } else {
+            (tokio::spawn(runner.run(actor)), None)
+        };
 
         World {
             client,
-            _device_client: device_client,
+            device_client,
             packet_txs: HashMap::new(),
             packet_rxs: HashMap::new(),
-            _actor_task: actor_task,
+            sink_states: HashMap::new(),
+            error_stats,
+            notify_behavior,
+            notify_called_rx,
+            _actor_task,
+            _multi_dispatch_guard,
+        }
+    }
+
+    pub(crate) fn given_device_notify_behavior(&self, behavior: NotifyBehavior) {
+        *self.notify_behavior.lock() = behavior;
+    }
+
+    pub(crate) fn given_packet_sink_write_error(
+        &self,
+        chip_id: impl Into<ChipId>,
+        kind: ErrorKind,
+    ) {
+        let chip_id = chip_id.into();
+        let sink_state = self.sink_states.get(&chip_id).expect("Chip sink_state not found");
+        sink_state.lock().fault = Some(SinkFault::FailWrite(kind));
+    }
+
+    pub(crate) fn when_guest_disconnects_on_next_packet(
+        &mut self,
+        chip_id: impl Into<ChipId>,
+        use_grpc_disconnect: bool,
+    ) {
+        let chip_id = chip_id.into();
+        let packet_tx =
+            self.packet_txs.remove(&chip_id).expect("Chip packet_tx not found or already closed");
+        let packet_rx = self.packet_rxs.remove(&chip_id);
+        let sink_state = self.sink_states.get(&chip_id).expect("Chip sink_state not found");
+        sink_state.lock().fault =
+            Some(SinkFault::DisconnectOnNextWrite { packet_tx, packet_rx, use_grpc_disconnect });
+    }
+
+    pub(crate) async fn when_device_actor_shuts_down(&self) {
+        self.given_device_notify_behavior(NotifyBehavior::ActorClosed);
+        self.device_client.shutdown().await.unwrap();
+    }
+
+    pub(crate) async fn then_device_notify_completed(&mut self) {
+        tokio::time::timeout(Duration::from_secs(1), self.notify_called_rx.recv())
+            .await
+            .expect("Timed out waiting for notify_chip_removed")
+            .expect("notify channel closed unexpectedly");
+        tokio::task::yield_now().await;
+    }
+
+    pub(crate) async fn then_error_stats_are(&self, expected: &[(u32, u32)]) {
+        if expected.is_empty() {
+            assert_eq!(self.error_stats.snapshot(), expected);
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let actual = self.error_stats.snapshot();
+            if actual == expected || std::time::Instant::now() >= deadline {
+                assert_eq!(actual, expected);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -97,7 +289,12 @@ impl World {
     ) -> Result<(), ClientError> {
         let id = ChipId(chip_id);
         let (stream, packet_tx) = mock_stream();
-        let (sink, packet_rx) = mock_sink();
+        let (inner_sink, packet_rx) = mock_sink();
+        let sink_state = Arc::new(Mutex::new(FaultySinkState::default()));
+        let sink = Box::pin(
+            FaultySink { inner: inner_sink, state: Arc::clone(&sink_state) }
+                .sink_map_err(io::Error::other),
+        );
         let mut chip = Chip::new_test_uwb(name.to_string());
         chip.id = id.0;
         chip.device_id = DeviceId(1);
@@ -108,6 +305,7 @@ impl World {
 
         self.packet_txs.insert(id, packet_tx);
         self.packet_rxs.insert(id, packet_rx);
+        self.sink_states.insert(id, sink_state);
 
         Ok(())
     }

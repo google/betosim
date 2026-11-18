@@ -14,6 +14,7 @@
 
 mod actions;
 mod client;
+pub mod err;
 mod error;
 mod lifecycle;
 mod radio_model;
