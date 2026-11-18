@@ -172,7 +172,8 @@ impl AsyncWrite for AsyncGenericFd {
 }
 
 pub struct DualFdListener {
-    config: DualFdConfig,
+    num_devices: usize,
+    num_chips: usize,
     /// Streams established from pre-existing FDs (e.g., inherited pipes) that
     /// do not need to accept connections dynamically.
     pending_static_streams: VecDeque<StaticStreamEntry>,
@@ -182,61 +183,90 @@ pub struct DualFdListener {
 type StaticStreamEntry = (DeviceInfo, String, Option<i32>, Option<String>, (OwnedFd, OwnedFd));
 type ListeningSocketEntry = (DeviceInfo, String, Option<i32>, Option<String>, AsyncFd<OwnedFd>);
 
+fn resolve_device_info(name: Option<&str>, device_info: Option<DeviceInfo>) -> DeviceInfo {
+    let mut info = device_info.unwrap_or_default();
+    if let Some(name) = name.filter(|_| info.name.is_empty()) {
+        info.name = name.to_string();
+    }
+    if info.id.is_empty() {
+        info.id.clone_from(&info.name);
+    }
+    info
+}
+
 impl DualFdListener {
     pub fn new(config: DualFdConfig) -> Result<Self> {
-        let mut listener =
-            Self { config, pending_static_streams: VecDeque::new(), listening_sockets: Vec::new() };
-        listener.prepare_streams()?;
+        let num_devices = config.devices.len();
+        let num_chips = config.devices.iter().map(|d| d.chips.len()).sum();
+        let mut listener = Self {
+            num_devices,
+            num_chips,
+            pending_static_streams: VecDeque::new(),
+            listening_sockets: Vec::new(),
+        };
+        listener.prepare_streams(&config)?;
         Ok(listener)
     }
 
-    fn prepare_streams(&mut self) -> Result<()> {
+    fn prepare_streams(&mut self, config: &DualFdConfig) -> Result<()> {
         self.pending_static_streams.clear();
         self.listening_sockets.clear();
-        for device in &self.config.devices {
-            let mut device_info = device.device_info.clone().unwrap_or_default();
-            if let Some(name) = device.name.as_ref().filter(|_| device_info.name.is_empty()) {
-                device_info.name.clone_from(name);
-            }
-            if device_info.id.is_empty() {
-                device_info.id.clone_from(&device_info.name);
-            }
-
+        for device in &config.devices {
+            let device_info =
+                resolve_device_info(device.name.as_deref(), device.device_info.clone());
             for chip in &device.chips {
                 let in_fd = claim_fd(chip.fd_in)?;
-
-                if is_listening_socket(&in_fd) {
-                    set_nonblocking(&in_fd)?;
-                    // SAFETY: `in_fd` is an exclusively owned `OwnedFd` moved into `AsyncFd`;
-                    // `AsyncFd::drop` deregisters it before `OwnedFd::drop` closes it, and
-                    // `DualFdListener` never calls `get_mut()` or `into_inner()`.
-                    let async_fd = unsafe { AsyncFd::register(in_fd) }.map_err(|e| {
-                        PacketStreamError::InvalidConfig(format!(
-                            "Failed to create AsyncFd for listening socket: {e}"
-                        ))
-                    })?;
-                    self.listening_sockets.push((
-                        device_info.clone(),
-                        chip.kind.clone(),
-                        chip.sim_type,
-                        chip.sim_profile.clone(),
-                        async_fd,
-                    ));
+                let out_fd = if is_listening_socket(&in_fd) {
+                    None
                 } else {
-                    let out_fd = match chip.fd_out {
-                        Some(fd) if fd != chip.fd_in => claim_fd(fd)?,
-                        _ => in_fd.try_clone().map_err(PacketStreamError::Io)?,
-                    };
-
-                    self.pending_static_streams.push_back((
-                        device_info.clone(),
-                        chip.kind.clone(),
-                        chip.sim_type,
-                        chip.sim_profile.clone(),
-                        (in_fd, out_fd),
-                    ));
-                }
+                    chip.fd_out.filter(|&fd| fd != chip.fd_in).map(claim_fd).transpose()?
+                };
+                self.add_stream_endpoints(
+                    device_info.clone(),
+                    chip.kind.clone(),
+                    chip.sim_type,
+                    chip.sim_profile.clone(),
+                    in_fd,
+                    out_fd,
+                )?;
             }
+        }
+        Ok(())
+    }
+
+    fn add_stream_endpoints(
+        &mut self,
+        device_info: DeviceInfo,
+        kind: String,
+        sim_type: Option<i32>,
+        sim_profile: Option<String>,
+        in_fd: OwnedFd,
+        out_fd: Option<OwnedFd>,
+    ) -> Result<()> {
+        if is_listening_socket(&in_fd) {
+            set_nonblocking(&in_fd)?;
+            // SAFETY: `in_fd` is an exclusively owned `OwnedFd` moved into `AsyncFd`;
+            // `AsyncFd::drop` deregisters it before `OwnedFd::drop` closes it, and
+            // `DualFdListener` never calls `get_mut()` or `into_inner()`.
+            let async_fd = unsafe { AsyncFd::register(in_fd) }.map_err(|e| {
+                PacketStreamError::InvalidConfig(format!(
+                    "Failed to create AsyncFd for listening socket: {e}"
+                ))
+            })?;
+            self.listening_sockets.push((device_info, kind, sim_type, sim_profile, async_fd));
+        } else {
+            let out_fd = match out_fd {
+                Some(fd) => fd,
+                None => in_fd.try_clone().map_err(PacketStreamError::Io)?,
+            };
+
+            self.pending_static_streams.push_back((
+                device_info,
+                kind,
+                sim_type,
+                sim_profile,
+                (in_fd, out_fd),
+            ));
         }
         Ok(())
     }
@@ -389,10 +419,9 @@ impl TransportListener for DualFdListener {
     }
 
     fn local_addr(&self) -> Result<StreamAddress> {
-        let total_chips: usize = self.config.devices.iter().map(|d| d.chips.len()).sum();
         Ok(StreamAddress::Fd {
-            in_fd: i32::try_from(total_chips).unwrap_or(i32::MAX),
-            out_fd: Some(i32::try_from(self.config.devices.len()).unwrap_or(i32::MAX)),
+            in_fd: i32::try_from(self.num_chips).unwrap_or(i32::MAX),
+            out_fd: Some(i32::try_from(self.num_devices).unwrap_or(i32::MAX)),
         })
     }
 
