@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use device_api::DeviceAction;
 use netsim_model::{ChipClient, ChipId};
 use wifi_actor::WifiClient;
 
@@ -137,34 +136,8 @@ async fn test_sink_closure_notification() {
     world.chips.retain(|c| c.id != 2);
 
     // Then
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(1));
-    tokio::pin!(timeout);
-
-    let mut notification_received = false;
-    loop {
-        tokio::select! {
-             Some(action) = world.device_action_rx.recv() => {
-                 match action {
-                     DeviceAction::NotifyChipRemoved(_, id) => {
-                         if id.0 == 2 {
-                             notification_received = true;
-                             break;
-                         }
-                     }
-                     _ => {}
-                 }
-             }
-             _ = &mut timeout => {
-                 panic!("Timeout waiting for NotifyChipRemoved");
-             }
-        }
-    }
-
-    assert!(notification_received);
-
-    // And
-    let chip = world.wifi_client.read(ChipId(2)).await;
-    assert!(chip.is_err(), "Chip should be removed from WifiActor");
+    world.then_device_is_notified_chip_removed(2).await;
+    world.then_chip_is_not_found(2).await;
 }
 
 #[test]
@@ -304,4 +277,26 @@ async fn test_chip_client_reset_restores_state_and_clears_stats() {
     // And: Chip 1 can transmit P2P traffic again after reset
     world.when_chip_transmits_unicast(0, 1, "TrafficAfterReset").await;
     world.then_chip_receives_payload(1, "TrafficAfterReset").await;
+}
+
+// Feature: Sink Disconnect Error Handling
+// Scenario: Broken SinkMapErr sink removes chip without re-poll panic
+//
+//   Given a world with a chip backed by a SinkMapErr-wrapped broken sink
+//   When the chip transmits a frame so WifiActor sends a TX ack to the sink
+//   Then the sink task closes cleanly without panicking
+//   And the device actor receives NotifyChipRemoved and the chip is removed
+#[tokio::test]
+async fn test_broken_sink_map_err_disconnect_removes_chip_without_panic() {
+    // Given
+    let mut world = World::new().await;
+    let chip_id = world.given_a_chip_with_broken_sink(7).await;
+
+    // When
+    world.when_chip_transmits_broadcast(0, "TriggerSinkSend").await;
+
+    // Then
+    world.then_sink_task_closed_without_delete_error(chip_id).await;
+    world.then_device_is_notified_chip_removed(chip_id).await;
+    world.then_chip_is_not_found(chip_id).await;
 }

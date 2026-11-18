@@ -39,6 +39,7 @@ netsim_rust_library(
     test_deps = [
         "//src/common",
         "//src/device-api:testing",
+        "//src/testing",
         "@tracing-subscriber",
     ],
     deps = [

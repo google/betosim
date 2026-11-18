@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use bytes::Bytes;
 use futures::{
-    Future,
+    Future, SinkExt,
     sink::Sink,
     stream::Stream,
     task::{Context, Poll},
@@ -75,6 +75,40 @@ pub fn mock_sink() -> (PinnedSink, mpsc::Receiver<Vec<u8>>) {
     (sink, packet_rx)
 }
 
+fn broken_pipe() -> std::io::Error {
+    std::io::Error::from(std::io::ErrorKind::BrokenPipe)
+}
+
+/// A mock [`Sink`] whose operations all fail with [`std::io::ErrorKind::BrokenPipe`].
+#[derive(Debug)]
+pub struct DisconnectedSink;
+
+impl Sink<Bytes> for DisconnectedSink {
+    type Error = std::io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Err(broken_pipe()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _item: Bytes) -> Result<(), Self::Error> {
+        Err(broken_pipe())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Err(broken_pipe()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Err(broken_pipe()))
+    }
+}
+
+/// Creates a mock packet sink wrapped in [`futures::sink::SinkMapErr`], like production
+/// transports. The first operation fails; polling it again after that error panics.
+pub fn mock_broken_sink() -> PinnedSink {
+    Box::pin(DisconnectedSink.sink_map_err(std::io::Error::other))
+}
+
 /// Creates a mock packet stream and a sender to inject packets into it.
 pub fn mock_stream() -> (Box<dyn Stream<Item = Bytes> + Send + Sync + Unpin>, mpsc::Sender<Bytes>) {
     let (packet_tx, packet_rx) = mpsc::channel(DEFAULT_STREAM_BUFFER_CAPACITY);
@@ -84,7 +118,7 @@ pub fn mock_stream() -> (Box<dyn Stream<Item = Bytes> + Send + Sync + Unpin>, mp
 
 #[cfg(test)]
 mod tests {
-    use futures::{SinkExt, StreamExt};
+    use futures::StreamExt;
 
     use super::*;
 
@@ -114,5 +148,24 @@ mod tests {
 
         assert_eq!(stream.next().await.unwrap(), Bytes::from_static(b"foo"));
         assert_eq!(stream.next().await.unwrap(), Bytes::from_static(b"bar"));
+    }
+
+    #[tokio::test]
+    async fn test_disconnected_sink_returns_broken_pipe() {
+        let mut sink = DisconnectedSink;
+
+        let send_err = sink.send(Bytes::from_static(b"pkt")).await.expect_err("send should fail");
+        assert_eq!(send_err.kind(), std::io::ErrorKind::BrokenPipe);
+
+        let close_err = sink.close().await.expect_err("close should fail");
+        assert_eq!(close_err.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn test_mock_broken_sink_fails_on_send() {
+        let mut sink = mock_broken_sink();
+
+        let send_err = sink.send(Bytes::from_static(b"pkt")).await.expect_err("send should fail");
+        assert_eq!(send_err.kind(), std::io::ErrorKind::Other);
     }
 }

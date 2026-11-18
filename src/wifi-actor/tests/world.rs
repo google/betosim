@@ -378,6 +378,34 @@ impl World {
         );
     }
 
+    pub async fn then_sink_task_closed_without_delete_error(&self, chip_id: u32) {
+        self.wait_for_lifecycle_info_and_assert_no_delete_error(
+            &format!("Sink task closed for chip {chip_id}"),
+            "broken sink send error",
+        )
+        .await;
+    }
+
+    pub async fn then_device_is_notified_chip_removed(&mut self, expected_chip_id: u32) {
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(1));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Some(action) = self.device_action_rx.recv() => {
+                    if let DeviceAction::NotifyChipRemoved(_, id) = action
+                        && id.0 == expected_chip_id
+                    {
+                        return;
+                    }
+                }
+                _ = &mut timeout => {
+                    panic!("Timeout waiting for NotifyChipRemoved for chip {expected_chip_id}");
+                }
+            }
+        }
+    }
+
     pub async fn then_sink_task_is_aborted_without_close_log(&self, chip_id: u32) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         self.wifi_client.list().await.expect("Failed to list chips");
@@ -463,21 +491,16 @@ impl World {
         id
     }
 
-    async fn create_chip_channels(
+    async fn create_chip_with_sink(
         &mut self,
         chip_id: u32,
         device_id: u32,
         mac: [u8; 6],
+        packet_sink: netsim_model::PacketSink,
+        stream_rx: mpsc::Receiver<Bytes>,
     ) -> ChipChannels {
-        let (stream_tx, stream_rx) = mpsc::channel(128);
         let (sink_tx, sink_rx) = mpsc::channel(128);
-
         let packet_stream = Box::new(ReceiverStream::new(sink_rx));
-        let packet_sink =
-            Box::pin(futures::sink::unfold(stream_tx, |tx, item: Bytes| async move {
-                let _ = tx.send(item).await;
-                Ok::<_, std::io::Error>(tx)
-            }));
 
         let chip = netsim_model::Chip {
             name: "wifi".to_string(),
@@ -497,6 +520,37 @@ impl World {
         self.wifi_client.create(ChipId(chip_id), params).await.expect("Failed to create chip");
 
         ChipChannels { id: chip_id, mac, stream_rx, sink_tx }
+    }
+
+    async fn create_chip_channels(
+        &mut self,
+        chip_id: u32,
+        device_id: u32,
+        mac: [u8; 6],
+    ) -> ChipChannels {
+        let (stream_tx, stream_rx) = mpsc::channel(128);
+        let packet_sink =
+            Box::pin(futures::sink::unfold(stream_tx, |tx, item: Bytes| async move {
+                let _ = tx.send(item).await;
+                Ok::<_, std::io::Error>(tx)
+            }));
+        self.create_chip_with_sink(chip_id, device_id, mac, packet_sink, stream_rx).await
+    }
+
+    pub async fn given_a_chip_with_broken_sink(&mut self, id_val: u32) -> u32 {
+        let src_mac = [0x00, 0x00, 0x00, 0x00, 0x00, id_val as u8];
+        let (_, stream_rx) = mpsc::channel(1);
+        let chip = self
+            .create_chip_with_sink(
+                id_val,
+                1,
+                src_mac,
+                netsim_testing::mock_broken_sink(),
+                stream_rx,
+            )
+            .await;
+        self.chips.push(chip);
+        id_val
     }
 
     pub async fn given_a_chip(&mut self, id_val: u32) -> u32 {

@@ -64,7 +64,8 @@ impl ActorService for WifiActor {
                 let mut sink = sink;
                 while let Some(packet) = rx.recv().await {
                     if sink.send(packet).await.is_err() {
-                        break;
+                        // Skip sink.close(): SinkMapErr panics if polled again after a send error.
+                        return sink_id;
                     }
                 }
                 let _ = sink.close().await;
