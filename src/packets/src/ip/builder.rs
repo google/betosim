@@ -31,14 +31,11 @@ impl<'a> Ipv4Builder<'a> {
         src_addr: Ipv4Addr,
         dst_addr: Ipv4Addr,
     ) -> Option<Self> {
-        if buffer.len() < std::mem::size_of::<Ipv4Header>() {
-            return None;
-        }
-        let (header_slice, payload) = buffer.split_at_mut(std::mem::size_of::<Ipv4Header>());
-        let header = Ipv4Header::mut_from_bytes(header_slice).ok()?;
+        let default_total_len = u16::try_from(std::mem::size_of::<Ipv4Header>()).ok()?;
+        let (header, payload) = Ipv4Header::mut_from_prefix(buffer).ok()?;
         header.version_ihl = (4 << 4) | 5;
         header.dscp_ecn = 0;
-        header.total_length.set(std::mem::size_of::<Ipv4Header>() as u16); // Default: 20 bytes (0 payload)
+        header.total_length.set(default_total_len); // Default: 20 bytes (0 payload)
         header.identification.set(0);
         header.flags_fragment_offset.set(0);
         header.ttl = 64;
@@ -80,8 +77,8 @@ impl<'a> Ipv4Builder<'a> {
 
     /// Sets the payload data.
     pub fn payload<'b>(&'b mut self, payload: &[u8]) -> Option<&'b mut Self> {
-        let total_len = std::mem::size_of::<Ipv4Header>() + payload.len();
-        if total_len > u16::MAX as usize {
+        let total_len = std::mem::size_of::<Ipv4Header>().checked_add(payload.len())?;
+        if u16::try_from(total_len).is_err() {
             return None;
         }
         self.payload.get_mut(..payload.len())?.copy_from_slice(payload);
@@ -91,12 +88,11 @@ impl<'a> Ipv4Builder<'a> {
 
     pub fn build(self) -> Option<usize> {
         let total_len = std::mem::size_of::<Ipv4Header>().checked_add(self.payload_len)?;
-        if total_len > u16::MAX as usize
-            || (!self.payload.is_empty() && self.payload_len > self.payload.len())
-        {
+        let total_len_u16 = u16::try_from(total_len).ok()?;
+        if !self.payload.is_empty() && self.payload_len > self.payload.len() {
             return None;
         }
-        self.header.total_length.set(total_len as u16);
+        self.header.total_length.set(total_len_u16);
         self.header.update_checksum();
         Some(total_len)
     }
@@ -115,11 +111,7 @@ impl<'a> Ipv6Builder<'a> {
         src_addr: Ipv6Addr,
         dst_addr: Ipv6Addr,
     ) -> Option<Self> {
-        if buffer.len() < std::mem::size_of::<Ipv6Header>() {
-            return None;
-        }
-        let (header_slice, payload) = buffer.split_at_mut(std::mem::size_of::<Ipv6Header>());
-        let header = Ipv6Header::mut_from_bytes(header_slice).ok()?;
+        let (header, payload) = Ipv6Header::mut_from_prefix(buffer).ok()?;
         header.version_tc_fl.set(6 << 28);
         header.payload_length.set(0); // Will be set later
         header.next_header = protocol;
@@ -140,7 +132,7 @@ impl<'a> Ipv6Builder<'a> {
 
     /// Sets the payload data.
     pub fn payload<'b>(&'b mut self, payload: &[u8]) -> Option<&'b mut Self> {
-        if payload.len() > u16::MAX as usize {
+        if u16::try_from(payload.len()).is_err() {
             return None;
         }
         self.payload.get_mut(..payload.len())?.copy_from_slice(payload);
@@ -154,12 +146,11 @@ impl<'a> Ipv6Builder<'a> {
     }
 
     pub fn build(self) -> Option<usize> {
-        if self.payload_len > u16::MAX as usize
-            || (!self.payload.is_empty() && self.payload_len > self.payload.len())
-        {
+        let payload_len = u16::try_from(self.payload_len).ok()?;
+        if !self.payload.is_empty() && self.payload_len > self.payload.len() {
             return None;
         }
-        self.header.payload_length.set(self.payload_len as u16);
-        Some(self.payload_len + std::mem::size_of::<Ipv6Header>())
+        self.header.payload_length.set(payload_len);
+        self.payload_len.checked_add(std::mem::size_of::<Ipv6Header>())
     }
 }
