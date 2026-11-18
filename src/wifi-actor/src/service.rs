@@ -174,6 +174,10 @@ impl ActorService for WifiActor {
                 let stats = self.medium.wifi_stats.to_proto();
                 Ok(WifiResponse::GlobalStats(Box::new(stats)))
             }
+            #[cfg(any(test, feature = "testing"))]
+            WifiReq::IsHostMdnsForwardingEnabled => {
+                Ok(WifiResponse::HostMdnsForwardingEnabled(self.forward_host_mdns))
+            }
             WifiReq::Reset { id } => {
                 self.medium.reset(id.0);
                 let initial_chip = self.initial_chips.get(&id).ok_or_else(|| {

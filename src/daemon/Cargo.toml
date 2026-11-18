@@ -97,4 +97,4 @@ cuttlefish = [
   "slirp-actor/cuttlefish",
   "uwb-actor/cuttlefish",
 ]
-testing = []
+testing = ["wifi-actor/testing"]

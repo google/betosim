@@ -67,6 +67,19 @@ impl WifiClient {
             Err(e) => Err(ClientError::Send(e.to_string())),
         }
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn is_host_mdns_forwarding_enabled(&self) -> Result<bool, ClientError> {
+        match self
+            .inner
+            .perform_action(None, crate::wifi_actor::WifiReq::IsHostMdnsForwardingEnabled)
+            .await
+        {
+            Ok(crate::wifi_actor::WifiResponse::HostMdnsForwardingEnabled(enabled)) => Ok(enabled),
+            Ok(_) => Err(ClientError::Recv("Unexpected action result".into())),
+            Err(e) => Err(ClientError::Send(e.to_string())),
+        }
+    }
 }
 
 #[async_trait::async_trait]

@@ -1018,3 +1018,25 @@ async fn test_host_dns_cli_flag_configures_slirp_and_drops_invalid() {
         ])
         .await;
 }
+
+// Scenario: Default daemon launch disables host mDNS forwarding in WifiActor
+#[tokio::test]
+async fn test_default_disables_host_mdns_forwarding() {
+    // Given
+    let mut world = World::new_with_cli_args(&["--no-shutdown"]).await;
+    // When
+    world.when_spawn_daemon().await;
+    // Then
+    world.then_host_mdns_forwarding_enabled(false).await;
+}
+
+// Scenario: --forward-host-mdns enables host mDNS forwarding in WifiActor
+#[tokio::test]
+async fn test_forward_host_mdns_cli_flag_enables_wifi_actor_forwarding() {
+    // Given
+    let mut world = World::new_with_cli_args(&["--no-shutdown", "--forward-host-mdns"]).await;
+    // When
+    world.when_spawn_daemon().await;
+    // Then
+    world.then_host_mdns_forwarding_enabled(true).await;
+}

@@ -396,6 +396,7 @@ pub struct World {
     pub packet_client: PacketStreamerClient,
     pub capture_client: capture_actor::CaptureClient,
     pub slirp_client: slirp_actor::SlirpClient,
+    pub wifi_client: wifi_actor::WifiClient,
     pub packet_sender:
         Option<grpcio::ClientDuplexSender<netsim_proto::packet_streamer::PacketRequest>>,
     pub packet_receiver:
@@ -490,6 +491,7 @@ impl World {
 
         let capture_client = daemon.capture_client().clone();
         let slirp_client = daemon.slirp_client().clone();
+        let wifi_client = daemon.wifi_client().clone();
 
         let env = SHARED_ENV.get_or_init(|| Arc::new(grpcio::Environment::new(1))).clone();
         let ch = ChannelBuilder::new(Arc::clone(&env)).connect(&format!("localhost:{}", grpc_port));
@@ -507,6 +509,7 @@ impl World {
             packet_client,
             capture_client,
             slirp_client,
+            wifi_client,
             packet_sender: None,
             packet_receiver: None,
             grpc_port,
@@ -1914,5 +1917,15 @@ impl World {
             status.configured_dns_servers, expected,
             "Unexpected Slirp configured DNS servers"
         );
+    }
+
+    /// Then WifiActor reports `expected` for host mDNS forwarding.
+    pub async fn then_host_mdns_forwarding_enabled(&mut self, expected: bool) {
+        let enabled = self
+            .wifi_client
+            .is_host_mdns_forwarding_enabled()
+            .await
+            .expect("Failed to query WifiActor host mDNS forwarding state");
+        assert_eq!(enabled, expected, "Unexpected daemon host mDNS forwarding state");
     }
 }

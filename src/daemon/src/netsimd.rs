@@ -451,6 +451,8 @@ pub struct NetsimDaemon {
     link_client: Box<dyn link_api::LinkClient>,
 
     slirp_client: SlirpClient,
+    #[cfg(any(test, feature = "testing"))]
+    wifi_client: wifi_actor::WifiClient,
     chip_clients: HashMap<ChipKind, Box<dyn ChipClient>>,
     /// Guard holding the discovery INI file lock. Declared as the last field so
     /// `netsim.ini.lock` is released only after `_grpc_server`, actor clients,
@@ -491,6 +493,11 @@ impl NetsimDaemon {
     #[cfg(any(test, feature = "testing"))]
     pub fn slirp_client(&self) -> &SlirpClient {
         &self.slirp_client
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn wifi_client(&self) -> &wifi_actor::WifiClient {
+        &self.wifi_client
     }
 
     /// Creates a new `NetsimDaemon` instance or returns config for forwarding.
@@ -863,10 +870,12 @@ impl NetsimDaemon {
         let (uwb_runner, uwb_client) = uwb_actor::new();
         let uwb_actor = uwb_actor::UwbActor::new(device_client.clone());
 
+        #[cfg(any(test, feature = "testing"))]
+        let daemon_wifi_client = wifi_client.clone();
         // Prepare chip clients map for DeviceServer
         let mut chip_clients: HashMap<ChipKind, Box<dyn ChipClient>> = HashMap::new();
         chip_clients.insert(ChipKind::BLUETOOTH, Box::new(bt_client.clone()));
-        chip_clients.insert(ChipKind::WIFI, Box::new(wifi_client.clone()));
+        chip_clients.insert(ChipKind::WIFI, Box::new(wifi_client));
         chip_clients.insert(ChipKind::ETHERNET, Box::new(eth_client.clone()));
         chip_clients.insert(ChipKind::CELLULAR_DATA, Box::new(eth_client.clone()));
         chip_clients.insert(ChipKind::UWB, Box::new(uwb_client.clone()));
@@ -1011,6 +1020,8 @@ impl NetsimDaemon {
             ini_lock_inode,
             link_client: Box::new(link_client),
             slirp_client,
+            #[cfg(any(test, feature = "testing"))]
+            wifi_client: daemon_wifi_client,
             chip_clients: daemon_chip_clients,
             _ini_guard: initialized_guard,
         }))

@@ -38,7 +38,11 @@ use crate::{
 pub enum WifiReq {
     GetStatistics,
     GetGlobalStats,
-    Reset { id: ChipId },
+    #[cfg(any(test, feature = "testing"))]
+    IsHostMdnsForwardingEnabled,
+    Reset {
+        id: ChipId,
+    },
 }
 
 /// Responses from the WifiActor (Output).
@@ -47,6 +51,8 @@ pub enum WifiResponse {
     Ok,
     Statistics(Box<[NetsimRadioStats]>),
     GlobalStats(Box<ProtoWifiIpcStats>),
+    #[cfg(any(test, feature = "testing"))]
+    HostMdnsForwardingEnabled(bool),
     Chip(Box<netsim_model::Chip>),
 }
 
