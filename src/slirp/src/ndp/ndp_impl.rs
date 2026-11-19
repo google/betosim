@@ -124,27 +124,25 @@ impl NdpReply {
         Self::router_advertisement(config, ALL_NODES_MULTICAST_V6, ALL_NODES_MAC)
     }
 
+    fn frame_header(&self) -> Icmpv6FrameHeader {
+        let (icmp_type, src_mac, dst_mac, src_ip, dst_ip) = match self {
+            Self::NeighborAdvertisement { src_mac, dst_mac, src_ip, dst_ip, .. } => {
+                (Icmpv6Type::NeighborAdvertisement, *src_mac, *dst_mac, *src_ip, *dst_ip)
+            }
+            Self::RouterAdvertisement { src_mac, dst_mac, src_ip, dst_ip, .. } => {
+                (Icmpv6Type::RouterAdvertisement, *src_mac, *dst_mac, *src_ip, *dst_ip)
+            }
+        };
+        Icmpv6FrameHeader { src_mac, dst_mac, src_ip, dst_ip, icmp_type }
+    }
+
     /// Encodes the NDP reply into the provided buffer as a complete Ethernet + IPv6 + ICMPv6 frame.
     ///
     /// Returns the number of bytes written, or `None` if the buffer is too small.
     pub(crate) fn encode(&self, buf: &mut [u8]) -> Option<usize> {
+        let hdr = self.frame_header();
         match self {
-            Self::NeighborAdvertisement {
-                src_mac,
-                dst_mac,
-                src_ip,
-                dst_ip,
-                target_ip,
-                target_mac,
-                flags,
-            } => {
-                let hdr = Icmpv6FrameHeader {
-                    src_mac: *src_mac,
-                    dst_mac: *dst_mac,
-                    src_ip: *src_ip,
-                    dst_ip: *dst_ip,
-                    icmp_type: Icmpv6Type::NeighborAdvertisement,
-                };
+            Self::NeighborAdvertisement { target_ip, target_mac, flags, .. } => {
                 encode_icmpv6_frame(
                     buf,
                     &hdr,
@@ -157,22 +155,7 @@ impl NdpReply {
                     },
                 )
             }
-            Self::RouterAdvertisement {
-                src_mac,
-                dst_mac,
-                src_ip,
-                dst_ip,
-                prefix,
-                prefix_len,
-                dns_server,
-            } => {
-                let hdr = Icmpv6FrameHeader {
-                    src_mac: *src_mac,
-                    dst_mac: *dst_mac,
-                    src_ip: *src_ip,
-                    dst_ip: *dst_ip,
-                    icmp_type: Icmpv6Type::RouterAdvertisement,
-                };
+            Self::RouterAdvertisement { prefix, prefix_len, dns_server, .. } => {
                 encode_icmpv6_frame(
                     buf,
                     &hdr,
@@ -180,7 +163,7 @@ impl NdpReply {
                     |payload| {
                         RouterAdvertisementBuilder::new(payload)?
                             .rdnss(dns_server.octets(), u32::from(RA_ROUTER_LIFETIME_SECS))
-                            .build(0, 0, src_mac.bytes, *prefix, *prefix_len)
+                            .build(0, 0, hdr.src_mac.bytes, *prefix, *prefix_len)
                     },
                 )
             }

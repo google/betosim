@@ -33,6 +33,15 @@ const GUEST_LINK_LOCAL: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0215, 0xb2ff
 const ALL_ROUTERS_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
 const TEST_BUF_CAP: usize = 256;
 
+fn icmpv6_header(icmpv6_type: Icmpv6Type) -> Icmpv6Header {
+    Icmpv6Header {
+        icmpv6_type: icmpv6_type as u8,
+        icmpv6_code: 0,
+        icmpv6_checksum: 0.into(),
+        rest: [0; 4],
+    }
+}
+
 #[test]
 fn test_ndp_table_creation_and_lookup() {
     let mut ndp_table = NdpTable::new();
@@ -54,12 +63,7 @@ fn test_handle_ndp_packet_neighbor_solicitation_host_ipv6() {
 
     let ns = NeighborSolicitation { target_addr: config.host_ipv6.octets() };
 
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::NeighborSolicitation as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::NeighborSolicitation);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, ns.as_bytes());
     let Some(NdpReply::NeighborAdvertisement {
@@ -92,12 +96,7 @@ fn test_handle_ndp_packet_neighbor_solicitation_gateway_link_local() {
 
     let ns = NeighborSolicitation { target_addr: GATEWAY_LINK_LOCAL_IPV6.octets() };
 
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::NeighborSolicitation as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::NeighborSolicitation);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, ns.as_bytes());
     let Some(NdpReply::NeighborAdvertisement { src_ip, target_ip, .. }) = reply else {
@@ -116,12 +115,7 @@ fn test_handle_ndp_packet_neighbor_solicitation_dad() {
 
     let ns = NeighborSolicitation { target_addr: config.host_ipv6.octets() };
 
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::NeighborSolicitation as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::NeighborSolicitation);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, ns.as_bytes());
     let Some(NdpReply::NeighborAdvertisement { dst_mac, dst_ip, flags, .. }) = reply else {
@@ -141,12 +135,7 @@ fn test_handle_ndp_packet_neighbor_solicitation_ignored() {
 
     let ns = NeighborSolicitation { target_addr: other_ip.octets() };
 
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::NeighborSolicitation as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::NeighborSolicitation);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, ns.as_bytes());
     assert!(reply.is_none());
@@ -158,12 +147,7 @@ fn test_handle_ndp_packet_router_solicitation_unicast() {
     let ipv6_hdr =
         Ipv6Header::new(GUEST_LINK_LOCAL.octets(), ALL_ROUTERS_MULTICAST.octets(), IP_P_ICMPV6);
 
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::RouterSolicitation as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::RouterSolicitation);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, &[]);
     let Some(NdpReply::RouterAdvertisement {
@@ -197,12 +181,7 @@ fn test_handle_ndp_packet_router_solicitation_unspecified() {
         IP_P_ICMPV6,
     );
 
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::RouterSolicitation as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::RouterSolicitation);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, &[]);
     let Some(NdpReply::RouterAdvertisement { dst_mac, dst_ip, .. }) = reply else {
@@ -218,12 +197,7 @@ fn test_handle_ndp_packet_non_ndp_ignored() {
     let config = Config::default();
     let ipv6_hdr =
         Ipv6Header::new(GUEST_LINK_LOCAL.octets(), config.host_ipv6.octets(), IP_P_ICMPV6);
-    let icmpv6_hdr = Icmpv6Header {
-        icmpv6_type: Icmpv6Type::EchoRequest as u8,
-        icmpv6_code: 0,
-        icmpv6_checksum: 0.into(),
-        rest: [0; 4],
-    };
+    let icmpv6_hdr = icmpv6_header(Icmpv6Type::EchoRequest);
 
     let reply = handle_ndp_packet(&config, GUEST_MAC, &ipv6_hdr, &icmpv6_hdr, &[]);
     assert!(reply.is_none());
