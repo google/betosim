@@ -190,6 +190,7 @@ Bluetooth-Actor sits between the **Device-Actor** (upstream) and **RootCanal**
 | **RQ-LIFE-03**  | Delete Chip                                  | `lifecycle_tests.rs`  | `test_remove_chip`                                                       | **Full**    |
 | **RQ-HCI-01**   | Bridge Input Stream (Host->Ctrl)    | `lifecycle_tests.rs`  | `test_hci_reset_command` (Sends HCI Reset)                      | **Full**    |
 | **RQ-HCI-02**   | Bridge Output Sink (Ctrl->Host)     | `lifecycle_tests.rs`  | `test_hci_reset_command` (Receives Command Complete)            | **Full**    |
+| **RQ-HCI-03**   | Sink Backpressure & Disconnection   | `hci_callbacks.rs`, `lifecycle_tests.rs` | `test_send_hci_drops_when_channel_full`, `test_sink_loop_broken_pipe_map_err_returns_without_panic`, `test_sink_loop_clean_eof_closes_sink`, `test_chip_dies_on_packet_sink_error`, `test_chip_dies_on_broken_sink_map_err_without_panic` | **Full**    |
 | **RQ-SIG-01**   | Hybrid RSSI (Link > Spatial)        | `update_chip_test.rs` | `test_update_chip` (Verifies properties passed)                 | **PARTIAL** |
 | **RQ-SIG-02**   | Propagate Position                  | `update_chip_test.rs` | `test_update_chip`                                              | **Full**    |
 | **RQ-OBS-01**   | Get Statistics                      | `N/A`                 | **Missing**                                                     | **None**    |

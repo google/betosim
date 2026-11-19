@@ -96,6 +96,7 @@ rust_test_host {
         "libnetsim_next_actor_framework_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_model_testing",
+        "libnetsim_next_netsim_testing_testing",
         "libnetsim_next_packets_testing",
         "libnetsim_next_rootcanal_testing",
         "libparking_lot",

@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use netsim_model::ChipClient;
+use netsim_packets::Reset;
 use tokio::time::Duration;
 
 use crate::world::World;
@@ -128,6 +129,24 @@ async fn test_chip_dies_on_packet_sink_error() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let chip_count: usize = world.client.read_count_for_testing().await.expect("chip count");
     assert_eq!(chip_count, 0);
+}
+
+// Scenario: Chip removal on broken SinkMapErr packet sink without panic
+//
+//   Given a bluetooth chip backed by a SinkMapErr-wrapped broken sink
+//   When an HCI reset command triggers an outbound packet write failure
+//   Then the chip is removed from the actor without panicking
+#[tokio::test]
+async fn test_chip_dies_on_broken_sink_map_err_without_panic() {
+    // Given
+    let mut world = World::new();
+    world.given_device_with_broken_sink("A").await;
+
+    // When
+    world.when_command_sent("A", Reset {}).await;
+
+    // Then
+    world.then_chip_eventually_removed("A").await;
 }
 
 // Scenario: Reset re-enables chip states

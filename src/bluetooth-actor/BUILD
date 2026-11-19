@@ -44,6 +44,9 @@ netsim_rust_library(
     proc_macro_deps = [
         "@async-trait",
     ],
+    test_deps = [
+        "//src/testing",
+    ],
     deps = BLUETOOTH_DEPS,
 )
 

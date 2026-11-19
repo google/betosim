@@ -155,18 +155,17 @@ impl World {
         .await;
     }
 
-    /// Creates a Bluetooth chip in Device mode with custom controller properties.
-    pub async fn given_created_device_chip_with_properties(
+    async fn create_device_chip_with_sink(
         &mut self,
         name: &str,
         bt_properties: netsim_model::BtControllerProperties,
+        sink: PacketSink,
     ) {
         if self.chips.contains_key(name) {
             panic!("Chip with name '{}' already exists", name);
         }
 
         let (stream, stream_tx) = crate::test_utils::mock_stream();
-        let (sink, sink_rx) = crate::test_utils::mock_sink();
 
         self.create_chip_with_properties(
             name,
@@ -179,15 +178,30 @@ impl World {
         .await;
 
         self.streams.insert(name.to_string(), stream_tx);
+    }
+
+    /// Creates a Bluetooth chip in Device mode with custom controller properties.
+    pub async fn given_created_device_chip_with_properties(
+        &mut self,
+        name: &str,
+        bt_properties: netsim_model::BtControllerProperties,
+    ) {
+        let (sink, sink_rx) = crate::test_utils::mock_sink();
+        self.create_device_chip_with_sink(name, bt_properties, sink).await;
         self.sinks.insert(name.to_string(), sink_rx);
     }
 
-    pub async fn given_slow_device(&mut self, name: &str, delay: tokio::time::Duration) {
-        if self.chips.contains_key(name) {
-            panic!("Chip with name '{}' already exists", name);
-        }
+    /// Creates a Bluetooth chip in Device mode backed by a SinkMapErr-wrapped broken sink.
+    pub async fn given_device_with_broken_sink(&mut self, name: &str) {
+        self.create_device_chip_with_sink(
+            name,
+            netsim_model::BtControllerProperties::default(),
+            netsim_testing::mock_broken_sink(),
+        )
+        .await;
+    }
 
-        let (stream, stream_tx) = crate::test_utils::mock_stream();
+    pub async fn given_slow_device(&mut self, name: &str, delay: tokio::time::Duration) {
         let (sink, mut sink_rx) = crate::test_utils::mock_sink();
 
         // Spawn a background task to slow down the reading from the packet sink.
@@ -199,16 +213,12 @@ impl World {
             }
         });
 
-        self.create_chip(
+        self.create_device_chip_with_sink(
             name,
-            BluetoothMode::Device(DeviceParams {}),
-            Some(stream),
-            Some(sink),
-            self.device_id,
+            netsim_model::BtControllerProperties::default(),
+            sink,
         )
         .await;
-
-        self.streams.insert(name.to_string(), stream_tx);
         self.sinks.insert(name.to_string(), slow_rx);
     }
 

@@ -110,12 +110,12 @@ pub(crate) async fn sink_loop(
     debug!("sink_loop: Started for chip {}", id);
     while let Some(packet) = receiver.recv().await {
         debug!("sink_loop: Received packet len={}", packet.len());
-        if sink.send(packet).await.is_err() {
-            error!("Sink for chip {} failed", id);
-            break;
-        } else {
-            debug!("sink_loop: Sent packet successfully");
+        if let Err(error) = sink.send(packet).await {
+            error!(%error, "Sink for chip {id} failed");
+            // Skip sink.close(): SinkMapErr panics if sink.close() returns a second error.
+            return id;
         }
+        debug!("sink_loop: Sent packet successfully");
     }
     let _ = sink.close().await;
     error!("Sink task for chip {} finished", id);
@@ -124,10 +124,52 @@ pub(crate) async fn sink_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll},
+    };
+
     use bytes::Bytes;
+    use futures::Sink;
+    use netsim_testing::mock_broken_sink;
     use tokio::sync::{mpsc, mpsc::error::TryRecvError};
 
     use super::*;
+
+    struct CloseFlagSink {
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Sink<Bytes> for CloseFlagSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Bytes) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.closed.store(true, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn test_send_hci_drops_when_channel_full() {
@@ -184,5 +226,32 @@ mod tests {
             packets[netsim_model::NetsimRadioStats::MAX_INVALID_PACKETS - 1].description,
             format!("error {}", netsim_model::NetsimRadioStats::MAX_INVALID_PACKETS + 4)
         );
+    }
+
+    #[tokio::test]
+    async fn test_sink_loop_broken_pipe_map_err_returns_without_panic() {
+        let (tx, rx) = mpsc::channel(4);
+        let sink = mock_broken_sink();
+
+        tx.send(Bytes::from_static(b"packet")).await.expect("send packet");
+
+        let returned_id = sink_loop(sink, rx, ChipId::from(1)).await;
+        assert_eq!(returned_id, ChipId::from(1));
+    }
+
+    #[tokio::test]
+    async fn test_sink_loop_clean_eof_closes_sink() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let sink: netsim_model::PacketSink = Box::pin(
+            CloseFlagSink { closed: Arc::clone(&closed) }.sink_map_err(std::io::Error::other),
+        );
+        let (tx, rx) = mpsc::channel(4);
+
+        tx.send(Bytes::from_static(b"packet")).await.expect("send packet");
+        drop(tx);
+
+        let returned_id = sink_loop(sink, rx, ChipId::from(1)).await;
+        assert_eq!(returned_id, ChipId::from(1));
+        assert!(closed.load(Ordering::SeqCst));
     }
 }
