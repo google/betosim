@@ -15,6 +15,7 @@
 //! Command Line Interface for Netsim
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+#![deny(unsafe_code)]
 
 mod ap;
 mod args;

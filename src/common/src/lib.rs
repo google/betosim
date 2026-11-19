@@ -16,6 +16,8 @@
 //!
 //! A collection of utilities for netsimd and netsim.
 
+#[deny(unsafe_code)]
 pub(crate) mod err;
+#[deny(unsafe_code)]
 pub mod system;
 pub mod util;

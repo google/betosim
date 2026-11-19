@@ -14,13 +14,26 @@
 
 //! # netsim utilities.
 
+#[deny(unsafe_code)]
 pub mod bluetooth_mac;
+#[deny(unsafe_code)]
 pub mod ini_file;
+#[deny(unsafe_code)]
 pub mod net;
+#[deny(unsafe_code)]
 pub mod netsim_logger;
+#[cfg(not(windows))]
+#[deny(unsafe_code)]
 pub mod os_utils;
+#[cfg(windows)]
+pub mod os_utils;
+#[deny(unsafe_code)]
 pub mod proto_print_options;
+#[deny(unsafe_code)]
 pub mod scanner_util;
+#[deny(unsafe_code)]
 pub mod time_display;
+#[deny(unsafe_code)]
 pub mod websocket;
+#[deny(unsafe_code)]
 pub mod zip_artifact;
