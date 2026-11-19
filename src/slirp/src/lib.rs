@@ -14,7 +14,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-pub mod arp;
+mod arp;
 pub mod dhcp;
 pub mod dhcpv6;
 pub mod dns;

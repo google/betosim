@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod arp_impl;
-pub use arp_impl::ArpTable;
+pub(super) use arp_impl::ArpTable;
 
 #[cfg(test)]
 mod tests;

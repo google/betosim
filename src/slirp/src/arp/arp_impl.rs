@@ -19,16 +19,16 @@ use serde::{Deserialize, Serialize};
 
 /// Handles Address Resolution Protocol (ARP).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ArpEntry {
-    pub mac: MacAddr,
+struct ArpEntry {
+    mac: MacAddr,
     #[serde(skip)]
-    pub last_accessed_tick: u64,
+    last_accessed_tick: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ArpTable {
-    pub(crate) cache: HashMap<Ipv4Addr, ArpEntry>,
-    pub(crate) access_counter: u64,
+pub(crate) struct ArpTable {
+    cache: HashMap<Ipv4Addr, ArpEntry>,
+    access_counter: u64,
 }
 
 impl Default for ArpTable {
@@ -38,13 +38,13 @@ impl Default for ArpTable {
 }
 
 impl ArpTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { cache: HashMap::new(), access_counter: 0 }
     }
 
     /// Adds or updates an entry in the ARP table with bounded size limit and
     /// LRU eviction.
-    pub fn add_entry(&mut self, ip: Ipv4Addr, mac: MacAddr) {
+    pub(crate) fn add_entry(&mut self, ip: Ipv4Addr, mac: MacAddr) {
         const MAX_ARP_ENTRIES: usize = 512;
         self.access_counter = self.access_counter.wrapping_add(1);
         let current_tick = self.access_counter;
@@ -57,7 +57,7 @@ impl ArpTable {
     }
 
     /// Looks up a MAC address for the given IPv4 address.
-    pub fn lookup(&self, ip: &Ipv4Addr) -> Option<MacAddr> {
+    pub(crate) fn lookup(&self, ip: &Ipv4Addr) -> Option<MacAddr> {
         self.cache.get(ip).map(|entry| entry.mac)
     }
 
@@ -65,7 +65,7 @@ impl ArpTable {
     ///
     /// If the packet is a "who-has" request for an IP address owned by this
     /// table, it will generate and return an "is-at" reply packet.
-    pub fn handle_packet(&mut self, packet: &ArpPacket) -> Option<Vec<u8>> {
+    pub(crate) fn handle_packet(&mut self, packet: &ArpPacket) -> Option<Vec<u8>> {
         // We only care about ARP requests for IPv4 over Ethernet.
         if packet.hardware_type.get() != 1 || packet.protocol_type.get() != 0x0800 {
             return None;
