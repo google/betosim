@@ -66,8 +66,6 @@ const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 const SUBPROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CHILD_TEST_PASS_MARKER: &str = "1 passed; 0 failed";
 const REDACTED_WIFI_PASSWORD_FIELD: &str = r#"wifi_password: "<redacted>""#;
-// TODO(b/584604993): Re-enable on Windows once file-redirection integration tests are re-enabled.
-#[cfg(not(target_os = "windows"))]
 const ARTIFACTS_PATH_LOG_MARKER: &str = "netsim artifacts path:";
 const SCRUBBED_ENV_VARS: &[&str] = &[
     "RUST_LOG",
@@ -188,8 +186,6 @@ impl IsolatedChildOutput {
     }
 
     /// Then default `netsim_stdout.log` and `netsim_stderr.log` were not created.
-    // TODO(b/584604993): Re-enable on Windows once file-redirection integration tests are re-enabled.
-    #[cfg(not(target_os = "windows"))]
     pub fn then_no_default_log_files_created(&self) {
         let netsimd_temp = self.netsimd_temp_dir();
         assert!(
@@ -207,8 +203,6 @@ impl IsolatedChildOutput {
     /// Then `stdout_filename` captures the pass marker while piped stdout does not,
     /// and `stderr_filename` logs the artifacts path with `secret` redacted while
     /// piped stderr leaks neither the artifacts path nor `secret`.
-    // TODO(b/584604993): Re-enable on Windows once file-redirection integration tests are re-enabled.
-    #[cfg(not(target_os = "windows"))]
     pub fn then_redirected_logs_written(
         &self,
         stdout_filename: &str,

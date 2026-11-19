@@ -14,15 +14,14 @@
 
 //! # os utility functions
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::fd::AsRawFd;
-#[cfg(target_os = "windows")]
-use std::os::windows::io::AsRawHandle;
+use std::{env, fmt::Write as _, io, path::PathBuf};
+#[cfg(unix)]
+use std::{ffi::CString, os::fd::AsRawFd};
+#[cfg(windows)]
 use std::{
-    env,
-    ffi::{CString, NulError},
-    fmt::Write as _,
-    path::PathBuf,
+    fs::File,
+    io::Write as _,
+    os::windows::io::{FromRawHandle, IntoRawHandle},
 };
 
 use tracing::warn;
@@ -131,7 +130,8 @@ where
 }
 
 /// Redirect Standard Stream
-pub fn redirect_std_stream(instance_name: &str) -> Result<(), NulError> {
+#[cfg(unix)]
+pub fn redirect_std_stream(instance_name: &str) -> io::Result<()> {
     // Construct File Paths
     let netsim_temp_dir = netsimd_temp_dir();
     let stdout_filename =
@@ -145,22 +145,10 @@ pub fn redirect_std_stream(instance_name: &str) -> Result<(), NulError> {
     let mode_c = CString::new("w")?;
 
     // Obtain the raw file descriptors for stdout.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let stdout_fd = std::io::stdout().as_raw_fd();
-    #[cfg(target_os = "windows")]
-    let stdout_fd =
-        // SAFETY: This operation allows opening a runtime file descriptor in Windows.
-        // This is necessary to translate the RawHandle as a FileDescriptor to redirect streams.
-        unsafe { libc::open_osfhandle(std::io::stdout().as_raw_handle() as isize, libc::O_RDWR) };
 
     // Obtain the raw file descriptors for stderr.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let stderr_fd = std::io::stderr().as_raw_fd();
-    #[cfg(target_os = "windows")]
-    let stderr_fd =
-        // SAFETY: This operation allows opening a runtime file descriptor in Windows.
-        // This is necessary to translate the RawHandle as a FileDescriptor to redirect streams.
-        unsafe { libc::open_osfhandle(std::io::stderr().as_raw_handle() as isize, libc::O_RDWR) };
 
     // SAFETY: These operations allow redirection of stdout and stderr stream to a
     // file if terminal. Convert the raw file descriptors to FILE pointers using
@@ -174,6 +162,60 @@ pub fn redirect_std_stream(instance_name: &str) -> Result<(), NulError> {
         libc::freopen(stderr_filename_c.as_ptr(), mode_c.as_ptr(), stderr_file);
     }
 
+    Ok(())
+}
+
+/// Redirect Standard Stream
+#[cfg(windows)]
+pub fn redirect_std_stream(instance_name: &str) -> io::Result<()> {
+    let netsim_temp_dir = netsimd_temp_dir();
+    let stdout_file =
+        File::create(netsim_temp_dir.join(format!("netsim_{instance_name}stdout.log")))?;
+    let stderr_file =
+        File::create(netsim_temp_dir.join(format!("netsim_{instance_name}stderr.log")))?;
+
+    // Hold the Rust stdio locks so other threads can't write mid-swap.
+    let mut stdout_lock = io::stdout().lock();
+    let mut stderr_lock = io::stderr().lock();
+    let _ = stdout_lock.flush();
+    let _ = stderr_lock.flush();
+
+    redirect_stream(stdout_file, StdStream::Stdout)?;
+    redirect_stream(stderr_file, StdStream::Stderr)?;
+
+    drop((stdout_lock, stderr_lock));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum StdStream {
+    Stdout = 1,
+    Stderr = 2,
+}
+
+/// Points stdout or stderr (CRT fd and, via `_dup2`, the Win32 std handle) at `file`.
+#[cfg(windows)]
+fn redirect_stream(file: File, stream: StdStream) -> io::Result<()> {
+    let target_fd = stream as libc::c_int;
+    let raw = file.into_raw_handle();
+    // SAFETY: `raw` is an open handle we own; on success the CRT fd takes ownership.
+    let fd = unsafe { libc::open_osfhandle(raw as libc::intptr_t, libc::O_WRONLY | libc::O_TEXT) };
+    if fd == -1 {
+        // SAFETY: `_open_osfhandle` failed, so `raw` is still open and owned only by us.
+        drop(unsafe { File::from_raw_handle(raw) });
+        return Err(io::Error::other("_open_osfhandle failed"));
+    }
+    // UCRT `_dup2` updates the Win32 std handles for console apps, so Rust stdio follows.
+    // SAFETY: `fd` is an open CRT fd and `stream` is this process's stdout or stderr fd.
+    let dup_res = unsafe { libc::dup2(fd, target_fd) };
+    if fd != target_fd {
+        // SAFETY: `fd` is owned from `_open_osfhandle` and is not used after this call.
+        let _ = unsafe { libc::close(fd) };
+    }
+    if dup_res != 0 {
+        return Err(io::Error::other("_dup2 failed"));
+    }
     Ok(())
 }
 
