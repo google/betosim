@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! Device Actor
 //!
 //! This crate provides the `DeviceActor` which manages the lifecycle of devices

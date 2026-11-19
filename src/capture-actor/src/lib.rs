@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! Capture Actor
 //!
 //! This crate provides an actor for managing packet captures. It handles
