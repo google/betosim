@@ -74,6 +74,25 @@ pub struct DualFdConfig {
     pub devices: Vec<DeviceConfig>,
 }
 
+#[derive(Debug)]
+pub struct DualFdChipEndpoints {
+    pub kind: String,
+    /// Input to the device (netsim writes to it).
+    pub in_fd: OwnedFd,
+    /// Output from the device (netsim reads from it). When `None`, `in_fd` is
+    /// bidirectional; must be `None` when `in_fd` is a listening socket.
+    pub out_fd: Option<OwnedFd>,
+    pub sim_type: Option<i32>,
+    pub sim_profile: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct DualFdDeviceEndpoints {
+    pub name: Option<String>,
+    pub chips: Vec<DualFdChipEndpoints>,
+    pub device_info: Option<DeviceInfo>,
+}
+
 #[cfg(all(not(test), feature = "cuttlefish"))]
 fn claim_fd(fd: i32) -> Result<OwnedFd> {
     take_fd_ownership(fd)
@@ -208,6 +227,47 @@ impl DualFdListener {
         Ok(listener)
     }
 
+    /// Creates a [`DualFdListener`] from pre-claimed device and chip endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - [`PacketStreamError::InvalidConfig`]: a listening socket specifies
+    ///   `out_fd: Some(_)`, or `AsyncFd::register` fails to register the socket
+    ///   with the Tokio reactor.
+    /// - [`PacketStreamError::Io`]: setting `O_NONBLOCK` on a listening socket
+    ///   fails, or `OwnedFd::try_clone` fails for a bidirectional non-listening
+    ///   `in_fd` when `out_fd` is `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any endpoint is a listening socket and this function is called
+    /// outside an active Tokio runtime.
+    pub fn try_new_with_owned_fds(devices: Vec<DualFdDeviceEndpoints>) -> Result<Self> {
+        let num_devices = devices.len();
+        let num_chips = devices.iter().map(|d| d.chips.len()).sum();
+        let mut listener = Self {
+            num_devices,
+            num_chips,
+            pending_static_streams: VecDeque::new(),
+            listening_sockets: Vec::new(),
+        };
+        for device in devices {
+            let device_info = resolve_device_info(device.name.as_deref(), device.device_info);
+            for chip in device.chips {
+                listener.add_stream_endpoints(
+                    device_info.clone(),
+                    chip.kind,
+                    chip.sim_type,
+                    chip.sim_profile,
+                    chip.in_fd,
+                    chip.out_fd,
+                )?;
+            }
+        }
+        Ok(listener)
+    }
+
     fn prepare_streams(&mut self, config: &DualFdConfig) -> Result<()> {
         self.pending_static_streams.clear();
         self.listening_sockets.clear();
@@ -244,6 +304,11 @@ impl DualFdListener {
         out_fd: Option<OwnedFd>,
     ) -> Result<()> {
         if is_listening_socket(&in_fd) {
+            if out_fd.is_some() {
+                return Err(PacketStreamError::InvalidConfig(format!(
+                    "Listening socket endpoint for chip {kind} cannot specify out_fd"
+                )));
+            }
             set_nonblocking(&in_fd)?;
             // SAFETY: `in_fd` is an exclusively owned `OwnedFd` moved into `AsyncFd`;
             // `AsyncFd::drop` deregisters it before `OwnedFd::drop` closes it, and
@@ -449,6 +514,14 @@ mod tests {
 
     const EXPECTED_CHIP_COUNT: i32 = 2;
     const EXPECTED_DEVICE_COUNT: i32 = 1;
+
+    struct SocketGuard<'a>(&'a Path);
+
+    impl Drop for SocketGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0);
+        }
+    }
 
     fn prepare_test_socket(socket_path: &Path) -> UnixListener {
         match std::fs::remove_file(socket_path) {
@@ -719,6 +792,227 @@ mod tests {
         assert_multi_chip_static_streams_roundtrip(
             listener,
             "multi-chip-dev",
+            guest_sock,
+            guest_to_host_w,
+            host_to_guest_r,
+            CHIP1_SIM_TYPE,
+            CHIP1_SIM_PROFILE,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_listening_socket() {
+        let socket_path =
+            std::env::temp_dir().join(format!("test_vsock_owned_{}.sock", std::process::id()));
+        let std_listener = prepare_test_socket(&socket_path);
+        let _socket_guard = SocketGuard(&socket_path);
+        let in_fd = OwnedFd::from(std_listener);
+
+        let endpoints = vec![DualFdDeviceEndpoints {
+            name: None,
+            device_info: Some(DeviceInfo {
+                name: "cvd-1".to_string(),
+                kind: "CUTTLEFISH".to_string(),
+                ..Default::default()
+            }),
+            chips: vec![DualFdChipEndpoints {
+                kind: "CELLULAR".to_string(),
+                in_fd,
+                out_fd: None,
+                sim_type: None,
+                sim_profile: None,
+            }],
+        }];
+
+        let listener = DualFdListener::try_new_with_owned_fds(endpoints).unwrap();
+        assert_listening_socket_roundtrip(socket_path.clone(), listener).await;
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_rejects_out_fd_for_listening_socket() {
+        let socket_path = std::env::temp_dir()
+            .join(format!("test_vsock_owned_reject_out_fd_{}.sock", std::process::id()));
+        let std_listener = prepare_test_socket(&socket_path);
+        let _socket_guard = SocketGuard(&socket_path);
+        let in_fd = OwnedFd::from(std_listener);
+        let (out_fd, _unused_w) = pipe().unwrap();
+
+        let endpoints = vec![DualFdDeviceEndpoints {
+            name: Some("cvd-reject".to_string()),
+            device_info: None,
+            chips: vec![DualFdChipEndpoints {
+                kind: "CELLULAR".to_string(),
+                in_fd,
+                out_fd: Some(out_fd),
+                sim_type: None,
+                sim_profile: None,
+            }],
+        }];
+
+        let Err(err) = DualFdListener::try_new_with_owned_fds(endpoints) else {
+            panic!("expected InvalidConfig when out_fd is set on listening socket");
+        };
+        assert!(
+            matches!(
+                &err,
+                PacketStreamError::InvalidConfig(msg)
+                    if msg == "Listening socket endpoint for chip CELLULAR cannot specify out_fd"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    async fn accept_owned_device_info(
+        device_name: Option<&str>,
+        device_info: Option<DeviceInfo>,
+    ) -> DeviceInfo {
+        let (r_fd, w_fd) = pipe().unwrap();
+        let endpoints = vec![DualFdDeviceEndpoints {
+            name: device_name.map(str::to_string),
+            device_info,
+            chips: vec![DualFdChipEndpoints {
+                kind: "CELLULAR".to_string(),
+                in_fd: w_fd,
+                out_fd: Some(r_fd),
+                sim_type: None,
+                sim_profile: None,
+            }],
+        }];
+        let mut listener = DualFdListener::try_new_with_owned_fds(endpoints).unwrap();
+        let (_stream, _sink, chip_info, _guid) = listener.accept().await.unwrap();
+        chip_info.device_info.unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_device_info_fallback_to_device_name() {
+        let info = accept_owned_device_info(Some("generic-dev"), None).await;
+        assert_eq!(info.name, "generic-dev");
+        assert_eq!(info.id, "generic-dev");
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_device_info_precedence() {
+        let info = accept_owned_device_info(
+            Some("legacy-dev"),
+            Some(DeviceInfo {
+                name: "primary-dev".into(),
+                kind: "CUTTLEFISH".into(),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert_eq!(info.name, "primary-dev");
+        assert_eq!(info.id, "primary-dev");
+        assert_eq!(info.kind, "CUTTLEFISH");
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_device_info_empty_name_fallback() {
+        let info = accept_owned_device_info(
+            Some("legacy-dev"),
+            Some(DeviceInfo { kind: "CUTTLEFISH".into(), ..Default::default() }),
+        )
+        .await;
+        assert_eq!(info.name, "legacy-dev");
+        assert_eq!(info.id, "legacy-dev");
+        assert_eq!(info.kind, "CUTTLEFISH");
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_multi_device_isolation() {
+        let (r_fd1, w_fd1) = pipe().unwrap();
+        let (r_fd2, w_fd2) = pipe().unwrap();
+        let endpoints = vec![
+            DualFdDeviceEndpoints {
+                name: None,
+                device_info: Some(DeviceInfo {
+                    name: "cvd-1".to_string(),
+                    kind: "CUTTLEFISH".to_string(),
+                    ..Default::default()
+                }),
+                chips: vec![DualFdChipEndpoints {
+                    kind: "CELLULAR".to_string(),
+                    in_fd: w_fd1,
+                    out_fd: Some(r_fd1),
+                    sim_type: None,
+                    sim_profile: None,
+                }],
+            },
+            DualFdDeviceEndpoints {
+                name: None,
+                device_info: Some(DeviceInfo {
+                    name: "cvd-2".to_string(),
+                    kind: "CUTTLEFISH".to_string(),
+                    ..Default::default()
+                }),
+                chips: vec![DualFdChipEndpoints {
+                    kind: "BLUETOOTH".to_string(),
+                    in_fd: w_fd2,
+                    out_fd: Some(r_fd2),
+                    sim_type: None,
+                    sim_profile: None,
+                }],
+            },
+        ];
+        let mut listener = DualFdListener::try_new_with_owned_fds(endpoints).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let StreamAddress::Fd { in_fd, out_fd: Some(num_devices) } = addr else {
+            panic!("unexpected local_addr: {addr:?}");
+        };
+        assert_eq!(in_fd, 2);
+        assert_eq!(num_devices, 2);
+
+        let (_stream1, _sink1, chip_info1, guid1) = listener.accept().await.unwrap();
+        let Some(dev1) = chip_info1.device_info else {
+            panic!("expected device_info for first accepted connection");
+        };
+        assert_eq!(dev1.name, "cvd-1");
+        assert_eq!(dev1.id, "cvd-1");
+        assert_eq!(dev1.kind, "CUTTLEFISH");
+
+        let (_stream2, _sink2, chip_info2, guid2) = listener.accept().await.unwrap();
+        let Some(dev2) = chip_info2.device_info else {
+            panic!("expected device_info for second accepted connection");
+        };
+        assert_eq!(dev2.name, "cvd-2");
+        assert_eq!(dev2.id, "cvd-2");
+        assert_eq!(dev2.kind, "CUTTLEFISH");
+        assert_ne!(guid1, guid2);
+    }
+
+    #[tokio::test]
+    async fn test_try_new_with_owned_fds_multi_chip_static_streams() {
+        const CHIP1_SIM_TYPE: i32 = 2;
+        const CHIP1_SIM_PROFILE: &str = "test-profile-owned";
+
+        let (guest_sock, host_sock) = UnixStream::pair().unwrap();
+        let (host_to_guest_r, host_to_guest_w) = pipe().unwrap();
+        let (guest_to_host_r, guest_to_host_w) = pipe().unwrap();
+        let endpoints = vec![DualFdDeviceEndpoints {
+            name: Some("multi-chip-owned".to_string()),
+            device_info: None,
+            chips: vec![
+                DualFdChipEndpoints {
+                    kind: "CELLULAR".to_string(),
+                    in_fd: OwnedFd::from(host_sock),
+                    out_fd: None,
+                    sim_type: None,
+                    sim_profile: None,
+                },
+                DualFdChipEndpoints {
+                    kind: "BLUETOOTH".to_string(),
+                    in_fd: host_to_guest_w,
+                    out_fd: Some(guest_to_host_r),
+                    sim_type: Some(CHIP1_SIM_TYPE),
+                    sim_profile: Some(CHIP1_SIM_PROFILE.to_string()),
+                },
+            ],
+        }];
+        let listener = DualFdListener::try_new_with_owned_fds(endpoints).unwrap();
+        assert_multi_chip_static_streams_roundtrip(
+            listener,
+            "multi-chip-owned",
             guest_sock,
             guest_to_host_w,
             host_to_guest_r,

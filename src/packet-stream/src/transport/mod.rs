@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
-pub use dual_fd::{DualFdConfig, DualFdListener};
+pub use dual_fd::{DualFdChipEndpoints, DualFdConfig, DualFdDeviceEndpoints, DualFdListener};
 pub use h4::H4Codec;
 pub use modem::ModemCodec;
 pub use nci::NciCodec;

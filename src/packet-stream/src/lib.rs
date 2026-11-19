@@ -83,7 +83,9 @@ pub use streams::{InitInfo, Streams};
 // Core streaming types - public API only (transport internals hidden)
 pub use transport::TransportType;
 #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
-pub use transport::dual_fd::{DualFdConfig, DualFdListener};
+pub use transport::dual_fd::{
+    DualFdChipEndpoints, DualFdConfig, DualFdDeviceEndpoints, DualFdListener,
+};
 pub use transport::{
     CrossPlatformListener, CrossPlatformStream, ListenerConfig, SocketConfig, SocketType,
 };
