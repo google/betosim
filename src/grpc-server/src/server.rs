@@ -549,6 +549,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_cell_service_execute_chip_not_found() {
+        let (server, addr, mut cell_rx, _) = setup_test_server().await;
+
+        let env = Arc::new(Environment::new(1));
+        let ch = ChannelBuilder::new(env).connect(&format!("localhost:{}", addr));
+        let client = CellServiceClient::new(ch);
+
+        tokio::spawn(async move {
+            if let Some(actor_framework::ResourceRequest::Action { id, action, respond_to }) =
+                cell_rx.recv().await
+            {
+                assert_eq!(id.unwrap().0, 99);
+                match action {
+                    CellAction::EndCall => {
+                        let _ = respond_to.send(Err(cell_actor::CellError::Chip(
+                            netsim_model::ChipError::ChipNotFound(netsim_model::ChipId(99)),
+                        )));
+                    }
+                    _ => panic!("Unexpected action"),
+                }
+            }
+        });
+
+        let mut req = ExecuteCellRequest::new();
+        req.id = 99;
+        req.set_end_call(netsim_proto::cell::EndCall::new());
+        let response = client.execute(&req);
+        assert!(response.is_err());
+        match response.unwrap_err() {
+            grpcio::Error::RpcFailure(status) => {
+                assert_eq!(status.code(), RpcStatusCode::NOT_FOUND);
+            }
+            err => panic!("Expected RpcFailure, got {:?}", err),
+        }
+
+        drop(server);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_nfc_service_get_status_list_success() {
         let (server, addr, _, mut nfc_rx) = setup_test_server().await;
 

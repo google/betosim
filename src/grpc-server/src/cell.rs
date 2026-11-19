@@ -292,22 +292,15 @@ impl CellService for CellServiceImpl {
     }
 }
 
-fn find_chip_error<'a>(
-    mut err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a netsim_model::ChipError> {
-    loop {
-        if let Some(chip_err) = err.downcast_ref::<netsim_model::ChipError>() {
-            return Some(chip_err);
-        }
-        err = err.source()?;
-    }
-}
-
 fn execute_error_to_rpc_status(error: &netsim_model::ClientError) -> grpcio::RpcStatus {
-    match find_chip_error(error) {
+    match error.as_chip_error() {
         Some(netsim_model::ChipError::InvalidArguments(_)) => grpcio::RpcStatus::with_message(
             grpcio::RpcStatusCode::INVALID_ARGUMENT,
             format!("Invalid argument: {error}"),
+        ),
+        Some(netsim_model::ChipError::ChipNotFound(_)) => grpcio::RpcStatus::with_message(
+            grpcio::RpcStatusCode::NOT_FOUND,
+            format!("Chip not found: {error}"),
         ),
         _ => grpcio::RpcStatus::with_message(
             grpcio::RpcStatusCode::INTERNAL,
@@ -320,7 +313,8 @@ fn execute_error_to_rpc_status(error: &netsim_model::ClientError) -> grpcio::Rpc
 mod tests {
     use actor_framework::FrameworkError;
     use cell_actor::CellError;
-    use netsim_model::{ChipError, ClientError};
+    use grpcio::RpcStatusCode;
+    use netsim_model::{ChipError, ChipId, ClientError};
 
     use super::*;
 
@@ -333,7 +327,7 @@ mod tests {
 
         let status = execute_error_to_rpc_status(&error);
 
-        assert_eq!(status.code(), grpcio::RpcStatusCode::INVALID_ARGUMENT);
+        assert_eq!(status.code(), RpcStatusCode::INVALID_ARGUMENT);
         assert_eq!(
             status.message(),
             "Invalid argument: Framework error: Service error: Chip error: \
@@ -342,12 +336,46 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_error_chip_not_found_maps_to_not_found() {
+        let error: ClientError =
+            FrameworkError::ServiceError(CellError::Chip(ChipError::ChipNotFound(ChipId(99))))
+                .into();
+
+        let status = execute_error_to_rpc_status(&error);
+
+        assert_eq!(status.code(), RpcStatusCode::NOT_FOUND);
+        assert_eq!(
+            status.message(),
+            "Chip not found: Framework error: Service error: Chip error: Chip not found error: 99"
+        );
+    }
+
+    #[test]
+    fn test_execute_error_direct_chip_not_found_maps_to_not_found() {
+        let error = ClientError::Chip(ChipError::ChipNotFound(ChipId(99)));
+
+        let status = execute_error_to_rpc_status(&error);
+
+        assert_eq!(status.code(), RpcStatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_execute_error_other_chip_error_maps_to_internal() {
+        let error: ClientError =
+            FrameworkError::ServiceError(CellError::Chip(ChipError::Unsupported)).into();
+
+        let status = execute_error_to_rpc_status(&error);
+
+        assert_eq!(status.code(), RpcStatusCode::INTERNAL);
+    }
+
+    #[test]
     fn test_execute_error_generic_maps_to_internal() {
         let error = ClientError::Send("connection refused".to_string());
 
         let status = execute_error_to_rpc_status(&error);
 
-        assert_eq!(status.code(), grpcio::RpcStatusCode::INTERNAL);
+        assert_eq!(status.code(), RpcStatusCode::INTERNAL);
         assert_eq!(
             status.message(),
             "Failed to execute action: Failed to send command: connection refused"

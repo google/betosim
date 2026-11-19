@@ -36,8 +36,8 @@ pub enum ClientError {
     Framework(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[cfg(any(feature = "testing", test))]
 impl ClientError {
+    /// Returns the underlying `ChipError`, if any, by walking the error source chain.
     pub fn as_chip_error(&self) -> Option<&ChipError> {
         match self {
             Self::Chip(chip) => Some(chip),
@@ -71,5 +71,58 @@ impl<E: 'static + std::error::Error + Send + Sync> From<actor_framework::Framewo
 {
     fn from(val: actor_framework::FrameworkError<E>) -> Self {
         ClientError::Framework(Box::new(val))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use thiserror::Error;
+
+    use super::*;
+    use crate::ChipId;
+
+    #[test]
+    fn test_as_chip_error_direct_chip() {
+        let error = ClientError::Chip(ChipError::ChipNotFound(ChipId(99)));
+        assert!(matches!(
+            error.as_chip_error(),
+            Some(ChipError::ChipNotFound(id)) if *id == ChipId(99)
+        ));
+    }
+
+    #[test]
+    fn test_as_chip_error_direct_framework() {
+        let error = ClientError::Framework(Box::new(ChipError::ChipNotFound(ChipId(42))));
+        assert!(matches!(
+            error.as_chip_error(),
+            Some(ChipError::ChipNotFound(id)) if *id == ChipId(42)
+        ));
+    }
+
+    #[test]
+    fn test_as_chip_error_nested_source() {
+        #[derive(Error, Debug)]
+        #[error("inner: {0}")]
+        struct InnerError(#[source] ChipError);
+
+        #[derive(Error, Debug)]
+        #[error("outer: {0}")]
+        struct OuterError(#[source] InnerError);
+
+        let error = ClientError::Framework(Box::new(OuterError(InnerError(
+            ChipError::ChipNotFound(ChipId(7)),
+        ))));
+        assert!(matches!(
+            error.as_chip_error(),
+            Some(ChipError::ChipNotFound(id)) if *id == ChipId(7)
+        ));
+    }
+
+    #[test]
+    fn test_as_chip_error_non_chip_returns_none() {
+        assert!(ClientError::Send("send".to_string()).as_chip_error().is_none());
+        assert!(ClientError::Recv("recv".to_string()).as_chip_error().is_none());
+        let framework_io = ClientError::Framework(Box::new(std::io::Error::other("io")));
+        assert!(framework_io.as_chip_error().is_none());
     }
 }
