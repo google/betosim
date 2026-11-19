@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! The bluetooth crate provides a simulation environment for Bluetooth devices.
 //!
 //! This crate is responsible for managing the lifecycle of simulated Bluetooth

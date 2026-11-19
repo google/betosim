@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(unsafe_code)]
+
 //! Netsim HTTP REST API module.
 //!
 //! Provides REST API request and response models and the HTTP endpoint
