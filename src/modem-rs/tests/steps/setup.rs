@@ -15,7 +15,7 @@
 use hex;
 use modem_rs::{
     DedicatedFile, ElementaryFile, FileSystem, PhoneNumber, PinState, SimFile, SimIo, SimProfile,
-    config::PinProfile, constants::UiccFileId, test_utils::MockModemHandler,
+    config::PinProfile, constants::UiccFileId,
 };
 use netsim_model::{CellNetworkConfig, Quirks, RegistrationStatus};
 
@@ -42,18 +42,9 @@ pub fn given_modem_with_network_config(
     name: &str,
     network_config: CellNetworkConfig,
 ) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(false);
-
-    world
-        .manager
-        .new_modem(id, sink, None, None, Quirks::default(), vec![network_config])
-        .expect("Failed to create new modem with network config");
-    world.modems.insert(name.to_string(), (id, handler));
+    let id = world.register_modem_with(name, Quirks::default(), |manager, id, sink| {
+        manager.new_modem(id, sink, None, None, Quirks::default(), vec![network_config])
+    });
     set_registered_home(world, id);
 }
 
@@ -62,18 +53,9 @@ pub fn given_data_modem(world: &mut World, name: &str) {
 }
 
 pub fn given_data_modem_with_quirks(world: &mut World, name: &str, quirks: Quirks) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(quirks.goldfish_ril_37_or_earlier);
-
-    world
-        .manager
-        .new_modem(id, sink, None, None, quirks, vec![create_default_test_network_config()])
-        .expect("Failed to create new modem with network config");
-    world.modems.insert(name.to_string(), (id, handler));
+    let id = world.register_modem_with(name, quirks, |manager, id, sink| {
+        manager.new_modem(id, sink, None, None, quirks, vec![create_default_test_network_config()])
+    });
     set_registered_home(world, id);
 }
 
@@ -91,84 +73,67 @@ pub fn given_goldfish_37_data_modem(world: &mut World, name: &str) {
 ///
 /// Panics if a modem with the same name already exists or if creation fails.
 pub fn given_modem(world: &mut World, name: &str) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(false);
-
-    world
-        .manager
-        .new_modem(id, sink, None, None, Quirks::default(), Vec::new())
-        .expect("Failed to create new modem");
-    world.modems.insert(name.to_string(), (id, handler));
+    given_modem_with_quirks(world, name, Quirks::default());
 }
 
 /// Creates a modem with custom quirks.
 pub fn given_modem_with_quirks(world: &mut World, name: &str, quirks: Quirks) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
+    world.register_modem_with(name, quirks, |manager, id, sink| {
+        manager.new_modem(id, sink, None, None, quirks, Vec::new())
+    });
+}
 
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(quirks.goldfish_ril_37_or_earlier);
+/// Creates a modem with a specific SIM profile and custom quirks.
+pub(crate) fn given_modem_with_profile_and_quirks(
+    world: &mut World,
+    name: &str,
+    profile: SimProfile,
+    quirks: Quirks,
+) {
+    world.register_modem_with(name, quirks, |manager, id, sink| {
+        manager.new_modem_with_profile(id, sink, Some(profile), None, quirks, Vec::new())
+    });
+}
 
-    world
-        .manager
-        .new_modem(id, sink, None, None, quirks, Vec::new())
-        .expect("Failed to create new modem");
-    world.modems.insert(name.to_string(), (id, handler));
+/// Creates a modem with the default test SIM profile and `quirks`, runs
+/// cold-boot AT init, advances past the attach delay, and verifies initial LTE
+/// attach URCs.
+pub(crate) fn given_attached_cold_boot_modem_with_quirks(
+    world: &mut World,
+    name: &str,
+    quirks: Quirks,
+) {
+    given_modem_with_profile_and_quirks(world, name, create_legacy_test_profile(), quirks);
+    world.when_cold_boot_init_sequence_runs(name);
+    world.when_time_advances_ms(NETWORK_ATTACH_WAIT_MS);
+    world.then_location_attach_urcs_are(name);
+    world.then_no_response(name);
+}
+
+/// Creates an attached LTE modem initialized with the cold-boot AT sequence.
+pub(crate) fn given_attached_cold_boot_modem(world: &mut World, name: &str) {
+    given_attached_cold_boot_modem_with_quirks(world, name, Quirks::default());
 }
 
 /// Creates a Goldfish 37 (or earlier) modem with the given name.
 pub fn given_goldfish_37_modem(world: &mut World, name: &str) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(true);
-
-    let quirks = Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() };
-    world
-        .manager
-        .new_modem(id, sink, None, None, quirks, Vec::new())
-        .expect("Failed to create new modem");
-    world.modems.insert(name.to_string(), (id, handler));
+    given_modem_with_quirks(
+        world,
+        name,
+        Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() },
+    );
 }
 
 /// Creates a modem with the given name and SIM type.
 pub fn given_modem_with_sim_type(world: &mut World, name: &str, sim_type: i32) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(false);
-
-    world
-        .manager
-        .new_modem(id, sink, Some(sim_type), None, Quirks::default(), Vec::new())
-        .expect("Failed to create new modem");
-    world.modems.insert(name.to_string(), (id, handler));
+    world.register_modem_with(name, Quirks::default(), |manager, id, sink| {
+        manager.new_modem(id, sink, Some(sim_type), None, Quirks::default(), Vec::new())
+    });
 }
 
 /// Creates a Cuttlefish modem with the given name.
 pub fn given_cuttlefish_modem(world: &mut World, name: &str) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(false);
-
-    let quirks = Quirks { is_cuttlefish: true, ..Default::default() };
-    world
-        .manager
-        .new_modem(id, sink, None, None, quirks, Vec::new())
-        .expect("Failed to create new modem");
-    world.modems.insert(name.to_string(), (id, handler));
+    given_modem_with_quirks(world, name, Quirks { is_cuttlefish: true, ..Default::default() });
 }
 
 /// Creates a modem with the given name and phone number.
@@ -196,18 +161,9 @@ pub fn given_modem_with_sim_profile(world: &mut World, name: &str) {
 
 /// Creates a modem with a custom XML SIM profile.
 pub fn given_modem_with_xml_profile(world: &mut World, name: &str, xml: &str) {
-    if world.modems.contains_key(name) {
-        panic!("Modem with name '{name}' already exists");
-    }
-
-    let id = world.next_modem_id();
-    let (handler, sink) = MockModemHandler::new(false);
-
-    world
-        .manager
-        .new_modem(id, sink, None, Some(xml.to_string()), Quirks::default(), Vec::new())
-        .expect("Failed to create new modem with XML profile");
-    world.modems.insert(name.to_string(), (id, handler));
+    world.register_modem_with(name, Quirks::default(), |manager, id, sink| {
+        manager.new_modem(id, sink, None, Some(xml.to_string()), Quirks::default(), Vec::new())
+    });
 }
 
 /// Helper function to create the legacy SIM profile used in tests.

@@ -12,28 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, mpsc},
+};
 
+use bytes::Bytes;
 use modem_rs::{
-    ModemId, ModemNetworkSimulator, SimProfile, test_utils::MockModemHandler, time::MockClock,
+    ModemError, ModemId, ModemNetworkSimulator, ModemSink, SimProfile,
+    test_utils::MockModemHandler, time::MockClock,
 };
 use netsim_model::Quirks;
 
-use crate::steps::{
-    action::{
-        when_at_command_sent, when_hex_bytes_sent, when_modem_created, when_modem_removed,
-        when_sim_status_set, when_time_advances_ms,
-    },
-    check::{
-        then_no_response, then_phone_number_is, then_prompt, then_prompt_is,
-        then_response_contains, then_response_is, then_wait_for_response_containing,
-    },
-    setup::{
-        given_data_modem, given_goldfish_37_data_modem, given_goldfish_37_modem, given_modem,
-        given_modem_with_fdn_sim_profile, given_modem_with_locked_sim,
-        given_modem_with_msisdn_in_fs, given_modem_with_network_config, given_modem_with_number,
-        given_modem_with_perm_blocked_sim, given_modem_with_sim_profile,
-        given_modem_with_xml_profile,
+use crate::{
+    common::constants::{CME_ERROR_INCORRECT_PARAMETERS, INVALID_CTEC_CMD},
+    steps::{
+        action::{
+            when_at_command_sent, when_cold_boot_init_sequence_runs, when_hex_bytes_sent,
+            when_modem_created, when_modem_removed, when_sim_status_set, when_time_advances_ms,
+            when_zoned_clock_set,
+        },
+        check::{
+            then_location_attach_urcs_are, then_no_response, then_phone_number_is, then_prompt,
+            then_prompt_is, then_raw_packets_are, then_response_contains, then_response_is,
+            then_wait_for_response_containing,
+        },
+        setup::{
+            given_attached_cold_boot_modem, given_attached_cold_boot_modem_with_quirks,
+            given_data_modem, given_goldfish_37_data_modem, given_goldfish_37_modem, given_modem,
+            given_modem_with_fdn_sim_profile, given_modem_with_locked_sim,
+            given_modem_with_msisdn_in_fs, given_modem_with_network_config,
+            given_modem_with_number, given_modem_with_perm_blocked_sim,
+            given_modem_with_profile_and_quirks, given_modem_with_quirks,
+            given_modem_with_sim_profile, given_modem_with_xml_profile,
+        },
     },
 };
 
@@ -45,6 +57,8 @@ pub struct World {
     pub clock: Arc<MockClock>,
     /// Map of modem names to their IDs and handlers.
     pub modems: HashMap<String, (ModemId, MockModemHandler)>,
+    /// Raw outbound packets captured before `MockModemHandler` line splitting.
+    pub(crate) raw_packets: HashMap<String, mpsc::Receiver<Bytes>>,
     /// Counter for generating unique ModemIds.
     pub modem_id_counter: usize,
     /// Keep the host event receiver alive to prevent channel closure.
@@ -63,12 +77,52 @@ impl World {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let manager = ModemNetworkSimulator::new_with_clock(clock.clone(), tx);
 
-        World { manager, clock, modems: HashMap::new(), modem_id_counter: 0, _host_event_rx: rx }
+        World {
+            manager,
+            clock,
+            modems: HashMap::new(),
+            raw_packets: HashMap::new(),
+            modem_id_counter: 0,
+            _host_event_rx: rx,
+        }
     }
 
     pub fn next_modem_id(&mut self) -> ModemId {
         self.modem_id_counter += 1;
         self.modem_id_counter as ModemId
+    }
+
+    /// Wraps `inner` to record each raw `ModemSink` packet before line splitting.
+    fn wrap_modem_sink(&mut self, name: &str, inner: ModemSink) -> ModemSink {
+        let (tx, rx) = mpsc::channel();
+        self.raw_packets.insert(name.to_string(), rx);
+        ModemSink::new(move |packet: Bytes| {
+            let _ = tx.send(packet.clone());
+            inner.send(packet)
+        })
+    }
+
+    /// Allocates a modem ID, wraps `ModemSink` to capture raw outbound packets,
+    /// registers the modem via `create`, and stores its handler under `name`.
+    pub(crate) fn register_modem_with<F>(
+        &mut self,
+        name: &str,
+        quirks: Quirks,
+        create: F,
+    ) -> ModemId
+    where
+        F: FnOnce(&mut ModemNetworkSimulator, ModemId, ModemSink) -> Result<(), ModemError>,
+    {
+        if self.modems.contains_key(name) {
+            panic!("Modem with name '{name}' already exists");
+        }
+        let id = self.next_modem_id();
+        let (handler, sink) = MockModemHandler::new(quirks.goldfish_ril_37_or_earlier);
+        let sink = self.wrap_modem_sink(name, sink);
+        create(&mut self.manager, id, sink)
+            .unwrap_or_else(|e| panic!("Failed to create modem '{name}': {e:?}"));
+        self.modems.insert(name.to_string(), (id, handler));
+        id
     }
 
     /// Helper to get modem data by name
@@ -87,12 +141,34 @@ impl World {
         given_modem(self, name);
     }
 
+    /// Creates a modem with custom quirks.
+    pub(crate) fn given_modem_with_quirks(&mut self, name: &str, quirks: Quirks) {
+        given_modem_with_quirks(self, name, quirks);
+    }
+
+    /// Creates an attached LTE modem initialized with the cold-boot AT sequence.
+    pub(crate) fn given_attached_cold_boot_modem(&mut self, name: &str) {
+        given_attached_cold_boot_modem(self, name);
+    }
+
+    /// Creates an attached LTE modem with `quirks` initialized via cold-boot AT init.
+    pub(crate) fn given_attached_cold_boot_modem_with_quirks(
+        &mut self,
+        name: &str,
+        quirks: Quirks,
+    ) {
+        given_attached_cold_boot_modem_with_quirks(self, name, quirks);
+    }
+
+    /// Sets the shared simulator clock from an RFC 9557 zoned timestamp.
+    pub(crate) fn given_zoned_clock(&mut self, zoned_timestamp: &str) {
+        when_zoned_clock_set(self, zoned_timestamp);
+    }
+
     /// Creates a modem with the given name and IANA timezone.
     pub fn given_modem_with_timezone(&mut self, name: &str, timezone: &str) {
-        let id = self.next_modem_id();
-        let (handler, sink) = MockModemHandler::new(false);
-        self.manager
-            .new_modem_with_options(
+        self.register_modem_with(name, Quirks::default(), |manager, id, sink| {
+            manager.new_modem_with_options(
                 id,
                 sink,
                 modem_rs::modem_network::ModemOptions {
@@ -100,8 +176,7 @@ impl World {
                     ..Default::default()
                 },
             )
-            .expect("Failed to create modem with timezone");
-        self.modems.insert(name.to_string(), (id, handler));
+        });
     }
 
     pub fn given_data_modem(&mut self, name: &str) {
@@ -162,15 +237,7 @@ impl World {
 
     /// Creates a modem with a specific SIM profile.
     pub fn given_modem_with_profile(&mut self, name: &str, profile: SimProfile) {
-        if self.modems.contains_key(name) {
-            panic!("Modem with name '{name}' already exists");
-        }
-        let id = self.next_modem_id();
-        let (handler, sink) = MockModemHandler::new(false);
-        self.manager
-            .new_modem_with_profile(id, sink, Some(profile), None, Quirks::default(), Vec::new())
-            .expect("Failed to create modem with profile");
-        self.modems.insert(name.to_string(), (id, handler));
+        given_modem_with_profile_and_quirks(self, name, profile, Quirks::default());
     }
 
     // --- BDD When (Pure Actions / Stimulus) ---
@@ -179,6 +246,16 @@ impl World {
     /// response.
     pub fn when_at_command(&mut self, name: &str, command: &str) {
         when_at_command_sent(self, name, command);
+    }
+
+    /// Runs the Goldfish RIL cold-boot AT initialization sequence on `name`.
+    pub(crate) fn when_cold_boot_init_sequence_runs(&mut self, name: &str) {
+        when_cold_boot_init_sequence_runs(self, name);
+    }
+
+    /// Sets the shared simulator clock during a When step.
+    pub(crate) fn when_zoned_clock_set(&mut self, zoned_timestamp: &str) {
+        when_zoned_clock_set(self, zoned_timestamp);
     }
 
     /// Sends raw bytes, specified as a hex string, to the modem.
@@ -240,6 +317,11 @@ impl World {
         then_no_response(self, name);
     }
 
+    /// Asserts that `name` emits home LTE registration URCs and default signal quality.
+    pub(crate) fn then_location_attach_urcs_are(&mut self, name: &str) {
+        then_location_attach_urcs_are(self, name);
+    }
+
     // --- Compound AT Transactions (Action + Assertion) ---
 
     /// Sends an AT command and asserts an immediate "OK" response.
@@ -260,6 +342,60 @@ impl World {
     pub fn send_and_expect_error(&mut self, name: &str, command: &str, expected_error: &str) {
         self.when_at_command(name, command);
         self.then_response_is(name, expected_error);
+    }
+
+    /// Drains prior raw packets, sends `command`, asserts the exact raw
+    /// `ModemSink` packets emitted, and drains the matching line-split
+    /// `MockModemHandler` queue so both queues remain synchronized.
+    pub(crate) fn send_and_expect_raw_packets(
+        &mut self,
+        name: &str,
+        command: &str,
+        expected_packets: &[&[u8]],
+    ) {
+        self.then_no_response(name);
+        let rx = self
+            .raw_packets
+            .get(name)
+            .unwrap_or_else(|| panic!("Raw packet receiver for modem '{name}' not found"));
+        while rx.try_recv().is_ok() {}
+
+        self.when_at_command(name, command);
+        then_raw_packets_are(self, name, expected_packets);
+
+        let id = self.modems.get(name).map(|(id, _)| *id).expect("Modem not found");
+        let delimiter =
+            if self.manager.get_modem(id).is_some_and(|m| m.quirks.goldfish_ril_37_or_earlier) {
+                b'\r'
+            } else {
+                b'\n'
+            };
+        let (_, handler) = self.get_modem(name);
+        for packet in expected_packets {
+            for expected_line in packet.split_inclusive(|&b| b == delimiter) {
+                let actual_line = handler.wait_for_response();
+                assert_eq!(
+                    actual_line.as_slice(),
+                    expected_line,
+                    "Modem {name} line-split queue mismatch.\nExpected: {:?}\nActual: {:?}",
+                    String::from_utf8_lossy(expected_line),
+                    String::from_utf8_lossy(&actual_line),
+                );
+            }
+        }
+        self.then_no_response(name);
+    }
+
+    /// Verifies that `name` has no pending URCs and remains powered off
+    /// (`+CFUN: 0`) with location URC modes (`2`) and numeric `CMEE` (`1`).
+    pub(crate) fn send_and_expect_powered_off_reset_state(&mut self, name: &str) {
+        self.then_no_response(name);
+        self.send_and_expect(name, "AT+CFUN?", &["+CFUN: 0", "OK"]);
+        self.send_and_expect(name, "AT+CREG?", &["+CREG: 2,0", "OK"]);
+        self.send_and_expect(name, "AT+CGREG?", &["+CGREG: 2,0", "OK"]);
+        self.send_and_expect(name, "AT+CEREG?", &["+CEREG: 2,0", "OK"]);
+        self.send_and_expect(name, "AT+CMEE?", &["+CMEE: 1", "OK"]);
+        self.send_and_expect_error(name, INVALID_CTEC_CMD, CME_ERROR_INCORRECT_PARAMETERS);
     }
 
     /// Triggers Emergency Callback Mode (ECBM) on the named modem.

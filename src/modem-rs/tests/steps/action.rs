@@ -17,7 +17,7 @@ use std::time::Duration;
 use modem_rs::{PhoneNumber, RegistrationStatus};
 use netsim_model::{ChipId, ModemAction, RadioTechnology};
 
-use crate::world::World;
+use crate::{common::constants::COLD_BOOT_INIT_COMMANDS, world::World};
 
 /// Sends an AT command string to the specified modem.
 ///
@@ -187,10 +187,25 @@ pub fn when_phone_number_set(world: &mut World, name: &str, number: &str) {
 /// Removes a modem from the network simulator by name during a When step.
 pub fn when_modem_removed(world: &mut World, name: &str) {
     let (id, _) = world.modems.remove(name).unwrap_or_else(|| panic!("Modem '{name}' not found"));
+    world.raw_packets.remove(name);
     world.manager.remove_modem(id);
 }
 
 /// Creates a new default modem during a When step.
 pub fn when_modem_created(world: &mut World, name: &str) {
     crate::steps::given_modem(world, name);
+}
+
+/// Runs the Goldfish RIL cold-boot AT initialization sequence on `name`.
+pub(crate) fn when_cold_boot_init_sequence_runs(world: &mut World, name: &str) {
+    for cmd in COLD_BOOT_INIT_COMMANDS {
+        world.send_and_expect_ok(name, cmd);
+    }
+}
+
+/// Sets the shared simulator clock from an RFC 9557 zoned timestamp.
+pub(crate) fn when_zoned_clock_set(world: &mut World, zoned_timestamp: &str) {
+    let zoned: jiff::Zoned =
+        zoned_timestamp.parse().expect("Invalid zoned timestamp for MockClock");
+    world.clock.set_zoned(zoned);
 }

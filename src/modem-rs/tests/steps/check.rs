@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::world::World;
+use bytes::Bytes;
+
+use crate::{
+    common::constants::{LTE_ACT_EUTRAN, RESP_CSQ_LTE_DEFAULT, TEST_CID, TEST_LAC},
+    world::World,
+};
 
 /// Check for expected modem count.
 ///
@@ -205,4 +210,42 @@ pub fn then_phone_number_is(world: &mut World, name: &str, expected: &str) {
     let expected_phone = modem_rs::PhoneNumber::try_from(expected)
         .unwrap_or_else(|e| panic!("Invalid expected phone number '{expected}': {e:?}"));
     assert_eq!(modem.phone_number().as_ref(), Some(&expected_phone));
+}
+
+/// Verifies that `name` emitted the exact sequence of raw `ModemSink` packets.
+///
+/// Unlike `then_response_is`, which inspects line-split frames from
+/// `MockModemHandler`, this checks packet boundaries directly to verify
+/// coalesced multi-command AT replies.
+pub(crate) fn then_raw_packets_are(world: &World, name: &str, expected_packets: &[&[u8]]) {
+    let rx = world
+        .raw_packets
+        .get(name)
+        .unwrap_or_else(|| panic!("Raw packet receiver for modem '{name}' not found"));
+    let actual_packets: Vec<Bytes> = rx.try_iter().collect();
+    let actual_slices: Vec<&[u8]> = actual_packets.iter().map(Bytes::as_ref).collect();
+    let actual_text: Vec<_> =
+        actual_slices.iter().map(|packet| String::from_utf8_lossy(packet)).collect();
+    let expected_text: Vec<_> =
+        expected_packets.iter().map(|packet| String::from_utf8_lossy(packet)).collect();
+    assert_eq!(
+        actual_slices.as_slice(),
+        expected_packets,
+        "Modem {name} raw packet mismatch.\nExpected ({}): {expected_text:?}\nActual ({}): {actual_text:?}",
+        expected_packets.len(),
+        actual_slices.len(),
+    );
+}
+
+/// Verifies that `name` emits home LTE `+CREG`, `+CGREG`, and `+CEREG`
+/// location registration URCs followed by default LTE `+CSQ` signal quality.
+pub(crate) fn then_location_attach_urcs_are(world: &mut World, name: &str) {
+    for prefix in ["+CREG", "+CGREG", "+CEREG"] {
+        then_response_is(
+            world,
+            name,
+            &format!("{prefix}: 1,\"{TEST_LAC}\",\"{TEST_CID}\",{LTE_ACT_EUTRAN}"),
+        );
+    }
+    then_response_is(world, name, RESP_CSQ_LTE_DEFAULT);
 }

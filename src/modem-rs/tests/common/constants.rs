@@ -163,3 +163,25 @@ pub const TEST_IPV4_ADDR: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 pub const TEST_GATEWAY_IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 pub const TEST_DNS_IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 pub const DEFAULT_BEARER_ID: u32 = 5;
+
+// Boot & Chained Radio Reset Constants
+// Mirrors initSequence in device/generic/goldfish/hals/radio/main.cpp.
+pub(crate) const COLD_BOOT_INIT_COMMANDS: &[&str] = &[
+    "ATE0Q0V1",
+    "AT+CMEE=1",
+    "AT+CREG=2",
+    "AT+CGREG=2",
+    "AT+CEREG=2",
+    "AT+CCWA=1",
+    "AT+CMOD=0",
+    "AT+CMUT=0",
+    "AT+CSSN=0,1",
+    "AT+COLP=0",
+    "AT+CSCS=\"HEX\"",
+    "AT+CUSD=1",
+    "AT+CGEREP=1,0",
+    "AT+CMGF=0",
+];
+pub(crate) const INVALID_CTEC_CMD: &str = "AT+CTEC=99";
+pub(crate) const NETWORK_ATTACH_WAIT_MS: u64 = 15;
+pub(crate) const LTE_ACT_EUTRAN: u8 = 7;
