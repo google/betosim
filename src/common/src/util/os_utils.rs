@@ -14,14 +14,14 @@
 
 //! # os utility functions
 
-use std::{env, fmt::Write as _, io, path::PathBuf};
-#[cfg(unix)]
-use std::{ffi::CString, os::fd::AsRawFd};
 #[cfg(windows)]
+use std::os::windows::io::{FromRawHandle, IntoRawHandle};
 use std::{
+    env,
+    fmt::Write as _,
     fs::File,
-    io::Write as _,
-    os::windows::io::{FromRawHandle, IntoRawHandle},
+    io::{self, Write as _},
+    path::{Path, PathBuf},
 };
 
 use tracing::warn;
@@ -129,50 +129,23 @@ where
     instance_name
 }
 
-/// Redirect Standard Stream
-#[cfg(unix)]
+/// Redirects the whole process's stdout and stderr to log files in [`netsimd_temp_dir`].
+///
+/// Creates (truncating) `netsim_{instance_name}stdout.log` and
+/// `netsim_{instance_name}stderr.log` and points stdout and stderr at them so
+/// Rust, C, and C++ output all go to the logs. Flushes Rust stdio before
+/// swapping; any buffered C stdio output written beforehand is not flushed.
+///
+/// Safe to call again: each call replaces the previous redirect and closes the
+/// old files. If either file cannot be created, nothing is redirected; a later
+/// failure can leave stdout redirected but not stderr.
 pub fn redirect_std_stream(instance_name: &str) -> io::Result<()> {
-    // Construct File Paths
-    let netsim_temp_dir = netsimd_temp_dir();
-    let stdout_filename =
-        netsim_temp_dir.join(format!("netsim_{instance_name}stdout.log")).into_os_string();
-    let stderr_filename =
-        netsim_temp_dir.join(format!("netsim_{instance_name}stderr.log")).into_os_string();
-
-    // CStrings
-    let stdout_filename_c = CString::new(stdout_filename.as_encoded_bytes())?;
-    let stderr_filename_c = CString::new(stderr_filename.as_encoded_bytes())?;
-    let mode_c = CString::new("w")?;
-
-    // Obtain the raw file descriptors for stdout.
-    let stdout_fd = std::io::stdout().as_raw_fd();
-
-    // Obtain the raw file descriptors for stderr.
-    let stderr_fd = std::io::stderr().as_raw_fd();
-
-    // SAFETY: These operations allow redirection of stdout and stderr stream to a
-    // file if terminal. Convert the raw file descriptors to FILE pointers using
-    // libc::fdopen. This is necessary because freopen expects a FILE* as its
-    // last argument, not a raw file descriptor. Use freopen to redirect stdout
-    // and stderr to the specified files.
-    unsafe {
-        let stdout_file = libc::fdopen(stdout_fd, mode_c.as_ptr());
-        let stderr_file = libc::fdopen(stderr_fd, mode_c.as_ptr());
-        libc::freopen(stdout_filename_c.as_ptr(), mode_c.as_ptr(), stdout_file);
-        libc::freopen(stderr_filename_c.as_ptr(), mode_c.as_ptr(), stderr_file);
-    }
-
-    Ok(())
+    redirect_std_stream_in(&netsimd_temp_dir(), instance_name)
 }
 
-/// Redirect Standard Stream
-#[cfg(windows)]
-pub fn redirect_std_stream(instance_name: &str) -> io::Result<()> {
-    let netsim_temp_dir = netsimd_temp_dir();
-    let stdout_file =
-        File::create(netsim_temp_dir.join(format!("netsim_{instance_name}stdout.log")))?;
-    let stderr_file =
-        File::create(netsim_temp_dir.join(format!("netsim_{instance_name}stderr.log")))?;
+fn redirect_std_stream_in(dir: &Path, instance_name: &str) -> io::Result<()> {
+    let stdout_file = File::create(dir.join(format!("netsim_{instance_name}stdout.log")))?;
+    let stderr_file = File::create(dir.join(format!("netsim_{instance_name}stderr.log")))?;
 
     // Hold the Rust stdio locks so other threads can't write mid-swap.
     let mut stdout_lock = io::stdout().lock();
@@ -180,10 +153,26 @@ pub fn redirect_std_stream(instance_name: &str) -> io::Result<()> {
     let _ = stdout_lock.flush();
     let _ = stderr_lock.flush();
 
-    redirect_stream(stdout_file, StdStream::Stdout)?;
-    redirect_stream(stderr_file, StdStream::Stderr)?;
+    redirect_stdio(stdout_file, stderr_file)?;
 
     drop((stdout_lock, stderr_lock));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn redirect_stdio(stdout_file: File, stderr_file: File) -> io::Result<()> {
+    // try_clone dups with F_DUPFD_CLOEXEC at fd >= 3, so the logs can't alias stdio.
+    let (stdout, stderr) = (stdout_file.try_clone()?, stderr_file.try_clone()?);
+    drop((stdout_file, stderr_file));
+    nix::unistd::dup2_stdout(&stdout)?;
+    nix::unistd::dup2_stderr(&stderr)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn redirect_stdio(stdout_file: File, stderr_file: File) -> io::Result<()> {
+    redirect_stream(stdout_file, StdStream::Stdout)?;
+    redirect_stream(stderr_file, StdStream::Stderr)?;
     Ok(())
 }
 
@@ -306,5 +295,40 @@ mod tests {
         expected.push(DISCOVERY.subdir);
         assert_eq!(actual, expected);
         assert_eq!(table.snapshot(), vec![(crate::err::Code::DiscoveryEnvMissing as u32, 1)]);
+    }
+
+    #[test]
+    fn test_redirect_std_stream() {
+        const DIR_ENV: &str = "NETSIM_REDIRECT_TEST_DIR";
+        const STDOUT_MARKER: &str = "netsim_redirect_stdout_marker";
+        const STDERR_MARKER: &str = "netsim_redirect_stderr_marker";
+
+        if let Some(dir) = env::var_os(DIR_ENV) {
+            redirect_std_stream_in(Path::new(&dir), "test_").expect("redirect_std_stream_in");
+            writeln!(io::stdout(), "{STDOUT_MARKER}").expect("write stdout");
+            writeln!(io::stderr(), "{STDERR_MARKER}").expect("write stderr");
+            io::stdout().flush().expect("flush stdout");
+            io::stderr().flush().expect("flush stderr");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let output = std::process::Command::new(env::current_exe().expect("current_exe"))
+            .args(["--exact", "util::os_utils::tests::test_redirect_std_stream", "--nocapture"])
+            .stdin(std::process::Stdio::null())
+            .env(DIR_ENV, dir.path())
+            .output()
+            .expect("run child test");
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "child failed: {out}\n{err}");
+        assert!(!out.contains(STDOUT_MARKER), "stdout leaked: {out}");
+        assert!(!err.contains(STDERR_MARKER), "stderr leaked: {err}");
+        let stdout_log = std::fs::read_to_string(dir.path().join("netsim_test_stdout.log"))
+            .expect("read stdout log");
+        let stderr_log = std::fs::read_to_string(dir.path().join("netsim_test_stderr.log"))
+            .expect("read stderr log");
+        assert!(stdout_log.contains(STDOUT_MARKER), "missing stdout marker: {stdout_log}");
+        assert!(stderr_log.contains(STDERR_MARKER), "missing stderr marker: {stderr_log}");
     }
 }
