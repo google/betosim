@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use std::{
+    collections::HashMap,
     io::Write as _,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
@@ -123,6 +124,13 @@ impl IsolatedChildOutput {
             "Expected discovery_dir {} to remain empty",
             self.discovery_dir().display()
         );
+    }
+
+    /// Then the isolated child wrote no `.ini` file in its discovery directory
+    /// (unlike `then_discovery_dir_is_empty`, `.lock` and `.init.lock` files
+    /// remain on disk after `IniFileUninitialized::drop`).
+    pub fn then_discovery_dir_has_no_ini_file(&self) {
+        assert_no_ini_files(self.discovery_dir());
     }
 
     /// Then the isolated child's captured stderr contains a `"netsim I "` log line with `info_msg`.
@@ -375,6 +383,38 @@ fn assert_redacts_secret(log_text: &str, secret: &str, source: &str) {
     );
 }
 
+fn assert_no_ini_files(dir: &Path) {
+    let ini_files: Vec<String> = std::fs::read_dir(dir)
+        .expect("Failed to read discovery_dir")
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.ends_with(".ini").then_some(name)
+        })
+        .collect();
+    assert!(
+        ini_files.is_empty(),
+        "Expected no .ini files in {}, found {ini_files:?}",
+        dir.display()
+    );
+}
+
+fn assert_tcp_forwarder_init_error(
+    result: Result<StartUpMode, daemon::RunResult>,
+    expected_port: u16,
+) {
+    let Err(daemon::RunResult::InitializationError(msg)) = result else {
+        panic!(
+            "Expected Err(RunResult::InitializationError) for TCP forwarder port {expected_port}, got {result:?}"
+        );
+    };
+    let expected_port_str = expected_port.to_string();
+    assert!(
+        msg.contains("TCP forwarder") && msg.contains(&expected_port_str),
+        "Expected TCP forwarder init error mentioning port {expected_port}, got: {msg}"
+    );
+}
+
 type IsolatedPacketStream = (
     grpcio::ClientDuplexSender<PacketRequest>,
     grpcio::ClientDuplexReceiver<netsim_proto::packet_streamer::PacketResponse>,
@@ -460,11 +500,15 @@ impl World {
         Self::new_with_args_in_dir(temp_dir, args).await
     }
 
+    fn init_test_logging() {
+        static LOG_INIT: std::sync::Once = std::sync::Once::new();
+        LOG_INIT.call_once(common::util::netsim_logger::init_for_test);
+    }
+
     /// Given a running Netsim Daemon started in an existing discovery
     /// directory, which lets scenarios pre-seed `netsim.ini` and its locks.
     pub async fn new_with_args_in_dir(temp_dir: PathBuf, args: daemon::Args) -> Self {
-        static LOG_INIT: std::sync::Once = std::sync::Once::new();
-        LOG_INIT.call_once(common::util::netsim_logger::init_for_test);
+        Self::init_test_logging();
 
         let startup_mode =
             NetsimDaemon::new_with_dirs(temp_dir.clone(), Self::with_test_ports(args))
@@ -547,6 +591,64 @@ impl World {
         args
     }
 
+    fn read_ini_map(dir: &Path, instance: u16) -> HashMap<String, String> {
+        let ini_path = dir.join(common::util::ini_file::get_ini_filename(instance));
+        let content = std::fs::read_to_string(&ini_path).expect("Failed to read netsim ini");
+        common::util::ini_file::parse_ini(
+            &content,
+            &common::util::ini_file::IniParserOptions::default(),
+        )
+        .expect("Failed to parse netsim ini")
+    }
+
+    /// Given an occupied IPv4 loopback TCP port held open for the lifetime of the returned guard.
+    pub fn given_occupied_loopback_port() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("Failed to bind occupied loopback TCP port");
+        let port = listener.local_addr().expect("Failed to read occupied loopback port").port();
+        (listener, port)
+    }
+
+    /// When netsimd starts in a fresh discovery directory with explicit `hci_port`,
+    /// `ws_port`, and `tcp_port`.
+    pub async fn when_daemon_starts_with_tcp_port(
+        hci_port: u16,
+        ws_port: u16,
+        tcp_port: u16,
+    ) -> (tempfile::TempDir, Result<StartUpMode, daemon::RunResult>) {
+        Self::init_test_logging();
+        let discovery_dir = tempfile::tempdir().expect("Failed to create temp discovery_dir");
+        let args = Self::with_isolated_owner_ports(daemon::Args {
+            logtostderr: true,
+            no_shutdown: true,
+            hci_port: Some(hci_port),
+            ws_port: Some(ws_port),
+            tcp_port: Some(tcp_port),
+            ..Default::default()
+        });
+        let result = NetsimDaemon::new_with_dirs(discovery_dir.path().to_path_buf(), args).await;
+        (discovery_dir, result)
+    }
+
+    /// Then startup failed with `InitializationError` mentioning `expected_port` and left no `.ini` file.
+    pub fn then_startup_failed_with_init_error_without_ini(
+        dir: &Path,
+        result: Result<StartUpMode, daemon::RunResult>,
+        expected_port: u16,
+    ) {
+        assert_tcp_forwarder_init_error(result, expected_port);
+        assert_no_ini_files(dir);
+    }
+
+    /// Then every loopback TCP port in `ports` can be rebound immediately.
+    pub fn then_loopback_ports_are_rebindable(ports: &[u16]) {
+        for &port in ports {
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap_or_else(|err| {
+                panic!("Expected loopback port {port} to be released after startup failure: {err}")
+            });
+        }
+    }
+
     /// Then `netsim_{instance}.ini` records non-zero ephemeral `hci.port` (and
     /// `test.port` under `cuttlefish`) distinct from the occupied default ports
     /// and matching the running daemon's bound ports.
@@ -557,13 +659,7 @@ impl World {
         #[cfg(feature = "cuttlefish")] occupied_test_port: u16,
     ) {
         let daemon = self.daemon.as_ref().expect("Daemon not available");
-        let ini_path = self._temp_dir.join(common::util::ini_file::get_ini_filename(instance));
-        let content = std::fs::read_to_string(&ini_path).expect("Failed to read netsim ini");
-        let ini_map = common::util::ini_file::parse_ini(
-            &content,
-            &common::util::ini_file::IniParserOptions::default(),
-        )
-        .expect("Failed to parse netsim ini");
+        let ini_map = Self::read_ini_map(&self._temp_dir, instance);
 
         let recorded_hci_port: u16 = ini_map
             .get("hci.port")
@@ -676,7 +772,7 @@ impl World {
     fn run_isolated_child_test(
         module_path: &str,
         test_name: &str,
-        netsim_args: Option<&str>,
+        extra_env: &[(&str, &str)],
     ) -> IsolatedChildOutput {
         let android_tmp = tempfile::tempdir().expect("Failed to create temp ANDROID_TMP");
         let discovery_dir = tempfile::tempdir().expect("Failed to create temp discovery_dir");
@@ -698,8 +794,8 @@ impl World {
         for &var in SCRUBBED_ENV_VARS {
             cmd.env_remove(var);
         }
-        if let Some(netsim_args) = netsim_args {
-            cmd.env("NETSIM_ARGS", netsim_args);
+        for &(key, value) in extra_env {
+            cmd.env(key, value);
         }
 
         let mut child = ChildKillGuard::new(cmd.spawn().unwrap_or_else(|err| {
@@ -852,7 +948,9 @@ impl World {
             });
             return None;
         }
-        Some(Self::run_isolated_child_test(module_path, test_name, netsim_args))
+        let extra_env: Vec<(&str, &str)> =
+            netsim_args.into_iter().map(|args| ("NETSIM_ARGS", args)).collect();
+        Some(Self::run_isolated_child_test(module_path, test_name, &extra_env))
     }
 
     /// Two-phase isolated child test entry point that starts `NetsimDaemon` with
@@ -872,7 +970,64 @@ impl World {
             });
             return None;
         }
-        Some(Self::run_isolated_child_test(module_path, test_name, None))
+        Some(Self::run_isolated_child_test(module_path, test_name, &[]))
+    }
+
+    /// Two-phase isolated child probe that starts `NetsimDaemon` with `NETSIM_TCP_PORT`
+    /// set to `port` (an occupied IPv4 loopback port) and asserts `InitializationError`.
+    pub fn when_run_child_tcp_env_bind_conflict_probe(
+        module_path: &str,
+        test_name: &str,
+        port: u16,
+    ) -> Option<IsolatedChildOutput> {
+        if Self::is_isolated_child_for(test_name) {
+            let expected_port: u16 = std::env::var("NETSIM_TCP_PORT")
+                .expect("NETSIM_TCP_PORT must be set in child process")
+                .parse()
+                .expect("NETSIM_TCP_PORT must be a valid u16");
+            let args = Self::with_isolated_owner_ports(daemon::Args {
+                logtostderr: true,
+                no_shutdown: true,
+                tcp_port: None,
+                ..Default::default()
+            });
+            Self::run_child_daemon_probe(args, |result| {
+                assert_tcp_forwarder_init_error(result, expected_port);
+            });
+            return None;
+        }
+        let port_str = port.to_string();
+        Some(Self::run_isolated_child_test(
+            module_path,
+            test_name,
+            &[("NETSIM_TCP_PORT", &port_str)],
+        ))
+    }
+
+    /// Then `netsim.ini` in `SUBPROCESS_DISCOVERY_DIR_ENV` records a non-zero
+    /// `tcp.port` under `cuttlefish` and omits `tcp.port` on standard platforms.
+    pub fn then_child_ini_records_platform_tcp_policy() {
+        let discovery_dir = PathBuf::from(
+            std::env::var_os(SUBPROCESS_DISCOVERY_DIR_ENV)
+                .expect("SUBPROCESS_DISCOVERY_DIR_ENV must be set in child process"),
+        );
+        let ini_map = Self::read_ini_map(&discovery_dir, 1);
+        #[cfg(feature = "cuttlefish")]
+        {
+            let port: u16 = ini_map
+                .get("tcp.port")
+                .expect("tcp.port must be recorded in netsim.ini under cuttlefish")
+                .parse()
+                .expect("tcp.port must be u16");
+            assert!(port > 0, "Expected non-zero tcp.port in netsim.ini, got {port}");
+        }
+        #[cfg(not(feature = "cuttlefish"))]
+        {
+            assert!(
+                !ini_map.contains_key("tcp.port"),
+                "Did not expect tcp.port in netsim.ini without cuttlefish, got {ini_map:?}"
+            );
+        }
     }
 
     /// When I call reset

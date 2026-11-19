@@ -772,7 +772,7 @@ impl NetsimDaemon {
             resolve_port_with_env(args.hci_port, "NETSIM_HCI_PORT", |name| std::env::var(name))
                 .unwrap_or_else(|| get_hci_port(0, instance_num - 1) as u16);
         let mut actual_hci_port = None;
-        let mut hci_task = None;
+        let mut hci_listener = None;
         if let Some(listener) = bind_tcp_loopback_with_ephemeral_fallback(
             resolved_hci_port,
             is_explicit_hci,
@@ -784,12 +784,12 @@ impl NetsimDaemon {
             ))
         })? {
             actual_hci_port = Some(listener.local_addr().map_err(init_error)?.port());
-            hci_task = Some(tokio::spawn(hci_server::run(listener, device_client.clone())));
+            hci_listener = Some(listener);
         }
 
         // WebSocket server
         let mut actual_ws_port = None;
-        let mut ws_task = None;
+        let mut ws_listener = None;
         let resolved_ws_port_opt =
             resolve_port_with_env(args.ws_port, "NETSIM_WS_PORT", |name| std::env::var(name));
         let websocket_port = resolved_ws_port_opt.map(|p| p + instance_num - 1);
@@ -797,10 +797,7 @@ impl NetsimDaemon {
             match bind_tcp_loopback(ws_port) {
                 Ok(listener) => {
                     actual_ws_port = Some(listener.local_addr().map_err(init_error)?.port());
-                    ws_task = Some(tokio::spawn(websocket_server::server::run(
-                        listener,
-                        device_client.clone(),
-                    )));
+                    ws_listener = Some(listener);
                 }
                 Err(e) => {
                     return Err(init_error(format!(
@@ -849,6 +846,11 @@ impl NetsimDaemon {
                 )
                 .await
             {
+                if resolved_tcp_port_opt.is_some() {
+                    return Err(init_error(format!(
+                        "Failed to bind requested TCP forwarder port {tcp_port}: {error}"
+                    )));
+                }
                 error!(%error, "Failed to start TCP forwarder listener");
             } else if let Some(packet_stream::StreamAddress::Tcp(socket_addr)) =
                 streams.listener_address("tcp")
@@ -996,6 +998,11 @@ impl NetsimDaemon {
             capture_client.clone(),
             get_version(),
         ));
+        let hci_task = hci_listener
+            .map(|listener| tokio::spawn(hci_server::run(listener, device_client.clone())));
+        let ws_task = ws_listener.map(|listener| {
+            tokio::spawn(websocket_server::server::run(listener, device_client.clone()))
+        });
 
         Ok(StartUpMode::Owner(NetsimDaemon {
             device_client,

@@ -1034,3 +1034,50 @@ async fn test_forward_host_mdns_cli_flag_enables_wifi_actor_forwarding() {
     // Then
     world.then_host_mdns_forwarding_enabled(true).await;
 }
+
+// Scenario: Explicit --tcp-port bind conflict fails daemon startup, leaves no netsim.ini, and releases hci/ws ports
+#[tokio::test]
+async fn test_explicit_tcp_port_bind_conflict_fails_startup_without_ini() {
+    // Given an occupied IPv4 loopback TCP port and free explicit hci and ws ports
+    let (_occupied, tcp_port) = World::given_occupied_loopback_port();
+    let (hci_probe, hci_port) = World::given_occupied_loopback_port();
+    let (ws_probe, ws_port) = World::given_occupied_loopback_port();
+    drop((hci_probe, ws_probe));
+    // When netsimd starts with --tcp-port set to that occupied port
+    let (discovery_dir, result) =
+        World::when_daemon_starts_with_tcp_port(hci_port, ws_port, tcp_port).await;
+    // Then startup fails with InitializationError, leaves no netsim.ini, and releases hci/ws ports
+    World::then_startup_failed_with_init_error_without_ini(discovery_dir.path(), result, tcp_port);
+    World::then_loopback_ports_are_rebindable(&[hci_port, ws_port]);
+}
+
+// Scenario: NETSIM_TCP_PORT bind conflict fails daemon startup and leaves no netsim.ini
+#[test]
+fn test_netsim_tcp_port_env_bind_conflict_fails_startup_without_ini() {
+    // Given an occupied IPv4 loopback TCP port
+    let (_occupied, port) = World::given_occupied_loopback_port();
+    // When an isolated netsimd child starts with NETSIM_TCP_PORT set to that port
+    let Some(output) = World::when_run_child_tcp_env_bind_conflict_probe(
+        module_path!(),
+        "test_netsim_tcp_port_env_bind_conflict_fails_startup_without_ini",
+        port,
+    ) else {
+        return;
+    };
+    // Then child startup fails with InitializationError and leaves no netsim.ini file
+    output.then_discovery_dir_has_no_ini_file();
+}
+
+// Scenario: Default startup without explicit TCP port preserves platform tcp.port policy
+#[test]
+fn test_default_startup_without_tcp_port_preserves_platform_tcp_policy() {
+    // Given an isolated child process with NETSIM_TCP_PORT scrubbed and tcp_port unset
+    // When netsimd starts as Owner
+    // Then Cuttlefish records a non-zero tcp.port in netsim.ini while standard omits tcp.port
+    World::when_run_isolated_owner(
+        module_path!(),
+        "test_default_startup_without_tcp_port_preserves_platform_tcp_policy",
+        &["-l", "--no-shutdown"],
+        World::then_child_ini_records_platform_tcp_policy,
+    );
+}
