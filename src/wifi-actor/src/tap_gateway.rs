@@ -91,14 +91,8 @@ impl TapInterface {
             *dest = libc::c_char::from_ne_bytes([b]);
         }
 
-        // Set flags
-        // SAFETY: Accessing union field to set flags.
-        // We cast the union to a short pointer because the field name `ifr_flags`
-        // might vary or be inaccessible in some libc versions/bindgen outputs.
-        unsafe {
-            let flags = (libc::IFF_TAP | libc::IFF_NO_PI) as libc::c_short;
-            *(&raw mut if_req.ifr_ifru).cast::<libc::c_short>() = flags;
-        }
+        // Omit the 4-byte Linux tun_pi header so reads and writes carry raw Ethernet frames.
+        if_req.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as libc::c_short;
 
         // IOCTL
         // Define the ioctl using nix macro.
