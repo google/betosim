@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use bytes::Bytes;
-use futures::{SinkExt, TryStreamExt, pin_mut, stream::StreamExt};
+use futures::{
+    SinkExt,
+    stream::{Stream, StreamExt},
+};
 use netsim_model::ChipInfo;
 use netsim_proto::{
     packet_streamer::{self, PacketRequest, PacketResponse},
@@ -59,6 +62,46 @@ fn grpc_error_to_packet_error(e: grpcio::Error) -> PacketStreamError {
         _ => std::io::ErrorKind::Other,
     };
     PacketStreamError::Io(std::io::Error::new(kind, e.to_string()))
+}
+
+fn is_expected_disconnect(error: &grpcio::Error) -> bool {
+    match error {
+        grpcio::Error::RpcFinished(None) => true,
+        grpcio::Error::RpcFinished(Some(status)) => {
+            matches!(status.code(), grpcio::RpcStatusCode::OK | grpcio::RpcStatusCode::CANCELLED)
+        }
+        _ => false,
+    }
+}
+
+async fn forward_grpc_requests(
+    mut stream: impl Stream<Item = grpcio::Result<PacketRequest>> + Unpin,
+    packet_stream_tx: mpsc::Sender<Result<Bytes>>,
+) {
+    while let Some(res) = stream.next().await {
+        match res {
+            Ok(packet_request) => {
+                let packet_res = packet_stream_converter::packet_request_to_bytes(packet_request);
+                if packet_stream_tx.send(packet_res).await.is_err() {
+                    break;
+                }
+            }
+            Err(error) if is_expected_disconnect(&error) => {
+                tracing::debug!(%error, "gRPC packet stream closed by peer");
+                break;
+            }
+            // grpcio re-arms msg_f before decoding, so stream framing stays intact.
+            Err(error @ grpcio::Error::Codec(_)) => {
+                if packet_stream_tx.send(Err(grpc_error_to_packet_error(error))).await.is_err() {
+                    break;
+                }
+            }
+            Err(error) => {
+                let _ = packet_stream_tx.send(Err(grpc_error_to_packet_error(error))).await;
+                break;
+            }
+        }
+    }
 }
 
 async fn handle_grpc_initial_info(
@@ -133,10 +176,6 @@ impl PacketStreamer for PacketStreamerService {
                 .as_ref()
                 .is_some_and(|c| c.kind == netsim_model::ChipKind::BLUETOOTH);
 
-            let grpc_stream =
-                stream.map_err(grpc_error_to_packet_error).and_then(|packet_request| async {
-                    packet_stream_converter::packet_request_to_bytes(packet_request)
-                });
             let (packet_stream_tx, packet_stream_rx) = mpsc::channel(100);
             let packet_stream = Box::pin(ReceiverStream::new(packet_stream_rx));
 
@@ -168,12 +207,7 @@ impl PacketStreamer for PacketStreamerService {
 
             // The stream must be driven within gRPC, or tokio won't get a wake.
             // https://github.com/tikv/grpc-rs/issues/338#issuecomment-512845420
-            pin_mut!(grpc_stream);
-            while let Some(packet_res) = grpc_stream.next().await {
-                if packet_stream_tx.send(packet_res).await.is_err() {
-                    break;
-                }
-            }
+            forward_grpc_requests(stream, packet_stream_tx).await;
         });
     }
 }
@@ -205,9 +239,23 @@ impl packet_stream::transport::traits::TransportListener for ChannelTransportLis
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, ErrorKind};
+    use std::{
+        io::{self, ErrorKind},
+        sync::Arc,
+        time::Duration,
+    };
 
-    use grpcio::{Error, RpcStatus, RpcStatusCode};
+    use grpcio::{
+        ChannelBuilder, Environment, Error, RpcStatus, RpcStatusCode, ServerBuilder,
+        ServerCredentials, WriteFlags,
+    };
+    use netsim_proto::{
+        common as proto_common,
+        hci_packet::{HCIPacket, hcipacket::PacketType},
+        packet_streamer_grpc::{PacketStreamerClient, create_packet_streamer},
+        startup as proto_startup,
+    };
+    use protobuf::{EnumOrUnknown, MessageField};
 
     use super::*;
 
@@ -301,5 +349,117 @@ mod tests {
             into_io_error(Error::Codec(Box::new(io::Error::new(ErrorKind::InvalidData, "decode"))));
         assert_eq!(io_err.kind(), ErrorKind::Other);
         assert!(!io_err.to_string().is_empty());
+    }
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn make_hci_packet_request(byte: u8) -> PacketRequest {
+        let hci = HCIPacket {
+            packet_type: PacketType::COMMAND.into(),
+            packet: vec![byte],
+            ..Default::default()
+        };
+        PacketRequest {
+            request_type: Some(packet_streamer::packet_request::Request_type::HciPacket(hci)),
+            ..Default::default()
+        }
+    }
+
+    async fn collect_forwarded_requests(
+        items: Vec<grpcio::Result<PacketRequest>>,
+    ) -> Vec<Result<Bytes>> {
+        let (tx, rx) = mpsc::channel(items.len().max(1));
+        forward_grpc_requests(futures::stream::iter(items), tx).await;
+        ReceiverStream::new(rx).collect().await
+    }
+
+    #[tokio::test]
+    async fn test_stream_packets_abrupt_client_close_ends_stream_without_error() {
+        let env = Arc::new(Environment::new(1));
+        let (new_connection_tx, mut new_connection_rx) = mpsc::channel(1);
+        let service = create_packet_streamer(PacketStreamerService::new(new_connection_tx));
+        let mut server = ServerBuilder::new(env.clone())
+            .channel_args(ChannelBuilder::new(env.clone()).reuse_port(false).build_args())
+            .register_service(service)
+            .build()
+            .unwrap();
+        let port = server.add_listening_port("localhost:0", ServerCredentials::insecure()).unwrap();
+        server.start();
+
+        let channel = ChannelBuilder::new(env).connect(&format!("localhost:{port}"));
+        let client = PacketStreamerClient::new(channel);
+        let (mut sender, receiver) = client.stream_packets().unwrap();
+
+        let mut chip = proto_startup::Chip::new();
+        chip.kind = EnumOrUnknown::new(proto_common::ChipKind::BLUETOOTH);
+        let mut chip_info = proto_startup::ChipInfo::new();
+        chip_info.name = "test-device".to_string();
+        chip_info.chip = MessageField::some(chip);
+        let initial_req = PacketRequest {
+            request_type: Some(packet_streamer::packet_request::Request_type::InitialInfo(
+                chip_info,
+            )),
+            ..Default::default()
+        };
+        sender.send((initial_req, WriteFlags::default())).await.unwrap();
+
+        let (_chip_info, _peer_addr, mut packet_stream, _packet_sink) =
+            tokio::time::timeout(TEST_TIMEOUT, new_connection_rx.recv()).await.unwrap().unwrap();
+
+        drop(sender);
+        drop(receiver);
+
+        assert!(tokio::time::timeout(TEST_TIMEOUT, packet_stream.next()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_forward_grpc_requests_continues_after_codec_error() {
+        let forwarded = collect_forwarded_requests(vec![
+            Err(grpcio::Error::Codec(Box::new(std::io::Error::other("bad proto")))),
+            Ok(make_hci_packet_request(0x01)),
+        ])
+        .await;
+
+        assert_eq!(forwarded.len(), 2);
+        assert!(
+            matches!(&forwarded[0], Err(PacketStreamError::Io(e)) if e.to_string().contains("bad proto"))
+        );
+        assert_eq!(
+            forwarded[1].as_ref().unwrap().as_ref(),
+            [EnumOrUnknown::new(PacketType::COMMAND).value() as u8, 0x01]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forward_grpc_requests_stops_after_terminal_non_expected_error() {
+        let forwarded = collect_forwarded_requests(vec![
+            Err(grpcio::Error::RpcFinished(Some(grpcio::RpcStatus::new(
+                grpcio::RpcStatusCode::INTERNAL,
+            )))),
+            Ok(make_hci_packet_request(0x01)),
+        ])
+        .await;
+
+        assert_eq!(forwarded.len(), 1);
+        assert!(
+            matches!(&forwarded[0], Err(PacketStreamError::Io(e)) if e.to_string().contains("INTERNAL"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forward_grpc_requests_drops_expected_disconnect_without_forwarding_error() {
+        for error in [
+            grpcio::Error::RpcFinished(None),
+            grpcio::Error::RpcFinished(Some(grpcio::RpcStatus::ok())),
+            grpcio::Error::RpcFinished(Some(grpcio::RpcStatus::new(
+                grpcio::RpcStatusCode::CANCELLED,
+            ))),
+        ] {
+            let received =
+                collect_forwarded_requests(vec![Err(error), Ok(make_hci_packet_request(0x01))])
+                    .await;
+
+            assert!(received.is_empty());
+        }
     }
 }
