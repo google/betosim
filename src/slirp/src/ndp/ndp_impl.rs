@@ -36,7 +36,7 @@ pub(crate) const SLAAC_PREFIX_LEN: u8 = 64;
 const IPV6_MIN_MTU: usize = 1280;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct NdpEntry {
+struct NdpEntry {
     mac: MacAddr,
     #[serde(skip)]
     last_accessed_tick: u64,
@@ -44,9 +44,9 @@ pub(crate) struct NdpEntry {
 
 /// Handles Neighbor Discovery Protocol (NDP) for IPv6.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NdpTable {
-    pub(crate) cache: HashMap<Ipv6Addr, NdpEntry>,
-    pub(crate) access_counter: u64,
+pub(crate) struct NdpTable {
+    cache: HashMap<Ipv6Addr, NdpEntry>,
+    access_counter: u64,
 }
 
 impl Default for NdpTable {
@@ -56,13 +56,13 @@ impl Default for NdpTable {
 }
 
 impl NdpTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { cache: HashMap::new(), access_counter: 0 }
     }
 
     /// Adds or updates an entry in the NDP table with bounded size limit and
     /// LRU eviction.
-    pub fn add_entry(&mut self, ip: Ipv6Addr, mac: MacAddr) {
+    pub(crate) fn add_entry(&mut self, ip: Ipv6Addr, mac: MacAddr) {
         const MAX_NDP_ENTRIES: usize = 512;
         self.access_counter = self.access_counter.wrapping_add(1);
         let current_tick = self.access_counter;
@@ -75,7 +75,7 @@ impl NdpTable {
     }
 
     /// Looks up a MAC address for the given IPv6 address.
-    pub fn lookup(&self, ip: &Ipv6Addr) -> Option<MacAddr> {
+    pub(crate) fn lookup(&self, ip: &Ipv6Addr) -> Option<MacAddr> {
         self.cache.get(ip).map(|entry| entry.mac)
     }
 }
@@ -139,7 +139,7 @@ impl NdpReply {
     /// Encodes the NDP reply into the provided buffer as a complete Ethernet + IPv6 + ICMPv6 frame.
     ///
     /// Returns the number of bytes written, or `None` if the buffer is too small.
-    pub(crate) fn encode(&self, buf: &mut [u8]) -> Option<usize> {
+    pub(super) fn encode(&self, buf: &mut [u8]) -> Option<usize> {
         let hdr = self.frame_header();
         match self {
             Self::NeighborAdvertisement { target_ip, target_mac, flags, .. } => {

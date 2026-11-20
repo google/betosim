@@ -20,7 +20,7 @@ pub mod dhcpv6;
 pub mod dns;
 pub mod icmp;
 pub mod ip_fragment;
-pub mod ndp;
+mod ndp;
 pub mod packet;
 pub mod tcp;
 
