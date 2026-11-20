@@ -20,9 +20,9 @@
 //! (`go/netsim-error-stats-dd`): `+0001..+1999` Config & Input,
 //! `+2000..+3999` OS & System I/O, `+4000..+5999` Client & Transport,
 //! `+6000..+7999` Internal & State, and `+8000..+9999` External Backend / FFI.
-//! Within `30000..=39999` (Packet Stream), `scripts/err_code_sites.py` splits
-//! `code % 1000` between `packet-stream` (`+000..+499`) and `model`
-//! (`+500..+999`, e.g. `36500..=36999`).
+//! Within `30000..=39999` (Packet Stream), `code % 1000` is split between
+//! `packet-stream` (`+000..+499`) and `model` (`+500..+999`, e.g.
+//! `36500..=36999`).
 //!
 //! Pass these as `code = err::Code::Variant as u32` to `error!` / `warn!` so
 //! `ErrorStatsLayer` counts them in `NetsimStats.error_stats`. Codes are

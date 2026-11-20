@@ -20,9 +20,9 @@
 //! (`go/netsim-error-stats-dd`): `+0001..+1999` Config & Input,
 //! `+2000..+3999` OS & System I/O, `+4000..+5999` Client & Transport,
 //! `+6000..+7999` Internal & State, and `+8000..+9999` External Backend / FFI.
-//! Within `10000..=19999` (Daemon & Startup), `scripts/err_code_sites.py`
-//! splits `code % 1000` between `daemon` (`+000..+499`) and `common`
-//! (`+500..+999`, e.g. `10500..=10999`, `12500..=12999`, `16500..=16999`).
+//! Within `10000..=19999` (Daemon & Startup), `code % 1000` is split between
+//! `daemon` (`+000..+499`) and `common` (`+500..+999`, e.g. `10500..=10999`,
+//! `12500..=12999`, `16500..=16999`).
 //!
 //! Pass these as `code = err::Code::Variant as u32` to `error!` / `warn!` so
 //! `ErrorStatsLayer` counts them in `NetsimStats.error_stats`. Codes are

@@ -20,10 +20,10 @@
 //! (`go/netsim-error-stats-dd`): `+0001..+1999` Config & Input,
 //! `+2000..+3999` OS & System I/O, `+4000..+5999` Client & Transport,
 //! `+6000..+7999` Internal & State, and `+8000..+9999` External Backend / FFI.
-//! Within `20000..=29999` (Actor & Device), three crates share the block, so
-//! `scripts/err_code_sites.py` splits `code % 1000` across `device-actor`
-//! (`+000..+499`), `actor-framework` (`+500..+799`, e.g. `26500..=26799`), and
-//! `link-actor` (`+800..+999`).
+//! Within `20000..=29999` (Actor & Device), three crates share the block,
+//! splitting `code % 1000` across `device-actor` (`+000..+499`),
+//! `actor-framework` (`+500..+799`, e.g. `26500..=26799`), and `link-actor`
+//! (`+800..+999`).
 //!
 //! Pass these as `code = err::Code::Variant as u32` to `error!` / `warn!` so
 //! `ErrorStatsLayer` counts them in `NetsimStats.error_stats`. Codes are
