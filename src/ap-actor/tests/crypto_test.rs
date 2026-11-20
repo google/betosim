@@ -216,6 +216,7 @@ fn test_crypto_interop_boringssl_encrypt_rust_decrypt() {
     // (A1=Dest, A2=BSSID/Transmitter, A3=Source).
 
     // Register session for A3 (Source)
+    store.set_station_bssid(a3, a2);
     store.add_session(a3, key.clone());
 
     // DECRYPT with Rust

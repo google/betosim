@@ -287,7 +287,7 @@ pub struct ApActor {
 pub struct ApState {
     pub id: ApId,
     pub config: ApConfig,
-    pub(crate) wpa: Option<wpa_auth::WpaAuthenticator>,
+    pub(crate) wpa_sessions: HashMap<MacAddr, wpa_auth::WpaAuthenticator>,
     pub(crate) sae_sessions: HashMap<MacAddr, crate::sae::SaeStateMachine>,
     pub(crate) eap_sessions: HashMap<MacAddr, crate::eap_auth::EapAuthenticator>,
     pub associations: std::collections::HashSet<MacAddr>,
@@ -316,7 +316,7 @@ impl Default for ApState {
         Self {
             id: DEFAULT_AP_ID,
             config: ApConfig { bssid: EXPECTED_DEFAULT_AP_BSSID, ..ApConfig::default() },
-            wpa: None,
+            wpa_sessions: HashMap::new(),
             sae_sessions: HashMap::new(),
             eap_sessions: HashMap::new(),
             associations: std::collections::HashSet::new(),
@@ -350,6 +350,13 @@ impl ApState {
         *self = Self { id: self.id, config, ..Self::default() };
     }
 
+    pub(crate) fn purge_delayed_frames(&mut self, sta_mac: &MacAddr) {
+        self.delayed_frames.retain(|(_, frame)| {
+            !netsim_packets::Ieee80211::decode(frame)
+                .is_ok_and(|ieee| ieee.get_destination() == *sta_mac)
+        });
+    }
+
     pub(crate) fn clear_station_state(&mut self, sta_mac: &MacAddr) {
         if self.associations.remove(sta_mac) {
             tracing::info!(
@@ -358,9 +365,8 @@ impl ApState {
                 self.config.bssid
             );
         }
-        if let Some(wpa) = &mut self.wpa {
-            wpa.remove_session(sta_mac);
-        }
+        self.wpa_sessions.remove(sta_mac);
+        self.purge_delayed_frames(sta_mac);
         self.sae_sessions.remove(sta_mac);
         self.eap_sessions.remove(sta_mac);
     }
@@ -429,7 +435,7 @@ mod tests {
         assert_eq!(state.config.ssid, "InitialSsid");
         assert_eq!(state.config.channel, 6);
         assert!(state.enabled);
-        assert!(state.wpa.is_none());
+        assert!(state.wpa_sessions.is_empty());
         assert!(state.sae_sessions.is_empty());
         assert!(state.eap_sessions.is_empty());
         assert!(state.associations.is_empty());
@@ -466,5 +472,25 @@ mod tests {
         let config = ApConfig { bssid: ZERO_BSSID, ..Default::default() };
         let create: ApCreate = config.into();
         assert_eq!(create.bssid, "");
+    }
+
+    #[test]
+    fn test_purge_delayed_frames_removes_only_target_station() {
+        use netsim_packets::{EthernetFrame, FrameDirection, Ieee80211, ether_type};
+        use zerocopy::IntoBytes;
+        const MIN_ETH_LEN: usize = 60;
+        let bssid = expected_default_ap_bssid();
+        let [sta_a, sta_b] = [0x11, 0x22].map(|b| MacAddr::new([0x02, 0, 0, 0, 0, b]));
+        let make_delayed = |dst: MacAddr| {
+            let mut eth = EthernetFrame::new(dst, bssid, ether_type::EAPOL).as_bytes().to_vec();
+            eth.resize(MIN_ETH_LEN, 0);
+            let pkt = Ieee80211::from_ieee8023(&eth, bssid, FrameDirection::FromAp, 1).unwrap();
+            (std::time::Instant::now(), bytes::Bytes::from(pkt.encode_to_vec().unwrap()))
+        };
+        let mut state = ApState::default();
+        state.delayed_frames.extend([make_delayed(sta_a), make_delayed(sta_b)]);
+        state.purge_delayed_frames(&sta_a);
+        assert_eq!(state.delayed_frames.len(), 1);
+        assert_eq!(Ieee80211::decode(&state.delayed_frames[0].1).unwrap().get_destination(), sta_b);
     }
 }

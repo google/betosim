@@ -16,13 +16,22 @@ use actor_framework::DynContext;
 use netsim_model::{ChipId, WifiMode};
 use netsim_packets::{
     AssociationResponseFixedFields, AuthenticationFixedFields, BeaconFixedFields,
-    BeaconFrameHeader, FrameControl, IeIterator, Ieee80211, LlcSnapHeader, MacHeader3Addr,
-    control_field, management_subtype, sap, tags, write_ie, write_wmm_param_element,
+    BeaconFrameHeader, EAPOL_TYPE_KEY, EAPOL_TYPE_PACKET, EAPOL_TYPE_START, FrameControl,
+    IeIterator, Ieee80211, LlcSnapHeader, MacHeader3Addr, control_field, management_subtype, sap,
+    tags, write_ie, write_wmm_param_element,
 };
 use tracing::{debug, error, info, warn};
 use zerocopy::{FromBytes, IntoBytes, U16};
 
-use crate::{ApActor, ApError, ApState, sae::SaeStateMachine, shared::SharedKeyStore};
+use crate::{
+    ApActor, ApError, ApState,
+    eap_auth::{EapAuthenticator, EapOutput},
+    sae::SaeStateMachine,
+    shared::SharedKeyStore,
+    wpa_auth::{WpaAuthenticator, WpaOutput},
+};
+
+const GTK_LEN: usize = 16;
 
 /// Handles 802.11 Management Frames
 #[derive(Clone, Debug)]
@@ -293,7 +302,7 @@ impl Ieee80211Manager {
             // session state (e.g., from a previous connection that disconnected
             // without sending a Deauth frame).
             ap.clear_station_state(&src);
-            shared_keys.remove_session(&src);
+            shared_keys.remove_station_for_bssid(&src, &ap.config.bssid);
         }
 
         // SAE (Algorithm 3)
@@ -509,23 +518,24 @@ impl Ieee80211Manager {
             _ => {}
         }
 
-        let mut msgs = Vec::new();
-        let resp = self.build_assoc_resp(ap, src, 0);
-        msgs.push(bytes::Bytes::from(resp));
+        let msgs = vec![bytes::Bytes::from(self.build_assoc_resp(ap, src, 0))];
+
+        ap.wpa_sessions.remove(&src);
+        ap.eap_sessions.remove(&src);
+        ap.purge_delayed_frames(&src);
+        shared_keys.associate_station(src, ap.config.bssid);
 
         // Init WPA if configured
         if let Some(passphrase) = &ap.config.wpa_passphrase {
             let rsn_ie = crate::rsn::build_rsn_ie(&ap.config);
-            let bssid = ap.config.bssid;
-            let global_gtk = shared_keys.get_gtk(&bssid).unwrap_or_else(|| {
-                let gtk_bytes = crate::ffi::RandBytes(16);
-                let mut new_gtk = [0u8; 16];
-                new_gtk.copy_from_slice(&gtk_bytes);
-                shared_keys.set_gtk(bssid, new_gtk);
+            let global_gtk = shared_keys.get_gtk(&ap.config.bssid).unwrap_or_else(|| {
+                let mut new_gtk = [0u8; GTK_LEN];
+                new_gtk.copy_from_slice(&crate::ffi::RandBytes(GTK_LEN));
+                shared_keys.set_gtk(ap.config.bssid, new_gtk);
                 new_gtk
             });
 
-            let mut authenticator = crate::wpa_auth::WpaAuthenticator::new(
+            let mut authenticator = WpaAuthenticator::new(
                 ap.config.bssid,
                 src,
                 ap.config.ssid.as_bytes(),
@@ -536,7 +546,7 @@ impl Ieee80211Manager {
 
             if let Ok(m1) = authenticator.initiate_handshake() {
                 let m1_frame = self.wrap_eapol(ap, src, &m1);
-                ap.wpa = Some(authenticator);
+                ap.wpa_sessions.insert(src, authenticator);
 
                 // 150ms buffer prevents EAPOL M1 from racing via AF_PACKET against the
                 // asynchronous Netlink Association event. Without it,
@@ -619,19 +629,9 @@ impl Ieee80211Manager {
         shared_keys: &SharedKeyStore,
     ) -> Result<Vec<bytes::Bytes>, ApError> {
         let src = frame.get_source();
-        info!("ApActor: Received Deauth from {}", src);
-
-        // Check if we have a session for this source
-        if let Some(_wpa) = &ap.wpa {
-            // Since ApState currently supports only a single session/authenticator,
-            // we clear it indiscriminately. Future multi-station support will need keyed
-            // lookup.
-            ap.wpa = None;
-        }
-
-        shared_keys.remove_session(&src);
-        ap.associations.remove(&src);
-
+        info!("ApActor: Received Deauth/Disassoc from {}", src);
+        ap.clear_station_state(&src);
+        shared_keys.remove_station_for_bssid(&src, &ap.config.bssid);
         Ok(vec![])
     }
 
@@ -690,9 +690,10 @@ impl Ieee80211Manager {
             return Ok(vec![]);
         }
 
-        info!("ApActor: Received EAPOL frame from src={}", ieee80211_frame.get_source());
+        let src = ieee80211_frame.get_source();
+        info!("ApActor: Received EAPOL frame from src={}", src);
         let frame_payload = ieee80211_frame.get_payload();
-        let Some(payload) = frame_payload.get(8..) else {
+        let Some(payload) = frame_payload.get(std::mem::size_of::<LlcSnapHeader>()..) else {
             return Ok(vec![]);
         };
 
@@ -701,7 +702,7 @@ impl Ieee80211Manager {
         };
 
         // EAPOL-Start (Type 1)
-        if eapol_type == 1 {
+        if eapol_type == EAPOL_TYPE_START {
             if !ap.config.enterprise_enabled {
                 warn!(
                     code = crate::err::Code::EapolStartEnterpriseDisabled as u32,
@@ -710,23 +711,16 @@ impl Ieee80211Manager {
                 return Ok(vec![]);
             }
             // Start EAP
-            let mut auth = crate::eap_auth::EapAuthenticator::new(
-                ap.config.bssid,
-                ieee80211_frame.get_source(),
-            );
+            let mut auth = EapAuthenticator::new(ap.config.bssid, src);
             match auth.start() {
                 Ok(outputs) => {
                     let mut frames = Vec::new();
                     for out in outputs {
-                        if let crate::eap_auth::EapOutput::Frame(data) = out {
-                            frames.push(bytes::Bytes::from(self.wrap_eapol(
-                                ap,
-                                ieee80211_frame.get_source(),
-                                &data,
-                            )));
+                        if let EapOutput::Frame(data) = out {
+                            frames.push(bytes::Bytes::from(self.wrap_eapol(ap, src, &data)));
                         }
                     }
-                    ap.eap_sessions.insert(ieee80211_frame.get_source(), auth);
+                    ap.eap_sessions.insert(src, auth);
                     return Ok(frames);
                 }
                 Err(error) => {
@@ -741,22 +735,18 @@ impl Ieee80211Manager {
         }
 
         // EAP-Packet (Type 0)
-        if eapol_type == 0 {
-            if let Some(auth) = ap.eap_sessions.get_mut(&ieee80211_frame.get_source()) {
+        if eapol_type == EAPOL_TYPE_PACKET {
+            if let Some(auth) = ap.eap_sessions.get_mut(&src) {
                 match auth.handle_eap(eap_packet) {
                     Ok(outputs) => {
                         let mut frames = Vec::new();
                         for out in outputs {
                             match out {
-                                crate::eap_auth::EapOutput::Frame(data) => {
-                                    frames.push(bytes::Bytes::from(self.wrap_eapol(
-                                        ap,
-                                        ieee80211_frame.get_source(),
-                                        &data,
-                                    )));
+                                EapOutput::Frame(data) => {
+                                    frames.push(bytes::Bytes::from(self.wrap_eapol(ap, src, &data)))
                                 }
-                                crate::eap_auth::EapOutput::Success => {
-                                    info!("EAP: Success for {}", ieee80211_frame.get_source());
+                                EapOutput::Success => {
+                                    info!("EAP: Success for {}", src);
                                     // TODO: Key Derivation / PMK setting?
                                     // For now, we are Authenticated.
                                 }
@@ -771,19 +761,16 @@ impl Ieee80211Manager {
                     }
                 }
             } else {
-                debug!("EAP Packet from unknown session {}", ieee80211_frame.get_source());
+                debug!("EAP Packet from unknown session {}", src);
                 return Ok(vec![]);
             }
         }
 
         // Key (Type 3) - WPA
-        if eapol_type == 3 {
-            let wpa = match &mut ap.wpa {
-                Some(wpa) => wpa,
-                None => {
-                    debug!("ApActor: Received EAPOL-Key but WPA not configured");
-                    return Ok(vec![]);
-                }
+        if eapol_type == EAPOL_TYPE_KEY {
+            let Some(wpa) = ap.wpa_sessions.get_mut(&src) else {
+                debug!("ApActor: Received EAPOL-Key without active WPA session for {}", src);
+                return Ok(vec![]);
             };
 
             let outputs = match wpa.handle_eapol(payload) {
@@ -798,22 +785,20 @@ impl Ieee80211Manager {
             };
 
             let mut frames = Vec::new();
-            let src = ieee80211_frame.get_source();
             info!("ApActor: EAPOL produced {} outputs for {}", outputs.len(), src);
 
             for out in outputs {
                 match out {
-                    crate::wpa_auth::WpaOutput::Frame(data) => {
+                    WpaOutput::Frame(data) => {
                         debug!("ApActor: Sending EAPOL response (len={})", data.len());
-                        let wrapped = self.wrap_eapol(ap, src, &data);
-                        frames.push(bytes::Bytes::from(wrapped));
+                        frames.push(bytes::Bytes::from(self.wrap_eapol(ap, src, &data)));
                     }
-                    crate::wpa_auth::WpaOutput::InstallKey { key_index, key, cipher } => {
+                    WpaOutput::InstallKey { key_index, key, cipher } => {
                         // Key Install Logic
                         info!("ApActor: Installing PTK.");
                         if key_index == 0 {
                             info!("ApActor: Installing PTK for {} cipher={}", src, cipher);
-                            shared_keys.add_session(src, key);
+                            shared_keys.authorize_station(src, ap.config.bssid, key);
                         }
                     }
                 }
@@ -828,6 +813,10 @@ impl Ieee80211Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::CCMP_TK_LEN;
+
+    const AUTH_FC: u16 = 0x00B0;
+    const MIN_ETHERNET_LEN: usize = 60;
 
     fn extract_tsf(frame: &[u8]) -> u64 {
         let (fixed, _) = BeaconFixedFields::read_from_prefix(&frame[24..])
@@ -1012,5 +1001,54 @@ mod tests {
         // Then
         assert!(out.is_empty());
         assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_handle_auth_seq1_clears_only_matching_bssid_session() {
+        use netsim_packets::{EthernetFrame, FrameDirection, MacAddr};
+        let b1 = MacAddr::new([2, 0, 0, 0, 0, 1]);
+        let b2 = MacAddr::new([2, 0, 0, 0, 0, 2]);
+        let sta1 = MacAddr::new([2, 0, 0, 0, 0, 0x55]);
+        let sta2 = MacAddr::new([2, 0, 0, 0, 0, 0x56]);
+        let auth_seq1 = |bssid, sta, seq| {
+            let hdr = MacHeader3Addr::new(FrameControl::new(AUTH_FC), 0, bssid, sta, bssid, seq);
+            let fix = AuthenticationFixedFields {
+                algorithm: U16::ZERO,
+                sequence: 1.into(),
+                status: U16::ZERO,
+            };
+            [hdr.as_bytes(), fix.as_bytes()].concat()
+        };
+        let downlink_data = |bssid, sta| {
+            let mut eth = EthernetFrame::new(sta, bssid, netsim_packets::ether_type::IPV4)
+                .as_bytes()
+                .to_vec();
+            eth.resize(MIN_ETHERNET_LEN, 0);
+            Ieee80211::from_ieee8023(&eth, bssid, FrameDirection::FromAp, 1).unwrap()
+        };
+
+        // Given sta1 authorized on b1 and sta2 authorized on b2
+        let mut mgr = Ieee80211Manager::new();
+        let mut ap = ApState::default();
+        ap.config.bssid = b2;
+        let keys = SharedKeyStore::new();
+        keys.add_bssid(b1);
+        keys.add_bssid(b2);
+        keys.associate_station(sta1, b1);
+        keys.authorize_station(sta1, b1, vec![0x42; CCMP_TK_LEN]);
+        keys.associate_station(sta2, b2);
+        keys.authorize_station(sta2, b2, vec![0x22; CCMP_TK_LEN]);
+
+        // When AP b2 handles Auth seq 1 from sta1 (mismatched BSSID) and sta2 (matching BSSID)
+        let raw1 = auth_seq1(b2, sta1, ap.next_seq_control());
+        mgr.handle_auth(&mut ap, &Ieee80211::decode(&raw1).unwrap(), &raw1, &keys).unwrap();
+        let raw2 = auth_seq1(b2, sta2, ap.next_seq_control());
+        mgr.handle_auth(&mut ap, &Ieee80211::decode(&raw2).unwrap(), &raw2, &keys).unwrap();
+
+        // Then sta1's session on b1 stays intact while sta2's matching b2 session is cleared
+        assert_eq!(keys.get_station_bssid(&sta1), Some(b1));
+        assert!(keys.try_encrypt(&downlink_data(b1, sta1)).is_some());
+        assert!(keys.get_station_bssid(&sta2).is_none());
+        assert!(keys.try_encrypt(&downlink_data(b2, sta2)).is_none());
     }
 }

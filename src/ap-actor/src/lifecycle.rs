@@ -116,7 +116,7 @@ impl ActorLifecycle for ApActor {
             for id in aps_to_clear {
                 if let Some(ap) = self.aps.get_mut(&id) {
                     ap.clear_station_state(&src);
-                    self.shared_keys.remove_session(&src);
+                    self.shared_keys.remove_station_for_bssid(&src, &ap.config.bssid);
                 }
             }
         }

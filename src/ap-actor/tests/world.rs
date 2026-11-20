@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use actor_framework::ResourceActor;
 use ap_actor::{ApActor, ApClient, ApConfig, SharedKeyStore};
@@ -21,7 +21,7 @@ use netsim_model::WifiMode;
 use netsim_packets::{
     AssociationRequestFixedFields, BeaconFixedFields, BeaconFrameHeader, EAPOL_TYPE_KEY,
     EAPOL_VERSION, FrameControl, Ieee80211, MacAddr, MacHeader3Addr, SequenceControl,
-    management_subtype,
+    management_subtype, tags, write_ie,
 };
 use rand::prelude::*;
 use tokio::sync::mpsc;
@@ -33,10 +33,23 @@ const MGMT_AUTH_FC: u16 = 0x00B0;
 const EAPOL_M1_DELAY: Duration = Duration::from_millis(150);
 const DELAYED_FRAME_READY_WAIT: Duration = EAPOL_M1_DELAY.saturating_add(Duration::from_millis(10));
 
+pub const DEFAULT_AP_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+const FC_MGMT_ASSOC_REQ: u16 = 0x0000;
+const FC_MGMT_PROBE_REQ: u16 = 0x0040;
+const FC_MGMT_DEAUTH: u16 = 0x00C0;
+const AUTH_ALG_OPEN_SYSTEM: u16 = 0;
+pub(crate) const DEAUTH_REASON_STA_LEAVING: u16 = 3;
+const BARRIER_TIMEOUT_SECS: u64 = 2;
+const ASSOC_REQ_CAPABILITIES: u16 = 0x0100;
+const ASSOC_REQ_LISTEN_INTERVAL: u16 = 0x000A;
+
 pub fn generate_random_mac() -> [u8; 6] {
     let mut rng = rand::rng();
     [0x02, 0x00, 0x00, 0x00, rng.random(), rng.random()]
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TestApId(u32);
 
 pub struct ApWorld {
     pub client: ApClient,
@@ -83,7 +96,7 @@ impl ApWorld {
             tx_to_ap: None,
             rx_from_ap: None,
             ap_id: None,
-            ap_bssid: MacAddr::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]),
+            ap_bssid: MacAddr::new(DEFAULT_AP_MAC),
             actor_handle: Some(handle),
             next_ap_id: 1001,
             shared_keys,
@@ -114,11 +127,10 @@ impl ApWorld {
 
     pub async fn given_a_registered_ap_with_config(&mut self, config: ApConfig) {
         info!("Given a registered AP '{}'", config.ssid);
-        let id = self.next_ap_id;
-        self.next_ap_id += 1;
-        self.ap_bssid = config.bssid;
-        self.client.create_ap(Some(id), config).await.expect("Failed to create AP");
-        self.ap_id = Some(id);
+        let bssid = config.bssid;
+        let id = self.given_extra_ap(config).await;
+        self.ap_bssid = bssid;
+        self.ap_id = Some(id.0);
 
         if self.tx_to_ap.is_none() {
             let (tx_to_ap, rx_for_ap) = mpsc::unbounded_channel::<bytes::Bytes>();
@@ -186,15 +198,19 @@ impl ApWorld {
         self.given_a_registered_ap_with_config(config).await;
     }
 
-    fn header_to_ap(&self, fc: u16, src_mac: MacAddr) -> MacHeader3Addr {
+    fn header_to_bssid(&self, fc: u16, src_mac: MacAddr, bssid: MacAddr) -> MacHeader3Addr {
         MacHeader3Addr::new(
             FrameControl::new(fc),
             0,
-            self.ap_bssid,
+            bssid,
             src_mac,
-            self.ap_bssid,
+            bssid,
             SequenceControl::new(0),
         )
+    }
+
+    fn header_to_ap(&self, fc: u16, src_mac: MacAddr) -> MacHeader3Addr {
+        self.header_to_bssid(fc, src_mac, self.ap_bssid)
     }
     pub async fn then_beacon_is_received(&mut self, ssid: &str) {
         info!("Then the World receives a Beacon for '{}'", ssid);
@@ -246,12 +262,23 @@ impl ApWorld {
         M: TryInto<MacAddr>,
         M::Error: std::fmt::Debug,
     {
+        self.when_station_sends_assoc_req_to_bssid(src_mac, self.ap_bssid).await;
+    }
+
+    pub(crate) async fn when_station_sends_assoc_req_to_bssid<M>(
+        &mut self,
+        src_mac: M,
+        bssid: MacAddr,
+    ) where
+        M: TryInto<MacAddr>,
+        M::Error: std::fmt::Debug,
+    {
         let src_mac = src_mac.try_into().expect("Invalid MAC address");
         info!("When a Station sends an Association Request from {}", src_mac);
-        let header = self.header_to_ap(0x0000, src_mac);
+        let header = self.header_to_bssid(FC_MGMT_ASSOC_REQ, src_mac, bssid);
         let fixed = AssociationRequestFixedFields {
-            capabilities: U16::new(0x0100),
-            listen_interval: U16::new(0x000A),
+            capabilities: U16::new(ASSOC_REQ_CAPABILITIES),
+            listen_interval: U16::new(ASSOC_REQ_LISTEN_INTERVAL),
         };
         let mut frame = Vec::new();
         frame.extend_from_slice(header.as_bytes());
@@ -287,22 +314,32 @@ impl ApWorld {
         panic!("Did not receive Assoc Resp for {}", dst_mac);
     }
 
-    pub async fn when_station_sends_open_auth(&mut self, src_mac: MacAddr) {
+    fn send_open_auth(&mut self, src_mac: MacAddr, bssid: MacAddr) {
         use netsim_packets::AuthenticationFixedFields;
 
-        info!("When a Station sends an Authentication Request from {}", src_mac);
-        let header = self.header_to_ap(0x00B0, src_mac);
+        info!("When a Station sends an Authentication Request from {} to {}", src_mac, bssid);
+        let hdr = self.header_to_bssid(MGMT_AUTH_FC, src_mac, bssid);
         let fixed = AuthenticationFixedFields {
-            algorithm: U16::new(0), // Open System
+            algorithm: U16::new(AUTH_ALG_OPEN_SYSTEM),
             sequence: U16::new(1),
             status: U16::new(0),
         };
+        let frame = [hdr.as_bytes(), fixed.as_bytes()].concat();
+        self.tx_to_ap.as_mut().expect("AP not registered").send(frame.into()).expect("send auth");
+    }
 
-        let mut frame = Vec::new();
-        frame.extend_from_slice(header.as_bytes());
-        frame.extend_from_slice(fixed.as_bytes());
-        let tx = self.tx_to_ap.as_mut().expect("AP not registered");
-        tx.send(bytes::Bytes::from(frame)).expect("Failed to send Auth Req");
+    pub async fn when_station_sends_open_auth(&mut self, src_mac: MacAddr) {
+        self.send_open_auth(src_mac, self.ap_bssid);
+    }
+
+    pub(crate) async fn when_station_sends_open_auth_to_bssid(
+        &mut self,
+        src_mac: &str,
+        bssid: MacAddr,
+    ) {
+        let src: MacAddr = src_mac.parse().expect("Invalid MAC address");
+        self.send_open_auth(src, bssid);
+        self.await_probe_barrier(src, true).await;
     }
 
     pub async fn when_station_sends_sae_auth(
@@ -330,15 +367,49 @@ impl ApWorld {
         tx.send(bytes::Bytes::from(auth_frame)).expect("Failed to send SAE Auth frame");
     }
 
+    fn send_deauth_with_reason(&mut self, src: MacAddr, bssid: MacAddr, reason: u16) {
+        let hdr = self.header_to_bssid(FC_MGMT_DEAUTH, src, bssid);
+        let frame = [hdr.as_bytes(), &reason.to_le_bytes()].concat();
+        self.tx_to_ap.as_mut().expect("AP not registered").send(frame.into()).expect("send deauth");
+    }
+
     pub async fn when_station_sends_deauth(&mut self, station_mac: MacAddr, reason_code: u16) {
-        let header = self.header_to_ap(0x00C0, station_mac);
+        self.send_deauth_with_reason(station_mac, self.ap_bssid, reason_code);
+    }
 
-        let mut frame = Vec::new();
-        frame.extend_from_slice(header.as_bytes());
-        frame.extend_from_slice(&reason_code.to_le_bytes());
+    pub(crate) async fn when_station_deauthenticates(&mut self, mac: &str) {
+        self.when_station_deauthenticates_from_bssid(mac, self.ap_bssid).await;
+    }
 
-        let tx = self.tx_to_ap.as_mut().expect("AP not registered");
-        tx.send(bytes::Bytes::from(frame)).expect("Failed to send Deauth frame");
+    pub(crate) async fn when_station_deauthenticates_from_bssid(
+        &mut self,
+        mac: &str,
+        bssid: MacAddr,
+    ) {
+        let src: MacAddr = mac.parse().expect("valid MAC");
+        self.send_deauth_with_reason(src, bssid, DEAUTH_REASON_STA_LEAVING);
+        self.await_probe_barrier(src, true).await;
+    }
+
+    pub(crate) async fn await_probe_barrier(&mut self, sta: MacAddr, allow_eapol: bool) {
+        let mut req =
+            self.header_to_bssid(FC_MGMT_PROBE_REQ, sta, self.ap_bssid).as_bytes().to_vec();
+        write_ie(&mut req, tags::SSID, &[]);
+        self.tx_to_ap.as_mut().expect("AP").send(bytes::Bytes::from(req)).expect("send");
+        let rx = self.rx_from_ap.as_mut().expect("AP registered");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(BARRIER_TIMEOUT_SECS);
+        loop {
+            let msg = tokio::time::timeout_at(deadline, rx.recv()).await.unwrap().unwrap();
+            if let Ok(f) = Ieee80211::decode(&msg) {
+                assert!(allow_eapol || !f.is_eapol().unwrap_or(false), "Unexpected EAPOL frame");
+                if f.is_mgmt()
+                    && f.stype() == management_subtype::PROBE_RESPONSE
+                    && f.get_addr1() == sta
+                {
+                    return;
+                }
+            }
+        }
     }
 
     fn build_eapol_frame(
@@ -349,10 +420,29 @@ impl ApWorld {
         packet_type: u8,
         body: &[u8],
     ) -> Vec<u8> {
+        self.build_eapol_frame_with_bssid(
+            self.ap_bssid,
+            client_mac,
+            frame_control,
+            version,
+            packet_type,
+            body,
+        )
+    }
+
+    pub(crate) fn build_eapol_frame_with_bssid(
+        &self,
+        bssid: MacAddr,
+        client_mac: MacAddr,
+        frame_control: u16,
+        version: u8,
+        packet_type: u8,
+        body: &[u8],
+    ) -> Vec<u8> {
         use netsim_packets::{EapolHeader, LlcSnapHeader, control_field, sap};
 
         let mut frame = Vec::new();
-        let header = self.header_to_ap(frame_control, client_mac);
+        let header = self.header_to_bssid(frame_control, client_mac, bssid);
         frame.extend_from_slice(header.as_bytes());
 
         let llc = LlcSnapHeader::new(
@@ -493,11 +583,23 @@ impl ApWorld {
         }
     }
 
+    pub(crate) fn primary_ap_id(&self) -> TestApId {
+        TestApId(self.ap_id.expect("AP not registered"))
+    }
+
     pub async fn when_force_disconnect_is_requested_for(&mut self, mac: &str) {
-        info!("When a force disconnect is requested for '{}'", mac);
-        let id = self.ap_id.expect("AP not registered");
+        let id = self.primary_ap_id();
+        self.when_force_disconnect_is_requested_on(id, mac).await;
+    }
+
+    pub(crate) async fn when_force_disconnect_is_requested_on(
+        &mut self,
+        ap_id: TestApId,
+        mac: &str,
+    ) {
+        info!("When a force disconnect is requested for '{}' on AP {}", mac, ap_id.0);
         self.client
-            .update_ap_config(id, None, None, Some(vec![mac.to_string()]), None)
+            .update_ap_config(ap_id.0, None, None, Some(vec![mac.to_string()]), None)
             .await
             .expect("Force disconnect failed");
     }
@@ -523,7 +625,7 @@ impl ApWorld {
     }
 
     pub async fn given_ap_beacons_disabled(&mut self) {
-        let id = self.ap_id.expect("AP not registered");
+        let id = self.primary_ap_id().0;
         self.client
             .update_ap_config(id, None, None, None, Some(false))
             .await
@@ -532,7 +634,7 @@ impl ApWorld {
 
     pub async fn when_ap_enabled_after_delayed_frame_ready(&mut self) {
         tokio::time::sleep(DELAYED_FRAME_READY_WAIT).await;
-        let id = self.ap_id.expect("AP not registered");
+        let id = self.primary_ap_id().0;
         self.client
             .update_ap_config(id, None, None, None, Some(true))
             .await
@@ -544,8 +646,29 @@ impl ApWorld {
     }
 
     pub async fn when_disconnect_is_requested_for(&mut self, mac: &str) {
-        let id = self.ap_id.expect("AP not registered");
-        self.client.disconnect(id, mac.to_string()).await.expect("Failed to disconnect station");
+        let id = self.primary_ap_id();
+        self.when_disconnect_is_requested_on(id, mac).await;
+    }
+
+    pub(crate) async fn when_disconnect_is_requested_on(&mut self, ap_id: TestApId, mac: &str) {
+        self.client
+            .disconnect(ap_id.0, mac.to_string())
+            .await
+            .expect("Failed to disconnect station");
+    }
+
+    pub(crate) async fn given_extra_ap(&mut self, config: ApConfig) -> TestApId {
+        let id = self.next_ap_id;
+        self.next_ap_id += 1;
+        self.client.create_ap(Some(id), config).await.expect("Failed to create AP");
+        TestApId(id)
+    }
+
+    pub(crate) async fn then_ap_associations_are(&self, ap_id: TestApId, expected: &[&str]) {
+        let expected_set: HashSet<MacAddr> =
+            expected.iter().map(|m| m.parse().expect("valid MAC")).collect();
+        let ap = self.client.get_ap(ap_id.0).await.expect("get_ap").expect("AP exists");
+        assert_eq!(ap.associations, expected_set);
     }
 
     pub async fn when_malformed_raw_bytes_sent(&mut self, raw: &[u8]) {

@@ -112,24 +112,15 @@ impl ActorService for ApActor {
                     }
                 };
 
-                if !ap_state.associations.remove(&mac) {
+                if !ap_state.associations.contains(&mac) {
                     warn!(
                         code = crate::err::Code::ForceDisconnectUnknownMac as u32,
                         "Requested force disconnect for unknown MAC: {}", mac
                     );
                     continue;
                 }
-
-                // Also clear sessions if any
-                if let Some(wpa) = &mut ap_state.wpa {
-                    wpa.remove_session(&mac);
-                }
-                ap_state.sae_sessions.remove(&mac);
-                ap_state.eap_sessions.remove(&mac);
-                self.shared_keys.remove_session(&mac);
-                self.shared_keys.remove_station_bssid(&mac);
-
-                // Send Deauth Frame
+                ap_state.clear_station_state(&mac);
+                self.shared_keys.remove_station_for_bssid(&mac, &ap_state.config.bssid);
                 send_deauth(self.sink.as_ref(), &self.manager, ap_state, mac);
             }
         }
@@ -147,27 +138,7 @@ impl ActorService for ApActor {
         _: &mut DynContext<Self>,
     ) -> Result<(), Self::Error> {
         if let Some(state) = self.aps.remove(&id) {
-            let bssid = state.config.bssid;
-            self.shared_keys.bssids.write().remove(&bssid);
-            self.shared_keys.gtks.write().remove(&bssid);
-
-            // Find and remove all stations associated with the deleted BSSID
-            let mut station_bssids = self.shared_keys.station_bssids.write();
-            let mut stations_to_remove = Vec::new();
-            station_bssids.retain(|sta, v| {
-                let matched = *v == bssid;
-                if matched {
-                    stations_to_remove.push(*sta);
-                }
-                !matched
-            });
-
-            // Remove their session keys
-            let mut sessions = self.shared_keys.sessions.write();
-            for sta in &stations_to_remove {
-                sessions.remove(sta);
-            }
-
+            self.shared_keys.remove_bssid(&state.config.bssid);
             info!("Deleted AP with ID: {}", id);
         } else {
             warn!(
@@ -219,19 +190,10 @@ impl ActorService for ApActor {
                 })?;
                 let ap_state = self.aps.get_mut(&id).ok_or(ApError::ApNotFound(id.0))?;
 
-                if ap_state.associations.remove(&mac) {
+                if ap_state.associations.contains(&mac) {
                     info!("ApActor: Force disconnecting MAC {} from AP {}", mac, id);
-
-                    // Clear sessions if any
-                    if let Some(wpa) = &mut ap_state.wpa {
-                        wpa.remove_session(&mac);
-                    }
-                    ap_state.sae_sessions.remove(&mac);
-                    ap_state.eap_sessions.remove(&mac);
-                    self.shared_keys.remove_session(&mac);
-                    self.shared_keys.remove_station_bssid(&mac);
-
-                    // Send Deauth Frame
+                    ap_state.clear_station_state(&mac);
+                    self.shared_keys.remove_station_for_bssid(&mac, &ap_state.config.bssid);
                     send_deauth(self.sink.as_ref(), &self.manager, ap_state, mac);
                 } else {
                     warn!(

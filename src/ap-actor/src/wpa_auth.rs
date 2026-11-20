@@ -104,15 +104,6 @@ impl WpaAuthenticator {
             &[],
         )
     }
-
-    pub(crate) fn remove_session(&mut self, sta_addr: &MacAddr) {
-        if self.sta_addr == *sta_addr {
-            self.state = WpaState::Idle;
-            self.ptk.clear();
-            self.tk.clear();
-            self.replay_counter = 0;
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +140,7 @@ impl WpaAuthenticator {
         // ... (snip parsers) ...
 
         match self.state {
-            WpaState::PtKStart | WpaState::Idle => {
+            WpaState::PtKStart => {
                 // ... (M2 logic) ...
                 self.snonce = key_frame.key_nonce;
                 self.calc_ptk()?;

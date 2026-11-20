@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
-use ap_actor::ffi::{DigestType, Hmac};
+use ap_actor::{
+    ApConfig,
+    ffi::{DigestType, Hmac, Pbkdf2HmacSha1},
+};
 use netsim_packets::{
-    DataFrameHeader, EAPOL_KEY_DESC_TYPE_RSN, EAPOL_TYPE_KEY, EAPOL_VERSION, EapolHeader,
-    EapolKeyFrame, FrameControl, Ieee80211, LlcSnapHeader, MacAddr, SequenceControl, control_field,
-    management_subtype, sap,
+    EAPOL_KEY_DESC_TYPE_RSN, EAPOL_TYPE_KEY, EAPOL_VERSION, EapolHeader, EapolKeyFrame,
+    EthernetFrame, FrameDirection, Ieee80211, LlcSnapHeader, MacAddr, ether_type,
 };
 use tracing::info;
 use zerocopy::{FromBytes, IntoBytes};
 
-use crate::world::ApWorld;
+use crate::world::{ApWorld, DEAUTH_REASON_STA_LEAVING, TestApId};
 
 // Helper: Calculate MIC (from wpa_auth.rs logic reversed/reused)
 fn calc_mic(kck: &[u8], frame: &[u8]) -> Vec<u8> {
@@ -86,326 +86,461 @@ async fn test_station_association_flow() {
     world.then_station_receives_assoc_resp(station_mac).await;
 }
 
-// Scenario: WPA Handshake Failure (Wrong Password)
-// Given a registered AP with WPA2 enabled
-// When a Station associates
-// And sends an M2 with an Invalid MIC (wrong password)
-// Then the AP does NOT send M3 (handshake fails/stalls)
-#[tokio::test]
-async fn test_wpa_handshake_failure_wrong_password() {
-    info!("Scenario: WPA Handshake Failure (Wrong Password)");
-    let mut world = ApWorld::new().await;
-    // Config with WPA
-    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+const FC_DATA_TO_DS: u16 = 0x0108;
+const OLD_BSSID: MacAddr = MacAddr::new([2, 0, 0, 0, 0, 0x22]);
+const TEST_STA_94: &str = "02:00:00:00:00:94";
+const TEST_STA_95: &str = "02:00:00:00:00:95";
+const TEST_STA_96: &str = "02:00:00:00:00:96";
+const TEST_STA_99: &str = "02:00:00:00:00:99";
+const KEY_INFO_M2: u16 = 0x010A;
+const KEY_INFO_M4: u16 = 0x030A;
+const EAPOL_KEY_BODY_LEN: u16 = 95;
+const PBKDF2_ITERATIONS: u32 = 4096;
+const PMK_LEN: usize = 32;
+const KCK_LEN: usize = 16;
+const TEST_SNONCE: [u8; 32] = [0x55; 32];
+const WRONG_PMK_BYTE: u8 = 0xEE;
+const MIN_ETHERNET_LEN: usize = 60;
+const DEFAULT_SEQ_NUM: u16 = 1;
 
-    let station_mac = "02:00:00:00:00:99";
-    let station_mac_addr: MacAddr = station_mac.try_into().unwrap();
+fn parse_mac(mac: &str) -> MacAddr {
+    mac.try_into().expect("valid MAC")
+}
 
-    // 1. Association Flow
-    // 1. Association Flow
-    world.when_station_sends_assoc_req(station_mac).await;
-    world.then_station_receives_assoc_resp(station_mac).await;
+fn sta_ptk(pmk: &[u8], bssid: MacAddr, sta: MacAddr, anonce: &[u8; 32]) -> Vec<u8> {
+    calc_ptk(pmk, &bssid.bytes, &sta.bytes, anonce, &TEST_SNONCE)
+}
 
-    // 2. Expect M1 (EAPOL Key)
-    let m1_msg = world
-        .recv_frame(|frame, msg| {
-            // Ignore Beacons
-            if frame.stype() == management_subtype::BEACON {
-                return false;
-            }
-            // EAPOL Key check: Len > 32, Type 0x888E
-            msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-        })
-        .await;
+fn decode_eapol_key(raw_msg: &[u8]) -> EapolKeyFrame {
+    let payload = Ieee80211::decode(raw_msg).expect("802.11 EAPOL").get_payload();
+    let (_, eapol) = LlcSnapHeader::read_from_prefix(&payload).expect("LLC/SNAP");
+    let (hdr, body) = EapolHeader::read_from_prefix(eapol).expect("EAPOL header");
+    assert_eq!(hdr.packet_type, EAPOL_TYPE_KEY);
+    EapolKeyFrame::read_from_prefix(body).expect("EAPOL-Key body").0
+}
 
-    let m1_frame = Ieee80211::decode(&m1_msg).expect("M1 Decode");
-    // Verify it is EAPOL
-    // Check EAPOL Type (0x888E) in LLC/SNAP if parsed, but raw payload check:
-    // Offset 32 is EAPOL Start (if header=24+8)
-    let eapol_start = 32;
-    let header_len = 32; // Assuming 24 + 8 LLC.
-    // Actually our wrap_eapol adds LLC.
+fn create_downlink_data_frame(sta_addr: MacAddr, bssid: MacAddr) -> Ieee80211 {
+    let mut bytes = EthernetFrame::new(sta_addr, sta_addr, ether_type::IPV4).as_bytes().to_vec();
+    bytes.resize(MIN_ETHERNET_LEN, 0);
+    Ieee80211::from_ieee8023(&bytes, bssid, FrameDirection::FromAp, DEFAULT_SEQ_NUM).unwrap()
+}
 
-    let eapol_payload = &m1_msg[header_len..];
-    let (header, body) = EapolHeader::read_from_prefix(eapol_payload).expect("EAPOL Header");
-    assert_eq!(header.packet_type, EAPOL_TYPE_KEY);
+impl ApWorld {
+    fn send_to_ap(&self, frame: Vec<u8>) {
+        self.tx_to_ap.as_ref().expect("AP").send(bytes::Bytes::from(frame)).expect("send");
+    }
 
-    let (key_frame, _) = EapolKeyFrame::read_from_prefix(body).expect("Key Frame");
+    fn build_eapol_key_frame(&self, sta: MacAddr, info: u16, rc: [u8; 8], ptk: &[u8]) -> Vec<u8> {
+        let eapol = EapolHeader::new(EAPOL_VERSION, EAPOL_TYPE_KEY, EAPOL_KEY_BODY_LEN);
+        let key_nonce = if info == KEY_INFO_M2 { TEST_SNONCE } else { [0; 32] };
+        let mut kf = EapolKeyFrame {
+            descriptor_type: EAPOL_KEY_DESC_TYPE_RSN,
+            key_info: info.to_be_bytes(),
+            replay_counter: rc,
+            key_nonce,
+            ..Default::default()
+        };
+        let mut unsigned = eapol.as_bytes().to_vec();
+        unsigned.extend_from_slice(kf.as_bytes());
+        kf.mic = calc_mic(&ptk[..KCK_LEN], &unsigned).try_into().expect("16-byte MIC");
+        self.build_eapol_frame_with_bssid(
+            self.ap_bssid,
+            sta,
+            FC_DATA_TO_DS,
+            EAPOL_VERSION,
+            EAPOL_TYPE_KEY,
+            kf.as_bytes(),
+        )
+    }
 
-    // Get ANonce
-    let anonce = key_frame.key_nonce;
+    async fn recv_eapol_key_for(&mut self, sta: MacAddr) -> EapolKeyFrame {
+        let msg = self
+            .recv_frame(|f, _| f.is_eapol().unwrap_or(false) && f.get_destination() == sta)
+            .await;
+        decode_eapol_key(&msg)
+    }
 
-    // 3. Construct M2 with WRONG Password
-    info!("And sends an M2 with an Invalid (wrong password derived) encryption/MIC");
-    // PMK = PSK for this simplified sim
-    // Wrong Password -> Wrong PMK
-    let wrong_pmk = b"WrongPassword_padding_to_32_bytes_";
-    // Just use arbitrary bytes for PMK
-    let pmk = vec![0xEE; 32];
-
-    let snonce = [0x55; 32]; // Our SNonce
-
-    // Calc PTK
-    // Need BSSID.
-    let bssid: MacAddr = "02:00:00:00:00:01".try_into().unwrap(); // From World default
-    let ptk = calc_ptk(&pmk, &bssid.bytes, &station_mac_addr.bytes, &anonce, &snonce);
-    let kck = &ptk[0..16];
-
-    // Build M2
-    let mut m2_frame = Vec::new();
-    let eapol_header = EapolHeader {
-        version: EAPOL_VERSION,
-        packet_type: EAPOL_TYPE_KEY,
-        length: (95u16 + 0).to_be_bytes(), // 95 fixed, 0 data
-    };
-    m2_frame.extend_from_slice(eapol_header.as_bytes());
-
-    let mut key_frame_m2 = EapolKeyFrame {
-        descriptor_type: EAPOL_KEY_DESC_TYPE_RSN,
-        key_info: 0x010A_u16.to_be_bytes(), // Key MIC | Request | Descriptor Version 2
-        replay_counter: key_frame.replay_counter, // Match M1
-        key_nonce: snonce,
-        ..Default::default()
-    };
-
-    // Write frame (header + body with 0 mic)
-    let mut m2_bytes = m2_frame.clone();
-    m2_bytes.extend_from_slice(key_frame_m2.as_bytes());
-
-    // Calc MIC
-    let mic = calc_mic(kck, &m2_bytes);
-    key_frame_m2.mic = mic.try_into().unwrap();
-
-    // Final M2
-    let mut final_m2 = m2_frame;
-    // Construct M2 Data Frame
-    let mut frame = Vec::new();
-
-    // 802.11 Header
-    // FC: Data(08), ToDS=1 (01) -> 0x0108
-    let header = DataFrameHeader::new(
-        FrameControl::new(0x0108),
-        0,
-        bssid,            // BSSID (RA)
-        station_mac_addr, // SA (TA)
-        bssid,            // DA
-        SequenceControl::new(0),
-    );
-    frame.extend_from_slice(header.as_bytes());
-
-    // LLC/SNAP Header (AA AA 03 00 00 00 88 8E)
-    let llc = LlcSnapHeader::new(
-        sap::SNAP,
-        sap::SNAP,
-        control_field::UI,
-        [0x00, 0x00, 0x00],
-        0x888E, // EAPOL
-    );
-    frame.extend_from_slice(llc.as_bytes());
-
-    // EAPOL Frame
-    frame.extend_from_slice(&final_m2);
-
-    let tx = world.tx_to_ap.as_mut().expect("AP registered");
-    tx.send(bytes::Bytes::from(frame)).expect("Send M2");
-
-    // 4. Expect NO M3 (Timeout)
-    info!("Then the AP does NOT send M3 (handshake fails)");
-    // 4. Expect NO M3 (Timeout)
-    info!("Then the AP does NOT send M3 (handshake fails)");
-
-    let start = std::time::Instant::now();
-    let mut rx = world.rx_from_ap.take().expect("AP registered"); // Take rx to ownership for polling if needed or just borrow
-    // Wait, rx is needed elsewhere? No, test ends here.
-
-    while start.elapsed() < Duration::from_secs(1) {
-        let result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
-        match result {
-            Ok(Some(msg)) => {
-                if let Ok(f) = Ieee80211::decode(&msg) {
-                    if f.stype() == management_subtype::BEACON {
-                        continue;
-                    }
-                    if msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E {
-                        panic!("Received M3 but expected failure due to wrong password!");
-                    }
-                }
-            }
-            Ok(None) => panic!("Stream closed"),
-            Err(_) => continue, // Timeout slice, keep waiting until total time
+    fn ap_cfg(ssid: &str, bssid: MacAddr, passphrase: Option<&str>) -> ApConfig {
+        ApConfig {
+            ssid: ssid.into(),
+            bssid,
+            wpa_passphrase: passphrase.map(str::to_string),
+            ..ApConfig::default()
         }
     }
-    // Success if we reach here
-    world.rx_from_ap = Some(rx); // Put it back just in case (though not needed)
-    // If we timed out or got only beacons, passed.
+
+    async fn given_old_wpa_ap(&mut self) -> TestApId {
+        let cfg = Self::ap_cfg("OldWpaAP", OLD_BSSID, Some("OldPassword"));
+        self.given_a_registered_ap_with_config(cfg).await;
+        self.primary_ap_id()
+    }
+
+    async fn given_extra_open_ap(&mut self, ssid: &str, bssid: MacAddr) -> TestApId {
+        self.given_extra_ap(Self::ap_cfg(ssid, bssid, None)).await
+    }
+
+    async fn given_station_associated_to_bssid(&mut self, sta: &str, bssid: MacAddr) {
+        self.when_station_sends_assoc_req_to_bssid(sta, bssid).await;
+        self.then_station_receives_assoc_resp(sta).await;
+    }
+
+    async fn given_authorized_wpa_station(&mut self, sta: &str, ssid: &str, pass: &str) {
+        self.given_station_is_associated(sta).await;
+        self.when_station_completes_wpa_handshake(sta, ssid, pass).await;
+    }
+
+    async fn recv_eapol_pair(&mut self, a: MacAddr, b: MacAddr) -> (EapolKeyFrame, EapolKeyFrame) {
+        let (mut fa, mut fb) = (None, None);
+        while fa.is_none() || fb.is_none() {
+            let msg = self.recv_frame(|f, _| f.is_eapol().unwrap_or(false)).await;
+            let dst = Ieee80211::decode(&msg).expect("802.11").get_destination();
+            if dst == a {
+                fa = Some(decode_eapol_key(&msg));
+            } else if dst == b {
+                fb = Some(decode_eapol_key(&msg));
+            }
+        }
+        (fa.expect("EAPOL A"), fb.expect("EAPOL B"))
+    }
+
+    fn given_frame_encrypted_with_current_ptk(&self, station_mac: &str) -> Ieee80211 {
+        let plain = create_downlink_data_frame(parse_mac(station_mac), self.ap_bssid);
+        let enc = self.shared_keys.try_encrypt(&plain).expect("encrypt with active PTK");
+        let frame = Ieee80211::decode(&enc).expect("valid CCMP frame");
+        assert!(self.shared_keys.try_decrypt(&frame).is_some(), "active PTK must decrypt");
+        frame
+    }
+
+    async fn given_station_has_pending_wpa_handshake(&mut self, mac: &str) {
+        self.given_station_is_associated(mac).await;
+        let _ = self.recv_eapol_key_for(parse_mac(mac)).await;
+    }
+
+    async fn when_unassociated_station_sends_eapol_key(&mut self, mac: &str) {
+        let sta = parse_mac(mac);
+        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M2, [0; 8], &[0; KCK_LEN]));
+        self.await_probe_barrier(sta, false).await;
+    }
+
+    async fn when_station_sends_invalid_m2(&mut self, station_mac: &str) {
+        let sta = parse_mac(station_mac);
+        let m1 = self.recv_eapol_key_for(sta).await;
+        let ptk = sta_ptk(&[WRONG_PMK_BYTE; PMK_LEN], self.ap_bssid, sta, &m1.key_nonce);
+        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M2, m1.replay_counter, &ptk));
+    }
+
+    async fn when_station_completes_wpa_handshake(
+        &mut self,
+        station_mac: &str,
+        ssid: &str,
+        pass: &str,
+    ) {
+        let sta = parse_mac(station_mac);
+        let m1 = self.recv_eapol_key_for(sta).await;
+        let pmk = Pbkdf2HmacSha1(pass.as_bytes(), ssid.as_bytes(), PBKDF2_ITERATIONS, PMK_LEN);
+        let ptk = sta_ptk(&pmk, self.ap_bssid, sta, &m1.key_nonce);
+        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M2, m1.replay_counter, &ptk));
+
+        let m3 = self.recv_eapol_key_for(sta).await;
+        assert!(u16::from_be_bytes(m3.key_data_len) > 0, "M3 must contain RSN IE + GTK");
+        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M4, m3.replay_counter, &ptk));
+        self.await_probe_barrier(sta, false).await;
+    }
+
+    async fn when_two_stations_complete_wpa(
+        &mut self,
+        sta_a_str: &str,
+        sta_b_str: &str,
+        ssid: &str,
+        pass: &str,
+    ) {
+        let (sta_a, sta_b) = (parse_mac(sta_a_str), parse_mac(sta_b_str));
+        let pmk = Pbkdf2HmacSha1(pass.as_bytes(), ssid.as_bytes(), PBKDF2_ITERATIONS, PMK_LEN);
+
+        let (m1_a, m1_b) = self.recv_eapol_pair(sta_a, sta_b).await;
+        let ptk_a = sta_ptk(&pmk, self.ap_bssid, sta_a, &m1_a.key_nonce);
+        let ptk_b = sta_ptk(&pmk, self.ap_bssid, sta_b, &m1_b.key_nonce);
+        self.send_to_ap(self.build_eapol_key_frame(
+            sta_a,
+            KEY_INFO_M2,
+            m1_a.replay_counter,
+            &ptk_a,
+        ));
+        self.send_to_ap(self.build_eapol_key_frame(
+            sta_b,
+            KEY_INFO_M2,
+            m1_b.replay_counter,
+            &ptk_b,
+        ));
+
+        let (m3_a, m3_b) = self.recv_eapol_pair(sta_a, sta_b).await;
+        self.send_to_ap(self.build_eapol_key_frame(
+            sta_a,
+            KEY_INFO_M4,
+            m3_a.replay_counter,
+            &ptk_a,
+        ));
+        self.send_to_ap(self.build_eapol_key_frame(
+            sta_b,
+            KEY_INFO_M4,
+            m3_b.replay_counter,
+            &ptk_b,
+        ));
+
+        self.await_probe_barrier(sta_a, false).await;
+    }
+
+    async fn when_station_deauths_immediately(&mut self, mac: &str) {
+        let sta = parse_mac(mac);
+        self.when_station_sends_deauth(sta, DEAUTH_REASON_STA_LEAVING).await;
+        self.await_probe_barrier(sta, false).await;
+    }
+
+    fn then_station_has_ptk_session(&self, station_mac: &str, expected: bool) {
+        self.then_station_has_ptk_session_on_bssid(station_mac, self.ap_bssid, expected);
+    }
+
+    fn then_station_has_ptk_session_on_bssid(&self, sta: &str, bssid: MacAddr, expected: bool) {
+        let frame = create_downlink_data_frame(parse_mac(sta), bssid);
+        assert_eq!(self.shared_keys.try_encrypt(&frame).is_some(), expected);
+    }
+
+    fn then_encrypted_frame_fails_decryption(&self, frame: &Ieee80211) {
+        assert!(self.shared_keys.try_decrypt(frame).is_none());
+    }
+
+    fn then_station_state_is(&self, sta: &str, expected_bssid: MacAddr) {
+        let mac = parse_mac(sta);
+        assert!(self.shared_keys.has_station(&mac));
+        assert_eq!(self.shared_keys.get_station_bssid(&mac), Some(expected_bssid));
+    }
+
+    fn then_roamed_station_state_is_preserved(&self, sta: &str) {
+        self.then_station_state_is(sta, self.ap_bssid);
+        self.then_station_has_ptk_session(sta, true);
+    }
+
+    fn then_unassociated_station_is_cleared(&self, station_mac: &str) {
+        let sta = parse_mac(station_mac);
+        assert!(!self.shared_keys.has_station(&sta));
+        self.then_station_has_ptk_session(station_mac, false);
+    }
+}
+
+// Scenario: WPA Handshake Failure (Wrong Password)
+#[tokio::test]
+async fn test_wpa_handshake_failure_wrong_password() {
+    // Given
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    let sta = "02:00:00:00:00:99";
+    world.given_station_is_associated(sta).await;
+    // When
+    world.when_station_sends_invalid_m2(sta).await;
+    // Then
+    world.then_no_eap_or_auth_frame_is_received().await;
 }
 
 // Scenario: WPA Handshake Success
-// Given a registered AP with WPA2 enabled
-// When a Station associates and completes 4-Way Handshake
-// Then keys are established (verified via M3 decryption and M4 acceptance)
 #[tokio::test]
 async fn test_wpa_handshake_success() {
-    info!("Scenario: WPA Handshake Success");
+    // Given
     let mut world = ApWorld::new().await;
-    // Config with WPA
     world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    let sta = "02:00:00:00:00:99";
+    world.given_station_is_associated(sta).await;
+    // When
+    world.when_station_completes_wpa_handshake(sta, "WpaAP", "CorrectPassword").await;
+    // Then
+    world.then_station_has_ptk_session(sta, true);
+}
 
-    let station_mac = "02:00:00:00:00:99";
-    let station_mac_addr: MacAddr = station_mac.try_into().unwrap();
+// Scenario: Unassociated station without an active WPA session sending EAPOL-Key
+// is dropped without invoking a peer station's WPA session, emitting frames,
+// or installing a PTK session.
+#[tokio::test]
+async fn test_unassociated_station_eapol_key_is_dropped() {
+    // Given a WPA2 AP with a peer station holding an active WPA session and an unassociated station
+    let mut world = ApWorld::with_error_stats().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_station_has_pending_wpa_handshake("22:33:44:55:66:77").await;
+    let sta = "02:00:00:00:11:12";
+    // When the unassociated station sends an EAPOL-Key M2 frame with an all-zero KCK
+    world.when_unassociated_station_sends_eapol_key(sta).await;
+    // Then no WPA MIC error is recorded on the peer session, no EAP/Auth frames are emitted,
+    // and no PTK session is installed
+    world.then_error_stats_are(&[]).await;
+    world.then_no_eap_or_auth_frame_is_received().await;
+    world.then_station_has_ptk_session(sta, false);
+}
 
-    // 1. Association Flow
-    // 1. Association Flow
-    world.when_station_sends_assoc_req(station_mac).await;
-    world.then_station_receives_assoc_resp(station_mac).await;
+// Scenario: Re-associating an authorized WPA2 station without Auth seq 1
+// immediately clears its stale PTK session in SharedKeyStore.
+#[tokio::test]
+async fn test_reassociation_without_auth_clears_stale_ptk_session() {
+    // Given an authorized WPA2 station and a frame encrypted under its PTK
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    let sta = "02:00:00:00:11:14";
+    world.given_station_is_associated(sta).await;
+    world.when_station_completes_wpa_handshake(sta, "WpaAP", "CorrectPassword").await;
+    let stale_frame = world.given_frame_encrypted_with_current_ptk(sta);
+    // When the station re-associates via AssocReq without sending Auth seq 1
+    world.when_station_sends_assoc_req(sta).await;
+    world.then_station_receives_assoc_resp(sta).await;
+    // Then SharedKeyStore rejects decryption under the stale PTK immediately
+    world.then_encrypted_frame_fails_decryption(&stale_frame);
+}
 
-    // 2. Receive M1
-    let m1_msg = world
-        .recv_frame(|frame, msg| {
-            // Ignore Beacons
-            if frame.stype() == management_subtype::BEACON {
-                return false;
-            }
-            // EAPOL Key check: Len > 32, Type 0x888E
-            msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-        })
-        .await;
+// Scenario: Two stations associating concurrently to the same WPA2 AP each keep
+// independent WPA authenticator sessions and both install PTK sessions cleanly.
+#[tokio::test]
+async fn test_concurrent_two_station_wpa_handshakes_both_authorize() {
+    // Given a WPA2 AP and two stations associated prior to either handshake
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    let (sta_a, sta_b) = ("02:00:00:00:00:91", "02:00:00:00:00:92");
+    world.given_station_is_associated(sta_a).await;
+    world.given_station_is_associated(sta_b).await;
 
-    let eapol_payload = &m1_msg[32..];
-    let (_, body) = EapolHeader::read_from_prefix(eapol_payload).expect("EAPOL Header");
-    let (key_frame_m1, _) = EapolKeyFrame::read_from_prefix(body).expect("Key Frame");
-    let anonce = key_frame_m1.key_nonce;
+    // When both stations complete their interleaved 4-way handshakes
+    world.when_two_stations_complete_wpa(sta_a, sta_b, "WpaAP", "CorrectPassword").await;
 
-    // 3. Construct M2 (Correct)
-    info!("And sends a valid M2");
-    // Generate PMK using the same PBKDF2 routine as the AP
-    let ssid = b"WpaAP";
-    let pmk_vec =
-        ap_actor::ffi::Pbkdf2HmacSha1(&b"CorrectPassword".to_vec(), &ssid.to_vec(), 4096, 32);
-    let pmk = pmk_vec.as_slice();
+    // Then both stations have installed PTK sessions
+    world.then_station_has_ptk_session(sta_a, true);
+    world.then_station_has_ptk_session(sta_b, true);
+}
 
-    let snonce = [0x55; 32];
-    let bssid: MacAddr = "02:00:00:00:00:01".try_into().unwrap();
-    let ptk = calc_ptk(pmk, &bssid.bytes, &station_mac_addr.bytes, &anonce, &snonce);
-    let kck = &ptk[0..16];
-    let _kek = &ptk[16..32]; // Used to decrypt M3 if we wanted to verify Key Data
+// Scenario: Re-associating or deauthenticating inside EAPOL_M1_DELAY cancels
+// the superseded delayed M1 frame.
+#[tokio::test]
+async fn test_reassoc_and_deauth_purge_delayed_m1() {
+    // Given a WPA2 AP and a station that just associated (queuing M1 #1)
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    let sta = "02:00:00:00:11:15";
+    world.given_station_is_associated(sta).await;
 
-    // Build M2
-    // ... Copy-paste build M2 logic from previous test but with correct MIC ...
-    let mut m2_frame = Vec::new();
-    let eapol_header = EapolHeader {
-        version: EAPOL_VERSION,
-        packet_type: EAPOL_TYPE_KEY,
-        length: (95u16 + 0).to_be_bytes(),
-    };
-    m2_frame.extend_from_slice(eapol_header.as_bytes());
+    // When the station immediately re-associates inside the 150ms M1 delay window
+    world.given_station_is_associated(sta).await;
 
-    let mut key_frame_m2 = EapolKeyFrame {
-        descriptor_type: EAPOL_KEY_DESC_TYPE_RSN,
-        key_info: 0x010A_u16.to_be_bytes(),
-        replay_counter: key_frame_m1.replay_counter,
-        key_nonce: snonce,
-        ..Default::default()
-    };
+    // Then only the second association's M1 arrives and completes the handshake
+    world.when_station_completes_wpa_handshake(sta, "WpaAP", "CorrectPassword").await;
+    world.then_station_has_ptk_session(sta, true);
 
-    let mut m2_bytes = m2_frame.clone();
-    m2_bytes.extend_from_slice(key_frame_m2.as_bytes());
-    let mic = calc_mic(kck, &m2_bytes);
-    key_frame_m2.mic = mic.try_into().unwrap();
+    // When another station associates and immediately deauthenticates inside 150ms
+    let sta2 = "02:00:00:00:11:16";
+    world.given_station_is_associated(sta2).await;
+    world.when_station_deauths_immediately(sta2).await;
 
-    let mut final_m2 = m2_frame;
-    final_m2.extend_from_slice(key_frame_m2.as_bytes());
+    // Then no delayed M1 frame is emitted past the 150ms delay window
+    world.then_no_eap_or_auth_frame_is_received().await;
+}
 
-    // Wrap and Send M2
-    let mut frame = Vec::new();
-    let header = DataFrameHeader::new(
-        FrameControl::new(0x0108),
-        0,
-        bssid,
-        station_mac_addr,
-        bssid,
-        SequenceControl::new(0),
-    );
-    frame.extend_from_slice(header.as_bytes());
+// Scenario: Deauthenticating an authorized WPA2 station clears its station
+// state and PTK session.
+#[tokio::test]
+async fn test_deauthentication_clears_station_state_and_session() {
+    // Given an authorized WPA2 station
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_authorized_wpa_station(TEST_STA_99, "WpaAP", "CorrectPassword").await;
 
-    let llc =
-        LlcSnapHeader::new(sap::SNAP, sap::SNAP, control_field::UI, [0x00, 0x00, 0x00], 0x888E);
-    frame.extend_from_slice(llc.as_bytes());
-    frame.extend_from_slice(&final_m2);
+    // When the station deauthenticates from the AP
+    world.when_station_deauthenticates(TEST_STA_99).await;
 
-    let tx = world.tx_to_ap.as_ref().expect("AP registered").clone();
-    tx.send(bytes::Bytes::from(frame)).expect("Send M2");
+    // Then the station is unassociated and has no PTK session
+    world.then_unassociated_station_is_cleared(TEST_STA_99);
+}
 
-    // 4. Expect M3
-    // We should receive M3 now.
-    info!("Then the AP sends M3 (with Encrypted Key Data)");
-    // 4. Expect M3
-    info!("Then the AP sends M3 (with Encrypted Key Data)");
+// Scenario: A late deauth frame sent to a prior AP does not clear the roamed
+// station's authorized state on the current WPA2 AP.
+#[tokio::test]
+async fn test_deauth_to_prior_ap_does_not_clear_roamed_station_state() {
+    // Given a station that associated to an old AP and then roamed and authorized on a new WPA2 AP
+    let mut world = ApWorld::new().await;
+    world.given_extra_open_ap("OldAP", OLD_BSSID).await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_station_associated_to_bssid(TEST_STA_94, OLD_BSSID).await;
+    world.given_authorized_wpa_station(TEST_STA_94, "WpaAP", "CorrectPassword").await;
 
-    let m3_msg = world
-        .recv_frame(|frame, msg| {
-            // Ignore Beacons
-            if frame.stype() == management_subtype::BEACON {
-                return false;
-            }
-            // Check for EAPOL Key
-            msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-        })
-        .await;
+    // When the station sends a deauth frame to the prior AP's BSSID
+    world.when_station_deauthenticates_from_bssid(TEST_STA_94, OLD_BSSID).await;
 
-    let eapol_payload_m3 = &m3_msg[32..];
+    // Then the station remains associated with an active PTK session on the new WPA2 AP
+    world.then_station_state_is(TEST_STA_94, world.ap_bssid);
+    world.then_station_has_ptk_session(TEST_STA_94, true);
+}
 
-    let (_, body_m3) = EapolHeader::read_from_prefix(eapol_payload_m3).expect("M3 EAPOL Header");
-    let (key_frame_m3, _) = EapolKeyFrame::read_from_prefix(body_m3).expect("M3 Key Frame");
+// Scenario: Disconnecting and force-disconnecting roamed stations from a prior
+// AP that still holds stale associations preserves their new-AP state and PTK.
+#[tokio::test]
+async fn test_prior_ap_disconnect_preserves_roamed_wpa2_station_state() {
+    // Given two stations authorized on an old WPA2 AP that then associate and
+    // authorize on a new WPA2 AP without Auth seq 1
+    let mut world = ApWorld::new().await;
+    let old_id = world.given_old_wpa_ap().await;
+    world.given_authorized_wpa_station(TEST_STA_95, "OldWpaAP", "OldPassword").await;
+    world.given_authorized_wpa_station(TEST_STA_96, "OldWpaAP", "OldPassword").await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_authorized_wpa_station(TEST_STA_95, "WpaAP", "CorrectPassword").await;
+    world.given_authorized_wpa_station(TEST_STA_96, "WpaAP", "CorrectPassword").await;
+    world.then_ap_associations_are(old_id, &[TEST_STA_95, TEST_STA_96]).await;
 
-    // RSN IE (22) + GTK KDE (1+1+3+1+1+1+16 = 24?) -> ~46 bytes.
-    // Plus padding to 8 bytes.
-    let data_len = u16::from_be_bytes(key_frame_m3.key_data_len);
-    assert!(data_len > 0, "M3 must contain encrypted key data (RSN IE + GTK)");
+    // When the prior AP disconnects or force-disconnects the stations
+    world.when_disconnect_is_requested_on(old_id, TEST_STA_96).await;
+    world.when_force_disconnect_is_requested_on(old_id, TEST_STA_95).await;
 
-    // Verify M3: Install=1, Pairwise=1, Mic=1, Ack=1 (0x13CA ?)
-    // Check MIC on M3 using *our* KCK?
-    // Check Encrypted Data?
+    // Then the prior AP clears its stale associations while new-AP state persists
+    world.then_ap_associations_are(old_id, &[]).await;
+    world.then_roamed_station_state_is_preserved(TEST_STA_95);
+    world.then_roamed_station_state_is_preserved(TEST_STA_96);
+}
 
-    // 5. Build M4
-    info!("When the Station sends a valid M4");
-    let mut m4_frame = Vec::new();
-    let eapol_header_m4 = EapolHeader {
-        version: EAPOL_VERSION,
-        packet_type: EAPOL_TYPE_KEY,
-        length: (95u16 + 0).to_be_bytes(),
-    };
-    m4_frame.extend_from_slice(eapol_header_m4.as_bytes());
+// Scenario: Disconnecting and force-disconnecting stations on their current
+// WPA2 AP clears each station's association state and PTK session.
+#[tokio::test]
+async fn test_current_ap_disconnect_and_force_disconnect_clear_station_state() {
+    // Given two authorized WPA2 stations on the current AP
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_authorized_wpa_station(TEST_STA_95, "WpaAP", "CorrectPassword").await;
+    world.given_authorized_wpa_station(TEST_STA_96, "WpaAP", "CorrectPassword").await;
 
-    let mut key_frame_m4 = EapolKeyFrame {
-        descriptor_type: EAPOL_KEY_DESC_TYPE_RSN,
-        key_info: 0x030A_u16.to_be_bytes(), // Mic=1, Secure=0?, Ack=0? Check wpa_auth.
-        // wpa_auth.rs: M4 usually has Mic=1, Secure=1 if PTK installed?
-        // Let's use 0x010A (Mic|Desc|Type).
-        replay_counter: key_frame_m3.replay_counter, // Match M3
-        ..Default::default()
-    };
+    // When one station is force-disconnected and the other is disconnected on the current AP
+    world.when_force_disconnect_is_requested_for(TEST_STA_95).await;
+    world.when_disconnect_is_requested_for(TEST_STA_96).await;
 
-    // M4 logic: Send M4, AP receives, verifies, installs PTK.
-    // If AP doesn't complain, success.
+    // Then both stations are unassociated and have no PTK session
+    world.then_unassociated_station_is_cleared(TEST_STA_95);
+    world.then_unassociated_station_is_cleared(TEST_STA_96);
+}
 
-    let mut m4_bytes = m4_frame.clone();
-    m4_bytes.extend_from_slice(key_frame_m4.as_bytes());
-    let mic_m4 = calc_mic(kck, &m4_bytes);
-    key_frame_m4.mic = mic_m4.try_into().unwrap();
+// Scenario: Roaming Auth seq 1 to a new AP clears the prior AP's association
+// and PTK session before the station associates and authorizes on the new AP.
+#[tokio::test]
+async fn test_roam_auth_seq1_clears_prior_ap_and_session() {
+    // Given two WPA2 APs and a station authenticated, associated, and authorized on AP 1
+    let mut world = ApWorld::new().await;
+    let old_id = world.given_old_wpa_ap().await;
+    world.given_authorized_wpa_station(TEST_STA_95, "OldWpaAP", "OldPassword").await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    let (new_id, new_bssid) = (world.primary_ap_id(), world.ap_bssid);
 
-    let mut final_m4 = m4_frame;
-    final_m4.extend_from_slice(key_frame_m4.as_bytes());
+    // When the station sends Auth seq 1 to AP 2
+    world.when_station_sends_open_auth_to_bssid(TEST_STA_95, new_bssid).await;
 
-    // Send M4
-    let mut frame_m4 = Vec::new();
-    frame_m4.extend_from_slice(header.as_bytes()); // Reuse header (same src/dst)
-    frame_m4.extend_from_slice(llc.as_bytes()); // Reuse LLC
-    frame_m4.extend_from_slice(&final_m4);
+    // Then AP 1's association, BSSID mapping, and PTK session are cleared
+    world.then_ap_associations_are(old_id, &[]).await;
+    world.then_unassociated_station_is_cleared(TEST_STA_95);
 
-    tx.send(bytes::Bytes::from(frame_m4)).expect("Send M4");
+    // When the station associates and completes WPA2 authorization on AP 2
+    world.given_authorized_wpa_station(TEST_STA_95, "WpaAP", "CorrectPassword").await;
 
-    // 6. Verify AP does NOT resend M3 (which it would if it ignored M4 or failed)
-    // And ideally logs "PTK Installed".
-    info!("Then the AP installs the key (Handshake Complete)");
+    // Then AP 2 holds active state and PTK session while AP 1 stays empty
+    world.then_ap_associations_are(old_id, &[]).await;
+    world.then_ap_associations_are(new_id, &[TEST_STA_95]).await;
+    world.then_station_state_is(TEST_STA_95, new_bssid);
+    world.then_station_has_ptk_session_on_bssid(TEST_STA_95, OLD_BSSID, false);
+    world.then_station_has_ptk_session(TEST_STA_95, true);
 }
