@@ -371,12 +371,31 @@ pub fn init_for_test() {
     }
 }
 
+/// Keeps the scoped error stats subscriber and a second dispatcher alive.
 #[cfg(any(test, feature = "testing"))]
-pub fn isolated_error_stats() -> (Arc<ErrorStatsTable>, tracing::subscriber::DefaultGuard) {
+#[must_use = "Dropping the guard restores the previous default subscriber."]
+#[derive(Debug)]
+pub struct IsolatedErrorStatsGuard {
+    _default_guard: tracing::subscriber::DefaultGuard,
+    _multi_dispatch_guard: tracing::Dispatch,
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn isolated_error_stats() -> (Arc<ErrorStatsTable>, IsolatedErrorStatsGuard) {
+    // Keep >= 2 live Dispatchers so tracing-core skips Rebuilder::JustOne and does not cache
+    // Interest::never when an unsubscribed thread hits a callsite first.
+    let multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
     let table = Arc::new(ErrorStatsTable::new());
     let layer = ErrorStatsLayer::with_table(Arc::clone(&table));
-    let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
-    (table, guard)
+    let default_guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+    (
+        table,
+        IsolatedErrorStatsGuard {
+            _default_guard: default_guard,
+            _multi_dispatch_guard: multi_dispatch_guard,
+        },
+    )
 }
 
 struct CustomFormatter {
@@ -983,5 +1002,65 @@ mod tests {
         });
         let snap = snapshot_error_stats();
         assert!(snap.iter().any(|&(code, count)| code == 10001 && count >= 1));
+    }
+
+    // Run in a fresh subprocess because sibling tests (`test_init_for_test`,
+    // `test_format_matches_legacy`) install a global subscriber in-process, which would mask
+    // `Rebuilder::JustOne` regressions when running the full crate test binary.
+    #[test]
+    fn test_isolated_error_stats_prevents_unsubscribed_callsite_poisoning() {
+        const TEST_UNSUBSCRIBED_CALLSITE_ERROR_CODE: u32 = 10999;
+        const SUBPROCESS_TEST_ENV: &str = "NETSIM_COMMON_LOGGER_TEST_SUBPROCESS";
+        const CHILD_TEST_NAME: &str =
+            "test_isolated_error_stats_prevents_unsubscribed_callsite_poisoning";
+        const CHILD_TEST_PASS_MARKER: &str = "1 passed; 0 failed";
+        const SCRUBBED_ENV_VARS: &[&str] = &[
+            "RUST_LOG",
+            "XML_OUTPUT_FILE",
+            "GUNIT_OUTPUT",
+            "TESTBRIDGE_TEST_ONLY",
+            "TEST_SHARD_INDEX",
+            "TEST_TOTAL_SHARDS",
+            "TEST_SHARD_STATUS_FILE",
+        ];
+
+        if std::env::var_os(SUBPROCESS_TEST_ENV).as_deref()
+            == Some(std::ffi::OsStr::new(CHILD_TEST_NAME))
+        {
+            fn emit_warn() {
+                tracing::warn!(
+                    code = TEST_UNSUBSCRIBED_CALLSITE_ERROR_CODE,
+                    "test unsubscribed callsite registration"
+                );
+            }
+
+            let (table, _guard) = isolated_error_stats();
+            std::thread::spawn(emit_warn).join().unwrap();
+            emit_warn();
+            assert_eq!(table.snapshot(), vec![(TEST_UNSUBSCRIBED_CALLSITE_ERROR_CODE, 1)]);
+            assert!(snapshot_error_stats().is_empty());
+            return;
+        }
+
+        let exact_filter = module_path!().split_once("::").map_or_else(
+            || CHILD_TEST_NAME.to_string(),
+            |(_, rel)| format!("{rel}::{CHILD_TEST_NAME}"),
+        );
+        let current_exe = std::env::current_exe().expect("resolve current test binary");
+        let mut cmd = std::process::Command::new(current_exe);
+        cmd.args(["--exact", &exact_filter, "--test-threads=1", "--nocapture"])
+            .env(SUBPROCESS_TEST_ENV, CHILD_TEST_NAME);
+        for &var in SCRUBBED_ENV_VARS {
+            cmd.env_remove(var);
+        }
+
+        let output = cmd.output().expect("run isolated logger child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains(CHILD_TEST_PASS_MARKER),
+            "Isolated child test {exact_filter} failed (status={:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status,
+        );
     }
 }
