@@ -26,7 +26,7 @@ pub mod tcp;
 
 pub mod logging;
 mod tftp;
-pub mod udp;
+mod udp;
 pub mod utils;
 
 #[cfg(test)]

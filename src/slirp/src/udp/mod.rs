@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod udp_impl;
-pub use udp_impl::UdpManager;
+pub(crate) use udp_impl::UdpManager;
 
 #[cfg(test)]
 mod tests;

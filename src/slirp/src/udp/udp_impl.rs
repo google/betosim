@@ -21,21 +21,21 @@ use crate::{ConnectionArgs, SlirpResponse, UdpConnectionArgs, UdpConnectionInfo}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct UdpFlow {
-    pub guest_addr: SocketAddr,
-    pub original_dest: SocketAddr,
+    pub(crate) guest_addr: SocketAddr,
+    pub(crate) original_dest: SocketAddr,
     #[serde(skip)]
-    pub last_accessed_tick: u64,
+    last_accessed_tick: u64,
 }
 
 /// Manages UDP flows.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UdpManager {
+pub(crate) struct UdpManager {
     // Maps guest_addr -> (conn_id, real_dest_addr)
     pub(crate) flows: HashMap<SocketAddr, (u64, SocketAddr)>,
     // Maps conn_id -> UdpFlow
     pub(crate) id_to_flow: HashMap<u64, UdpFlow>,
-    pub(crate) next_flow_id: u64,
-    pub(crate) access_counter: u64,
+    next_flow_id: u64,
+    access_counter: u64,
 }
 
 impl Default for UdpManager {
@@ -45,7 +45,7 @@ impl Default for UdpManager {
 }
 
 impl UdpManager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             flows: HashMap::new(),
             id_to_flow: HashMap::new(),
@@ -54,7 +54,7 @@ impl UdpManager {
         }
     }
 
-    pub fn get_connections(&self) -> impl Iterator<Item = UdpConnectionInfo> + '_ {
+    pub(crate) fn get_connections(&self) -> impl Iterator<Item = UdpConnectionInfo> + '_ {
         self.flows.iter().map(|(guest_addr, (_, real_dest))| UdpConnectionInfo {
             local_addr: *guest_addr,
             peer_addr: *real_dest,
@@ -62,7 +62,7 @@ impl UdpManager {
     }
 
     /// Handles an incoming UDP packet from the guest.
-    pub fn handle_packet(
+    pub(crate) fn handle_packet(
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         packet: &[u8],
@@ -118,7 +118,7 @@ impl UdpManager {
     }
 
     /// Explicitly closes a UDP flow by ID.
-    pub fn remove_flow(&mut self, conn_id: u64) {
+    pub(crate) fn remove_flow(&mut self, conn_id: u64) {
         if let Some(flow) = self.id_to_flow.remove(&conn_id) {
             self.flows.remove(&flow.guest_addr);
         }
@@ -126,7 +126,7 @@ impl UdpManager {
 
     /// Translates a host reply and returns the original destination (to be used
     /// as source), the guest address (destination), and the payload.
-    pub fn handle_reply(
+    pub(crate) fn handle_reply(
         &self,
         conn_id: u64,
         data: &[u8],
