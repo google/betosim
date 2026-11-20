@@ -19,4 +19,5 @@ mod integration_tests;
 mod test_connection_lifecycle;
 mod test_dual_fd_final;
 mod test_init_info;
+mod test_streams_lifecycle;
 mod world;

@@ -508,12 +508,36 @@ mod tests {
         path::Path,
     };
 
+    use futures::FutureExt;
     use nix::unistd::pipe;
 
     use super::*;
 
     const EXPECTED_CHIP_COUNT: i32 = 2;
     const EXPECTED_DEVICE_COUNT: i32 = 1;
+    const HCI_RESET_CMD: &[u8] = &[0x01, 0x03, 0x0c, 0x00];
+
+    fn static_fd_listener(configs: &[(&str, i32, Option<i32>)]) -> DualFdListener {
+        let chips = configs
+            .iter()
+            .map(|&(kind, fd_in, fd_out)| ChipConfig {
+                kind: kind.to_string(),
+                fd_in,
+                fd_out,
+                model: None,
+                sim_type: None,
+                sim_profile: None,
+            })
+            .collect();
+        let config = DualFdConfig {
+            devices: vec![DeviceConfig {
+                name: Some("test-dev".to_string()),
+                chips,
+                device_info: None,
+            }],
+        };
+        DualFdListener::new(config).unwrap()
+    }
 
     struct SocketGuard<'a>(&'a Path);
 
@@ -603,7 +627,6 @@ mod tests {
         assert_eq!(chip1.sim_type, Some(expected_sim_type));
         assert_eq!(chip1.sim_profile.as_deref(), Some(expected_sim_profile));
 
-        const HCI_RESET_CMD: &[u8] = &[1, 0x03, 0x0c, 0x00];
         nix::unistd::write(&guest_to_host_w, HCI_RESET_CMD).unwrap();
 
         let frame1 = stream1.next().await.unwrap().unwrap();
@@ -1020,5 +1043,69 @@ mod tests {
             CHIP1_SIM_PROFILE,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_dual_fd_listener_uwb_and_nfc_static_streams() {
+        const UCI_CTRL_PKT: &[u8] = &[0x20, 0x00, 0x00, 0x02, 0xaa, 0xbb];
+        const NCI_CTRL_PKT: &[u8] = &[0x20, 0x01, 0x02, 0xcc, 0xdd];
+
+        let (mut uwb_guest, uwb_host) = UnixStream::pair().unwrap();
+        let (mut nfc_guest, nfc_host) = UnixStream::pair().unwrap();
+        let mut listener = static_fd_listener(&[
+            ("UWB", uwb_host.into_raw_fd(), None),
+            ("NFC", nfc_host.into_raw_fd(), None),
+        ]);
+
+        uwb_guest.write_all(UCI_CTRL_PKT).unwrap();
+        let (mut uwb_stream, _uwb_sink, uwb_info, _guid) = listener.accept().await.unwrap();
+        assert_eq!(uwb_info.chip.unwrap().kind, ChipKind::UWB);
+        let uwb_frame = uwb_stream.next().await.unwrap().unwrap();
+        assert_eq!(uwb_frame.as_ref(), UCI_CTRL_PKT);
+
+        nfc_guest.write_all(NCI_CTRL_PKT).unwrap();
+        let (mut nfc_stream, _nfc_sink, nfc_info, _guid) = listener.accept().await.unwrap();
+        assert_eq!(nfc_info.chip.unwrap().kind, ChipKind::NFC);
+        let nci_frame = nfc_stream.next().await.unwrap().unwrap();
+        assert_eq!(nci_frame.as_ref(), NCI_CTRL_PKT);
+    }
+
+    #[tokio::test]
+    async fn test_dual_fd_listener_skips_unsupported_chip() {
+        let (_bad_guest, bad_host) = UnixStream::pair().unwrap();
+        let (mut bt_guest, bt_host) = UnixStream::pair().unwrap();
+
+        let mut listener = static_fd_listener(&[
+            ("UNSPECIFIED", bad_host.into_raw_fd(), None),
+            ("BLUETOOTH", bt_host.into_raw_fd(), None),
+        ]);
+
+        let (mut bt_stream, _bt_sink, bt_info, _guid) = listener.accept().await.unwrap();
+        assert_eq!(bt_info.chip.unwrap().kind, ChipKind::BLUETOOTH);
+
+        bt_guest.write_all(HCI_RESET_CMD).unwrap();
+        let hci_frame = bt_stream.next().await.unwrap().unwrap();
+        assert_eq!(hci_frame.as_ref(), HCI_RESET_CMD);
+    }
+
+    #[tokio::test]
+    async fn test_dual_fd_listener_shutdown_clears_pending_streams() {
+        let (mut bt_guest, bt_host) = UnixStream::pair().unwrap();
+        bt_guest.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+
+        let mut listener = static_fd_listener(&[("BLUETOOTH", bt_host.into_raw_fd(), None)]);
+
+        listener.shutdown().await.unwrap();
+
+        let mut eof_buf = [0u8; 1];
+        assert_eq!(bt_guest.read(&mut eof_buf).unwrap(), 0);
+
+        // With pending_static_streams and listening_sockets cleared by DualFdListener::shutdown,
+        // DualFdListener::accept must park on std::future::pending() rather than reach
+        // futures::future::select_all, which panics on an empty set.
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "DualFdListener::accept should remain pending after shutdown"
+        );
     }
 }

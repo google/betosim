@@ -60,3 +60,67 @@ impl Decoder for ModemCodec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::BufMut;
+
+    use super::*;
+
+    const MAX_UNTERMINATED_FRAME_LEN: usize = 4096;
+
+    #[test]
+    fn test_modem_decode_line_delimiters_and_blank_lines() {
+        let mut codec = ModemCodec;
+        let mut buf = BytesMut::from(&b"\r\n\r\nAT\r\nOK\n\nREADY\r"[..]);
+
+        assert_eq!(codec.decode(&mut buf).unwrap().unwrap().as_ref(), b"AT");
+        assert_eq!(codec.decode(&mut buf).unwrap().unwrap().as_ref(), b"OK");
+        assert_eq!(codec.decode(&mut buf).unwrap().unwrap().as_ref(), b"READY");
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_modem_decode_partial_line_waits_for_delimiter() {
+        let mut codec = ModemCodec;
+        let mut buf = BytesMut::from(&b"AT+CGMI"[..]);
+
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert_eq!(buf.len(), b"AT+CGMI".len());
+
+        buf.put_slice(b"\r");
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.as_ref(), b"AT+CGMI");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_modem_decode_ctrl_z_and_esc_preserve_terminator() {
+        let mut codec = ModemCodec;
+        let mut buf = BytesMut::from(&b"PDU\x1aABORT\x1b"[..]);
+
+        let pdu = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(pdu.as_ref(), b"PDU\x1a");
+
+        let abort = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(abort.as_ref(), b"ABORT\x1b");
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_modem_decode_overflow_flushes_4096_bytes() {
+        let mut codec = ModemCodec;
+        let mut buf = BytesMut::from(&vec![b'A'; MAX_UNTERMINATED_FRAME_LEN + 3][..]);
+
+        let chunk = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk.len(), MAX_UNTERMINATED_FRAME_LEN);
+        assert_eq!(buf.as_ref(), b"AAA");
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+
+        buf.put_slice(b"\r");
+        let tail = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(tail.as_ref(), b"AAA");
+        assert!(buf.is_empty());
+    }
+}

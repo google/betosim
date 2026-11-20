@@ -183,4 +183,78 @@ mod tests {
         let packet = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(packet.as_ref(), &[H4_CMD_TYPE, 0x03, 0x0c, 0x00]);
     }
+
+    #[test]
+    fn test_decode_empty_buffer_returns_none() {
+        let mut codec = H4Codec;
+        let mut empty = BytesMut::new();
+        assert!(codec.decode(&mut empty).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decode_partial_acl_payload_returns_none() {
+        const PARTIAL_ACL_PKT: &[u8] = &[H4_ACL_TYPE, 0x01, 0x20, 0x04, 0x00, 0xaa, 0xbb];
+
+        let mut codec = H4Codec;
+        // ACL header (1 + 4 bytes) claiming 4 payload bytes, with only 2 present.
+        let mut partial_acl = BytesMut::from(PARTIAL_ACL_PKT);
+        assert!(codec.decode(&mut partial_acl).unwrap().is_none());
+        assert_eq!(partial_acl.len(), 1 + HCI_ACL_PREAMBLE_SIZE + 2);
+    }
+
+    #[test]
+    fn test_decode_complete_packet_per_h4_type() {
+        const ACL_PKT: &[u8] = &[H4_ACL_TYPE, 0x01, 0x20, 0x02, 0x00, 0xaa, 0xbb];
+        const SCO_PKT: &[u8] = &[H4_SCO_TYPE, 0x02, 0x00, 0x02, 0xcc, 0xdd];
+        const EVT_PKT: &[u8] = &[H4_EVT_TYPE, 0x0e, 0x02, 0x01, 0x03];
+        // H4Codec::decode reads the ISO length as ((l1 & 0x0f) << 8) | l0 (12 bits), so the
+        // upper bits set in l1=0xc0 are ignored and l0=0x03 yields 3 payload bytes.
+        const ISO_PKT: &[u8] = &[H4_ISO_TYPE, 0x10, 0x20, 0x03, 0xc0, 0x11, 0x22, 0x33];
+
+        let test_cases = [("ACL", ACL_PKT), ("SCO", SCO_PKT), ("EVT", EVT_PKT), ("ISO", ISO_PKT)];
+
+        let mut codec = H4Codec;
+        for (label, expected_frame) in test_cases {
+            let mut buf = BytesMut::from(expected_frame);
+            let pkt = codec
+                .decode(&mut buf)
+                .unwrap_or_else(|e| panic!("{label}: decode failed: {e}"))
+                .unwrap_or_else(|| panic!("{label}: expected complete frame"));
+            assert_eq!(pkt.as_ref(), expected_frame, "{label}: decoded frame mismatch");
+            assert!(buf.is_empty(), "{label}: buffer should be empty after decode");
+        }
+    }
+
+    #[test]
+    fn test_decode_iso_extended_length_packet() {
+        // H4Codec::decode reads the ISO length as ((l1 & 0x0f) << 8) | l0 (12 bits), so l1=0xc1
+        // contributes only 0x01, giving (0x01 << 8) | 0x01 = 257 payload bytes.
+        const ISO_LONG_HDR: &[u8] = &[H4_ISO_TYPE, 0x10, 0x20, 0x01, 0xc1];
+        const ISO_EXTENDED_LEN: usize = 257;
+
+        let mut codec = H4Codec;
+        let mut iso_long = BytesMut::from(ISO_LONG_HDR);
+        iso_long.put_slice(&vec![0x7e; ISO_EXTENDED_LEN]);
+        let iso_long_pkt = codec.decode(&mut iso_long).unwrap().unwrap();
+        assert_eq!(iso_long_pkt.len(), 1 + HCI_ISO_PREAMBLE_SIZE + ISO_EXTENDED_LEN);
+        assert!(iso_long.is_empty());
+    }
+
+    #[test]
+    fn test_recover_retains_trailing_prefix_across_chunks() {
+        const GARBAGE_PREFIX: &[u8] = &[0xff, 0xaa, 0xbb];
+        const RESET_COMMAND: &[u8] = &[H4_CMD_TYPE, 0x03, 0x0c, 0x00];
+
+        let mut codec = H4Codec;
+        let mut buf = BytesMut::from(GARBAGE_PREFIX);
+        buf.put_slice(&RESET_COMMAND[..3]);
+
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert_eq!(buf.as_ref(), &RESET_COMMAND[..3]);
+
+        buf.put_u8(RESET_COMMAND[3]);
+        let recovered = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(recovered.as_ref(), RESET_COMMAND);
+        assert!(buf.is_empty());
+    }
 }

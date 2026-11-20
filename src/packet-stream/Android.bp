@@ -113,6 +113,7 @@ rust_test_host {
         "tests/test_connection_lifecycle.rs",
         "tests/test_dual_fd_final.rs",
         "tests/test_init_info.rs",
+        "tests/test_streams_lifecycle.rs",
         "tests/world.rs",
     ],
     features: [

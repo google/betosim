@@ -18,18 +18,23 @@
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use packet_stream::{
-    ChipInfo, ChipKind, StreamAddress, Streams, TransportType,
-    transport::traits::{PacketSink, PacketStream},
+    ChipInfo, ChipKind, ListenerConfig, PacketStreamError, StreamAddress, Streams, TransportType,
+    error::Result as PacketStreamResult,
+    transport::traits::{PacketSink, PacketStream, TransportListener},
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -82,6 +87,27 @@ impl Endpoint {
     }
 }
 
+struct MockTransportListener {
+    addr: StreamAddress,
+    shutdown_called: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl TransportListener for MockTransportListener {
+    async fn accept(&mut self) -> PacketStreamResult<(PacketStream, PacketSink, ChipInfo, String)> {
+        std::future::pending().await
+    }
+
+    fn local_addr(&self) -> PacketStreamResult<StreamAddress> {
+        Ok(self.addr.clone())
+    }
+
+    async fn shutdown(&mut self) -> PacketStreamResult<()> {
+        self.shutdown_called.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 pub(crate) struct World {
     streams: Streams,
     listener_targets: HashMap<String, TransportType>,
@@ -92,6 +118,8 @@ pub(crate) struct World {
     servers: HashMap<String, Endpoint>,
     raw_tcp_streams: HashMap<String, TcpStream>,
     last_connect_succeeded: Option<bool>,
+    last_error: Option<PacketStreamError>,
+    custom_listener_shutdowns: HashMap<String, Arc<AtomicBool>>,
 }
 
 impl World {
@@ -106,6 +134,8 @@ impl World {
             servers: HashMap::new(),
             raw_tcp_streams: HashMap::new(),
             last_connect_succeeded: None,
+            last_error: None,
+            custom_listener_shutdowns: HashMap::new(),
         }
     }
 
@@ -124,17 +154,38 @@ impl World {
             .unwrap_or_else(|| panic!("listener target not found for {listener_name}"))
     }
 
-    pub(crate) async fn given_tcp_listener(&mut self, name: &str) {
-        self.streams
-            .start_listener(name, TransportType::tcp("localhost", 0))
-            .await
-            .expect("start TCP listener");
+    fn record_tcp_target(&mut self, name: &str) {
         let listener_addr = self.streams.listener_address(name).expect("listener address");
         let StreamAddress::Tcp(addr) = listener_addr else {
             panic!("Expected TCP address for listener {name}");
         };
         self.listener_targets
             .insert(name.to_string(), TransportType::tcp("localhost", addr.port()));
+    }
+
+    pub(crate) async fn given_tcp_listener(&mut self, name: &str) {
+        self.streams
+            .start_listener(name, TransportType::tcp("localhost", 0))
+            .await
+            .expect("start TCP listener");
+        self.record_tcp_target(name);
+    }
+
+    pub(crate) fn given_custom_listener(&mut self, name: &str) {
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let listener = MockTransportListener {
+            addr: StreamAddress::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+            shutdown_called: Arc::clone(&shutdown_called),
+        };
+        self.streams.add_listener(name, Box::new(listener)).expect("add custom listener");
+        self.custom_listener_shutdowns.insert(name.to_string(), shutdown_called);
+    }
+
+    pub(crate) async fn given_listeners_from_tcp_config(&mut self, name: &str) {
+        let mut config = ListenerConfig::new();
+        config.add_listener(name, TransportType::tcp("localhost", 0));
+        self.streams.start_from_config(&config).await.expect("start listeners from config");
+        self.record_tcp_target(name);
     }
 
     #[cfg(unix)]
@@ -273,6 +324,25 @@ impl World {
     ) {
         let res = timeout(SHORT_TIMEOUT, self.streams.connect(transport, chip_info)).await;
         self.last_connect_succeeded = Some(matches!(res, Ok(Ok(_))));
+        self.last_error = match res {
+            Ok(Err(err)) => Some(err),
+            Err(_) => Some(PacketStreamError::Timeout),
+            Ok(Ok(_)) => None,
+        };
+    }
+
+    pub(crate) async fn when_try_start_fd_listener(
+        &mut self,
+        name: &str,
+        in_fd: i32,
+        out_fd: Option<i32>,
+    ) {
+        let res = self.streams.start_listener(name, TransportType::fd(in_fd, out_fd)).await;
+        self.last_error = res.err();
+    }
+
+    pub(crate) fn when_stop_listener(&mut self, name: &str) {
+        self.streams.stop_listener(name).expect("stop listener");
     }
 
     pub(crate) async fn then_client_receives_packet(&mut self, client_name: &str, expected: &[u8]) {
@@ -328,6 +398,33 @@ impl World {
 
     pub(crate) fn then_listener_is_running(&self, name: &str, expected: bool) {
         assert_eq!(self.streams.is_listener_running(name), expected);
+    }
+
+    pub(crate) fn then_listener_names_are(&self, expected_names: &[&str]) {
+        let mut actual = self.streams.listener_names();
+        actual.sort_unstable();
+        let mut expected = expected_names.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    pub(crate) fn then_last_error_is_invalid_config(&self, expected_msg: &str) {
+        assert!(
+            matches!(
+                &self.last_error,
+                Some(PacketStreamError::InvalidConfig(msg)) if msg == expected_msg
+            ),
+            "expected InvalidConfig({expected_msg:?}), got {:?}",
+            self.last_error
+        );
+    }
+
+    pub(crate) fn then_custom_listener_shutdown(&self, name: &str, expected: bool) {
+        let shutdown_called = self
+            .custom_listener_shutdowns
+            .get(name)
+            .unwrap_or_else(|| panic!("custom listener not found: {name}"));
+        assert_eq!(shutdown_called.load(Ordering::SeqCst), expected);
     }
 }
 
