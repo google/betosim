@@ -36,7 +36,9 @@ tracing = "0.1"
 
 [dev-dependencies]
 actor-framework = { path = "../actor-framework", features = ["testing"] }
+common = { package = "netsim-common", path = "../common" }
 hci-server = { path = ".", features = ["testing"] }
+tracing-subscriber = "0.3"
 
 [features]
 testing = ["device-actor/testing", "device-api/testing", "netsim-model/testing"]

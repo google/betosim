@@ -23,6 +23,8 @@ netsim_rust_library(
     edition = "2024",
     test_deps = [
         "//src/actor-framework",
+        "//src/common",
+        "@tracing-subscriber",
     ],
     deps = [
         "//src/device-actor",

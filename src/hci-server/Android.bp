@@ -77,6 +77,7 @@ rust_test_host {
         "libbytes",
         "libfutures",
         "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_common_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_device_api_testing",
         "libnetsim_next_model_testing",
@@ -85,6 +86,7 @@ rust_test_host {
         "libtokio_stream",
         "libtokio_util",
         "libtracing",
+        "libtracing_subscriber",
     ],
 }
 
@@ -109,6 +111,7 @@ rust_test_host {
         "libbytes",
         "libfutures",
         "libnetsim_next_actor_framework_testing",
+        "libnetsim_next_common_testing",
         "libnetsim_next_device_actor_testing",
         "libnetsim_next_device_api_testing",
         "libnetsim_next_hci_server_testing",
@@ -118,5 +121,6 @@ rust_test_host {
         "libtokio_stream",
         "libtokio_util",
         "libtracing",
+        "libtracing_subscriber",
     ],
 }

@@ -46,7 +46,11 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
                 tokio::spawn(handle_hci_client(stream, addr, device_client.clone()));
             }
             Err(error) => {
-                warn!(%error, "Error accepting HCI connection");
+                warn!(
+                    code = crate::err::Code::HciAcceptConnection as u32,
+                    %error,
+                    "Error accepting HCI connection"
+                );
             }
         }
     }
@@ -92,7 +96,12 @@ async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: D
                     }
                 }
                 Err(error) => {
-                    warn!(%error, %addr, "Error reading from HCI socket");
+                    warn!(
+                        code = crate::err::Code::HciSocketRead as u32,
+                        %error,
+                        %addr,
+                        "Error reading from HCI socket"
+                    );
                     break;
                 }
             }
@@ -119,21 +128,71 @@ async fn handle_hci_client(stream: TcpStream, addr: SocketAddr, device_client: D
     let request = build_device_add_chip_request(name, packet_stream, packet_sink);
 
     if let Err(error) = device_client.add_chip(request).await {
-        warn!(%error, %addr, "Failed to add virtual HCI chip");
+        warn!(
+            code = crate::err::Code::AddVirtualHciChip as u32,
+            %error,
+            %addr,
+            "Failed to add virtual HCI chip"
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use actor_framework::MockActorClient;
+    use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
     use device_actor::DeviceActor;
     use device_api::{DeviceAction, DeviceActionResult, DeviceId};
     use futures::{SinkExt, sink, stream};
     use netsim_model::ChipId;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
+    use crate::err::Code;
+
+    const HCI_RESET_CMD: [u8; 4] = [0x01, 0x03, 0x0c, 0x00];
+    // H4 Command indicator (0x01) + opcode LSB (0x03) truncated before 3-byte header completes.
+    const TRUNCATED_HCI_CMD_HEADER: [u8; 2] = [0x01, 0x03];
+
+    async fn connected_tcp_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_addr = listener.local_addr().unwrap();
+        let client_socket = TcpStream::connect(bind_addr).await.unwrap();
+        let (server_socket, peer_addr) = listener.accept().await.unwrap();
+        (client_socket, server_socket, peer_addr)
+    }
+
+    fn accepting_device_client() -> (DeviceClient, mpsc::Receiver<DeviceAddChip>) {
+        let (req_tx, req_rx) = mpsc::channel(1);
+        let mut mock = MockActorClient::<DeviceActor>::new();
+        mock.expect_perform_action().once().returning(move |id, action| {
+            assert!(id.is_none());
+            match action {
+                DeviceAction::AddChipByGuid { params } => {
+                    req_tx.try_send(*params).unwrap();
+                    Ok(DeviceActionResult::AddChipByGuidSuccess {
+                        device_id: DeviceId(1),
+                        chip_id: ChipId(1),
+                    })
+                }
+                other => panic!("Unexpected DeviceAction: {other:?}"),
+            }
+        });
+        (DeviceClient::new(Box::new(mock)), req_rx)
+    }
+
+    fn error_stats_subscriber()
+    -> (Arc<ErrorStatsTable>, tracing::subscriber::DefaultGuard, tracing::Dispatch) {
+        // b/582874820: keep >1 Dispatch alive so tracing_core never caches INTEREST_NEVER.
+        let multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+        let table = Arc::new(ErrorStatsTable::new());
+        let subscriber =
+            tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        (table, guard, multi_dispatch_guard)
+    }
 
     #[test]
     fn test_build_chip_defaults() {
@@ -159,29 +218,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_hci_client_broken_pipe_after_socket_disconnect() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bind_addr = listener.local_addr().unwrap();
+        let (mut client_socket, server_socket, peer_addr) = connected_tcp_pair().await;
+        let (device_client, mut req_rx) = accepting_device_client();
 
-        let mut client_socket = TcpStream::connect(bind_addr).await.unwrap();
-        let (server_socket, peer_addr) = listener.accept().await.unwrap();
-
-        let (req_tx, mut req_rx) = mpsc::channel(1);
-        let mut mock = MockActorClient::<DeviceActor>::new();
-        mock.expect_perform_action().once().returning(move |id, action| {
-            assert!(id.is_none());
-            match action {
-                DeviceAction::AddChipByGuid { params } => {
-                    req_tx.try_send(*params).unwrap();
-                    Ok(DeviceActionResult::AddChipByGuidSuccess {
-                        device_id: DeviceId(1),
-                        chip_id: ChipId(1),
-                    })
-                }
-                other => panic!("Unexpected DeviceAction: {other:?}"),
-            }
-        });
-
-        handle_hci_client(server_socket, peer_addr, DeviceClient::new(Box::new(mock))).await;
+        handle_hci_client(server_socket, peer_addr, device_client).await;
 
         let mut added = req_rx.recv().await.unwrap();
         let packet_stream = added.packet_stream.take().unwrap();
@@ -190,7 +230,7 @@ mod tests {
         // Dropping `packet_stream` closes `stream_rx`, so the next H4 frame from the socket
         // causes `stream_tx.send` to fail and terminates the read task cleanly.
         drop(packet_stream);
-        client_socket.write_all(&[0x01, 0x03, 0x0c, 0x00]).await.unwrap();
+        client_socket.write_all(&HCI_RESET_CMD).await.unwrap();
 
         // Dropping `client_socket` closes the peer TCP connection; subsequent writes on
         // `socket_tx` fail and terminate the write task, causing `packet_sink` to return
@@ -208,5 +248,73 @@ mod tests {
         .await
         .expect("timed out waiting for BrokenPipe error after socket disconnect");
         assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_handle_hci_client_clean_eof_at_frame_boundary_ignores_error_stat() {
+        let (table, _guard, _multi_dispatch_guard) = error_stats_subscriber();
+
+        let (mut client_socket, server_socket, peer_addr) = connected_tcp_pair().await;
+        let (device_client, mut req_rx) = accepting_device_client();
+
+        handle_hci_client(server_socket, peer_addr, device_client).await;
+
+        let mut added = req_rx.recv().await.unwrap();
+        let mut packet_stream = added.packet_stream.take().unwrap();
+
+        client_socket.write_all(&HCI_RESET_CMD).await.unwrap();
+        client_socket.shutdown().await.unwrap();
+
+        let packet = tokio::time::timeout(Duration::from_secs(2), packet_stream.next())
+            .await
+            .expect("timed out waiting for complete H4 packet");
+        assert_eq!(packet, Some(Bytes::from_static(&HCI_RESET_CMD)));
+
+        let next = tokio::time::timeout(Duration::from_secs(2), packet_stream.next())
+            .await
+            .expect("timed out waiting for HCI socket reader task to close stream");
+        assert!(next.is_none());
+
+        assert!(table.snapshot().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_handle_hci_client_truncated_packet_eof_records_error_stat() {
+        let (table, _guard, _multi_dispatch_guard) = error_stats_subscriber();
+
+        let (mut client_socket, server_socket, peer_addr) = connected_tcp_pair().await;
+        let (device_client, mut req_rx) = accepting_device_client();
+
+        handle_hci_client(server_socket, peer_addr, device_client).await;
+
+        let mut added = req_rx.recv().await.unwrap();
+        let mut packet_stream = added.packet_stream.take().unwrap();
+
+        client_socket.write_all(&TRUNCATED_HCI_CMD_HEADER).await.unwrap();
+        client_socket.shutdown().await.unwrap();
+
+        // Wait for the spawned reader task to emit the error and drop `stream_tx`.
+        let next = tokio::time::timeout(Duration::from_secs(2), packet_stream.next())
+            .await
+            .expect("timed out waiting for HCI socket reader task to close stream");
+        assert!(next.is_none());
+
+        assert_eq!(table.snapshot(), vec![(Code::HciSocketRead as u32, 1)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_handle_hci_client_add_virtual_hci_chip_failed_records_error_stat() {
+        let (table, _guard, _multi_dispatch_guard) = error_stats_subscriber();
+        let (_client_socket, server_socket, peer_addr) = connected_tcp_pair().await;
+
+        let mut mock = MockActorClient::<DeviceActor>::new();
+        mock.expect_perform_action().once().returning(|_id, _action| {
+            // Returning Success instead of AddChipByGuidSuccess triggers ClientError::Recv.
+            Ok(DeviceActionResult::Success)
+        });
+
+        handle_hci_client(server_socket, peer_addr, DeviceClient::new(Box::new(mock))).await;
+
+        assert_eq!(table.snapshot(), vec![(Code::AddVirtualHciChip as u32, 1)]);
     }
 }
