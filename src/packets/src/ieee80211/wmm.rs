@@ -19,6 +19,23 @@ pub const OUI_TYPE_WMM: u8 = 2;
 pub const OUI_SUBTYPE_WMM_PARAM: u8 = 1;
 pub const WMM_VERSION: u8 = 1;
 
+const QOS_INFO_UAPSD_BIT: u8 = 0x80;
+const QOS_INFO_PARAM_SET_COUNT_MASK: u8 = 0x0F;
+const WMM_RESERVED: u8 = 0;
+
+const fn ac_param_record(aci: u8, aifsn: u8, ecw_min: u8, ecw_max: u8, txop_limit: u16) -> [u8; 4] {
+    let [txop_lo, txop_hi] = txop_limit.to_le_bytes();
+    [(aci << 5) | aifsn, ecw_min | (ecw_max << 4), txop_lo, txop_hi]
+}
+
+// Default AP AC records: AC_BE, AC_BK, AC_VI (~3ms TXOP), AC_VO (~1.5ms TXOP).
+const DEFAULT_AC_RECORDS: [[u8; 4]; 4] = [
+    ac_param_record(0, 3, 4, 10, 0),
+    ac_param_record(1, 7, 4, 10, 0),
+    ac_param_record(2, 2, 3, 4, 94),
+    ac_param_record(3, 2, 2, 3, 47),
+];
+
 /// Writes the WMM Parameter Element to the buffer.
 ///
 /// Structure:
@@ -30,48 +47,36 @@ pub const WMM_VERSION: u8 = 1;
 /// - Reserved (1 byte)
 /// - AC Parameters (4 records * 4 bytes each = 16 bytes)
 pub fn write_wmm_param_element(buf: &mut Vec<u8>, uapsd: bool, param_set_count: u8) {
-    let mut body = Vec::with_capacity(24);
-    body.extend_from_slice(&OUI_MICROSOFT);
-    body.push(OUI_TYPE_WMM);
-    body.push(OUI_SUBTYPE_WMM_PARAM);
-    body.push(WMM_VERSION);
-
-    // QoS Info:
-    // Bit 7: U-APSD
-    // Bits 0-3: Parameter Set Count
-    let mut qos_info = param_set_count & 0x0F;
-    if uapsd {
-        qos_info |= 0x80;
-    }
-    body.push(qos_info);
-    body.push(0); // Reserved
-
-    // AC Parameters (Record Format: ACI/AIFSN, ECW Min/Max, TXOP Limit)
-    // We use default values typical for an AP.
-
-    // AC_BE (Best Effort) - ACI 0
-    // AIFSN: 3, ECWmin: 4, ECWmax: 10, TXOP: 0
-    body.push(3); // ACI=0, ACM=0, AIFSN=3
-    body.push(4 | (10 << 4)); // ECWmin=4, ECWmax=10
-    body.extend_from_slice(&0u16.to_le_bytes()); // TXOP Limit
-
-    // AC_BK (Background) - ACI 1
-    // AIFSN: 7, ECWmin: 4, ECWmax: 10, TXOP: 0
-    body.push((1 << 5) | 7); // ACI=1, ACM=0, AIFSN=7
-    body.push(4 | (10 << 4));
-    body.extend_from_slice(&0u16.to_le_bytes());
-
-    // AC_VI (Video) - ACI 2
-    // AIFSN: 2, ECWmin: 3, ECWmax: 4, TXOP: 94 (approx 3ms)
-    body.push((2 << 5) | 2); // ACI=2, ACM=0, AIFSN=2
-    body.push(3 | (4 << 4));
-    body.extend_from_slice(&94u16.to_le_bytes());
-
-    // AC_VO (Voice) - ACI 3
-    // AIFSN: 2, ECWmin: 2, ECWmax: 3, TXOP: 47 (approx 1.5ms)
-    body.push((3 << 5) | 2); // ACI=3, ACM=0, AIFSN=2
-    body.push(2 | (3 << 4));
-    body.extend_from_slice(&47u16.to_le_bytes());
+    let qos_info = (param_set_count & QOS_INFO_PARAM_SET_COUNT_MASK)
+        | if uapsd { QOS_INFO_UAPSD_BIT } else { 0 };
+    let header = [OUI_TYPE_WMM, OUI_SUBTYPE_WMM_PARAM, WMM_VERSION, qos_info, WMM_RESERVED];
+    let body = [OUI_MICROSOFT.as_slice(), &header, DEFAULT_AC_RECORDS.as_flattened()].concat();
 
     write_ie(buf, crate::ieee80211::ie::tags::VENDOR_SPECIFIC, &body);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_wmm_param_element_default_wire_bytes() {
+        let mut out = Vec::new();
+        write_wmm_param_element(&mut out, false, 0);
+        assert_eq!(
+            out,
+            [
+                0xdd, 24, 0x00, 0x50, 0xf2, 0x02, 0x01, 0x01, 0x00, 0x00, 0x03, 0xa4, 0x00, 0x00,
+                0x27, 0xa4, 0x00, 0x00, 0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn write_wmm_param_element_uapsd_and_masks_param_set_count() {
+        const QOS_INFO_OFFSET: usize = 8; // IE tag + len + OUI + type + subtype + version
+        let mut out = Vec::new();
+        write_wmm_param_element(&mut out, true, 0x1F);
+        assert_eq!(out[QOS_INFO_OFFSET], 0x80 | 0x0F);
+    }
 }

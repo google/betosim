@@ -29,6 +29,7 @@ use crate::{
         IP_P_HOPOPTS, IP_P_ICMP, IP_P_ICMPV6, IP_P_TCP, IP_P_UDP, Ipv4Header, Ipv6Header,
         Ipv6HopByHopHeader,
     },
+    llc::frame::{LlcHeader, LlcSnapHeader},
     transport::{tcp::TcpHeader, udp::UdpHeader},
 };
 
@@ -47,8 +48,6 @@ pub enum TransportPacket<'a> {
     Tcp(Ref<&'a [u8], TcpHeader>, &'a [u8]),
     Udp(Ref<&'a [u8], UdpHeader>, &'a [u8]),
 }
-
-use crate::llc::frame::{LlcHeader, LlcSnapHeader};
 
 /// Represents the LLC layer of a packet.
 pub enum LlcPacket<'a> {
@@ -102,50 +101,27 @@ pub fn parse(data: &[u8]) -> Option<Packet<'_>> {
         }
 
         let ip = match ethertype {
-            ether_type::IPV4 => {
-                if let Some((ipv4_header, ipv4_payload)) = Ipv4Header::parse(payload) {
-                    Some(IpPacket::V4(ipv4_header, ipv4_payload))
-                } else {
-                    None
-                }
-            }
-            ether_type::IPV6 => {
-                if let Some((ipv6_header, ipv6_payload)) = Ipv6Header::parse(payload) {
-                    Some(IpPacket::V6(ipv6_header, ipv6_payload))
-                } else {
-                    None
-                }
-            }
+            ether_type::IPV4 => Ipv4Header::parse(payload).map(|(h, p)| IpPacket::V4(h, p)),
+            ether_type::IPV6 => Ipv6Header::parse(payload).map(|(h, p)| IpPacket::V6(h, p)),
             _ => None,
         };
 
-        let transport = if let Some(ip_packet) = &ip {
-            match ip_packet {
-                IpPacket::V4(header, payload) => parse_transport(header.protocol, payload, false),
-                IpPacket::V6(header, payload) => {
-                    let mut next_header = header.next_header;
-                    let mut current_payload = *payload;
-                    if next_header == IP_P_HOPOPTS {
-                        if let Some((hbh_header, hbh_payload)) =
-                            Ipv6HopByHopHeader::parse(current_payload)
-                        {
-                            next_header = hbh_header.next_header;
-                            current_payload = hbh_payload;
-                        } else {
-                            // Malformed packet, can't parse HopByHop
-                            return Some(Packet { ethernet, llc, ip, transport: None });
-                        }
-                    }
-                    parse_transport(next_header, current_payload, true)
-                }
-            }
-        } else {
-            None
-        };
+        let transport = ip.as_ref().and_then(parse_ip_transport);
 
         Some(Packet { ethernet, llc, ip, transport })
     } else {
         None
+    }
+}
+
+fn parse_ip_transport<'a>(ip_packet: &IpPacket<'a>) -> Option<TransportPacket<'a>> {
+    match ip_packet {
+        IpPacket::V4(header, payload) => parse_transport(header.protocol, payload, false),
+        IpPacket::V6(header, payload) if header.next_header == IP_P_HOPOPTS => {
+            let (hbh, rest) = Ipv6HopByHopHeader::parse(payload)?;
+            parse_transport(hbh.next_header, rest, true)
+        }
+        IpPacket::V6(header, payload) => parse_transport(header.next_header, payload, true),
     }
 }
 
@@ -197,23 +173,42 @@ mod tests {
         bytes
     }
 
+    fn build_ipv6_packet(next_header: u8, payload: &[u8]) -> Vec<u8> {
+        let payload_len = payload.len() as u16;
+        [
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55].as_slice(),
+            &[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB],
+            &ether_type::IPV6.to_be_bytes(),
+            &0x6000_0000u32.to_be_bytes(),
+            &payload_len.to_be_bytes(),
+            &[next_header, 64],
+            &[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            &[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            payload,
+        ]
+        .concat()
+    }
+
     fn build_ipv6_icmpv6_packet() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        // Ethernet
-        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Dst
-        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]); // Src
-        bytes.extend_from_slice(&ether_type::IPV6.to_be_bytes());
-        // IPv6
-        bytes.extend_from_slice(&0x60000000u32.to_be_bytes()); // Version, TC, Flow Label
-        bytes.extend_from_slice(&8u16.to_be_bytes()); // Payload Length
-        bytes.extend_from_slice(&[IP_P_ICMPV6, 64]); // Next Header, Hop Limit
-        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // Src
-        bytes.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // Dst
-        // ICMPv6
-        bytes.extend_from_slice(&[128, 0]); // Type, Code
-        bytes.extend_from_slice(&0u16.to_be_bytes()); // Checksum
-        bytes.extend_from_slice(&[0, 0, 0, 0]); // Body
-        bytes
+        let icmpv6 = [[128u8, 0].as_slice(), &0u16.to_be_bytes(), &[0, 0, 0, 0]].concat();
+        build_ipv6_packet(IP_P_ICMPV6, &icmpv6)
+    }
+
+    fn build_udp_header(src_port: u16, dst_port: u16) -> [u8; 8] {
+        let [s0, s1] = src_port.to_be_bytes();
+        let [d0, d1] = dst_port.to_be_bytes();
+        [s0, s1, d0, d1, 0, 8, 0, 0]
+    }
+
+    fn build_hop_by_hop_udp_packet(hdr_ext_len: u8, src_port: u16, dst_port: u16) -> Vec<u8> {
+        let pad_len = (usize::from(hdr_ext_len) + 1) * 8 - 2;
+        let payload = [
+            [IP_P_UDP, hdr_ext_len].as_slice(),
+            &vec![0u8; pad_len],
+            &build_udp_header(src_port, dst_port),
+        ]
+        .concat();
+        build_ipv6_packet(IP_P_HOPOPTS, &payload)
     }
 
     #[test]
@@ -370,26 +365,18 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_tcp() {
-        let mut bytes = Vec::new();
-        // Ethernet
-        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
-        bytes.extend_from_slice(&ether_type::IPV6.to_be_bytes());
-        // IPv6
-        bytes.extend_from_slice(&0x60000000u32.to_be_bytes());
-        bytes.extend_from_slice(&20u16.to_be_bytes()); // Payload Length (20 TCP)
-        bytes.extend_from_slice(&[IP_P_TCP, 64]); // Next Header, Hop Limit
-        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        bytes.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        // TCP
-        bytes.extend_from_slice(&1234u16.to_be_bytes()); // Src Port
-        bytes.extend_from_slice(&80u16.to_be_bytes()); // Dst Port
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // Seq
-        bytes.extend_from_slice(&0u32.to_be_bytes()); // Ack
-        bytes.extend_from_slice(&[0x50, 0x02]); // Offset (5), Flags (SYN)
-        bytes.extend_from_slice(&0u16.to_be_bytes()); // Window
-        bytes.extend_from_slice(&0u16.to_be_bytes()); // Checksum
-        bytes.extend_from_slice(&0u16.to_be_bytes()); // Urgent Pointer
+        let tcp = [
+            1234u16.to_be_bytes().as_slice(),
+            &80u16.to_be_bytes(),
+            &0u32.to_be_bytes(),
+            &0u32.to_be_bytes(),
+            &[0x50, 0x02], // Offset (5), Flags (SYN)
+            &0u16.to_be_bytes(),
+            &0u16.to_be_bytes(),
+            &0u16.to_be_bytes(),
+        ]
+        .concat();
+        let bytes = build_ipv6_packet(IP_P_TCP, &tcp);
 
         let packet = parse(&bytes).expect("Failed to parse packet");
         let transport = packet.transport.expect("No transport packet found");
@@ -404,22 +391,7 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_udp() {
-        let mut bytes = Vec::new();
-        // Ethernet
-        bytes.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        bytes.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
-        bytes.extend_from_slice(&ether_type::IPV6.to_be_bytes());
-        // IPv6
-        bytes.extend_from_slice(&0x60000000u32.to_be_bytes());
-        bytes.extend_from_slice(&8u16.to_be_bytes()); // Payload Length (8 UDP)
-        bytes.extend_from_slice(&[IP_P_UDP, 64]); // Next Header, Hop Limit
-        bytes.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        bytes.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        // UDP
-        bytes.extend_from_slice(&1234u16.to_be_bytes()); // Src Port
-        bytes.extend_from_slice(&53u16.to_be_bytes()); // Dst Port
-        bytes.extend_from_slice(&8u16.to_be_bytes()); // Length
-        bytes.extend_from_slice(&0u16.to_be_bytes()); // Checksum
+        let bytes = build_ipv6_packet(IP_P_UDP, &build_udp_header(1234, 53));
 
         let packet = parse(&bytes).expect("Failed to parse packet");
         let transport = packet.transport.expect("No transport packet found");
@@ -546,5 +518,33 @@ mod tests {
         } else {
             panic!("Expected UDP packet");
         }
+    }
+
+    #[test]
+    fn test_parse_ipv6_truncated_hop_by_hop() {
+        let bytes = build_ipv6_packet(IP_P_HOPOPTS, &[IP_P_UDP, 0, 0, 0]);
+        let parsed = parse(&bytes).expect("Failed to parse packet");
+        assert!(matches!(parsed.ip, Some(IpPacket::V6(..))));
+        assert!(parsed.transport.is_none());
+    }
+
+    #[test]
+    fn test_parse_ipv6_valid_hop_by_hop_udp() {
+        let bytes = build_hop_by_hop_udp_packet(0, 1234, 53);
+        let parsed = parse(&bytes).expect("Failed to parse packet");
+        let Some(TransportPacket::Udp(udp, _)) = parsed.transport else {
+            panic!("Expected UDP packet");
+        };
+        assert_eq!((udp.source_port.get(), udp.dest_port.get()), (1234, 53));
+    }
+
+    #[test]
+    fn test_parse_ipv6_hop_by_hop_16_byte_header_udp() {
+        let bytes = build_hop_by_hop_udp_packet(1, 1234, 53);
+        let parsed = parse(&bytes).expect("Failed to parse packet");
+        let Some(TransportPacket::Udp(udp, _)) = parsed.transport else {
+            panic!("Expected UDP packet");
+        };
+        assert_eq!((udp.source_port.get(), udp.dest_port.get()), (1234, 53));
     }
 }

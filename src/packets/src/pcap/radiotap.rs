@@ -19,6 +19,14 @@
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use crate::netlink::hwsim_frame::HwsimFrame;
+
+const RADIOTAP_VERSION: u8 = 0;
+const RADIOTAP_HEADER_LEN: u16 = std::mem::size_of::<RadiotapHeader>() as u16;
+const RADIOTAP_PRESENT_CHANNEL: u32 = 1 << 3;
+const RADIOTAP_PRESENT_DBM_ANTSIGNAL: u32 = 1 << 5;
+const RADIOTAP_PRESENT_BITMAP: u32 = RADIOTAP_PRESENT_CHANNEL | RADIOTAP_PRESENT_DBM_ANTSIGNAL;
+
 /// Radiotap header.
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone, FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
@@ -39,23 +47,18 @@ pub struct ChannelInfo {
     pub flags: u16,
 }
 
-use crate::netlink::hwsim_frame::HwsimFrame;
-
 /// Creates a Radiotap packet from a HwsimFrame.
 pub fn create_radiotap_packet(frame: &HwsimFrame) -> Vec<u8> {
     let radiotap_hdr = RadiotapHeader {
-        version: 0,
+        version: RADIOTAP_VERSION,
         pad: 0,
-        len: (std::mem::size_of::<RadiotapHeader>() as u16),
-        present: ((1 << 3) /* channel */ | (1 << 5)/* signal dBm */),
+        len: RADIOTAP_HEADER_LEN,
+        present: RADIOTAP_PRESENT_BITMAP,
         channel: ChannelInfo { freq: frame.freq.unwrap_or(0) as u16, flags: 0 },
         signal: frame.signal.unwrap_or(0) as u8,
     };
 
-    let mut buffer = Vec::new();
-    buffer.extend_from_slice(radiotap_hdr.as_bytes());
-    buffer.extend_from_slice(&frame.data);
-    buffer
+    [radiotap_hdr.as_bytes(), frame.data.as_slice()].concat()
 }
 
 #[cfg(test)]
