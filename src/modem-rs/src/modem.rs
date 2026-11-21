@@ -34,8 +34,8 @@ use crate::{
     sup_service::SupService,
     time::Clock,
     types::{
-        CallForwardCondition, CmeError, CommandAction, CopsMode, ExecutionResult, HangupReason,
-        ModemError, ModemId, NumberPresentation, PhoneNumber, RadioPowerLevel,
+        CallForwardCondition, CmeError, CommandAction, CopsFormat, CopsMode, ExecutionResult,
+        HangupReason, ModemError, ModemId, NumberPresentation, PhoneNumber, RadioPowerLevel,
         RegistrationUnsolicitedMode, Response, SignalQuality,
     },
 };
@@ -842,6 +842,8 @@ impl ModemImpl {
         let mut all_responses = Vec::new();
         let mut combined_effects = Vec::new();
         let mut stop_chain = false;
+        let mut saved_cops_format: Option<CopsFormat> = None;
+        let mut is_compound_cops_query = false;
 
         for (i, cmd_bytes) in sub_commands.iter().enumerate() {
             let is_last = i == sub_commands.len() - 1;
@@ -868,9 +870,28 @@ impl ModemImpl {
                         );
                         stop_chain = true;
                     } else {
-                        let exec_res = self.execute_and_schedule(&command, &mut combined_effects);
+                        let prev_cops_format = self.network_service.cops_format();
+                        let exec_res = if is_compound_cops_query
+                            && matches!(command, Command::Network(NetworkCommand::QueryOperator))
+                        {
+                            self.network_service.execute_compound_query_operator()
+                        } else {
+                            self.execute_and_schedule(&command, &mut combined_effects)
+                        };
                         match exec_res {
                             ExecutionResult::Success(handled) => {
+                                if let Command::Network(NetworkCommand::SetOperator {
+                                    mode, ..
+                                }) = &command
+                                {
+                                    if *mode == CopsMode::SetFormatOnly {
+                                        saved_cops_format.get_or_insert(prev_cops_format);
+                                        is_compound_cops_query = true;
+                                    } else {
+                                        saved_cops_format = None;
+                                        is_compound_cops_query = false;
+                                    }
+                                }
                                 let mut responses = handled.responses;
                                 let success = responses.last() == Some(&Response::Ok);
                                 if !is_last && success {
@@ -905,6 +926,11 @@ impl ModemImpl {
             if stop_chain {
                 break;
             }
+        }
+
+        // Roll back format changes from an aborted compound chain so they do not leak into later standalone queries (b/585933678).
+        if stop_chain && let Some(prev_format) = saved_cops_format {
+            self.network_service.set_cops_format(prev_format);
         }
 
         if !all_responses.is_empty() {

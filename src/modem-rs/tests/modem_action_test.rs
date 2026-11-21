@@ -181,6 +181,6 @@ fn test_sim_hot_plugging_goldfish_37() {
     then_response_is(&mut world, "A", "ERROR");
 
     when_at_command_sent(&mut world, "A", "AT+COPS?");
-    then_response_is(&mut world, "A", "+COPS: 0,2,\"\"");
+    then_response_is(&mut world, "A", "+COPS: 0,0,0");
     then_response_is(&mut world, "A", "OK");
 }

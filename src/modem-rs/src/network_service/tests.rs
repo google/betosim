@@ -40,22 +40,144 @@ fn test_cops_query_unregistered_standard() {
 }
 
 #[test]
-fn test_cops_query_unregistered_goldfish_37_compound_queries() {
+fn test_cops_query_unregistered_goldfish_37_standalone() {
     let quirks = Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() };
-    for (fmt, expected_fmt_code) in [
-        (CopsFormat::LongAlphanumeric, "0"),
-        (CopsFormat::ShortAlphanumeric, "1"),
-        (CopsFormat::Numeric, "2"),
-    ] {
-        let response = NetworkResponse::OperatorQuery {
-            is_registered: false,
-            mode: CopsMode::Automatic,
-            format: fmt,
-            plmn: "310260".to_string(),
-            quirks,
-        };
-        assert_eq!(format!("{response}"), format!("+COPS: 0,{expected_fmt_code},\"\"\r\n"));
+    for (mode, expected_mode_code) in
+        [(CopsMode::Automatic, "0"), (CopsMode::Manual, "1"), (CopsMode::Deregister, "2")]
+    {
+        for fmt in
+            [CopsFormat::LongAlphanumeric, CopsFormat::ShortAlphanumeric, CopsFormat::Numeric]
+        {
+            let response = NetworkResponse::OperatorQuery {
+                is_registered: false,
+                mode,
+                format: fmt,
+                plmn: "310260".to_string(),
+                quirks,
+            };
+            assert_eq!(format!("{response}"), format!("+COPS: {expected_mode_code},0,0\r\n"));
+        }
     }
+}
+
+#[test]
+fn test_compound_query_operator_goldfish_37_radio_off_vs_host_rf_off_errors() {
+    let quirks = Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() };
+    let mut service = NetworkService::new(quirks, Plmn::parse("310260").ok());
+
+    service.radio_power = RadioPowerLevel::Minimum;
+    assert_eq!(
+        service.execute_compound_query_operator(),
+        ExecutionResult::cme_error(CmeError::OperationNotAllowed)
+    );
+
+    service.radio_power = RadioPowerLevel::Full;
+    service.set_host_radio_enabled(false);
+    assert_eq!(
+        service.execute_compound_query_operator(),
+        ExecutionResult::cme_error(CmeError::NoNetworkService)
+    );
+}
+
+#[test]
+fn test_query_operator_missing_plmn_treated_as_unregistered() {
+    let quirks = Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() };
+    let mut service = NetworkService::new(quirks, None);
+    service.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+
+    let standalone = service
+        .handle_query_operator()
+        .expect("standalone query should succeed")
+        .expect("standalone query should return a response");
+    assert_eq!(format!("{standalone}"), "+COPS: 0,0,0\r\n");
+    assert_eq!(
+        service.execute_compound_query_operator(),
+        ExecutionResult::cme_error(CmeError::NoNetworkService)
+    );
+
+    let mut standard = NetworkService::new(
+        Quirks { goldfish_ril_37_or_earlier: false, ..Default::default() },
+        None,
+    );
+    standard.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+    let standard_resp = standard
+        .handle_query_operator()
+        .expect("standard standalone query should succeed")
+        .expect("standard standalone query should return a response");
+    assert_eq!(format!("{standard_resp}"), "+COPS: 0\r\n");
+}
+
+#[test]
+fn test_query_operator_guest_radio_off_with_registration_treated_as_unregistered() {
+    let quirks = Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() };
+    let mut service = NetworkService::new(quirks, Plmn::parse("310260").ok());
+    service.radio_power = RadioPowerLevel::Minimum;
+    service.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+
+    let standalone = service
+        .handle_query_operator()
+        .expect("standalone query should succeed")
+        .expect("standalone query should return a response");
+    assert_eq!(format!("{standalone}"), "+COPS: 0,0,0\r\n");
+    assert_eq!(
+        service.execute_compound_query_operator(),
+        ExecutionResult::cme_error(CmeError::OperationNotAllowed)
+    );
+
+    let mut standard = NetworkService::new(
+        Quirks { goldfish_ril_37_or_earlier: false, ..Default::default() },
+        Plmn::parse("310260").ok(),
+    );
+    standard.radio_power = RadioPowerLevel::Minimum;
+    standard.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+    let standard_resp = standard
+        .handle_query_operator()
+        .expect("standard standalone query should succeed")
+        .expect("standard standalone query should return a response");
+    assert_eq!(format!("{standard_resp}"), "+COPS: 0\r\n");
+}
+
+#[test]
+fn test_query_operator_deregister_mode_with_registration_treated_as_unregistered() {
+    let mut goldfish = NetworkService::new(
+        Quirks { goldfish_ril_37_or_earlier: true, ..Default::default() },
+        Plmn::parse("310260").ok(),
+    );
+    goldfish.cops_mode = CopsMode::Deregister;
+    goldfish.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+    assert!(goldfish.is_radio_on() && goldfish.is_normal_registered());
+    assert!(!goldfish.has_selected_operator());
+    assert_eq!(
+        goldfish.execute_compound_query_operator(),
+        ExecutionResult::cme_error(CmeError::NoNetworkService)
+    );
+    let goldfish_resp = goldfish
+        .handle_query_operator()
+        .expect("goldfish standalone query should succeed")
+        .expect("goldfish standalone query should return a response");
+    assert!(matches!(
+        goldfish_resp,
+        NetworkResponse::OperatorQuery { is_registered: false, mode: CopsMode::Deregister, .. }
+    ));
+    assert_eq!(format!("{goldfish_resp}"), "+COPS: 2,0,0\r\n");
+
+    let mut standard = NetworkService::new(
+        Quirks { goldfish_ril_37_or_earlier: false, ..Default::default() },
+        Plmn::parse("310260").ok(),
+    );
+    standard.cops_mode = CopsMode::Deregister;
+    standard.set_registration(RegistrationType::Voice, RegistrationStatus::RegisteredHome);
+    assert!(standard.is_radio_on() && standard.is_normal_registered());
+    assert!(!standard.has_selected_operator());
+    let standard_resp = standard
+        .handle_query_operator()
+        .expect("standard standalone query should succeed")
+        .expect("standard standalone query should return a response");
+    assert!(matches!(
+        standard_resp,
+        NetworkResponse::OperatorQuery { is_registered: false, mode: CopsMode::Deregister, .. }
+    ));
+    assert_eq!(format!("{standard_resp}"), "+COPS: 2\r\n");
 }
 
 #[test]

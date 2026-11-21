@@ -55,6 +55,7 @@ pub const CME_ERROR_SIM_PUK_REQUIRED: &str = "+CME ERROR: 12";
 pub const CME_ERROR_SIM_FAILURE: &str = "+CME ERROR: 13";
 pub const CME_ERROR_OPERATION_NOT_ALLOWED: &str = "+CME ERROR: 3";
 pub const CME_ERROR_OPERATION_NOT_SUPPORTED: &str = "+CME ERROR: 4";
+pub const CME_ERROR_NO_NETWORK_SERVICE: &str = "+CME ERROR: 30";
 
 // Test vectors for validation
 pub const TOO_SHORT_PIN: &str = "123";
@@ -120,6 +121,7 @@ pub const INVALID_SMS_PDU_HEX: &str = "0001000A8100000000001A";
 
 // Network/Call Constants
 pub const TEST_PLMN: &str = "310260";
+pub const COMPOUND_COPS_QUERY: &str = "AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?";
 pub const TEST_OPERATOR_LONG: &str = "Android Virtual Operator";
 pub const TEST_OPERATOR_SHORT: &str = "Android";
 pub const INVALID_PLMN: &str = "123456";

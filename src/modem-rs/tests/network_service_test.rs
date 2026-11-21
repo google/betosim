@@ -427,24 +427,25 @@ fn test_network_registration_radio_cycle() {
 
 // Scenario: Query Operator in All Formats (Compound Query)
 //   Given a modem "A"
-//   When AT command "AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?" is
-// sent to "A"   Then response from "A" is "+COPS: 0,0,\"Android Virtual
-// Operator\""   And response from "A" is "+COPS: 0,1,\"Android\""
-//   And response from "A" is "+COPS: 0,2,310260"
-//   And response from "A" is "OK"
+//   When AT command "AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?" is sent before attach
+//   Then response from "A" is "+COPS: 0" three times followed by "OK"
+//   When attached and "AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?" is sent to "A"
+//   Then response from "A" is "+COPS: 0,0,\"Android Virtual Operator\"", "+COPS: 0,1,\"Android\"", "+COPS: 0,2,310260", and "OK"
 #[test]
 fn test_query_operator_all_formats() {
     let mut world = World::new();
     given_modem(&mut world, "A");
 
-    // Enable radio and attach
+    // Enable radio and verify unregistered compound query before attach completes
     when_at_command_sent(&mut world, "A", "AT+CFUN=1");
     then_response_is(&mut world, "A", "OK");
+    world.send_and_expect("A", COMPOUND_COPS_QUERY, &["+COPS: 0", "+COPS: 0", "+COPS: 0", "OK"]);
+
     when_time_advances_ms(&mut world, 10);
     let csq_response = RESP_CSQ_LTE_DEFAULT;
     then_response_is(&mut world, "A", csq_response);
 
-    when_at_command_sent(&mut world, "A", "AT+COPS=3,0;+COPS?;+COPS=3,1;+COPS?;+COPS=3,2;+COPS?");
+    when_at_command_sent(&mut world, "A", COMPOUND_COPS_QUERY);
     then_response_is(&mut world, "A", &format!("+COPS: 0,0,\"{TEST_OPERATOR_LONG}\""));
     then_response_is(&mut world, "A", &format!("+COPS: 0,1,\"{TEST_OPERATOR_SHORT}\""));
     then_response_is(&mut world, "A", &format!("+COPS: 0,2,\"{TEST_PLMN}\""));
@@ -897,7 +898,7 @@ fn test_cts_network_selection_mode_flow_goldfish_37() {
         &["+CREG: 3", "+CGREG: 3", "+CEREG: 3", "OK"],
     );
 
-    world.send_and_expect("A", "AT+COPS?", &["+COPS: 1,2,\"\"", "OK"]);
+    world.send_and_expect("A", "AT+COPS?", &["+COPS: 1,0,0", "OK"]);
 
     world.send_and_expect(
         "A",
@@ -1236,7 +1237,103 @@ fn test_cops_invalid_manual_operator_while_host_radio_disabled() {
     world.send_and_expect_ok("A", "AT+CREG=1");
     when_host_radio_set(&mut world, "A", false);
 
-    world.send_and_expect_error("A", &format!("AT+COPS=1,2,\"{INVALID_PLMN}\""), "+CME ERROR: 30");
+    world.send_and_expect_error(
+        "A",
+        &format!("AT+COPS=1,2,\"{INVALID_PLMN}\""),
+        CME_ERROR_NO_NETWORK_SERVICE,
+    );
     world.send_and_expect("A", "AT+CREG?", &["+CREG: 1,0", "OK"]);
     then_no_response(&mut world, "A");
+}
+
+// Scenario: Standalone and Compound AT+COPS? across unregistered, attached, host-RF-off, and deregistered states
+//   Given a Goldfish 37 modem "A"
+//   Then standalone AT+COPS? emits "+COPS: <mode>,0,0" when unregistered, compound AT+COPS? returns radio-off vs no-network-service errors, 3 formats when attached, and preserves Numeric cops_format
+#[test]
+fn test_compound_cops_query_lifecycle_goldfish_37() {
+    let mut world = World::new();
+    world.given_goldfish_37_modem("A");
+
+    world.send_and_expect_ok("A", "AT+CFUN=0");
+    world.send_and_expect("A", "AT+COPS?", &["+COPS: 0,0,0", "OK"]);
+    world.send_and_expect_error("A", COMPOUND_COPS_QUERY, "ERROR");
+    world.send_and_expect_ok("A", "AT+CMEE=1");
+    world.send_and_expect_error("A", COMPOUND_COPS_QUERY, CME_ERROR_OPERATION_NOT_ALLOWED);
+
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.send_and_expect("A", "AT+COPS?", &["+COPS: 0,0,0", "OK"]);
+    world.send_and_expect_error("A", COMPOUND_COPS_QUERY, CME_ERROR_NO_NETWORK_SERVICE);
+
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+    let numeric_cops = format!("+COPS: 0,2,\"{TEST_PLMN}\"");
+    world.send_and_expect("A", "AT+COPS?", &[&numeric_cops, "OK"]);
+    world.send_and_expect(
+        "A",
+        COMPOUND_COPS_QUERY,
+        &[
+            &format!("+COPS: 0,0,\"{TEST_OPERATOR_LONG}\""),
+            &format!("+COPS: 0,1,\"{TEST_OPERATOR_SHORT}\""),
+            &numeric_cops,
+            "OK",
+        ],
+    );
+
+    when_host_radio_set(&mut world, "A", false);
+    world.send_and_expect_error("A", COMPOUND_COPS_QUERY, CME_ERROR_NO_NETWORK_SERVICE);
+    when_host_radio_set(&mut world, "A", true);
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+    world.send_and_expect("A", "AT+COPS?", &[&numeric_cops, "OK"]);
+
+    world.send_and_expect_ok("A", "AT+COPS=2");
+    world.send_and_expect_ok("A", "AT+COPS=3,0");
+    world.send_and_expect("A", "AT+COPS?", &["+COPS: 2,0,0", "OK"]);
+    world.send_and_expect_error("A", COMPOUND_COPS_QUERY, CME_ERROR_NO_NETWORK_SERVICE);
+    world.send_and_expect_ok("A", &format!("AT+COPS=1,2,\"{INVALID_PLMN}\""));
+    world.send_and_expect_error("A", COMPOUND_COPS_QUERY, CME_ERROR_NO_NETWORK_SERVICE);
+    world.then_no_response("A");
+}
+
+// Scenario: Chained AT+COPS=3,0 restores cops_format on abort and resets tracking on mode change
+//   Given an attached Goldfish 37 modem "A" with "AT+CMEE=1"
+//   Then aborts preserve Numeric cops_format and committed AT+COPS=0,1 format across subsequent aborts, while AT+COPS=3,0;+COPS=0;+COPS? yields "+COPS: 0,0,0"
+#[test]
+fn test_chained_cops_format_restore_on_abort_goldfish_37() {
+    let mut world = World::new();
+    world.given_goldfish_37_modem("A");
+    world.send_and_expect_ok("A", "AT+CMEE=1");
+    world.send_and_expect_ok("A", "AT+CFUN=1");
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+
+    let numeric_cops = format!("+COPS: 0,2,\"{TEST_PLMN}\"");
+    world.when_sim_status("A", false);
+    world.send_and_expect_error("A", "AT+COPS=3,0;+CPIN?", CME_ERROR_SIM_NOT_INSERTED_NUMERIC);
+    world.when_sim_status("A", true);
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+    world.send_and_expect("A", "AT+COPS?", &[&numeric_cops, "OK"]);
+
+    world.send_and_expect_error("A", "AT+COPS=3,0;+COPS=1", "ERROR");
+    world.send_and_expect("A", "AT+COPS?", &[&numeric_cops, "OK"]);
+
+    world.when_sim_status("A", false);
+    world.send_and_expect_error(
+        "A",
+        "AT+COPS=3,0;+COPS=0,1;+CPIN?",
+        CME_ERROR_SIM_NOT_INSERTED_NUMERIC,
+    );
+    world.when_sim_status("A", true);
+    world.when_time_advances_ms(10);
+    world.then_response_is("A", RESP_CSQ_LTE_DEFAULT);
+    world.send_and_expect(
+        "A",
+        "AT+COPS?",
+        &[&format!("+COPS: 0,1,\"{TEST_OPERATOR_SHORT}\""), "OK"],
+    );
+
+    world.send_and_expect_ok("A", "AT+CFUN=0");
+    world.send_and_expect("A", "AT+COPS=3,0;+COPS=0;+COPS?", &["+COPS: 0,0,0", "OK"]);
+    world.then_no_response("A");
 }

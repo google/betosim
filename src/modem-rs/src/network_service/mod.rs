@@ -208,14 +208,9 @@ impl std::fmt::Display for NetworkResponse {
                         CopsFormat::Numeric => write!(f, "+COPS: {mode},2,\"{plmn}\"\r\n"),
                     }
                 } else if quirks.goldfish_ril_37_or_earlier {
-                    // Legacy Goldfish RIL (SDK <= 37) AtResponse::COPS::parse
-                    // expects 3 fields across compound
-                    // queries (AT+COPS=3,0;+COPS?;+COPS=3,
-                    // 1;+COPS?;+COPS=3,2;+COPS?)
-                    // and fails on standard single-field "+COPS: <mode>".
-                    // Emitting empty quotes strips to empty
-                    // operator strings with RadioError::NONE.
-                    write!(f, "+COPS: {mode},{format},\"\"\r\n")
+                    // Legacy Goldfish RIL (SDK <= 37) standalone getNetworkSelectionMode expects
+                    // 3 fields and rejects empty quoted operator strings.
+                    write!(f, "+COPS: {mode},0,0\r\n")
                 } else {
                     write!(f, "+COPS: {mode}\r\n")
                 }
@@ -670,11 +665,16 @@ impl NetworkService {
 
     // --- Pure command handlers ---
 
-    fn handle_query_operator(&self) -> NetworkResult {
-        let is_registered = self.is_normal_registered();
+    fn has_selected_operator(&self) -> bool {
+        self.is_radio_on()
+            && self.is_normal_registered()
+            && self.cops_mode != CopsMode::Deregister
+            && self.plmn.is_some()
+    }
 
+    fn handle_query_operator(&self) -> NetworkResult {
         Ok(Some(NetworkResponse::OperatorQuery {
-            is_registered,
+            is_registered: self.has_selected_operator(),
             mode: self.cops_mode,
             format: self.cops_format,
             plmn: self.plmn.as_ref().map(|p| p.to_string()).unwrap_or_default(),
@@ -1019,6 +1019,29 @@ impl NetworkService {
             urcs.push(urc);
         }
         urcs
+    }
+
+    pub(crate) fn cops_format(&self) -> CopsFormat {
+        self.cops_format
+    }
+
+    pub(crate) fn set_cops_format(&mut self, format: CopsFormat) {
+        self.cops_format = format;
+    }
+
+    pub(crate) fn execute_compound_query_operator(&self) -> ExecutionResult {
+        if self.quirks.goldfish_ril_37_or_earlier && !self.has_selected_operator() {
+            // Empty `""` in compound `AT+COPS?` crashes API 36-37.2 AIDL RIL at `substr(3)`
+            // (b/585933678). Gate `+CME ERROR: 3` (`RADIO_NOT_AVAILABLE`) on `radio_power != Full`
+            // so `ServiceStateTracker` keeps polling when guest radio is on (incl. host RF off).
+            if self.radio_power != RadioPowerLevel::Full {
+                ExecutionResult::cme_error(CmeError::OperationNotAllowed)
+            } else {
+                ExecutionResult::cme_error(CmeError::NoNetworkService)
+            }
+        } else {
+            self.handle_query_operator().into()
+        }
     }
 
     pub(crate) fn execute<'a>(
