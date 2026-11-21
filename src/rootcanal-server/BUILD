@@ -22,6 +22,8 @@ netsim_rust_library(
     crate_name = "rootcanal_server",
     edition = "2024",
     test_deps = [
+        "//src/actor-framework",
+        "//src/common",
         "//src/daemon:testing",
     ],
     visibility = ["//src:__subpackages__"],

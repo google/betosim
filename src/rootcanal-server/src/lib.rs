@@ -16,6 +16,7 @@
 //! its protocol by translating console commands into Netsim device actor
 //! updates.
 
+mod err;
 mod server;
 
 pub use server::run;

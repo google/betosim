@@ -44,13 +44,21 @@ pub async fn run(listener: TcpListener, device_client: DeviceClient) {
                 let client = device_client.clone();
                 tokio::spawn(async move {
                     if let Err(error) = handle_client(stream, client).await {
-                        error!(%error, "Error handling Rootcanal client {addr}");
+                        error!(
+                            code = crate::err::Code::ClientHandlerFailed as u32,
+                            %error,
+                            "Error handling Rootcanal client {addr}"
+                        );
                     }
                     info!("Rootcanal control connection closed for {addr}");
                 });
             }
             Err(error) => {
-                error!(%error, "Error accepting Rootcanal control connection");
+                error!(
+                    code = crate::err::Code::AcceptConnectionFailed as u32,
+                    %error,
+                    "Error accepting Rootcanal control connection"
+                );
                 // Mitigate tight CPU spin in case of persistent accept errors (e.g. EMFILE)
                 tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
             }
@@ -223,7 +231,11 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
         let command = match Command::parse(&name_str, &args) {
             Ok(cmd) => cmd,
             Err(error) => {
-                error!(%error, "Command '{name_str}' parse failed");
+                error!(
+                    code = crate::err::Code::CommandParseFailed as u32,
+                    %error,
+                    "Command '{name_str}' parse failed"
+                );
                 // Write the parser error back to the client and continue
                 write_response(&mut stream, error.as_bytes()).await?;
                 continue;
@@ -256,7 +268,10 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
                 handle_set_device_configuration(&device_client, device_id, &preset).await.map(Some)
             }
             Command::Unknown { name } => {
-                warn!("Unknown Rootcanal command received: {name}");
+                warn!(
+                    code = crate::err::Code::UnknownCommand as u32,
+                    "Unknown Rootcanal command received: {name}"
+                );
                 Ok(None)
             }
         };
@@ -265,7 +280,11 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
             Ok(Some(resp)) => resp,
             Ok(None) => "OK".to_string(),
             Err(error) => {
-                error!(%error, "Command '{name_str}' execution failed");
+                error!(
+                    code = crate::err::Code::CommandExecutionFailed as u32,
+                    %error,
+                    "Command '{name_str}' execution failed"
+                );
                 error
             }
         };
@@ -475,7 +494,15 @@ async fn handle_set_device_configuration(
 
 #[cfg(test)]
 mod tests {
+    use actor_framework::MockActorClient;
+    use common::util::{net::bind_tcp_loopback, netsim_logger::isolated_error_stats};
+    use device_actor::DeviceActor;
+
     use super::*;
+    use crate::err::Code;
+
+    const DEVICE_ID: &str = "999";
+    const INVALID_UTF8_COMMAND_FRAME: &[u8] = &[1u8, 0xffu8];
 
     #[test]
     fn test_phy_target_from_str() {
@@ -646,5 +673,149 @@ mod tests {
             Command::Unknown { name } => assert_eq!(name, "custom_unknown_op"),
             _ => panic!("Expected Unknown"),
         }
+    }
+
+    fn encode_command(name: &str, args: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(name.len() as u8);
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(args.len() as u8);
+        for arg in args {
+            buf.push(arg.len() as u8);
+            buf.extend_from_slice(arg.as_bytes());
+        }
+        buf
+    }
+
+    async fn error_stats_for(command: &[u8], device_client: DeviceClient) -> Vec<(u32, u32)> {
+        let listener = bind_tcp_loopback(0).unwrap();
+        let bind_addr = listener.local_addr().unwrap();
+
+        let mut client = TcpStream::connect(bind_addr).await.unwrap();
+        let (server_socket, _) = listener.accept().await.unwrap();
+
+        client.write_all(command).await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let (table, _guard) = isolated_error_stats();
+        handle_client(server_socket, device_client).await.unwrap();
+
+        table.snapshot()
+    }
+
+    async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
+        let mut len_bytes = [0u8; 4];
+        stream.read_exact(&mut len_bytes).await.unwrap();
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        let mut buf = vec![0u8; len];
+        stream.read_exact(&mut buf).await.unwrap();
+        buf
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_handle_client_unknown_command_records_error_stat() {
+        let (_runner, device_client) = device_actor::new();
+        let command = encode_command("unrecognized_command", &[]);
+        assert_eq!(
+            error_stats_for(&command, device_client).await,
+            vec![(Code::UnknownCommand as u32, 1)]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_handle_client_command_parse_failed_records_error_stat() {
+        let (_runner, device_client) = device_actor::new();
+        let command = encode_command("del", &["not_a_number"]);
+        assert_eq!(
+            error_stats_for(&command, device_client).await,
+            vec![(Code::CommandParseFailed as u32, 1)]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_handle_client_command_execution_failed_records_error_stat() {
+        let (runner, device_client) = device_actor::new();
+        drop(runner);
+        let command = encode_command("del", &[DEVICE_ID]);
+        assert_eq!(
+            error_stats_for(&command, device_client).await,
+            vec![(Code::CommandExecutionFailed as u32, 1)]
+        );
+    }
+
+    async fn run_session_error_stats<F, Fut>(
+        device_client: DeviceClient,
+        interact: F,
+    ) -> Vec<(u32, u32)>
+    where
+        F: FnOnce(TcpStream) -> Fut + Send,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = bind_tcp_loopback(0).unwrap();
+        let bind_addr = listener.local_addr().unwrap();
+
+        let (table, _guard) = isolated_error_stats();
+        let server_task = tokio::spawn(run(listener, device_client));
+
+        let mut client = TcpStream::connect(bind_addr).await.unwrap();
+        assert_eq!(read_frame(&mut client).await, b"RootCanal\n");
+        interact(client).await;
+
+        server_task.abort();
+        assert!(server_task.await.unwrap_err().is_cancelled());
+        table.snapshot()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_client_handler_failed_records_error_stat() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = run_session_error_stats(device_client, |mut client| async move {
+            client.write_all(INVALID_UTF8_COMMAND_FRAME).await.unwrap();
+            client.flush().await.unwrap();
+
+            // On current_thread, the spawned task drops the stream and logs 54800 within one poll,
+            // so observing EOF implies the stat is recorded.
+            let mut eof_buf = [0u8; 1];
+            assert_eq!(client.read(&mut eof_buf).await.unwrap(), 0);
+        })
+        .await;
+        assert_eq!(stats, vec![(Code::ClientHandlerFailed as u32, 1)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_valid_command_and_close_records_no_error_stats() {
+        let mut mock = MockActorClient::<DeviceActor>::new();
+        mock.expect_clone_box().returning(|| {
+            let mut conn_mock = MockActorClient::<DeviceActor>::new();
+            conn_mock.expect_list().returning(|| Ok(vec![]));
+            Box::new(conn_mock)
+        });
+        let device_client = DeviceClient::new(Box::new(mock));
+
+        let stats = run_session_error_stats(device_client, |mut client| async move {
+            client.write_all(&encode_command("list", &[])).await.unwrap();
+            client.flush().await.unwrap();
+            let list_resp = read_frame(&mut client).await;
+            assert!(list_resp.starts_with(b"Devices:\n"));
+
+            client.write_all(&encode_command("CLOSE_TEST_CHANNEL", &[])).await.unwrap();
+            client.flush().await.unwrap();
+            let mut eof_buf = [0u8; 1];
+            assert_eq!(client.read(&mut eof_buf).await.unwrap(), 0);
+        })
+        .await;
+        assert_eq!(stats, vec![]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_clean_eof_records_no_error_stats() {
+        let (_runner, device_client) = device_actor::new();
+        let stats = run_session_error_stats(device_client, |mut client| async move {
+            client.shutdown().await.unwrap();
+            let mut eof_buf = [0u8; 1];
+            assert_eq!(client.read(&mut eof_buf).await.unwrap(), 0);
+        })
+        .await;
+        assert_eq!(stats, vec![]);
     }
 }
