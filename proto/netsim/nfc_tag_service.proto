@@ -1,0 +1,207 @@
+// Copyright 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package netsim.nfc_tag_service;
+
+import "google/protobuf/empty.proto";
+import "netsim/model.proto";
+
+// Manages virtual NFC tags attached to the simulated Casimir RF scene.
+service NfcTagService {
+  // Creates a virtual NFC tag in the RF scene.
+  // Defaults when omitted/UNSPECIFIED: protocol = NFC_TAG_PROTOCOL_T4AT,
+  // uid = auto-generated 7-byte hex UID (or explicit 4-, 7-, or 10-byte hex),
+  // placement = position (0, 0, 0) meters, visible = true, formatted = true,
+  // fault_trigger = NFC_FAULT_TRIGGER_NONE. When formatted is true, payload
+  // must be set; when formatted is false, payload may be omitted.
+  // Returns INVALID_ARGUMENT on malformed UID/NDEF inputs, unsupported
+  // protocol, missing payload on a formatted tag, or invalid fault trigger
+  // counts; NOT_FOUND if target_device does not exist; and ALREADY_EXISTS if
+  // name collides with an existing tag.
+  rpc CreateTag(CreateTagRequest) returns (NfcTag);
+
+  // Returns the current state and counters of a virtual NFC tag.
+  // Returns INVALID_ARGUMENT if tag selector is unset, or NOT_FOUND if
+  // unmatched.
+  rpc GetTag(GetTagRequest) returns (NfcTag);
+
+  // Lists all virtual NFC tags ordered by ascending tag ID.
+  rpc ListTags(google.protobuf.Empty) returns (ListTagsResponse);
+
+  // Partially updates a virtual NFC tag's metadata, placement, NDEF payload,
+  // lock state, or fault trigger. Returns INVALID_ARGUMENT on invalid inputs
+  // or unset tag selector, NOT_FOUND if the tag or target_device does not
+  // exist, and ALREADY_EXISTS on a duplicate tag name.
+  rpc UpdateTag(UpdateTagRequest) returns (NfcTag);
+
+  // Removes a virtual NFC tag from the RF scene and releases any active reader.
+  // Returns INVALID_ARGUMENT if tag selector is unset, or NOT_FOUND if
+  // unmatched.
+  rpc DeleteTag(DeleteTagRequest) returns (google.protobuf.Empty);
+
+  // Removes all virtual NFC tags from the RF scene.
+  rpc ResetTags(google.protobuf.Empty) returns (google.protobuf.Empty);
+}
+
+enum NfcTagProtocol {
+  NFC_TAG_PROTOCOL_UNSPECIFIED = 0;
+  NFC_TAG_PROTOCOL_T4AT = 1;
+  NFC_TAG_PROTOCOL_T2T = 2;
+}
+
+enum NfcFaultTrigger {
+  NFC_FAULT_TRIGGER_UNSPECIFIED = 0;
+  NFC_FAULT_TRIGGER_NONE = 1;
+  NFC_FAULT_TRIGGER_ON_NEXT_APDU = 2;
+  NFC_FAULT_TRIGGER_ON_FIRST_WRITE = 3;
+  NFC_FAULT_TRIGGER_AFTER_N_APDUS = 4;
+}
+
+// Identifies a virtual NFC tag by numeric ID or unique tag name.
+message TagSelector {
+  oneof selector {
+    uint32 id = 1;
+    string name = 2;
+  }
+}
+
+// Identifies a simulated device by numeric ID or unique device name.
+message DeviceSelector {
+  oneof selector {
+    uint32 id = 1;
+    string name = 2;
+  }
+}
+
+// NFC Forum Well-Known Text ("T") record input.
+message NdefTextRecord {
+  // UTF-8 text body.
+  string text = 1;
+  // IANA language code (1..63 ASCII bytes; defaults to "en" if empty).
+  string language_code = 2;
+}
+
+// Structured NDEF record input for tag provisioning.
+message NdefRecord {
+  oneof record {
+    NdefTextRecord text = 1;
+    // Full URI string (e.g. "https://example.com").
+    string uri = 2;
+  }
+}
+
+// Non-empty ordered list of structured NDEF records.
+message NdefRecordList {
+  repeated NdefRecord records = 1;
+}
+
+message NfcTag {
+  uint32 id = 1;
+  string name = 2;
+  NfcTagProtocol protocol = 3;
+  // Tag UID as a lowercase 4-, 7-, or 10-byte hex string.
+  string uid = 4;
+  // Tag 3D coordinates in meters.
+  netsim.model.Position position = 5;
+  bool visible = 6;
+  // NDEF message as a hex string (e.g. "d101055402656e6869").
+  string ndef_bytes = 7;
+  optional string payload_text = 8;
+  bool read_only = 9;
+  bool formatted = 10;
+  NfcFaultTrigger fault_trigger = 11;
+  optional uint32 fault_trigger_apdu_count = 12;
+  // Casimir RF frames emitted by this virtual tag's state machine (poll
+  // responses, ATS activation, ISO-DEP R-APDUs/presence echoes while visible,
+  // plus tag-initiated link-loss deactivation). Distinct from per-chip guest
+  // NCI packet counts on Chip.nfc (netsim/model.proto, NetsimRadioStats in
+  // netsim/stats.proto) and session-wide Casimir scene boundary counts
+  // rf_taps_tx/rf_taps_rx (NfcStats in netsim/stats.proto).
+  uint32 tx_count = 13;
+  // Casimir RF frames accepted by this virtual tag's state machine while
+  // visible (poll commands, RATS activation, ISO-DEP C-APDUs/presence checks,
+  // and reader deactivation notifications). Distinct from per-chip guest NCI
+  // packet counts and session-wide rf_taps_rx.
+  uint32 rx_count = 14;
+}
+
+// Formatted tags (the default) require payload to be set. Unformatted tags
+// accept an optional payload or omit payload for empty NDEF storage.
+message CreateTagRequest {
+  string name = 1;
+  NfcTagProtocol protocol = 2;
+  // Optional 4-, 7-, or 10-byte hex UID; auto-generated 7-byte UID if empty.
+  string uid = 3;
+  // Initial 3D placement in meters: explicit coordinates or copied once from
+  // an existing simulated device's current position (does not follow later
+  // device moves). Defaults to (0, 0, 0) if unset.
+  oneof placement {
+    netsim.model.Position position = 4;
+    DeviceSelector target_device = 5;
+  }
+  optional bool visible = 6;
+  oneof payload {
+    // Raw NDEF message as a hex string (e.g. "d101055402656e6869").
+    string ndef_bytes = 7;
+    // Single UTF-8 Well-Known Text ("en") NDEF record shorthand.
+    string payload_text = 8;
+    // Ordered list of structured NDEF records.
+    NdefRecordList records = 9;
+  }
+  bool read_only = 10;
+  optional bool formatted = 11;
+  NfcFaultTrigger fault_trigger = 12;
+  optional uint32 fault_trigger_apdu_count = 13;
+}
+
+message GetTagRequest {
+  TagSelector tag = 1;
+}
+
+message ListTagsResponse {
+  repeated NfcTag tags = 1;
+}
+
+// Updates selected fields on an existing virtual NFC tag; unset fields and
+// NFC_FAULT_TRIGGER_UNSPECIFIED preserve existing state, while
+// NFC_FAULT_TRIGGER_NONE clears an armed fault trigger.
+message UpdateTagRequest {
+  TagSelector tag = 1;
+  optional string name = 2;
+  // Updated 3D placement in meters: explicit coordinates or copied once from
+  // an existing simulated device's current position.
+  oneof placement {
+    netsim.model.Position position = 3;
+    DeviceSelector target_device = 4;
+  }
+  optional bool visible = 5;
+  oneof payload {
+    // Raw NDEF message as a hex string (e.g. "d101055402656e6869").
+    string ndef_bytes = 6;
+    // Single UTF-8 Well-Known Text ("en") NDEF record shorthand.
+    string payload_text = 7;
+    // Ordered list of structured NDEF records.
+    NdefRecordList records = 8;
+  }
+  optional bool read_only = 9;
+  optional bool formatted = 10;
+  NfcFaultTrigger fault_trigger = 11;
+  optional uint32 fault_trigger_apdu_count = 12;
+}
+
+message DeleteTagRequest {
+  TagSelector tag = 1;
+}

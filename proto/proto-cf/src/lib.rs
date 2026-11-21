@@ -34,6 +34,8 @@ pub mod hci_packet;
 pub mod model;
 pub mod nfc_service;
 pub mod nfc_service_grpc;
+pub mod nfc_tag_service;
+pub mod nfc_tag_service_grpc;
 pub mod packet_streamer;
 pub mod packet_streamer_grpc;
 pub mod reflection;

@@ -25,6 +25,7 @@ pub mod frontend;
 pub mod hci_packet;
 pub mod model;
 pub mod nfc_service;
+pub mod nfc_tag_service;
 pub mod packet_streamer;
 pub mod reflection;
 pub mod startup;
