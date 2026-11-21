@@ -640,6 +640,7 @@ mod tests {
 
     #[test]
     fn test_wifi_stats_log_and_incr_err_count_populates_error_stats_table() {
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));

@@ -215,6 +215,7 @@ mod tests {
     }
 
     fn count_ftm_distance_warn_logs<F: FnOnce() -> R, R>(f: F) -> (R, usize) {
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let warn_count = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry()
             .with(WarnCaptureLayer { warn_count: warn_count.clone() });
@@ -344,6 +345,7 @@ mod tests {
 
     #[test]
     fn handle_ftm_request_invalid_distance_records_invalid_distance_error() {
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
@@ -362,6 +364,7 @@ mod tests {
 
     #[test]
     fn handle_ftm_request_zero_distance_records_no_error_stats() {
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
@@ -379,6 +382,7 @@ mod tests {
 
     #[test]
     fn handle_ftm_request_positive_distance_records_no_error_stats() {
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));

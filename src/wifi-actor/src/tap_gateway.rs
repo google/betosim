@@ -702,6 +702,7 @@ mod tests {
             Medium::new(Arc::clone(&key_store), wifi_stats, Arc::new(DebugArgs::default()));
         let mut out_queue = Vec::new();
 
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
@@ -763,6 +764,7 @@ mod tests {
             false,
         );
 
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
@@ -806,6 +808,7 @@ mod tests {
         sock.set_nonblocking(true).unwrap();
         let rx_file = std::fs::File::from(OwnedFd::from(sock));
 
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));

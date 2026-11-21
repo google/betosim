@@ -383,6 +383,7 @@ mod tests {
         use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));

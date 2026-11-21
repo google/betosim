@@ -169,6 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_start_ap_client_register_failed_records_error_stat() {
+        let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
         let table = Arc::new(ErrorStatsTable::new());
         let subscriber =
             tracing_subscriber::registry().with(ErrorStatsLayer::with_table(Arc::clone(&table)));
