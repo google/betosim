@@ -83,8 +83,13 @@ impl RestServer {
         })?;
         let no_pcap =
             || HttpError::new(StatusCode::NOT_FOUND, format!("Capture {id} has no PCAP yet"));
-        let read_failed = |e: std::io::Error, path: &std::path::Path| {
-            tracing::warn!("Failed to read capture file {}: {e}", path.display());
+        let read_failed = |error: std::io::Error, path: &std::path::Path| {
+            tracing::warn!(
+                code = crate::err::Code::CaptureFileRead as u32,
+                %error,
+                path = %path.display(),
+                "Failed to read capture file"
+            );
             let message = format!("Failed to read capture {id}");
             HttpError::new(StatusCode::INTERNAL_SERVER_ERROR, message)
         };
@@ -118,5 +123,69 @@ impl NetsimRestClient {
     /// `GET /v1/captures/{id}`
     pub fn get_capture(&self, id: u32) -> RestRequest<'_, Pcap> {
         self.get(format!("{}/{id}", crate::path::CAPTURES))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use actor_framework::{ResourceClient, ResourceRequest};
+    use capture_actor::CaptureClient;
+    use device_actor::DeviceClient;
+    use netsim_model::ChipKind;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::{
+        err::{Code, ErrorStats, run_with_error_stats},
+        server::test_utils::test_server,
+    };
+
+    fn run_get_capture_err_with_filepath(filepath: PathBuf) -> (HttpError, ErrorStats) {
+        let (device_tx, _) = mpsc::channel(1);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+        let (capture_tx, mut capture_rx) = mpsc::channel(1);
+        let capture_client = CaptureClient::new(ResourceClient::new(capture_tx));
+        let server = test_server(device_client, capture_client);
+
+        run_with_error_stats(async {
+            tokio::spawn(async move {
+                if let Some(ResourceRequest::Get { id, respond_to }) = capture_rx.recv().await {
+                    let _ = respond_to.send(Ok(Some(CaptureInfo {
+                        chip_id: id,
+                        chip_kind: ChipKind::BLUETOOTH,
+                        device_name: "test-dev".to_string(),
+                        enabled: true,
+                        records_written: 0,
+                        bytes_written: 0,
+                        seconds: 0,
+                        nanos: 0,
+                        filepath: Some(filepath),
+                    })));
+                }
+            });
+            server.get_capture(&[("id", "1")]).await.unwrap_err()
+        })
+    }
+
+    #[test]
+    fn test_get_capture_read_error_records_error_stats() {
+        // Embedded NUL bytes make tokio::fs::File::open fail with
+        // ErrorKind::InvalidInput rather than NotFound, routing into read_failed.
+        let invalid_path = PathBuf::from("invalid\0capture.pcap");
+        let (err, snapshot) = run_get_capture_err_with_filepath(invalid_path);
+
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(snapshot, vec![(Code::CaptureFileRead as u32, 1)]);
+    }
+
+    #[test]
+    fn test_get_capture_missing_file_returns_not_found_without_error_stats() {
+        let missing_path = PathBuf::from("/nonexistent/netsim-missing-capture.pcap");
+        let (err, snapshot) = run_get_capture_err_with_filepath(missing_path);
+
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert!(snapshot.is_empty());
     }
 }

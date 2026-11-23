@@ -32,6 +32,7 @@ mod capture_api;
 mod capture_stream;
 mod client;
 pub mod device_api;
+mod err;
 mod keepalive;
 pub mod link_api;
 pub mod openapi;

@@ -54,7 +54,11 @@ pub async fn run(
 ) {
     match listener.local_addr() {
         Ok(addr) => info!("REST API server is listening on: {addr}"),
-        Err(error) => warn!(%error, "REST API server failed to read local address"),
+        Err(error) => warn!(
+            code = crate::err::Code::ListenerLocalAddr as u32,
+            %error,
+            "REST API server failed to read local address"
+        ),
     }
 
     let server =
@@ -93,7 +97,11 @@ pub async fn run(
                         debug!("Transient error accepting connection on HTTP listener: {e}");
                     }
                     Err(error) => {
-                        warn!(%error, "Error accepting connection on HTTP listener");
+                        warn!(
+                            code = crate::err::Code::ListenerAccept as u32,
+                            %error,
+                            "Error accepting connection on HTTP listener"
+                        );
                         // Back off so a persistent accept error, such as running out
                         // of file descriptors, does not spin the task at full speed.
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -656,6 +664,28 @@ impl RestServer {
             }
         };
         resp.0.map(Either::Left)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use link_api::MockLinkClient;
+
+    use super::*;
+
+    pub(crate) fn test_server(
+        device_client: DeviceClient,
+        capture_client: CaptureClient,
+    ) -> RestServer {
+        let (ap_tx, _) = tokio::sync::mpsc::channel(1);
+        let ap_client = ApClient::new(actor_framework::ResourceClient::new(ap_tx));
+        RestServer::new(
+            device_client,
+            Arc::new(MockLinkClient::new()),
+            ap_client,
+            capture_client,
+            "0.3.92".to_string(),
+        )
     }
 }
 

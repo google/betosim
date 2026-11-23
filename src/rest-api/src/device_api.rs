@@ -49,7 +49,11 @@ impl From<Vec<Device>> for JsonResponse {
 impl RestServer {
     pub(crate) async fn list_devices(&self) -> Result<Vec<Device>, HttpError> {
         if let Err(error) = self.device_client.get_radio_stats().await {
-            tracing::warn!(%error, "Failed to get radio stats");
+            tracing::warn!(
+                code = crate::err::Code::GetRadioStats as u32,
+                %error,
+                "Failed to get radio stats"
+            );
         }
         Ok(self.device_client.list().await?)
     }
@@ -133,5 +137,67 @@ impl NetsimRestClient {
     /// `POST /v1/devices:reset`
     pub fn reset(&self) -> RestRequest<'_, ()> {
         self.post(format!("{}:reset", crate::path::DEVICES))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use actor_framework::{ResourceClient, ResourceRequest};
+    use device_actor::{DeviceAction, DeviceActionResult, DeviceClient};
+    use netsim_model::{Device, NetsimRadioStats};
+    use tokio::sync::mpsc;
+
+    use crate::{
+        err::{Code, ErrorStats, run_with_error_stats},
+        server::{HttpError, test_utils::test_server},
+    };
+
+    fn run_list_devices_with_stats(
+        stats: Option<Vec<NetsimRadioStats>>,
+    ) -> (Result<Vec<Device>, HttpError>, ErrorStats) {
+        run_with_error_stats(async {
+            let (device_tx, mut device_rx) = mpsc::channel(2);
+            let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+            let server = test_server(device_client, capture_actor::new().1);
+
+            tokio::spawn(async move {
+                let Some(ResourceRequest::Action {
+                    action: DeviceAction::GetRadioStats,
+                    respond_to,
+                    ..
+                }) = device_rx.recv().await
+                else {
+                    panic!("expected GetRadioStats");
+                };
+                if let Some(stats) = stats {
+                    let _ = respond_to.send(Ok(DeviceActionResult::Statistics(stats)));
+                } else {
+                    drop(respond_to);
+                }
+
+                let Some(ResourceRequest::List { respond_to }) = device_rx.recv().await else {
+                    panic!("expected List");
+                };
+                let _ = respond_to.send(Ok(Vec::new()));
+            });
+
+            server.list_devices().await
+        })
+    }
+
+    #[test]
+    fn test_list_devices_radio_stats_error_records_error_stats() {
+        let (result, snapshot) = run_list_devices_with_stats(None);
+
+        assert!(result.unwrap().is_empty());
+        assert_eq!(snapshot, vec![(Code::GetRadioStats as u32, 1)]);
+    }
+
+    #[test]
+    fn test_list_devices_success_records_no_error_stats() {
+        let (result, snapshot) = run_list_devices_with_stats(Some(Vec::new()));
+
+        assert!(result.unwrap().is_empty());
+        assert!(snapshot.is_empty());
     }
 }
