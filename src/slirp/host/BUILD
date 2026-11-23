@@ -21,6 +21,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "slirp_host",
     edition = "2024",
+    pedantic_clippy = True,
     # The integration tests bind loopback TCP listeners and send real ICMP
     # echo requests to 127.0.0.1, which the sandbox's network namespace blocks.
     tags = ["no-sandbox"],

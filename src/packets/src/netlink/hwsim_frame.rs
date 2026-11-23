@@ -66,7 +66,7 @@ impl HwsimFrame {
         let frame =
             attrs.frame.clone().ok_or(HwsimError::Frame("Missing frame attribute".to_string()))?;
         let ieee80211 = Ieee80211::decode_full(&frame)
-            .map_err(|e| HwsimError::Frame(format!("Failed to decode Ieee80211: {}", e)))?;
+            .map_err(|e| HwsimError::Frame(format!("Failed to decode Ieee80211: {e}")))?;
 
         Ok(HwsimFrame {
             transmitter: attrs.transmitter,

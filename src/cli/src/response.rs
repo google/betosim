@@ -29,20 +29,20 @@ pub(crate) fn print_beacon_patch_ble_verbose(args: &args::BeaconPatchBle) {
     if let Some(advertise_mode) = &args.settings.advertise_mode {
         match advertise_mode {
             args::Interval::Mode(mode) => {
-                println!("Set advertise mode to {mode:#?}")
+                println!("Set advertise mode to {mode:#?}");
             }
             args::Interval::Milliseconds(ms) => {
-                println!("Set advertise interval to {ms} ms")
+                println!("Set advertise interval to {ms} ms");
             }
         }
     }
     if let Some(tx_power_level) = &args.settings.tx_power_level {
         match tx_power_level {
             args::TxPower::Level(level) => {
-                println!("Set transmit power level to {level:#?}")
+                println!("Set transmit power level to {level:#?}");
             }
             args::TxPower::Dbm(dbm) => {
-                println!("Set transmit power level to {dbm} dBm")
+                println!("Set transmit power level to {dbm} dBm");
             }
         }
     }
@@ -53,13 +53,13 @@ pub(crate) fn print_beacon_patch_ble_verbose(args: &args::BeaconPatchBle) {
         println!("Set timeout to {timeout} ms");
     }
     if args.advertise_data.include_device_name {
-        println!("Added the device's name to the advertise packet")
+        println!("Added the device's name to the advertise packet");
     }
     if args.advertise_data.include_tx_power_level {
-        println!("Added the beacon's transmit power level to the advertise packet")
+        println!("Added the beacon's transmit power level to the advertise packet");
     }
     if args.advertise_data.manufacturer_data.is_some() {
-        println!("Added manufacturer data to the advertise packet")
+        println!("Added manufacturer data to the advertise packet");
     }
 }
 

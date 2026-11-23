@@ -40,10 +40,10 @@ impl fmt::Display for JsonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JsonError::SerdeJson(e) => {
-                write!(f, "JSON serialization/deserialization error: {}", e)
+                write!(f, "JSON serialization/deserialization error: {e}")
             }
-            JsonError::HexParse(e) => write!(f, "Hex parsing error: {}", e),
-            JsonError::Conversion(s) => write!(f, "Conversion error: {}", s),
+            JsonError::HexParse(e) => write!(f, "Hex parsing error: {e}"),
+            JsonError::Conversion(s) => write!(f, "Conversion error: {s}"),
         }
     }
 }
@@ -167,7 +167,7 @@ pub fn packet_to_json(packet: &[u8]) -> serde_json::Value {
         let mut genl_map = serde_json::Map::new();
         genl_map.insert(
             "genl.cmd".to_string(),
-            serde_json::Value::String(format!("0x{:02x}", nlmsg_type)),
+            serde_json::Value::String(format!("0x{nlmsg_type:02x}")),
         ); // Placeholder
         // Tshark output for Netlink is complex and depends on protocol (Generic
         // Netlink, Route, etc.) For our test, we might just want to dump the
@@ -179,7 +179,7 @@ pub fn packet_to_json(packet: &[u8]) -> serde_json::Value {
         nl_map.insert("netlink.type".to_string(), serde_json::Value::Number(nlmsg_type.into()));
         nl_map.insert(
             "netlink.flags".to_string(),
-            serde_json::Value::String(format!("0x{:04x}", nlmsg_flags)),
+            serde_json::Value::String(format!("0x{nlmsg_flags:04x}")),
         );
         nl_map.insert("netlink.seq".to_string(), serde_json::Value::Number(nlmsg_seq.into()));
         nl_map.insert("netlink.pid".to_string(), serde_json::Value::Number(nlmsg_pid.into()));

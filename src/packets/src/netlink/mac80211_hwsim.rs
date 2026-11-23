@@ -108,7 +108,7 @@ impl HwsimMsg {
             return Err("Packet too short for HwsimMsg".into());
         }
         let (nl_hdr, rest) = Ref::<&[u8], NlMsgHdr>::from_prefix(bytes)
-            .map_err(|err| format!("Failed to read NlMsgHdr: {}", err))?;
+            .map_err(|err| format!("Failed to read NlMsgHdr: {err}"))?;
         let hwsim_hdr = HwsimMsgHdr::parse(rest).ok_or("Failed to read HwsimMsgHdr")?;
         let attributes = rest.get(4..).ok_or("Failed to read attributes")?.to_vec();
         Ok(Self { nl_hdr: *nl_hdr, hwsim_hdr, attributes })

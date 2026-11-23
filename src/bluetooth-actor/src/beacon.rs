@@ -142,26 +142,23 @@ fn configure(
         send_hci_command(rootcanal, chip_id, LeClearAdvertisingSets)?;
     }
 
-    let interval_ms = params
-        .ble_beacon
-        .settings
-        .as_ref()
-        .and_then(|s| s.interval.as_ref())
-        .map(|interval| match interval {
+    let interval_ms = params.ble_beacon.settings.as_ref().and_then(|s| s.interval.as_ref()).map_or(
+        DEFAULT_BEACON_INTERVAL_MS,
+        |interval| match interval {
             Interval::Milliseconds(ms) => *ms,
             Interval::AdvertiseMode(mode) => match *mode {
                 netsim_model::AdvertiseMode::LowPower => MODE_LOW_POWER_MS,
                 netsim_model::AdvertiseMode::Balanced => MODE_BALANCED_MS,
                 netsim_model::AdvertiseMode::LowLatency => MODE_LOW_LATENCY_MS,
             },
-        })
-        .unwrap_or(DEFAULT_BEACON_INTERVAL_MS);
+        },
+    );
     let slots = (interval_ms.saturating_mul(BLE_SLOT_NUMERATOR) / BLE_SLOT_DENOMINATOR)
         .clamp(ADV_INTERVAL_MIN_SLOTS, ADV_INTERVAL_MAX_SLOTS);
     let [b0, b1, b2, _] = (slots as u32).to_le_bytes();
     let interval_bytes = [b0, b1, b2];
 
-    let scannable = params.ble_beacon.settings.as_ref().map(|s| s.scannable).unwrap_or_default();
+    let scannable = params.ble_beacon.settings.as_ref().is_some_and(|s| s.scannable);
     let advertising_event_properties = if scannable {
         AdvertisingEventProperties::LEGACY_ADV_SCAN_IND
     } else {

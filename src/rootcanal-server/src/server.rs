@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{io, time::Duration};
+use std::{fmt::Write as _, io, time::Duration};
 
 use device_actor::DeviceClient;
 use netsim_model::{
@@ -34,8 +34,7 @@ const PHY_CLASSIC_ID: &str = "1";
 /// Accepts incoming connections from host-side test runners and spawns
 /// a new Tokio task to handle each client session concurrently.
 pub async fn run(listener: TcpListener, device_client: DeviceClient) {
-    let addr =
-        listener.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
+    let addr = listener.local_addr().map_or_else(|_| "unknown".to_string(), |a| a.to_string());
     info!("Rootcanal test channel server started on {addr}");
     loop {
         match listener.accept().await {
@@ -263,7 +262,7 @@ async fn handle_client(mut stream: TcpStream, device_client: DeviceClient) -> io
             Command::DelDevice { device_id } => {
                 handle_del(&device_client, device_id).await.map(Some)
             }
-            Command::Reset => handle_reset(&device_client).await.map(|_| None),
+            Command::Reset => handle_reset(&device_client).await.map(|()| None),
             Command::SetDeviceConfiguration { device_id, preset } => {
                 handle_set_device_configuration(&device_client, device_id, &preset).await.map(Some)
             }
@@ -315,10 +314,10 @@ async fn handle_list(device_client: &DeviceClient) -> Result<String, String> {
     let low_energy_section = phy_section(Chip::is_le_enabled);
     let br_edr_section = phy_section(Chip::is_classic_enabled);
 
-    let devices_section: String = devices
-        .iter()
-        .map(|device| format!("  {}:hci_device_{}\n", device.id, device.id))
-        .collect();
+    let devices_section = devices.iter().fold(String::new(), |mut s, device| {
+        let _ = writeln!(s, "  {}:hci_device_{}", device.id, device.id);
+        s
+    });
 
     Ok(format!(
         "Devices:\n{devices_section}Phys:\n{}\n{}\n",

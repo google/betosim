@@ -47,7 +47,9 @@ fn main() -> ExitCode {
     openapi::expand(&mut doc);
     let errors = openapi::validate(&doc);
     if !errors.is_empty() {
-        errors.iter().for_each(|err| eprintln!("{path}: {err}"));
+        for err in &errors {
+            eprintln!("{path}: {err}");
+        }
         return ExitCode::FAILURE;
     }
     match lang.as_str() {

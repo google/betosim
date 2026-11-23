@@ -24,6 +24,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "rootcanal",
     edition = "2024",
+    pedantic_clippy = True,
     test_deps = [
         "@pdl-runtime",
         "@tokio",

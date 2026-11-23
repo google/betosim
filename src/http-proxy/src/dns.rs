@@ -79,7 +79,7 @@ impl CursorExt for Cursor<&[u8]> {
         self.position()
     }
     fn set_position(&mut self, pos: u64) {
-        self.set_position(pos)
+        self.set_position(pos);
     }
 }
 
@@ -584,7 +584,7 @@ impl Name {
                     }
                     name.push_str(&label);
                 }
-            };
+            }
         }
     }
 }

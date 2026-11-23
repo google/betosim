@@ -41,6 +41,7 @@ netsim_rust_library(
     crate_name = "bluetooth_actor",
     edition = "2024",
     enable_integration_test = False,
+    pedantic_clippy = True,
     proc_macro_deps = [
         "@async-trait",
     ],

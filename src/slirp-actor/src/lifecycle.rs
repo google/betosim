@@ -75,22 +75,7 @@ impl ActorLifecycle for SlirpActor {
         let dest_mac = frame.dst_addr;
 
         // DOWNLINK FLOW (libslirp -> SlirpActor -> Clients)
-        if !dest_mac.is_multicast() {
-            if let Some(&client_id) = self.mac_table.get(&dest_mac) {
-                if let Some(client) = self.clients.get(&client_id) {
-                    client.send(msg);
-                    return;
-                }
-                tracing::warn!("SlirpActor: Stale MAC mapping {dest_mac} -> {client_id}, flooding");
-            } else {
-                tracing::warn!("SlirpActor: Unknown unicast MAC {dest_mac}, flooding");
-            }
-            for client in self.clients.values() {
-                if !client.is_isolated() {
-                    client.send(msg.clone());
-                }
-            }
-        } else {
+        if dest_mac.is_multicast() {
             // Flood broadcast/multicast packets according to client isolation policy
             let is_cellular_resolution = if frame.ethertype.get() == netsim_packets::ether_type::ARP
                 && let Some(arp) = netsim_packets::ArpPacket::parse(remainder)
@@ -113,6 +98,21 @@ impl ActorLifecycle for SlirpActor {
             for client in self.clients.values() {
                 let should_deliver = client.is_isolated() == is_cellular_resolution;
                 if should_deliver {
+                    client.send(msg.clone());
+                }
+            }
+        } else {
+            if let Some(&client_id) = self.mac_table.get(&dest_mac) {
+                if let Some(client) = self.clients.get(&client_id) {
+                    client.send(msg);
+                    return;
+                }
+                tracing::warn!("SlirpActor: Stale MAC mapping {dest_mac} -> {client_id}, flooding");
+            } else {
+                tracing::warn!("SlirpActor: Unknown unicast MAC {dest_mac}, flooding");
+            }
+            for client in self.clients.values() {
+                if !client.is_isolated() {
                     client.send(msg.clone());
                 }
             }

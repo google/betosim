@@ -197,12 +197,11 @@ impl ControllerImpl {
     /// Receives an HCI packet from the host.
     pub(crate) fn receive_hci(&self, data: Bytes) {
         self.hci_commands_in.fetch_add(1, Ordering::Relaxed);
-        let (&first, payload) = match data.as_ref() {
-            [first, rest @ ..] => (first, rest),
-            [] => return,
+        let [first, payload @ ..] = data.as_ref() else {
+            return;
         };
         let controller = self.controller.lock();
-        let idc = first as c_int;
+        let idc = c_int::from(*first);
         // SAFETY: The `controller.0` pointer is guaranteed to be valid
         // as long as `self` exists. `payload` is a valid slice, and we provide its
         // length to ensure the C++ side does not read out of bounds.
@@ -212,26 +211,23 @@ impl ControllerImpl {
                 idc,
                 payload.as_ptr(),
                 payload.len() as ffi::size_t,
-            )
-        };
+            );
+        }
     }
 
     /// Receives a link layer packet from a peer.
     pub(crate) fn receive_ll(&self, data: &[u8], phy: Phy, rssi: i32) {
         self.ll_packets_in.fetch_add(1, Ordering::Relaxed);
         let is_p2p = netsim_packets::link_layer::fast_inspect_p2p_payload(data);
-        match phy {
-            Phy::LowEnergy => {
-                self.ll_packets_in_ble.fetch_add(1, Ordering::Relaxed);
-                if is_p2p {
-                    self.ble_p2p_rx_count.fetch_add(1, Ordering::Relaxed);
-                }
+        if phy == Phy::LowEnergy {
+            self.ll_packets_in_ble.fetch_add(1, Ordering::Relaxed);
+            if is_p2p {
+                self.ble_p2p_rx_count.fetch_add(1, Ordering::Relaxed);
             }
-            _ => {
-                self.ll_packets_in_classic.fetch_add(1, Ordering::Relaxed);
-                if is_p2p {
-                    self.classic_p2p_rx_count.fetch_add(1, Ordering::Relaxed);
-                }
+        } else {
+            self.ll_packets_in_classic.fetch_add(1, Ordering::Relaxed);
+            if is_p2p {
+                self.classic_p2p_rx_count.fetch_add(1, Ordering::Relaxed);
             }
         }
         let controller = self.controller.lock();
@@ -245,8 +241,8 @@ impl ControllerImpl {
                 data.len() as ffi::size_t,
                 phy as c_int,
                 rssi,
-            )
-        };
+            );
+        }
     }
 
     /// Reconfigures the controller with new properties.
@@ -445,18 +441,15 @@ extern "C" fn send_ll_trampoline(
         let data_slice = unsafe { std::slice::from_raw_parts(data, data_len as ffi::size_t) };
         controller.ll_packets_out.fetch_add(1, Ordering::Relaxed);
         let is_p2p = netsim_packets::link_layer::fast_inspect_p2p_payload(data_slice);
-        match phy {
-            Phy::LowEnergy => {
-                controller.ll_packets_out_ble.fetch_add(1, Ordering::Relaxed);
-                if is_p2p {
-                    controller.ble_p2p_tx_count.fetch_add(1, Ordering::Relaxed);
-                }
+        if phy == Phy::LowEnergy {
+            controller.ll_packets_out_ble.fetch_add(1, Ordering::Relaxed);
+            if is_p2p {
+                controller.ble_p2p_tx_count.fetch_add(1, Ordering::Relaxed);
             }
-            _ => {
-                controller.ll_packets_out_classic.fetch_add(1, Ordering::Relaxed);
-                if is_p2p {
-                    controller.classic_p2p_tx_count.fetch_add(1, Ordering::Relaxed);
-                }
+        } else {
+            controller.ll_packets_out_classic.fetch_add(1, Ordering::Relaxed);
+            if is_p2p {
+                controller.classic_p2p_tx_count.fetch_add(1, Ordering::Relaxed);
             }
         }
         // rootcanal request to send ll through bluetooth medium

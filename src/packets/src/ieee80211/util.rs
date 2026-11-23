@@ -81,7 +81,7 @@ pub fn frame_type_to_string(frame_type_val: u8) -> String {
         frame_type::MANAGEMENT => "Mgmt".to_string(),
         frame_type::CONTROL => "Ctrl".to_string(),
         frame_type::DATA => "Data".to_string(),
-        _ => format!("Type:{}", frame_type_val),
+        _ => format!("Type:{frame_type_val}"),
     }
 }
 
@@ -101,7 +101,7 @@ pub fn management_subtype_to_string(subtype_val: u8) -> String {
         management_subtype::AUTHENTICATION => "Auth".to_string(),
         management_subtype::DEAUTHENTICATION => "Deauth".to_string(),
         management_subtype::ACTION => "Action".to_string(),
-        _ => format!("MgmtSubtype:{}", subtype_val),
+        _ => format!("MgmtSubtype:{subtype_val}"),
     }
 }
 
@@ -119,7 +119,7 @@ pub fn data_subtype_to_string(subtype_val: u8) -> String {
         data_subtype::CF_POLL => "CfPoll".to_string(),
         data_subtype::CF_ACK_POLL => "CfAckPoll".to_string(),
         data_subtype::QOS_DATA => "QoSData".to_string(),
-        _ => format!("DataSubtype:{}", subtype_val),
+        _ => format!("DataSubtype:{subtype_val}"),
     }
 }
 

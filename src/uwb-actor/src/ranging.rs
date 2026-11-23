@@ -32,10 +32,7 @@ fn checked_div(num: f32, den: f32) -> Option<f32> {
 /// helper function for calculating azimuth angle from a given 3D delta vector.
 fn azimuth(delta: Vec3) -> f32 {
     checked_div(delta.x, delta.z).map_or(
-        match delta.x == 0. {
-            true => 0.,
-            false => delta.x.signum() * std::f32::consts::FRAC_PI_2,
-        },
+        if delta.x == 0. { 0. } else { delta.x.signum() * std::f32::consts::FRAC_PI_2 },
         f32::atan,
     ) + if delta.z >= 0. { 0. } else { delta.x.signum() * std::f32::consts::PI }
 }
@@ -44,10 +41,7 @@ fn azimuth(delta: Vec3) -> f32 {
 /// vector.
 fn elevation(delta: Vec3) -> f32 {
     checked_div(delta.y, f32::sqrt(delta.x.powi(2) + delta.z.powi(2))).map_or(
-        match delta.y == 0. {
-            true => 0.,
-            false => delta.y.signum() * std::f32::consts::FRAC_PI_2,
-        },
+        if delta.y == 0. { 0. } else { delta.y.signum() * std::f32::consts::FRAC_PI_2 },
         f32::atan,
     )
 }
@@ -84,7 +78,7 @@ impl Pose {
     /// The ranging model is adapted from https://github.com/google/pica.
     pub(crate) fn compute_ranging(&self, target: &Pose) -> Result<(f32, i16, i8), UwbError> {
         let delta = target.position - self.position;
-        let distance = delta.length().clamp(0.0, u16::MAX as f32);
+        let distance = delta.length().clamp(0.0, f32::from(u16::MAX));
         let direction = self.orientation.mul_vec3(delta);
         let azimuth = azimuth(direction).to_degrees().round();
         let elevation = elevation(direction).to_degrees().round();

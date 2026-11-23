@@ -237,7 +237,7 @@ impl LibSlirp {
                     proxy_manager,
                     tx_proxy_bytes,
                     signal_tx,
-                )
+                );
             }) {
                 Ok(handle) => Some(handle),
                 Err(error) => {
@@ -483,8 +483,7 @@ fn slirp_thread(
             }
             Ok(SlirpCmd::Input(bytes)) => slirp.input(&bytes),
 
-            // A timer has been modified, new expired_time value
-            Ok(SlirpCmd::TimerModified) => continue,
+            Ok(SlirpCmd::TimerModified) | Err(mpsc::RecvTimeoutError::Timeout) => continue,
 
             // A notification to wake up the poll thread
             Ok(SlirpCmd::Notify) => {
@@ -494,26 +493,22 @@ fn slirp_thread(
                 continue;
             }
 
-            // Exit the while loop and shutdown
-            Ok(SlirpCmd::Shutdown) => break,
+            Ok(SlirpCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
 
-            Ok(SlirpCmd::ProxyConnect(func, connect_id, fd, af)) => match func {
-                // Safety: we ensure that func (`SlirpProxyConnectFunc`)
-                // and `connect_opaque` are valid because they originated
-                // from the libslirp call to `try_connect_cb.`
-                //
-                // Parameter `fd` will be >= 0 and the descriptor for the
-                // active socket to use, `af` will be either AF_INET or
-                // AF_INET6. On failure `fd` will be negative.
-                Some(func) => unsafe { func(connect_id as *mut c_void, fd as c_int, af as c_int) },
-                None => warn!("Proxy connect function not found"),
-            },
-
-            // Timeout... process any timers
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-
-            // Error
-            _ => break,
+            Ok(SlirpCmd::ProxyConnect(func, connect_id, fd, af)) => {
+                if let Some(func) = func {
+                    // Safety: we ensure that func (`SlirpProxyConnectFunc`)
+                    // and `connect_opaque` are valid because they originated
+                    // from the libslirp call to `try_connect_cb.`
+                    //
+                    // Parameter `fd` will be >= 0 and the descriptor for the
+                    // active socket to use, `af` will be either AF_INET or
+                    // AF_INET6. On failure `fd` will be negative.
+                    unsafe { func(connect_id as *mut c_void, fd as c_int, af as c_int) };
+                } else {
+                    warn!("Proxy connect function not found");
+                }
+            }
         }
 
         // Explicitly store expired timers to release lock
@@ -753,7 +748,7 @@ fn slirp_poll_thread(
         // will explicitly sleep for the timeout regardless of OS.
         if os_poll_fds.is_empty() {
             // If there are no FDs to poll, sleep for the specified timeout.
-            thread::sleep(Duration::from_millis(timeout as u64));
+            thread::sleep(Duration::from_millis(u64::from(timeout)));
         } else {
             // Safety: we ensure that:
             //
@@ -799,7 +794,8 @@ fn slirp_poll_thread(
         }
 
         // 'select_error' should be 1 if poll() returned an error, else 0.
-        if let Err(error) = tx.send(SlirpCmd::PollResult(slirp_poll_fds, (poll_result < 0) as i32))
+        if let Err(error) =
+            tx.send(SlirpCmd::PollResult(slirp_poll_fds, i32::from(poll_result < 0)))
         {
             warn!(%error, "Failed to send slirp PollResult cmd");
         }
@@ -1090,7 +1086,7 @@ extern "C" fn notify_cb(opaque: *mut c_void) {
     // Safety:
     //
     // * `opaque` is a valid `CallbackContext` pointer.
-    unsafe { callback_context_from_raw(opaque) }.notify()
+    unsafe { callback_context_from_raw(opaque) }.notify();
 }
 
 /// Callback function invoked by the slirp stack to initiate a proxy connection.
@@ -1154,7 +1150,7 @@ impl CallbackContext {
             //  * Obtaining the `ss_family` field from a valid `sockaddr_storage` struct is
             //    safe
             let storage = unsafe { *addr };
-            let af = storage.ss_family as i32;
+            let af = i32::from(storage.ss_family);
             let Ok(socket_addr) = SocketAddr::try_from(storage) else {
                 warn!("Unsupported address family: {}", storage.ss_family);
                 return false;

@@ -81,10 +81,10 @@ impl ProxyConfig {
     /// Returns an [Error] if the input string is not in a
     /// valid format or if the hostname/port resolution fails.
     pub(crate) fn from_string(config_string: &str) -> Result<ProxyConfig> {
-        let normalized = if !config_string.contains("://") {
-            format!("http://{config_string}")
-        } else {
+        let normalized = if config_string.contains("://") {
             config_string.to_string()
+        } else {
+            format!("http://{config_string}")
         };
 
         let parsed = Url::parse(&normalized).map_err(|err| match err {
@@ -290,9 +290,9 @@ mod tests {
                 input
             );
             let result = result.ok().unwrap();
-            assert_eq!(result.addr, expected.addr, "For input: {}", input);
-            assert_eq!(result.username, expected.username, "For input: {}", input);
-            assert_eq!(result.password, expected.password, "For input: {}", input);
+            assert_eq!(result.addr, expected.addr, "For input: {input}");
+            assert_eq!(result.username, expected.username, "For input: {input}");
+            assert_eq!(result.password, expected.password, "For input: {input}");
         }
     }
 
@@ -322,26 +322,20 @@ mod tests {
                 Error::InvalidHost(_) => {
                     assert!(
                         matches!(actual_error, Error::InvalidHost(_)),
-                        "Expected InvalidHost for input: {}, got {:?}",
-                        input,
-                        actual_error
+                        "Expected InvalidHost for input: {input}, got {actual_error:?}"
                     );
                 }
                 Error::InvalidPortNumber(_) => {
                     assert!(
                         matches!(actual_error, Error::InvalidPortNumber(_)),
-                        "Expected InvalidPortNumber for input: {}, got {:?}",
-                        input,
-                        actual_error
+                        "Expected InvalidPortNumber for input: {input}, got {actual_error:?}"
                     );
                 }
                 _ => {
                     assert_eq!(
                         actual_error.to_string(),
                         expected_error.to_string(),
-                        "Expected {} for input: {}",
-                        expected_error,
-                        input
+                        "Expected {expected_error} for input: {input}"
                     );
                 }
             }

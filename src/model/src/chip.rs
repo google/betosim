@@ -434,20 +434,20 @@ impl ChipUpdate {
             chip.id = (*id).into();
         }
         if let Some(name) = name {
-            chip.name = name.clone();
+            chip.name.clone_from(name);
         }
         if let Some(manufacturer) = manufacturer {
-            chip.manufacturer = manufacturer.clone();
+            chip.manufacturer.clone_from(manufacturer);
         }
         if let Some(product_name) = product_name {
-            chip.product_name = product_name.clone();
+            chip.product_name.clone_from(product_name);
         }
         pose.apply(&mut chip.pose);
         if let Some(enabled) = enabled {
             chip.enabled = *enabled;
         }
         if let Some(links) = links {
-            chip.links = links.clone();
+            chip.links.clone_from(links);
         }
         if let (Some(update_variant), Some(chip_variant)) = (variant, &mut chip.variant) {
             update_variant.apply(chip_variant);

@@ -57,7 +57,7 @@ impl RootcanalCallbacks for RootcanalCallbacksImpl {
         if let (Some(src), Some(dst)) = (src_chip, dst_chip) {
             let is_enabled = |chip: &Chip| match phy {
                 Phy::LowEnergy => chip.is_le_enabled(),
-                _ => chip.is_classic_enabled(),
+                Phy::BrEdr => chip.is_classic_enabled(),
             };
 
             if !is_enabled(src) || !is_enabled(dst) {
@@ -76,12 +76,12 @@ impl RootcanalCallbacks for RootcanalCallbacksImpl {
             let rssi = src
                 .links
                 .iter()
-                .find_map(|(id, rssi)| (*id == dst_id).then_some(*rssi as i32))
+                .find_map(|(id, rssi)| (*id == dst_id).then_some(i32::from(*rssi)))
                 .unwrap_or_else(|| {
                     if is_beacon {
-                        ranging::beacon_distance_to_rssi(tx_power as i8, dist) as i32
+                        i32::from(ranging::beacon_distance_to_rssi(tx_power as i8, dist))
                     } else {
-                        ranging::distance_to_rssi(tx_power as i8, dist) as i32
+                        i32::from(ranging::distance_to_rssi(tx_power as i8, dist))
                     }
                 });
             Some(rssi)

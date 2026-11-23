@@ -247,7 +247,7 @@ impl RestRequest<'_, crate::Pcap> {
     }
 }
 
-impl<'a, T: DeserializeOwned> RestRequest<'a, T> {
+impl<T: DeserializeOwned> RestRequest<'_, T> {
     /// Sends the request asynchronously.
     pub async fn send(self) -> Result<T, RestError> {
         let body = self.send_bytes().await?;

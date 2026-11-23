@@ -516,9 +516,8 @@ fn test_tcp_connection_closed_established_sends_rst() {
 
     // 4. Verify a TCP RST packet is sent to the guest
     assert_eq!(replies.len(), 1);
-    let reply_packet = match replies.first() {
-        Some(SlirpResponse::Packet(p)) => p,
-        _ => panic!("Expected a packet response, got {replies:?}"),
+    let Some(SlirpResponse::Packet(reply_packet)) = replies.first() else {
+        panic!("Expected a packet response, got {replies:?}");
     };
 
     let (eth_frame, ip_payload) = EthernetFrame::parse(reply_packet).unwrap();

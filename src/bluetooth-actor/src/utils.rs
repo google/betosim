@@ -151,7 +151,7 @@ mod tests {
             LeClearAdvertisingSets,
             &trailing_255,
         );
-        assert!(result_255.is_ok(), "255 bytes payload should succeed, got: {:?}", result_255);
+        assert!(result_255.is_ok(), "255 bytes payload should succeed, got: {result_255:?}");
 
         let trailing_256 = [0u8; 256];
         let result_256 = send_hci_command_with_payload(
@@ -162,8 +162,7 @@ mod tests {
         );
         assert!(
             matches!(result_256, Err(ChipError::InvalidArguments(_))),
-            "256 bytes payload should return InvalidArguments, got: {:?}",
-            result_256
+            "256 bytes payload should return InvalidArguments, got: {result_256:?}"
         );
     }
 }

@@ -39,6 +39,7 @@ netsim_rust_library(
     crate_name = "capture_actor",
     crate_root = "src/lib.rs",
     edition = "2024",
+    pedantic_clippy = True,
     proc_macro_deps = [
         "@async-trait",
     ],

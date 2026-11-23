@@ -86,7 +86,7 @@ pub(crate) struct World {
     target_addr: Option<SocketAddr>,
     connector: Option<Connector>,
     manager: Option<Manager>,
-    _proxy_bytes_tx: Option<mpsc::Sender<Bytes>>,
+    proxy_bytes_tx: Option<mpsc::Sender<Bytes>>,
     dns_manager: DnsManager,
     client_stream: Option<TcpStream>,
     connect_error: Option<Error>,
@@ -104,6 +104,7 @@ impl Drop for World {
         for task in self.tasks.drain(..) {
             task.abort();
         }
+        drop(self.proxy_bytes_tx.take());
         if let Some(manager) = self.manager.take() {
             let _ = std::thread::spawn(move || drop(manager)).join();
         }
@@ -274,7 +275,7 @@ impl World {
         match Manager::new(config_str, rx) {
             Ok(manager) => {
                 self.manager = Some(manager);
-                self._proxy_bytes_tx = Some(tx);
+                self.proxy_bytes_tx = Some(tx);
                 self.manager_error = None;
             }
             Err(err) => {

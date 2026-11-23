@@ -38,7 +38,7 @@ const TEST_MSS: u16 = 1460;
 #[test]
 fn test_initial_congestion_window() {
     let cc = CongestionControl::new(TEST_MSS);
-    assert_eq!(cc.cwnd, INITIAL_CWND_PACKETS * TEST_MSS as u32);
+    assert_eq!(cc.cwnd, INITIAL_CWND_PACKETS * u32::from(TEST_MSS));
     assert_eq!(cc.ssthresh, INITIAL_SSTHRESH);
 }
 
@@ -49,10 +49,10 @@ fn test_slow_start_on_ack() {
 
     // In slow start, cwnd should increase by MSS for each ACK.
     cc.on_ack(TEST_MSS);
-    assert_eq!(cc.cwnd, initial_cwnd + TEST_MSS as u32);
+    assert_eq!(cc.cwnd, initial_cwnd + u32::from(TEST_MSS));
 
     cc.on_ack(TEST_MSS);
-    assert_eq!(cc.cwnd, initial_cwnd + 2 * TEST_MSS as u32);
+    assert_eq!(cc.cwnd, initial_cwnd + 2 * u32::from(TEST_MSS));
 }
 
 #[test]
@@ -64,20 +64,20 @@ fn test_congestion_avoidance_on_ack() {
 
     // In congestion avoidance, cwnd increases by roughly MSS^2 / cwnd
     cc.on_ack(TEST_MSS);
-    let expected_increase = (TEST_MSS as u32 * TEST_MSS as u32) / initial_cwnd;
+    let expected_increase = (u32::from(TEST_MSS) * u32::from(TEST_MSS)) / initial_cwnd;
     assert_eq!(cc.cwnd, initial_cwnd + expected_increase);
 }
 
 #[test]
 fn test_retransmission_updates_ssthresh_and_cwnd() {
     let mut cc = CongestionControl::new(TEST_MSS);
-    cc.cwnd = 20 * TEST_MSS as u32; // Inflate the window
+    cc.cwnd = 20 * u32::from(TEST_MSS); // Inflate the window
     let current_cwnd = cc.cwnd;
 
     cc.on_retransmission(TEST_MSS);
 
     assert_eq!(cc.ssthresh, current_cwnd / 2);
-    assert_eq!(cc.cwnd, TEST_MSS as u32);
+    assert_eq!(cc.cwnd, u32::from(TEST_MSS));
 }
 
 #[tokio::test]

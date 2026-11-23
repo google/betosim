@@ -134,7 +134,7 @@ impl FrontendClient {
 
     async fn handle_list_link(client: Arc<dyn LinkClient>) -> Result<ListLinkResponse, RpcStatus> {
         let links = client.list().await.map_err(|e| {
-            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to list links: {}", e))
+            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to list links: {e}"))
         })?;
         let mut response = ListLinkResponse::new();
         for link in links {
@@ -153,10 +153,7 @@ impl FrontendClient {
         // stale (older) timestamp rather than one newer than the snapshot.
         let last_modified = client.get_last_modified().await;
         let devices = client.list().await.map_err(|e| {
-            RpcStatus::with_message(
-                RpcStatusCode::INTERNAL,
-                format!("Failed to list devices: {}", e),
-            )
+            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to list devices: {e}"))
         })?;
         let mut proto_response = ListDeviceResponse::new();
         for device in devices {
@@ -280,7 +277,9 @@ impl FrontendClient {
                     .into_option()
                     .map(crate::frontend_converter::from_proto_orientation),
             },
-            chips: if !req.device.chips.is_empty() {
+            chips: if req.device.chips.is_empty() {
+                None
+            } else {
                 Some(
                     req.device
                         .chips
@@ -289,8 +288,6 @@ impl FrontendClient {
                         .map(crate::frontend_converter::from_proto_chip_update)
                         .collect(),
                 )
-            } else {
-                None
             },
         };
 
@@ -355,7 +352,7 @@ impl FrontendClient {
         client.delete_device(device_id).await.map_err(|e| {
             RpcStatus::with_message(
                 RpcStatusCode::INTERNAL,
-                format!("Failed to delete device: {}", e),
+                format!("Failed to delete device: {e}"),
             )
         })
     }
@@ -367,11 +364,11 @@ impl FrontendClient {
         client.reset(None).await.map_err(|e| {
             RpcStatus::with_message(
                 RpcStatusCode::INTERNAL,
-                format!("Failed to reset devices: {}", e),
+                format!("Failed to reset devices: {e}"),
             )
         })?;
         ap_client.reset().await.map_err(|e| {
-            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to reset APs: {}", e))
+            RpcStatus::with_message(RpcStatusCode::INTERNAL, format!("Failed to reset APs: {e}"))
         })?;
         Ok(())
     }
@@ -541,13 +538,13 @@ impl FrontendService for FrontendClient {
     fn delete_device(
         &mut self,
         ctx: RpcContext,
-        _req: netsim_proto::frontend::DeleteDeviceRequest,
+        req: netsim_proto::frontend::DeleteDeviceRequest,
         sink: UnarySink<Empty>,
     ) {
         self.frontend_stats.delete_device.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.device_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_delete_device(client, _req).await.map(|_| Empty::new());
+            let res = Self::handle_delete_device(client, req).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -560,9 +557,9 @@ impl FrontendService for FrontendClient {
     ) {
         self.frontend_stats.get_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut response = netsim_proto::frontend::VersionResponse::new();
-        response.version = self.version.clone();
+        response.version.clone_from(&self.version);
         let f = sink.success(response).map(|_| ());
-        ctx.spawn(f)
+        ctx.spawn(f);
     }
 
     fn list_device(&mut self, ctx: RpcContext, _req: Empty, sink: UnarySink<ListDeviceResponse>) {
@@ -582,7 +579,7 @@ impl FrontendService for FrontendClient {
     ) {
         self.frontend_stats.subscribe_device.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let f = sink.fail(RpcStatus::new(RpcStatusCode::UNIMPLEMENTED)).map(|_| ());
-        ctx.spawn(f)
+        ctx.spawn(f);
     }
 
     fn patch_device(
@@ -594,7 +591,7 @@ impl FrontendService for FrontendClient {
         self.frontend_stats.patch_device.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.device_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_patch_device(client, req).await.map(|_| Empty::new());
+            let res = Self::handle_patch_device(client, req).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -604,7 +601,7 @@ impl FrontendService for FrontendClient {
         let client = self.device_client.clone();
         let ap_client = self.ap_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_reset(client, ap_client).await.map(|_| Empty::new());
+            let res = Self::handle_reset(client, ap_client).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -633,7 +630,7 @@ impl FrontendService for FrontendClient {
         self.frontend_stats.delete_chip.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.device_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_delete_chip(client, req).await.map(|_| Empty::new());
+            let res = Self::handle_delete_chip(client, req).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -667,7 +664,7 @@ impl FrontendService for FrontendClient {
     ) {
         let client = self.link_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_patch_link(client, req).await.map(|_| Empty::new());
+            let res = Self::handle_patch_link(client, req).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -680,7 +677,7 @@ impl FrontendService for FrontendClient {
     ) {
         let client = self.link_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_delete_link(client, req).await.map(|_| Empty::new());
+            let res = Self::handle_delete_link(client, req).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }
@@ -698,7 +695,7 @@ impl FrontendService for FrontendClient {
         self.frontend_stats.patch_capture.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let client = self.capture_client.clone();
         ctx.spawn(async move {
-            let res = Self::handle_patch_capture(client, req).await.map(|_| Empty::new());
+            let res = Self::handle_patch_capture(client, req).await.map(|()| Empty::new());
             reply(sink, res).await;
         });
     }

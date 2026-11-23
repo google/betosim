@@ -44,7 +44,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn crc16(data: &[u8], initial: u16, invert: bool) -> (u8, u8) {
     let mut w_crc: u16 = initial;
     for &byte in data {
-        let mut temp: u16 = (byte as u16) ^ (w_crc & 0x00FF);
+        let mut temp: u16 = u16::from(byte) ^ (w_crc & 0x00FF);
         temp = (temp ^ (temp << 4)) & 0xFF;
         w_crc = (w_crc >> 8) ^ (temp << 8) ^ (temp << 3) ^ (temp >> 4);
     }
@@ -288,7 +288,7 @@ impl CasimirControlServiceImpl {
                 self.state.lock().await.pending_select = None;
                 return Err("T4AT Select timeout".to_string());
             }
-        };
+        }
 
         Ok(remote_id)
     }
@@ -331,13 +331,13 @@ impl CasimirControlService for CasimirControlServiceImpl {
 
             // Determine target ID (1-based in proto, 0-based internally)
             let target_id: u16 = if let Some(sender_id) = req.sender_id {
-                if sender_id == 0 || sender_id > (u16::MAX as u32) + 1 {
+                if sender_id == 0 || sender_id > u32::from(u16::MAX) + 1 {
                     let _ = sink
                         .fail(RpcStatus::with_message(
                             RpcStatusCode::INVALID_ARGUMENT,
                             format!(
                                 "Invalid sender_id: {sender_id}. Must be between 1 and {}",
-                                (u16::MAX as u32) + 1
+                                u32::from(u16::MAX) + 1
                             ),
                         ))
                         .await;
@@ -401,20 +401,19 @@ impl CasimirControlService for CasimirControlServiceImpl {
                     return;
                 }
 
-                match tokio::time::timeout(Duration::from_secs(3), apdu_rx).await {
-                    Ok(Ok(response_packet)) => {
-                        response_hex_strings.push(hex_encode(&response_packet.data));
-                    }
-                    _ => {
-                        self_clone.state.lock().await.pending_apdus.remove(&receiver_id);
-                        let _ = sink
-                            .fail(RpcStatus::with_message(
-                                RpcStatusCode::DEADLINE_EXCEEDED,
-                                "APDU response timeout".into(),
-                            ))
-                            .await;
-                        return;
-                    }
+                if let Ok(Ok(response_packet)) =
+                    tokio::time::timeout(Duration::from_secs(3), apdu_rx).await
+                {
+                    response_hex_strings.push(hex_encode(&response_packet.data));
+                } else {
+                    self_clone.state.lock().await.pending_apdus.remove(&receiver_id);
+                    let _ = sink
+                        .fail(RpcStatus::with_message(
+                            RpcStatusCode::DEADLINE_EXCEEDED,
+                            "APDU response timeout".into(),
+                        ))
+                        .await;
+                    return;
                 }
             }
 
@@ -440,7 +439,7 @@ impl CasimirControlService for CasimirControlServiceImpl {
                 Ok(sender_id) => {
                     let mut reply = SenderId::new();
                     // Workaround: 1-based ID
-                    reply.sender_id = (sender_id as u32) + 1;
+                    reply.sender_id = u32::from(sender_id) + 1;
                     let _ = sink.success(reply).await;
                 }
                 Err(e) => {
@@ -591,10 +590,10 @@ impl CasimirControlService for CasimirControlServiceImpl {
                 }
             };
 
-            let format = if req_bits != 8 {
-                rf::PollingFrameFormat::Short
-            } else {
+            let format = if req_bits == 8 {
                 rf::PollingFrameFormat::Long
+            } else {
+                rf::PollingFrameFormat::Short
             };
 
             // Adjust range of values from 0-100 to 0-12
@@ -666,8 +665,8 @@ impl CasimirControlService for CasimirControlServiceImpl {
             }
 
             if req_timeout != 0 {
-                let _ =
-                    tokio::time::timeout(Duration::from_micros(req_timeout as u64), any_rx).await;
+                let _ = tokio::time::timeout(Duration::from_micros(u64::from(req_timeout)), any_rx)
+                    .await;
             }
 
             let _ = sink.success(SendBroadcastResponse::new()).await;

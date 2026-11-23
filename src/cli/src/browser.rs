@@ -21,7 +21,7 @@ use std::process::Command;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(crate) fn open<T: AsRef<OsStr>>(path: T) {
     let path = path.as_ref();
-    println!("Unsupported OS. Open this url:{:?}", path)
+    println!("Unsupported OS. Open this url:{}", path.display());
 }
 
 #[cfg(target_os = "linux")]
@@ -36,7 +36,10 @@ pub(crate) fn open<T: AsRef<OsStr>>(path: T) {
             return;
         }
     }
-    println!("xdg-open, gnome-open, kde-open not working (linux). Open this url:{path:?}");
+    println!(
+        "xdg-open, gnome-open, kde-open not working (linux). Open this url:{}",
+        path.display()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -45,10 +48,10 @@ pub(crate) fn open<T: AsRef<OsStr>>(path: T) {
     let mut open_cmd = Command::new("/usr/bin/open");
     open_cmd.arg(path);
     if open_cmd.output().is_ok() {
-        println!("Opened with command : {:?}", open_cmd);
+        println!("Opened with command : {open_cmd:?}");
         return;
     }
-    println!("/usr/bin/open not working (macos). Open this url:{:?}", path);
+    println!("/usr/bin/open not working (macos). Open this url:{}", path.display());
 }
 
 #[cfg(target_os = "windows")]
@@ -59,9 +62,12 @@ pub(crate) fn open<T: AsRef<OsStr>>(path: T) {
     let open_cmds = [cmd_exe.args(["/C", "start"]).arg(path), explorer.arg(path)];
     for open_cmd in open_cmds {
         if open_cmd.output().is_ok() {
-            println!("Opened with command : {:?}", open_cmd);
+            println!("Opened with command : {open_cmd:?}");
             return;
         }
     }
-    println!("'start' and 'explorer' command not supported (windows). Open this url:{:?}", path);
+    println!(
+        "'start' and 'explorer' command not supported (windows). Open this url:{}",
+        path.display()
+    );
 }

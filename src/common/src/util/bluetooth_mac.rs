@@ -148,7 +148,7 @@ fn read_netsim_config_for_avd(avd_ini_path: &Path) -> Result<NetsimConfig, Box<d
         return Ok(NetsimConfig::default());
     }
     let contents = read_ini_file_bounded(&config_path)?;
-    NetsimConfig::from_ini(&contents).map_err(|e| e.into())
+    NetsimConfig::from_ini(&contents).map_err(Into::into)
 }
 
 fn write_netsim_config_for_avd(
@@ -183,7 +183,7 @@ fn read_all_bluetooth_addresses(avd_root: &Path) -> Result<HashSet<String>, Box<
                     %error,
                     path = %ini_path.display(),
                     "Failed to read netsim.ini, skipping address scan"
-                )
+                );
             }
         }
     }
@@ -195,7 +195,7 @@ fn generate_next_mac(used_addresses: &HashSet<String>) -> Result<String, Box<dyn
         let b1 = (i >> 16) & 0xFF;
         let b2 = (i >> 8) & 0xFF;
         let b3 = i & 0xFF;
-        let mac = format!("BB:BB:BB:{:02X}:{:02X}:{:02X}", b1, b2, b3);
+        let mac = format!("BB:BB:BB:{b1:02X}:{b2:02X}:{b3:02X}");
         debug_assert!(is_valid_mac_address(&mac), "Generated MAC must be valid: {mac}");
         if !used_addresses.contains(&mac) {
             return Ok(mac);
@@ -273,7 +273,9 @@ fn get_or_create_bluetooth_mac(
 fn set_bluetooth_mac(avd_path: &str, address: &str) -> Result<(), Box<dyn Error>> {
     let avd_ini_path = PathBuf::from(avd_path);
     let mut config = read_netsim_config_for_avd(&avd_ini_path).unwrap_or_default();
-    if !address.is_empty() {
+    if address.is_empty() {
+        config.bluetooth_address = None;
+    } else {
         if !is_valid_mac_address(address) {
             return Err(format!("Invalid Bluetooth MAC address: '{address}'").into());
         }
@@ -281,8 +283,6 @@ fn set_bluetooth_mac(avd_path: &str, address: &str) -> Result<(), Box<dyn Error>
             return Ok(());
         }
         config.bluetooth_address = Some(address.to_string());
-    } else {
-        config.bluetooth_address = None;
     }
     write_netsim_config_for_avd(&avd_ini_path, &config)?;
     info!("Successfully updated MAC address for AVD: '{}'", avd_path);

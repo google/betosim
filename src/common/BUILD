@@ -21,6 +21,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "common",
     edition = "2024",
+    pedantic_clippy = True,
     select_deps = select({
         "@platforms//os:linux": [
             "@nix",

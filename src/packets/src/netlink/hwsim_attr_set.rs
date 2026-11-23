@@ -37,9 +37,9 @@ pub enum HwsimError {
 impl fmt::Display for HwsimError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HwsimError::Frame(msg) => write!(f, "Frame error: {}", msg),
-            HwsimError::ParseError(msg, err) => write!(f, "Parse error ({}): {}", msg, err),
-            HwsimError::Other(msg) => write!(f, "Other error: {}", msg),
+            HwsimError::Frame(msg) => write!(f, "Frame error: {msg}"),
+            HwsimError::ParseError(msg, err) => write!(f, "Parse error ({msg}): {err}"),
+            HwsimError::Other(msg) => write!(f, "Other error: {msg}"),
         }
     }
 }
@@ -255,34 +255,34 @@ impl fmt::Display for HwsimAttrSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{ ")?;
         if let Some(v) = self.transmitter {
-            write!(f, "transmitter: {v}, ")?
+            write!(f, "transmitter: {v}, ")?;
         }
         if let Some(v) = self.receiver {
-            write!(f, "receiver: {v}, ")?
+            write!(f, "receiver: {v}, ")?;
         }
         if let Some(v) = self.cookie {
-            write!(f, "cookie: {v}, ")?
+            write!(f, "cookie: {v}, ")?;
         }
         if let Some(v) = self.flags {
-            write!(f, "flags: {v}, ")?
+            write!(f, "flags: {v}, ")?;
         }
         if let Some(v) = self.rx_rate_idx {
-            write!(f, "rx_rate_idx: {v}, ")?
+            write!(f, "rx_rate_idx: {v}, ")?;
         }
         if let Some(v) = self.signal {
-            write!(f, "signal: {v}, ")?
+            write!(f, "signal: {v}, ")?;
         }
         if let Some(v) = &self.frame {
-            write!(f, "frame: {:?}, ", v)?
+            write!(f, "frame: {v:?}, ")?;
         }
         if let Some(v) = self.freq {
-            write!(f, "freq: {v}, ")?
+            write!(f, "freq: {v}, ")?;
         }
         if let Some(v) = &self.tx_info {
-            write!(f, "tx_info: {:?}, ", v)?
+            write!(f, "tx_info: {v:?}, ")?;
         }
         if let Some(v) = &self.tx_info_flags {
-            write!(f, "tx_info_flags: {:?}, ", v)?
+            write!(f, "tx_info_flags: {v:?}, ")?;
         }
         write!(f, "}}")
     }

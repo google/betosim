@@ -92,7 +92,7 @@ impl ErrorStatsTable {
                             slot_count.fetch_add(1, Ordering::Release);
                             return;
                         }
-                        Err(_) => continue,
+                        Err(_) => {}
                     }
                 }
             }
@@ -557,7 +557,7 @@ mod tests {
             // Match pattern: netsim I MM-DD HH:MM:SS.sss netsim_logger.rs:LINE - Test
             // tracing message
             let re = regex::Regex::new(r"netsim I \d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} netsim_logger\.rs:\d+ - Test tracing message").unwrap();
-            assert!(re.is_match(&output), "Output did not match legacy format: {}", output);
+            assert!(re.is_match(&output), "Output did not match legacy format: {output}");
         });
 
         // For info!, it uses the global dispatcher. If another test already
@@ -585,7 +585,7 @@ mod tests {
         let output = String::from_utf8(LOG_BUFFER.lock().unwrap().clone()).unwrap();
         if !output.is_empty() {
             let re = regex::Regex::new(r"netsim I \d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} netsim_logger\.rs:\d+ - Test log message").unwrap();
-            assert!(re.is_match(&output), "Log output did not match legacy format: {}", output);
+            assert!(re.is_match(&output), "Log output did not match legacy format: {output}");
         }
     }
 

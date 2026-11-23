@@ -27,5 +27,6 @@ netsim_rust_library(
     crate_name = "device_api",
     crate_root = "src/lib.rs",
     edition = "2024",
+    pedantic_clippy = True,
     deps = DEPS,
 )

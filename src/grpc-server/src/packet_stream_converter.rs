@@ -99,8 +99,7 @@ pub(crate) fn packet_request_to_bytes(value: PacketRequest) -> Result<Bytes> {
         Some(packet_streamer::packet_request::Request_type::HciPacket(hci)) => {
             let mut h4_packet = BytesMut::new();
             h4_packet.put_u8(hci.packet_type.value() as u8);
-            let hci_bytes = hci.packet.to_vec();
-            h4_packet.put_slice(&hci_bytes);
+            h4_packet.put_slice(&hci.packet);
             Ok(h4_packet.freeze())
         }
         Some(packet_streamer::packet_request::Request_type::Packet(packet)) => {

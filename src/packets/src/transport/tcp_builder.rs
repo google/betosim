@@ -37,7 +37,7 @@ impl<'a> TcpBuilder<'a> {
         header.dest_port.set(0);
         header.sequence_num.set(0);
         header.ack_num.set(0);
-        header.data_offset_reserved_flags.set((data_offset as u16) << 12);
+        header.data_offset_reserved_flags.set(u16::from(data_offset) << 12);
         header.window_size.set(65535);
         header.checksum.set(0);
         header.urgent_ptr.set(0);
@@ -66,7 +66,7 @@ impl<'a> TcpBuilder<'a> {
         // to 0, and set the new Data Offset (bits 12-15).
         self.header
             .data_offset_reserved_flags
-            .set((current & 0x01FF) | ((clamped_offset as u16) << 12));
+            .set((current & 0x01FF) | (u16::from(clamped_offset) << 12));
         self
     }
 

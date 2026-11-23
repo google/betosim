@@ -344,7 +344,7 @@ impl NfcWorld {
 
             self.actor.on_task_closed(chip_id, &mut self.ctx).await;
         } else {
-            panic!("Task handle NOT found for chip {}", id_val);
+            panic!("Task handle NOT found for chip {id_val}");
         }
     }
 
@@ -385,7 +385,7 @@ pub(crate) struct NfcClientWorld {
     last_control_channel_error: Option<netsim_model::ClientError>,
     error_stats: Arc<ErrorStatsTable>,
     held_control_channels: Vec<(tokio::io::DuplexStream, u16)>,
-    _multi_dispatch_guard: Option<tracing::Dispatch>,
+    multi_dispatch_guard: Option<tracing::Dispatch>,
     actor_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -394,6 +394,7 @@ impl Drop for NfcClientWorld {
         if let Some(task) = self.actor_task.take() {
             task.abort();
         }
+        let _ = self.multi_dispatch_guard.take();
     }
 }
 
@@ -414,7 +415,7 @@ impl NfcClientWorld {
         let (runner, client) = nfc_actor::new();
         let actor = NfcActor::new(device_client, client.stats());
         let error_stats = Arc::new(ErrorStatsTable::new());
-        let (actor_task, _multi_dispatch_guard) = if record_error_stats {
+        let (actor_task, multi_dispatch_guard) = if record_error_stats {
             let guard = tracing::Dispatch::new(tracing_subscriber::registry());
             let subscriber = tracing_subscriber::registry()
                 .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
@@ -432,7 +433,7 @@ impl NfcClientWorld {
             last_control_channel_error: None,
             error_stats,
             held_control_channels: Vec::new(),
-            _multi_dispatch_guard,
+            multi_dispatch_guard,
             actor_task: Some(actor_task),
         }
     }

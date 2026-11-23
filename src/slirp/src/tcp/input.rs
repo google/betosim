@@ -155,17 +155,16 @@ impl TcpManager {
                         // Silently drop SYN packets to connections in
                         // TIME_WAIT.
                         return;
-                    } else {
-                        // Drop unexpected SYN for existing active connections
-                        // to prevent
-                        // duplicate connection allocation
-                        crate::slirp_debug!(
-                            crate::logging::Topic::Tcp,
-                            "SYN received for active connection {conn_id} in state {:?}, dropping.",
-                            conn.state
-                        );
-                        return;
                     }
+                    // Drop unexpected SYN for existing active connections
+                    // to prevent
+                    // duplicate connection allocation
+                    crate::slirp_debug!(
+                        crate::logging::Topic::Tcp,
+                        "SYN received for active connection {conn_id} in state {:?}, dropping.",
+                        conn.state
+                    );
+                    return;
                 }
 
                 let conn_id = self.next_conn_id;
@@ -187,13 +186,13 @@ impl TcpManager {
                 let (mss, window_scale, sack_blocks) =
                     util::parse_tcp_options(&tcp_header, payload);
                 let send_window = if let Some(scale) = window_scale {
-                    (tcp_header.window_size.get() as u32) << scale
+                    u32::from(tcp_header.window_size.get()) << scale
                 } else {
-                    tcp_header.window_size.get() as u32
+                    u32::from(tcp_header.window_size.get())
                 };
                 let guest_mac = match packet.ethernet {
-                    netsim_packets::EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                    netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                    netsim_packets::EthernetPacket::Untagged { frame, .. }
+                    | netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
                 };
                 let conn = TcpConnection {
                     state: State::SynSent,
@@ -254,14 +253,14 @@ impl TcpManager {
                 if let Some(mut conn) = self.connections.remove(&conn_id) {
                     let (_, _, sack_blocks) = util::parse_tcp_options(&tcp_header, payload);
                     if !sack_blocks.is_empty() {
-                        conn.sack_blocks = sack_blocks.clone();
+                        conn.sack_blocks.clone_from(&sack_blocks);
                     }
                     let ack_num = tcp_header.ack_num.get();
                     conn.window_size = tcp_header.window_size.get();
                     conn.send_window = if let Some(scale) = conn.recv_window_scale {
-                        (conn.window_size as u32) << scale
+                        u32::from(conn.window_size) << scale
                     } else {
-                        conn.window_size as u32
+                        u32::from(conn.window_size)
                     };
                     let mut retransmit = false;
                     if is_ack {
@@ -442,17 +441,17 @@ impl TcpManager {
                             trace!("TIMEWAIT::on_packet tcp_header={tcp_header:?}");
                         }
                     }
-                    if !should_remove {
-                        self.connections.insert(conn_id, conn);
-                    } else {
+                    if should_remove {
                         self.incoming_connections.remove(&conn_id);
+                    } else {
+                        self.connections.insert(conn_id, conn);
                     }
                 }
 
                 if let Some(args) = packet_to_send {
                     let guest_mac = match packet.ethernet {
-                        netsim_packets::EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                        netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                        netsim_packets::EthernetPacket::Untagged { frame, .. }
+                        | netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
                     };
                     if let Some(conn) = self.connections.get(&conn_id) {
                         self.send_tcp_packet(responses, timers, guest_mac, conn.gateway_mac, &args);
@@ -473,8 +472,8 @@ impl TcpManager {
                             return;
                         };
                     let guest_mac = match packet.ethernet {
-                        netsim_packets::EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                        netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                        netsim_packets::EthernetPacket::Untagged { frame, .. }
+                        | netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
                     };
                     let args = SendTcpPacketArgs {
                         conn_id: Some(conn_id),
@@ -507,14 +506,14 @@ impl TcpManager {
                             .sequence_num
                             .get()
                             .wrapping_add(tcp_payload.len() as u32)
-                            .wrapping_add(if is_fin { 1 } else { 0 }),
+                            .wrapping_add(u32::from(is_fin)),
                         true,
                     )
                 };
 
                 let guest_mac = match packet.ethernet {
-                    netsim_packets::EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                    netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                    netsim_packets::EthernetPacket::Untagged { frame, .. }
+                    | netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
                 };
                 self.send_tcp_packet(
                     responses,

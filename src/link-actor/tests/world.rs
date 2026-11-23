@@ -25,12 +25,12 @@ use netsim_model::{ChipClient, ChipId, ChipKind, MockChipClient};
 /// clients. Dropping this struct terminates the actor task.
 pub struct World {
     pub client: LinkClient,
-    _actor_task: tokio::task::JoinHandle<()>,
+    actor_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for World {
     fn drop(&mut self) {
-        self._actor_task.abort();
+        self.actor_task.abort();
     }
 }
 
@@ -50,12 +50,12 @@ impl World {
         let (actor, client) = link_actor::new();
         let link_actor_state = LinkActor::new(clients);
         let actor_task = tokio::spawn(actor.run(link_actor_state));
-        World { _actor_task: actor_task, client }
+        World { client, actor_task }
     }
 
     pub async fn teardown(mut self) {
         self.client.shutdown().await.expect("link actor shutdown should succeed");
-        (&mut self._actor_task).await.expect("link actor task should not panic");
+        (&mut self.actor_task).await.expect("link actor task should not panic");
     }
 
     // TODO: move this to a common place for Link and Device actors

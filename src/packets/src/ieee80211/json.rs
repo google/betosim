@@ -64,10 +64,10 @@ impl fmt::Display for JsonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JsonError::SerdeJson(e) => {
-                write!(f, "JSON serialization/deserialization error: {}", e)
+                write!(f, "JSON serialization/deserialization error: {e}")
             }
-            JsonError::HexParse(s) => write!(f, "Hex parsing error: {}", s),
-            JsonError::Conversion(s) => write!(f, "Conversion error: {}", s),
+            JsonError::HexParse(s) => write!(f, "Hex parsing error: {s}"),
+            JsonError::Conversion(s) => write!(f, "Conversion error: {s}"),
         }
     }
 }
@@ -121,7 +121,7 @@ impl From<FrameControl> for JsonFrameControl {
             subtype: fc.frame_subtype(),
             to_ds: fc.to_ds(),
             from_ds: fc.from_ds(),
-            more_fragments: if fc.more_fragments() { 1 } else { 0 },
+            more_fragments: u8::from(fc.more_fragments()),
             retry: fc.retry(),
             power_management: fc.power_management(),
             more_data: fc.more_data(),

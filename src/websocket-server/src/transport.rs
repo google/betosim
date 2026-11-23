@@ -372,8 +372,8 @@ enum BtPropsOrEnvelope {
 
 fn parse_ws_bt_properties(text: &str) -> Result<BtControllerProperties, serde_json::Error> {
     serde_json::from_str::<BtPropsOrEnvelope>(text).map(|res| match res {
-        BtPropsOrEnvelope::Envelope { bt_properties } => bt_properties,
-        BtPropsOrEnvelope::Direct(bt_properties) => bt_properties,
+        BtPropsOrEnvelope::Envelope { bt_properties }
+        | BtPropsOrEnvelope::Direct(bt_properties) => bt_properties,
     })
 }
 

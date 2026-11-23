@@ -166,21 +166,18 @@ impl TftpManager {
         };
 
         // Open the file
-        let mut file = match File::open(&safe_path) {
-            Ok(f) => f,
-            Err(_) => {
-                warn!("TFTP: File not found: {}", safe_path.display());
-                self.send_error(
-                    responses,
-                    config,
-                    src_addr,
-                    TFTP_PORT,
-                    ERR_NOT_FOUND,
-                    "File not found",
-                    guest_mac,
-                );
-                return;
-            }
+        let Ok(mut file) = File::open(&safe_path) else {
+            warn!("TFTP: File not found: {}", safe_path.display());
+            self.send_error(
+                responses,
+                config,
+                src_addr,
+                TFTP_PORT,
+                ERR_NOT_FOUND,
+                "File not found",
+                guest_mac,
+            );
+            return;
         };
 
         // Allocate a unique TID (local port)
@@ -301,7 +298,7 @@ impl TftpManager {
             block_data.truncate(n);
 
             session.block_num = session.block_num.wrapping_add(1);
-            session.last_block_sent = block_data.clone();
+            session.last_block_sent.clone_from(&block_data);
             session.is_last_block = n < TFTP_BLOCK_SIZE;
 
             let next_block_num = session.block_num;

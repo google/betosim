@@ -79,7 +79,7 @@ pub struct InformationElement<'a> {
     pub body: &'a [u8],
 }
 
-impl<'a> fmt::Debug for InformationElement<'a> {
+impl fmt::Debug for InformationElement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InformationElement")
             .field("id", &self.id)

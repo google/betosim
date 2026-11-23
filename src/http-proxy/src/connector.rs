@@ -76,7 +76,7 @@ impl Connector {
         let mut stream = TcpStream::connect(self.proxy_addr).await?;
 
         // Construct the CONNECT request
-        let mut request = format!("CONNECT {} HTTP/{}\r\n", addr, HTTP_VERSION);
+        let mut request = format!("CONNECT {addr} HTTP/{HTTP_VERSION}\r\n");
 
         // Authentication
         if let Some(auth_header) = self.auth_header() {
@@ -92,7 +92,7 @@ impl Connector {
         let mut reader = BufReader::new(stream);
         let mut response = String::new();
         reader.read_line(&mut response).await?;
-        if response.starts_with(&format!("HTTP/{} 200", HTTP_VERSION)) {
+        if response.starts_with(&format!("HTTP/{HTTP_VERSION} 200")) {
             Ok(reader.into_inner())
         } else {
             Err(Error::ConnectionError(addr, response.trim_end_matches("\r\n").to_string()))
@@ -240,8 +240,11 @@ mod tests {
 
     #[test]
     fn test_auth_header_with_empty_password() {
-        let connector =
-            Connector::new("127.0.0.1:8080".parse().unwrap(), Some("user".into()), Some("".into()));
+        let connector = Connector::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            Some("user".into()),
+            Some(String::new()),
+        );
         assert_eq!(
             connector.auth_header(),
             Some("Proxy-Authorization: Basic dXNlcjo=\r\n".to_string())

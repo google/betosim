@@ -125,9 +125,8 @@ fn test_dhcp_discover_offer() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, discover_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let offer_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(offer_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (eth_frame, _) = EthernetFrame::parse(&offer_packet).unwrap();
@@ -157,9 +156,8 @@ fn test_dhcp_offer_includes_config_options() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, discover_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let offer_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(offer_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let offer_dhcp = parse_dhcp_reply_payload(&offer_packet);
@@ -189,9 +187,8 @@ fn test_dhcp_request_invalid_ip_sends_nak() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, request_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let nak_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(nak_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let nak_dhcp = parse_dhcp_reply_payload(&nak_packet);
@@ -216,9 +213,8 @@ fn test_dhcp_offer_includes_dns_search_list() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, discover_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let offer_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(offer_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let offer_dhcp = parse_dhcp_reply_payload(&offer_packet);
@@ -249,9 +245,8 @@ fn test_dhcp_offer_includes_hostname() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, discover_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let offer_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(offer_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let offer_dhcp = parse_dhcp_reply_payload(&offer_packet);
@@ -352,9 +347,8 @@ fn test_dhcp_inform() {
     );
 
     assert_eq!(responses.len(), 1);
-    let ack_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(ack_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let ack_dhcp = parse_dhcp_reply_payload(&ack_packet);
@@ -412,9 +406,8 @@ fn test_bootp_legacy_request() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, bootp_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let reply_dhcp = parse_dhcp_reply_payload(&reply_packet);
@@ -541,9 +534,8 @@ fn test_dhcp_discover_with_existing_lease() {
 
     // 3. Verify it offers the SAME IP
     assert_eq!(responses.len(), 1);
-    let offer_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!(),
+    let SlirpResponse::Packet(offer_packet) = responses.pop().unwrap() else {
+        panic!();
     };
     let offer_dhcp = parse_dhcp_reply_payload(&offer_packet);
     assert_eq!(offer_dhcp.yiaddr, client_ip.octets());
@@ -568,9 +560,8 @@ fn test_dhcp_request_different_ip_sends_nak() {
 
     // 3. Verify NAK
     assert_eq!(responses.len(), 1);
-    let nak_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!(),
+    let SlirpResponse::Packet(nak_packet) = responses.pop().unwrap() else {
+        panic!();
     };
     let nak_dhcp = parse_dhcp_reply_payload(&nak_packet);
     let options = parse_dhcp_options(&nak_dhcp.options);
@@ -608,9 +599,8 @@ fn test_dhcp_ip_exhaustion_and_table_full() {
     request_packet.chaddr[0] = 99;
     dhcp_manager.handle_packet(&mut responses, &config, &clock, request_packet.as_bytes());
     assert_eq!(responses.len(), 1);
-    let nak_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!(),
+    let SlirpResponse::Packet(nak_packet) = responses.pop().unwrap() else {
+        panic!();
     };
     let nak_dhcp = parse_dhcp_reply_payload(&nak_packet);
     let options = parse_dhcp_options(&nak_dhcp.options);
@@ -632,9 +622,8 @@ fn test_dhcp_inform_with_config() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, inform_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let ack_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!(),
+    let SlirpResponse::Packet(ack_packet) = responses.pop().unwrap() else {
+        panic!();
     };
     let ack_dhcp = parse_dhcp_reply_payload(&ack_packet);
     let options = parse_dhcp_options(&ack_dhcp.options);
@@ -675,9 +664,8 @@ fn test_dhcp_bootp_existing_lease() {
     dhcp_manager.handle_packet(&mut responses, &config, &clock, bootp_packet.as_bytes());
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!(),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!();
     };
     let reply_dhcp = parse_dhcp_reply_payload(&reply_packet);
     assert_eq!(reply_dhcp.yiaddr, client_ip.octets());
@@ -764,9 +752,8 @@ fn test_dhcp_parse_option_edge_cases() {
     };
     dhcp_manager.handle_packet(&mut responses, &config, &clock, req_no_opt50.as_bytes());
     assert_eq!(responses.len(), 1);
-    let reply = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!(),
+    let SlirpResponse::Packet(reply) = responses.pop().unwrap() else {
+        panic!();
     };
     let reply_dhcp = parse_dhcp_reply_payload(&reply);
     let opts = parse_dhcp_options(&reply_dhcp.options);
@@ -919,9 +906,8 @@ fn test_dhcp_compact_packet_flow() {
 
     dhcp_manager.handle_packet(&mut responses, &config, &clock, &discover_bytes);
     assert_eq!(responses.len(), 1);
-    let offer_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(offer_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
     let offer_dhcp = parse_dhcp_reply_payload(&offer_packet);
     assert_eq!(offer_dhcp.op, 2);
@@ -940,9 +926,8 @@ fn test_dhcp_compact_packet_flow() {
 
     dhcp_manager.handle_packet(&mut responses, &config, &clock, &request_bytes);
     assert_eq!(responses.len(), 1);
-    let ack_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(ack_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
     let ack_dhcp = parse_dhcp_reply_payload(&ack_packet);
     assert_eq!(ack_dhcp.op, 2);
@@ -986,9 +971,8 @@ fn test_dhcp_header_only_240_byte_bootp_request_is_answered() {
 
     dhcp_manager.handle_packet(&mut responses, &config, &clock, &packet);
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
     let reply_dhcp = parse_dhcp_reply_payload(&reply_packet);
     assert_eq!(reply_dhcp.op, 2);

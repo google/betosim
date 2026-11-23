@@ -109,7 +109,7 @@ impl CrossPlatformListener {
             #[cfg(unix)]
             {
                 let volume_socket = PathBuf::from("/shared/sockets/packetstream.sock");
-                if volume_socket.parent().is_some_and(|p| p.exists())
+                if volume_socket.parent().is_some_and(std::path::Path::exists)
                     && let Ok(listener) = unix::UnixSocketListener::bind(&volume_socket)
                 {
                     return Ok(CrossPlatformListener::Unix(listener));

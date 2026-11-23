@@ -58,15 +58,14 @@ where
     if let Ok(test_env_p) = get_env("TMPDIR") {
         return PathBuf::from(test_env_p);
     }
-    let mut path = match get_env(DISCOVERY.root_env) {
-        Ok(env_p) => PathBuf::from(env_p),
-        Err(_) => {
-            warn!(
-                code = crate::err::Code::DiscoveryEnvMissing as u32,
-                "No discovery env for {}, using /tmp", DISCOVERY.root_env
-            );
-            PathBuf::from("/tmp")
-        }
+    let mut path = if let Ok(env_p) = get_env(DISCOVERY.root_env) {
+        PathBuf::from(env_p)
+    } else {
+        warn!(
+            code = crate::err::Code::DiscoveryEnvMissing as u32,
+            "No discovery env for {}, using /tmp", DISCOVERY.root_env
+        );
+        PathBuf::from("/tmp")
     };
     path.push(DISCOVERY.subdir);
     path
@@ -91,8 +90,7 @@ where
 {
     let instance_env: Option<u16> = get_env("NETSIM_INSTANCE").ok().and_then(|i| i.parse().ok());
     match (instance_env, instance_flag) {
-        (Some(i), _) if i > 0 => i,
-        (_, Some(i)) if i > 0 => i,
+        (Some(i), _) | (_, Some(i)) if i > 0 => i,
         (_, _) => DEFAULT_INSTANCE,
     }
 }
@@ -101,7 +99,7 @@ where
 ///
 /// `hci_port_flag` comes from cli args or the `NETSIM_HCI_PORT` env var.
 pub fn get_hci_port(hci_port_flag: u32, instance: u16) -> u32 {
-    if hci_port_flag != 0 { hci_port_flag } else { DEFAULT_HCI_PORT + (instance as u32) }
+    if hci_port_flag != 0 { hci_port_flag } else { DEFAULT_HCI_PORT + u32::from(instance) }
 }
 
 /// Get the netsim instance name used for log filename creation

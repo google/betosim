@@ -22,6 +22,7 @@ netsim_rust_library(
     crate_name = "netsim_testing",
     edition = "2024",
     enable_rustfmt = False,
+    pedantic_clippy = True,
     visibility = ["//src:__subpackages__"],
     deps = [
         "//src/common",

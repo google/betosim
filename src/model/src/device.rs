@@ -117,7 +117,7 @@ pub(crate) mod api {
     impl DeviceUpdate {
         pub fn apply(&self, device: &mut super::Device) {
             if let Some(name) = &self.name {
-                device.name = name.clone();
+                device.name.clone_from(name);
             }
             if let Some(visible) = self.visible {
                 device.visible = visible;

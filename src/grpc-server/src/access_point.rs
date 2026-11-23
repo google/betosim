@@ -41,21 +41,21 @@ fn ap_config_to_proto(id: u32, config: ApConfig, connected_devices: Vec<String>)
     ap.id = id;
     ap.ssid = config.ssid;
     ap.bssid = config.bssid.to_string();
-    ap.channel = config.channel as u32;
+    ap.channel = u32::from(config.channel);
     ap.hw_mode = config.hw_mode.to_string();
     if let Some(pass) = config.wpa_passphrase {
         ap.wpa_passphrase = pass;
     }
-    ap.beacon_interval = config.beacon_interval as u32;
+    ap.beacon_interval = u32::from(config.beacon_interval);
     if let Some(cc) = config.country_code {
         ap.country_code = cc;
     }
-    ap.dtim_period = config.dtim_period as u32;
+    ap.dtim_period = u32::from(config.dtim_period);
     ap.hidden_ssid = config.hidden_ssid;
     ap.sae = config.sae;
     ap.wmm_enabled = config.wmm_enabled;
     ap.enterprise_enabled = config.enterprise_enabled;
-    ap.mac_acl_mode = config.mac_acl_mode as u32;
+    ap.mac_acl_mode = u32::from(config.mac_acl_mode);
     ap.ftm_responder_enabled = config.ftm_responder_enabled;
     ap.connected_devices = connected_devices;
     ap
@@ -109,7 +109,7 @@ fn proto_to_ap_config(proto: AccessPoint) -> Result<ApConfig, grpcio::RpcStatus>
         } else {
             return Err(grpcio::RpcStatus::with_message(
                 grpcio::RpcStatusCode::INVALID_ARGUMENT,
-                format!("Invalid MAC in ACL: {}", mac_str),
+                format!("Invalid MAC in ACL: {mac_str}"),
             ));
         }
     }
@@ -119,7 +119,6 @@ fn proto_to_ap_config(proto: AccessPoint) -> Result<ApConfig, grpcio::RpcStatus>
         config.hw_mode = match proto.hw_mode.as_str() {
             "a" => WifiMode::A,
             "b" => WifiMode::B,
-            "g" => WifiMode::G,
             "n" => WifiMode::N,
             "ac" => WifiMode::Ac,
             "ax" => WifiMode::Ax,
@@ -159,7 +158,7 @@ impl AccessPointService for AccessPointServiceImpl {
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to create AP: {}", e),
+                            format!("Failed to create AP: {e}"),
                         ))
                         .await;
                 }
@@ -174,7 +173,7 @@ impl AccessPointService for AccessPointServiceImpl {
             match client.get_ap(req.id).await {
                 Ok(Some(state)) => {
                     let connected_devices =
-                        state.associations.iter().map(|m| m.to_string()).collect();
+                        state.associations.iter().map(ToString::to_string).collect();
                     let _ = sink
                         .success(ap_config_to_proto(req.id, state.config, connected_devices))
                         .await;
@@ -191,7 +190,7 @@ impl AccessPointService for AccessPointServiceImpl {
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to get AP: {}", e),
+                            format!("Failed to get AP: {e}"),
                         ))
                         .await;
                 }
@@ -215,7 +214,7 @@ impl AccessPointService for AccessPointServiceImpl {
             match client.update_ap_config(req.id, ssid, channel, force_disconnect, None).await {
                 Ok(state) => {
                     let connected_devices =
-                        state.associations.iter().map(|m| m.to_string()).collect();
+                        state.associations.iter().map(ToString::to_string).collect();
                     let _ = sink
                         .success(ap_config_to_proto(req.id, state.config, connected_devices))
                         .await;
@@ -224,7 +223,7 @@ impl AccessPointService for AccessPointServiceImpl {
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to update AP: {}", e),
+                            format!("Failed to update AP: {e}"),
                         ))
                         .await;
                 }
@@ -237,14 +236,14 @@ impl AccessPointService for AccessPointServiceImpl {
         let client = self.client.clone();
         let f = async move {
             match client.destroy_ap(req.id).await {
-                Ok(_) => {
+                Ok(()) => {
                     let _ = sink.success(Empty::new()).await;
                 }
                 Err(e) => {
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to delete AP: {}", e),
+                            format!("Failed to delete AP: {e}"),
                         ))
                         .await;
                 }
@@ -266,7 +265,7 @@ impl AccessPointService for AccessPointServiceImpl {
                     let mut resp = ListAccessPointsResponse::new();
                     for (id, ap) in aps {
                         let connected_devices =
-                            ap.associations.iter().map(|m| m.to_string()).collect();
+                            ap.associations.iter().map(ToString::to_string).collect();
                         resp.access_points.push(ap_config_to_proto(
                             id,
                             ap.config,
@@ -279,7 +278,7 @@ impl AccessPointService for AccessPointServiceImpl {
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to list APs: {}", e),
+                            format!("Failed to list APs: {e}"),
                         ))
                         .await;
                 }
@@ -307,14 +306,14 @@ impl AccessPointService for AccessPointServiceImpl {
             };
 
             match result {
-                Ok(_) => {
+                Ok(()) => {
                     let _ = sink.success(Empty::new()).await;
                 }
                 Err(e) => {
                     let _ = sink
                         .fail(grpcio::RpcStatus::with_message(
                             grpcio::RpcStatusCode::INTERNAL,
-                            format!("Failed to execute action: {}", e),
+                            format!("Failed to execute action: {e}"),
                         ))
                         .await;
                 }

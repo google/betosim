@@ -60,14 +60,15 @@ fn recurse_files(root: &Path) -> Result<Vec<(PathBuf, String)>> {
             };
             if file_type.is_symlink() {
                 continue;
-            } else if file_type.is_dir() {
+            }
+            if file_type.is_dir() {
                 stack.push(entry.path());
             } else if file_type.is_file() {
                 if let Some(filename) = entry
                     .path()
                     .file_name()
                     .and_then(|os_name| os_name.to_str())
-                    .map(|str_name| str_name.to_string())
+                    .map(ToString::to_string)
                 {
                     result.push((entry.path(), filename));
                 } else {
@@ -88,13 +89,14 @@ fn fetch_zip_files(root: &Path) -> Result<Vec<PathBuf>> {
     // Read all entries in the given root directory
     // Push path to result if name matches "netsim_artifacts_*.zip"
     let mut result: Vec<PathBuf> = read_dir(root)?
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.file_type().is_ok_and(|ft| ft.is_file()))
         .map(|e| e.path())
         .filter(|path| {
-            path.file_name().and_then(|os_name| os_name.to_str()).is_some_and(|filename| {
-                filename.starts_with("netsim_artifacts_") && filename.ends_with(".zip")
-            })
+            path.file_name()
+                .and_then(|os_name| os_name.to_str())
+                .is_some_and(|filename| filename.starts_with("netsim_artifacts_"))
+                && path.extension().is_some_and(|ext| ext == "zip")
         })
         .collect();
     // Sort the zip files by timestamp from oldest to newest
@@ -116,7 +118,7 @@ fn remove_zip_files_in_dir(root: &Path) -> Result<usize> {
                     error = %err,
                     "Failed to remove file {}",
                     file.display()
-                )
+                );
             }
         }
     }
@@ -156,7 +158,7 @@ pub fn remove_old_artifacts_in_dir(root: &Path) {
                 error = %err,
                 "Failed to remove zip files in {}",
                 root.display()
-            )
+            );
         }
     }
 
@@ -220,7 +222,7 @@ pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
 
         // Remove the file once written except for netsim log and json files
         if filename.starts_with("netsim_")
-            && (filename.ends_with(".log") || filename.ends_with(".json"))
+            && file.extension().is_some_and(|ext| ext == "log" || ext == "json")
         {
             continue;
         }
@@ -233,7 +235,7 @@ pub fn zip_artifacts_in_dir(root: &Path) -> ZipResult<()> {
                     error = %err,
                     "Failed to remove artifact file {}",
                     file.display()
-                )
+                );
             }
         }
     }

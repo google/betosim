@@ -47,8 +47,8 @@ pub fn to_json(packet: &Packet, packet_len: usize) -> Value {
     // Check if ethertype is present (Ethernet II)
     // We need to check the inner frame's ethertype
     let ethertype = match &packet.ethernet {
-        crate::ethernet::EthernetPacket::Untagged { frame, .. } => frame.ethertype.get(),
-        crate::ethernet::EthernetPacket::Vlan { frame, .. } => frame.ethertype.get(),
+        crate::ethernet::EthernetPacket::Untagged { frame, .. }
+        | crate::ethernet::EthernetPacket::Vlan { frame, .. } => frame.ethertype.get(),
     };
 
     if ethertype > 1500 {

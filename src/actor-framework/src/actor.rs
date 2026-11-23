@@ -315,7 +315,7 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                                 code = err::Code::MonitoredTaskFailed as u32,
                                 %error,
                                 "Monitored task failed"
-                            )
+                            );
                         }
                     }
                 }
@@ -346,12 +346,11 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
         msg_opt: Option<T::TypedStream>,
         ctx: &mut DynContext<T>,
     ) {
-        match msg_opt {
-            Some(msg) => actor.on_typed_stream(id, msg, ctx).await,
-            None => {
-                ctx.remove_typed_stream(id);
-                actor.on_typed_stream_closed(id, ctx).await;
-            }
+        if let Some(msg) = msg_opt {
+            actor.on_typed_stream(id, msg, ctx).await;
+        } else {
+            ctx.remove_typed_stream(id);
+            actor.on_typed_stream_closed(id, ctx).await;
         }
     }
 

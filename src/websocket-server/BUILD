@@ -21,6 +21,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "websocket_server",
     edition = "2024",
+    pedantic_clippy = True,
     test_deps = [
         "//src/actor-framework:testing",
         "@mockall",

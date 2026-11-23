@@ -96,9 +96,8 @@ fn test_dhcpv6_information_request_reply() {
     let parsed_packet = ParsedPacket::parse(&eth_packet).unwrap();
 
     // Extract UDP header from parsed packet
-    let udp_header = match &parsed_packet.transport {
-        Some(TransportPacket::Udp(hdr, _)) => hdr,
-        _ => panic!("Expected UDP packet"),
+    let Some(TransportPacket::Udp(udp_header, _)) = &parsed_packet.transport else {
+        panic!("Expected UDP packet");
     };
 
     let mut responses = Vec::new();
@@ -115,9 +114,8 @@ fn test_dhcpv6_information_request_reply() {
 
     // 3. Verify reply
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected Packet response");
     };
 
     // Parse Reply

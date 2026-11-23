@@ -79,9 +79,8 @@ fn test_dns_proxy_cache_hit_and_expiry() {
 
     // 3. Query again -> Cache Hit!
     let res2 = proxy.handle_query(&query, client, now, &servers);
-    let cached_payload = match res2 {
-        DnsQueryResult::Cached(payload) => payload,
-        _ => panic!("Expected Cache Hit"),
+    let DnsQueryResult::Cached(cached_payload) = res2 else {
+        panic!("Expected Cache Hit");
     };
 
     // Verify synthesized reply
@@ -135,13 +134,13 @@ fn test_dns_proxy_failover() {
 
 #[test]
 fn test_parse_resolv_conf_standard() {
-    let resolv_conf = r#"
+    let resolv_conf = "
 # Dynamic resolv.conf file for glibc resolver
 nameserver 8.8.8.8
 nameserver 2001:4860:4860::8888
 search corp.example.com example.com
 options edns0 trust-ad
-"#;
+";
     let servers = parse_resolv_conf_content(resolv_conf);
     assert_eq!(
         servers,
@@ -154,11 +153,11 @@ options edns0 trust-ad
 
 #[test]
 fn test_parse_resolv_conf_ipv6_scope_id() {
-    let resolv_conf = r#"
+    let resolv_conf = "
 ; Resolv.conf with IPv6 scope ID
 nameserver fe80::1%eth0
 nameserver fe80::2%wlan0
-"#;
+";
     let servers = parse_resolv_conf_content(resolv_conf);
     assert_eq!(
         servers,
@@ -171,7 +170,7 @@ nameserver fe80::2%wlan0
 
 #[test]
 fn test_parse_resolv_conf_preserves_loopback_and_skips_unspecified() {
-    let resolv_conf = r#"
+    let resolv_conf = "
 # Unspecified addresses should be filtered; loopback and external preserved in order
 nameserver 127.0.0.53
 nameserver 127.0.0.1
@@ -179,7 +178,7 @@ nameserver ::1
 nameserver 0.0.0.0
 nameserver ::
 nameserver 1.1.1.1
-"#;
+";
     let servers = parse_resolv_conf_content(resolv_conf);
     assert_eq!(
         servers,
@@ -194,13 +193,13 @@ nameserver 1.1.1.1
 
 #[test]
 fn test_parse_resolv_conf_container_and_stub_resolvers() {
-    let resolv_conf = r#"
+    let resolv_conf = "
 # Docker container embedded DNS and systemd-resolved stub alongside public resolvers
 nameserver 127.0.0.11
 nameserver 127.0.0.53
 nameserver 8.8.8.8
 nameserver 2001:4860:4860::8888
-"#;
+";
     let servers = parse_resolv_conf_content(resolv_conf);
     assert_eq!(
         servers,
@@ -215,13 +214,13 @@ nameserver 2001:4860:4860::8888
 
 #[test]
 fn test_parse_resolv_conf_ipv6_loopback_zone_and_dedup() {
-    let resolv_conf = r#"
+    let resolv_conf = "
 nameserver ::1%lo
 nameserver 127.0.0.11
 nameserver 8.8.8.8
 nameserver 127.0.0.11
 nameserver 8.8.8.8
-"#;
+";
     let servers = parse_resolv_conf_content(resolv_conf);
     assert_eq!(
         servers,
@@ -235,11 +234,11 @@ nameserver 8.8.8.8
 
 #[test]
 fn test_parse_resolv_conf_deduplication() {
-    let resolv_conf = r#"
+    let resolv_conf = "
 nameserver 8.8.8.8
 nameserver 8.8.4.4
 nameserver 8.8.8.8
-"#;
+";
     let servers = parse_resolv_conf_content(resolv_conf);
     assert_eq!(
         servers,

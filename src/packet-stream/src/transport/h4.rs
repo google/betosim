@@ -66,10 +66,10 @@ impl Decoder for H4Codec {
         // 3. Calculate payload length
         // Note: src has NOT been advanced, so indices are 0-based from start of packet
         let payload_length = match (h4_type, src.as_ref()) {
-            (H4_CMD_TYPE, &[_, _, _, len, ..]) => len as usize,
+            (H4_CMD_TYPE | H4_SCO_TYPE, &[_, _, _, len, ..]) | (H4_EVT_TYPE, &[_, _, len, ..]) => {
+                len as usize
+            }
             (H4_ACL_TYPE, &[_, _, _, l0, l1, ..]) => u16::from_le_bytes([l0, l1]) as usize,
-            (H4_SCO_TYPE, &[_, _, _, len, ..]) => len as usize,
-            (H4_EVT_TYPE, &[_, _, len, ..]) => len as usize,
             (H4_ISO_TYPE, &[_, _, _, l0, l1, ..]) => {
                 (usize::from(l1 & 0x0f) << 8) | usize::from(l0)
             }

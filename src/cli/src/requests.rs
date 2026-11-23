@@ -296,7 +296,7 @@ impl Command {
                         .map(|link| {
                             let mut link_proto = model::Link::new();
                             link_proto.id = link.id;
-                            link_proto.rssi = rssi as i32;
+                            link_proto.rssi = i32::from(rssi);
                             link_proto.kind = chip_kind.into();
                             // Populate sender/receiver for display purposes
                             link_proto.sender_id = link.sender_id;

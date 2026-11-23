@@ -240,7 +240,7 @@ impl World {
             .await
             .expect("timed out waiting for HCI event")
             .expect("HCI channel closed unexpectedly");
-        assert!(event.len() >= 7, "HCI event too short: {:02x?}", event);
+        assert!(event.len() >= 7, "HCI event too short: {event:02x?}");
         assert_eq!(event[0], 0x04, "expected HCI Event packet type 0x04");
         assert_eq!(event[1], 0x0e, "expected Command Complete event code 0x0e");
         assert_eq!(

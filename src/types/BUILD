@@ -19,6 +19,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "netsim_types",
     edition = "2024",
+    pedantic_clippy = True,
     visibility = ["//visibility:public"],
     deps = [
         "//proto",

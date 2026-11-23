@@ -142,7 +142,7 @@ mod tests {
         let valid_sms = CellAction::ReceiveSms { sender: "12345".into(), text: "Hello".into() };
         assert!(valid_sms.validate().is_ok());
 
-        let invalid_sms = CellAction::ReceiveSms { sender: "".into(), text: "Hello".into() };
+        let invalid_sms = CellAction::ReceiveSms { sender: String::new(), text: "Hello".into() };
         assert!(invalid_sms.validate().is_err());
 
         let valid_pdu = CellAction::ReceivePdu { pdu: "ABCD".into() };

@@ -325,8 +325,9 @@ impl Slirp {
         }
 
         let dst_mac = match packet.ethernet {
-            EthernetPacket::Untagged { frame, .. } => frame.dst_addr,
-            EthernetPacket::Vlan { frame, .. } => frame.dst_addr,
+            EthernetPacket::Untagged { frame, .. } | EthernetPacket::Vlan { frame, .. } => {
+                frame.dst_addr
+            }
         };
 
         let is_ipv6_multicast = dst_mac.bytes.starts_with(&[0x33, 0x33]);
@@ -357,7 +358,7 @@ impl Slirp {
                         else {
                             return;
                         };
-                        self.handle_ipv4_packet(&packet, ip_packet_slice, responses)
+                        self.handle_ipv4_packet(&packet, ip_packet_slice, responses);
                     }
                     IpPacket::V6(header, _) => {
                         let eth_header_len = match packet.ethernet {
@@ -370,15 +371,15 @@ impl Slirp {
                         else {
                             return;
                         };
-                        self.handle_ipv6_packet(&packet, ip_packet_slice, responses)
+                        self.handle_ipv6_packet(&packet, ip_packet_slice, responses);
                     }
                 },
                 NetworkPacket::Arp(arp_packet) => {
                     if let Some(arp_reply_payload) = self.arp_table.handle_packet(arp_packet) {
                         let mut eth_reply_buf = Vec::with_capacity(14 + arp_reply_payload.len());
                         let dst_mac = match packet.ethernet {
-                            EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                            EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                            EthernetPacket::Untagged { frame, .. }
+                            | EthernetPacket::Vlan { frame, .. } => frame.src_addr,
                         };
                         let src_mac = self.config.gateway_mac;
 
@@ -407,8 +408,9 @@ impl Slirp {
         };
 
         let guest_mac = match packet.ethernet {
-            EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-            EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+            EthernetPacket::Untagged { frame, .. } | EthernetPacket::Vlan { frame, .. } => {
+                frame.src_addr
+            }
         };
         let source_ip = Ipv4Addr::from(header.source_addr);
         if !source_ip.is_unspecified() {
@@ -455,8 +457,9 @@ impl Slirp {
             return;
         };
         let guest_mac = match packet.ethernet {
-            EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-            EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+            EthernetPacket::Untagged { frame, .. } | EthernetPacket::Vlan { frame, .. } => {
+                frame.src_addr
+            }
         };
         let source_ip = Ipv6Addr::from(header.source_addr);
         if !source_ip.is_unspecified() {
@@ -565,8 +568,9 @@ impl Slirp {
         // 1a. Handle TFTP
         if dest_port == TFTP_PORT || self.tftp_manager.has_session_with_tid(dest_port) {
             let guest_mac = match packet.ethernet {
-                EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                EthernetPacket::Untagged { frame, .. } | EthernetPacket::Vlan { frame, .. } => {
+                    frame.src_addr
+                }
             };
             self.tftp_manager.handle_packet(
                 responses,
@@ -631,10 +635,7 @@ impl Slirp {
     fn poll_timers(&mut self, responses: &mut Vec<SlirpResponse>) {
         for event in self.timer_manager.tick() {
             match event {
-                TimerEvent::Tcp(conn_id) => {
-                    self.tcp_manager.handle_timer(responses, &mut self.timer_manager, conn_id);
-                }
-                TimerEvent::TcpRetransmit(conn_id) => {
+                TimerEvent::Tcp(conn_id) | TimerEvent::TcpRetransmit(conn_id) => {
                     self.tcp_manager.handle_timer(responses, &mut self.timer_manager, conn_id);
                 }
                 TimerEvent::NdpRouterAdvertisement => {
@@ -647,7 +648,7 @@ impl Slirp {
                     self.timer_manager
                         .schedule(Duration::from_secs(600), TimerEvent::NdpRouterAdvertisement);
                 }
-                _ => {}
+                TimerEvent::Test => {}
             }
         }
         if let Some(duration) = self.timer_manager.next_event_in() {
@@ -813,8 +814,7 @@ impl Slirp {
                 .udp_manager
                 .flows
                 .get(&flow.guest_addr)
-                .map(|(_, real_dest)| *real_dest)
-                .unwrap_or(flow.original_dest);
+                .map_or(flow.original_dest, |(_, real_dest)| *real_dest);
 
             responses.push(SlirpResponse::EstablishConnection(
                 conn_id,

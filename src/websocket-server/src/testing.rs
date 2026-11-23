@@ -102,7 +102,7 @@ impl ManualWebSocketClient {
                         ws.send(Message::Pong(data)).expect("Failed to pong");
                     }
                     Message::Close(_) => return Bytes::new(),
-                    _ => continue,
+                    _ => {}
                 }
             }
         })

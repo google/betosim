@@ -365,15 +365,14 @@ pub(crate) fn from_proto_orientation(o: ProtoOrientation) -> ApiOrientation {
 
 pub(crate) fn from_proto_chip_kind(k: ProtoChipKind) -> Option<ApiChipKind> {
     match k {
-        ProtoChipKind::BLUETOOTH => Some(ApiChipKind::BLUETOOTH),
+        ProtoChipKind::BLUETOOTH | ProtoChipKind::BLUETOOTH_BEACON => Some(ApiChipKind::BLUETOOTH),
         ProtoChipKind::WIFI => Some(ApiChipKind::WIFI),
         ProtoChipKind::UWB => Some(ApiChipKind::UWB),
-        ProtoChipKind::BLUETOOTH_BEACON => Some(ApiChipKind::BLUETOOTH),
         ProtoChipKind::NFC => Some(ApiChipKind::NFC),
         ProtoChipKind::CELLULAR => Some(ApiChipKind::CELLULAR),
         ProtoChipKind::CELLULAR_DATA => Some(ApiChipKind::CELLULAR_DATA),
         ProtoChipKind::ETHERNET => Some(ApiChipKind::ETHERNET),
-        _ => None,
+        ProtoChipKind::UNSPECIFIED => None,
     }
 }
 
@@ -382,7 +381,7 @@ pub(crate) fn to_proto_link(l: ApiLink) -> ProtoLink {
     link.id = l.id.0;
     link.sender_id = l.sender.0;
     link.receiver_id = l.receiver.0;
-    link.rssi = l.rssi as i32;
+    link.rssi = i32::from(l.rssi);
     link.kind = EnumOrUnknown::new(to_proto_chip_kind(l.kind));
     link.link_kind = EnumOrUnknown::new(match l.kind {
         ApiChipKind::BLUETOOTH => ProtoPhyKind::BLUETOOTH_LOW_ENERGY,
@@ -501,17 +500,17 @@ pub(crate) fn from_proto_link(proto: ProtoLink) -> Option<ApiLink> {
     let receiver = netsim_model::ChipId(proto.receiver_id);
     let rssi = proto.rssi as i8;
 
-    let kind = if proto.kind.enum_value_or_default() != ProtoChipKind::UNSPECIFIED {
-        from_proto_chip_kind(proto.kind.enum_value_or_default())
-    } else {
+    let kind = if proto.kind.enum_value_or_default() == ProtoChipKind::UNSPECIFIED {
         match proto.link_kind.enum_value_or_default() {
             ProtoPhyKind::BLUETOOTH_CLASSIC | ProtoPhyKind::BLUETOOTH_LOW_ENERGY => {
                 Some(ApiChipKind::BLUETOOTH)
             }
             ProtoPhyKind::WIFI | ProtoPhyKind::WIFI_RTT => Some(ApiChipKind::WIFI),
             ProtoPhyKind::UWB => Some(ApiChipKind::UWB),
-            _ => None,
+            ProtoPhyKind::NONE => None,
         }
+    } else {
+        from_proto_chip_kind(proto.kind.enum_value_or_default())
     };
 
     if let Some(kind) = kind {

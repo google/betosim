@@ -121,9 +121,8 @@ fn test_tftp_rrq_success() {
 
     // Should return 1 packet (DATA block 1)
     assert_eq!(responses.len(), 1);
-    let packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     let (opcode, block_num, data) = parse_tftp_packet(packet);
@@ -162,9 +161,8 @@ fn test_tftp_large_file() {
     let responses = inject_udp_packet(&mut slirp, &rrq, 23456, 69);
     assert_eq!(responses.len(), 1);
 
-    let packet1 = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet"),
+    let SlirpResponse::Packet(packet1) = &responses[0] else {
+        panic!("Expected Packet");
     };
     let (opcode, block_num, data) = parse_tftp_packet(packet1);
     assert_eq!(opcode, 3);
@@ -179,9 +177,8 @@ fn test_tftp_large_file() {
     let responses2 = inject_udp_packet(&mut slirp, &ack1, 23456, tid);
     assert_eq!(responses2.len(), 1);
 
-    let packet2 = match &responses2[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet"),
+    let SlirpResponse::Packet(packet2) = &responses2[0] else {
+        panic!("Expected Packet");
     };
     let (opcode, block_num, data) = parse_tftp_packet(packet2);
     assert_eq!(opcode, 3);
@@ -211,18 +208,16 @@ fn test_tftp_retransmission() {
     // 1. Send RRQ -> DATA 1
     let rrq = build_rrq_packet("large.bin");
     let responses = inject_udp_packet(&mut slirp, &rrq, 23456, 69);
-    let packet1 = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet"),
+    let SlirpResponse::Packet(packet1) = &responses[0] else {
+        panic!("Expected Packet");
     };
     let tid = get_udp_dest_port(packet1);
 
     // 2. Send ACK 1 -> DATA 2
     let ack1 = build_ack_packet(1);
     let responses2 = inject_udp_packet(&mut slirp, &ack1, 23456, tid);
-    let packet2 = match &responses2[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet"),
+    let SlirpResponse::Packet(packet2) = &responses2[0] else {
+        panic!("Expected Packet");
     };
     let (_, block_num, _) = parse_tftp_packet(packet2);
     assert_eq!(block_num, 2);
@@ -232,9 +227,8 @@ fn test_tftp_retransmission() {
     assert_eq!(responses3.len(), 1);
 
     // Server must retransmit DATA 2!
-    let packet3 = match &responses3[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet"),
+    let SlirpResponse::Packet(packet3) = &responses3[0] else {
+        panic!("Expected Packet");
     };
     let (opcode, block_num, data) = parse_tftp_packet(packet3);
     assert_eq!(opcode, 3);
@@ -254,9 +248,8 @@ fn test_tftp_security_traversal() {
     let responses = inject_udp_packet(&mut slirp, &rrq, 23456, 69);
 
     assert_eq!(responses.len(), 1);
-    let packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet"),
+    let SlirpResponse::Packet(packet) = &responses[0] else {
+        panic!("Expected Packet");
     };
 
     let (opcode, err_code, _) = parse_tftp_packet(packet);

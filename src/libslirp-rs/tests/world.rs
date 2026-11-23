@@ -320,9 +320,8 @@ impl World {
                 break;
             }
 
-            let rx = match self.rx.as_ref() {
-                Some(r) => r,
-                None => break,
+            let Some(rx) = self.rx.as_ref() else {
+                break;
             };
 
             match rx.recv_timeout(remaining.min(Duration::from_millis(500))) {
@@ -388,7 +387,7 @@ impl World {
                         }
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }

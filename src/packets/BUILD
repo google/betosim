@@ -28,6 +28,7 @@ netsim_rust_library(
     crate_name = "netsim_packets",
     edition = "2024",
     enable_doc_test = False,
+    pedantic_clippy = True,
     proc_macro_deps = [
         "@num-derive",
     ],

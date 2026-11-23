@@ -45,19 +45,16 @@ pub(crate) async fn run_native_slirp_loop(
                 slirp_engine.handle_request(request)
             }));
 
-            match result {
-                Ok(responses) => {
-                    for response in responses {
-                        if slirp_response_sender.send(response).await.is_err() {
-                            error!("slirp_response_sender closed, exiting slirp task");
-                            return;
-                        }
+            if let Ok(responses) = result {
+                for response in responses {
+                    if slirp_response_sender.send(response).await.is_err() {
+                        error!("slirp_response_sender closed, exiting slirp task");
+                        return;
                     }
                 }
-                Err(_) => {
-                    error!("PANIC in slirp task, exiting task");
-                    return;
-                }
+            } else {
+                error!("PANIC in slirp task, exiting task");
+                return;
             }
         }
         info!("slirp task finished");

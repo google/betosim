@@ -275,12 +275,12 @@ mod tests {
         for i in 0..(NetsimRadioStats::MAX_INVALID_PACKETS + overflow) {
             stats.push_invalid_packet(InvalidPacket {
                 reason: InvalidPacketReason::ParseError,
-                description: format!("description {}", i),
+                description: format!("description {i}"),
             });
         }
         assert_eq!(stats.invalid_packets.len(), NetsimRadioStats::MAX_INVALID_PACKETS);
         assert_eq!(stats.invalid_packets[0].reason, InvalidPacketReason::ParseError);
-        assert_eq!(stats.invalid_packets[0].description, format!("description {}", overflow));
+        assert_eq!(stats.invalid_packets[0].description, format!("description {overflow}"));
         assert_eq!(
             stats.invalid_packets[NetsimRadioStats::MAX_INVALID_PACKETS - 1].description,
             format!("description {}", NetsimRadioStats::MAX_INVALID_PACKETS + overflow - 1)

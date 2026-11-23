@@ -157,7 +157,7 @@ impl AsyncRead for AsyncGenericFd {
                     return Poll::Ready(Ok(()));
                 }
                 Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_would_block) => continue,
+                Err(_would_block) => {}
             }
         }
     }
@@ -176,7 +176,7 @@ impl AsyncWrite for AsyncGenericFd {
             match guard.try_io(|inner| write(inner, buf).map_err(io::Error::from)) {
                 Ok(Ok(bytes_written)) => return Poll::Ready(Ok(bytes_written)),
                 Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_would_block) => continue,
+                Err(_would_block) => {}
             }
         }
     }
@@ -353,7 +353,7 @@ async fn accept_one_connection(async_fd: &AsyncFd<OwnedFd>) -> Result<(OwnedFd, 
                 return Ok((connected_fd, cloned_fd));
             }
             Ok(Err(err)) => return Err(PacketStreamError::Io(err)),
-            Err(_would_block) => continue,
+            Err(_would_block) => {}
         }
     }
 }
@@ -375,9 +375,9 @@ fn create_stream_and_sink(
             name: chip_kind.clone(),
             kind,
             id: chip_kind.clone(),
-            manufacturer: "".to_string(),
-            product_name: "".to_string(),
-            address: "".to_string(),
+            manufacturer: String::new(),
+            product_name: String::new(),
+            address: String::new(),
             sim_type,
             sim_profile,
             loopback: false,
@@ -551,7 +551,7 @@ mod tests {
         match std::fs::remove_file(socket_path) {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => panic!("failed to remove stale socket {socket_path:?}: {e}"),
+            Err(e) => panic!("failed to remove stale socket {}: {e}", socket_path.display()),
         }
         UnixListener::bind(socket_path).unwrap()
     }

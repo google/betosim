@@ -192,9 +192,8 @@ fn test_fragmented_icmp_echo_integration() {
     let mut reassembled_reply_ip = None;
 
     for response in responses {
-        let packet_bytes = match response {
-            SlirpResponse::Packet(p) => p,
-            _ => panic!("Expected Packet response"),
+        let SlirpResponse::Packet(packet_bytes) = response else {
+            panic!("Expected Packet response");
         };
 
         let (eth_frame, eth_payload) = EthernetFrame::parse(&packet_bytes).unwrap();
@@ -263,9 +262,8 @@ fn test_icmp_port_unreachable_integration() {
 
     assert_eq!(responses.len(), 1, "Should return exactly one response");
 
-    let response_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     let (eth_frame, eth_payload) = EthernetFrame::parse(response_packet).unwrap();
@@ -332,9 +330,8 @@ fn test_icmp_time_exceeded_integration() {
 
     assert_eq!(responses.len(), 1, "Should return exactly one response");
 
-    let response_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     let (eth_frame, eth_payload) = EthernetFrame::parse(response_packet).unwrap();
@@ -382,9 +379,8 @@ fn test_ndp_ns_gateway_host_ipv6() {
     let responses = slirp.handle_request(SlirpRequest::Packet(eth_packet));
     assert_eq!(responses.len(), 1, "Should return exactly one response");
 
-    let response_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     let (eth_frame_reply, rest) = EthernetFrame::ref_from_prefix(response_packet).unwrap();
@@ -442,9 +438,8 @@ fn test_ndp_ns_gateway_link_local() {
 
     let responses_ll = slirp.handle_request(SlirpRequest::Packet(eth_ll_packet));
     assert_eq!(responses_ll.len(), 1);
-    let response_ll_packet = match &responses_ll[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_ll_packet) = &responses_ll[0] else {
+        panic!("Expected Packet response");
     };
 
     let (_, rest) = EthernetFrame::ref_from_prefix(response_ll_packet).unwrap();
@@ -483,9 +478,8 @@ fn test_ndp_ns_gateway_dad_multicast() {
 
     let responses_dad = slirp.handle_request(SlirpRequest::Packet(eth_dad_packet));
     assert_eq!(responses_dad.len(), 1);
-    let response_dad_packet = match &responses_dad[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_dad_packet) = &responses_dad[0] else {
+        panic!("Expected Packet response");
     };
 
     let (eth_frame_dad_reply, rest) = EthernetFrame::ref_from_prefix(response_dad_packet).unwrap();
@@ -609,9 +603,8 @@ fn test_dns_redirection_and_reply_integration() {
     // 5. Verify the reply is translated back and sent to the guest
     assert_eq!(reply_responses.len(), 1, "Should return exactly one reply packet");
 
-    let response_packet = match &reply_responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &reply_responses[0] else {
+        panic!("Expected Packet response");
     };
 
     // Parse Ethernet
@@ -652,9 +645,8 @@ fn test_host_port_forwarding_integration() {
 
     // 2. Verify Slirp sends SYN to guest
     assert_eq!(responses.len(), 1, "Should return exactly one response (SYN packet)");
-    let syn_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(syn_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     // Parse Ethernet
@@ -755,9 +747,8 @@ fn test_host_port_forwarding_integration() {
         slirp.handle_request(SlirpRequest::Data(conn_id, Bytes::copy_from_slice(host_data)));
 
     assert_eq!(responses_data.len(), 1, "Should send data packet to guest");
-    let data_packet = match &responses_data[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(data_packet) = &responses_data[0] else {
+        panic!("Expected Packet response");
     };
 
     let (_, eth_payload_data) = EthernetFrame::parse(data_packet).unwrap();
@@ -1145,9 +1136,8 @@ fn test_save_restore_integration() {
     let eth_request_b = wrap_dhcp_packet(&request_b, config.guest_mac);
     let responses_request_b = slirp_b.handle_request(SlirpRequest::Packet(eth_request_b));
     assert_eq!(responses_request_b.len(), 1, "Should reply with DHCPACK after restore");
-    let ack_packet_b = match &responses_request_b[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(ack_packet_b) = &responses_request_b[0] else {
+        panic!("Expected Packet response");
     };
     let (_, offer_ip_b) = EthernetFrame::parse(ack_packet_b).unwrap();
     let (_, offer_udp_b) = Ipv4Header::parse(offer_ip_b).unwrap();
@@ -1216,9 +1206,8 @@ fn test_save_restore_integration() {
     let reply_responses =
         slirp_b.handle_request(SlirpRequest::Data(udp_conn_id, Bytes::copy_from_slice(dns_reply)));
     assert_eq!(reply_responses.len(), 1, "Should return exactly one reply packet after restore");
-    let response_packet = match &reply_responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &reply_responses[0] else {
+        panic!("Expected Packet response");
     };
     let (_, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
     let (ip_header_reply, ip_payload_reply) = Ipv4Header::parse(eth_payload_reply).unwrap();
@@ -1504,9 +1493,8 @@ fn test_udp_ipv6_integration() {
         slirp.handle_request(SlirpRequest::Data(udp_conn_id, Bytes::copy_from_slice(dns_reply)));
 
     assert_eq!(reply_responses.len(), 1, "Should return exactly one reply packet");
-    let response_packet = match &reply_responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &reply_responses[0] else {
+        panic!("Expected Packet response");
     };
 
     // Parse reply packet to verify it is a valid IPv6 UDP packet
@@ -1537,9 +1525,8 @@ fn test_ndp_router_solicitation_unicast_source() {
     let responses_unicast = slirp.handle_request(SlirpRequest::Packet(Bytes::from(eth_rs)));
 
     assert_eq!(responses_unicast.len(), 1, "Should return exactly one reply packet");
-    let response_packet = match &responses_unicast[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet) = &responses_unicast[0] else {
+        panic!("Expected Packet response");
     };
 
     let (eth_frame_reply, rest) = EthernetFrame::ref_from_prefix(response_packet).unwrap();
@@ -1610,9 +1597,8 @@ fn test_ndp_router_solicitation_unspecified_source() {
     let responses_unspec = slirp.handle_request(SlirpRequest::Packet(Bytes::from(eth_rs_unspec)));
 
     assert_eq!(responses_unspec.len(), 1, "Should return exactly one reply packet");
-    let response_packet_unspec = match &responses_unspec[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(response_packet_unspec) = &responses_unspec[0] else {
+        panic!("Expected Packet response");
     };
 
     let (eth_frame_reply_unspec, rest) =
@@ -1775,9 +1761,8 @@ fn test_icmpv6_echo_integration() {
     let responses = slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_packet)));
 
     assert_eq!(responses.len(), 1, "Should return exactly one reply packet");
-    let reply_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(reply_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     // Verify Reply
@@ -1845,9 +1830,8 @@ fn test_icmpv6_port_unreachable_integration() {
     let responses = slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_packet)));
 
     assert_eq!(responses.len(), 1, "Should return exactly one reply packet");
-    let reply_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(reply_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     // Verify Reply is ICMPv6 Port Unreachable
@@ -1947,9 +1931,8 @@ fn test_dhcpv6_integration() {
     let responses = slirp.handle_request(SlirpRequest::Packet(Bytes::copy_from_slice(&eth_packet)));
 
     assert_eq!(responses.len(), 1, "Should return exactly one reply packet");
-    let reply_packet = match &responses[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected Packet response"),
+    let SlirpResponse::Packet(reply_packet) = &responses[0] else {
+        panic!("Expected Packet response");
     };
 
     // Parse Reply
@@ -2035,7 +2018,7 @@ fn test_tcp_guestfwd_integration() {
         config.guest_ipv4,
         match virtual_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("Expected IPv4"),
+            IpAddr::V6(_) => panic!("Expected IPv4"),
         },
     )
     .unwrap();
@@ -2055,7 +2038,7 @@ fn test_tcp_guestfwd_integration() {
         config.guest_ipv4,
         match virtual_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("Expected IPv4"),
+            IpAddr::V6(_) => panic!("Expected IPv4"),
         },
     )
     .unwrap();
@@ -2096,7 +2079,7 @@ fn test_tcp_guestfwd_integration() {
                     Ipv4Addr::from(ip_header.source_addr),
                     match virtual_addr.ip() {
                         IpAddr::V4(ip) => ip,
-                        _ => panic!("Expected IPv4"),
+                        IpAddr::V6(_) => panic!("Expected IPv4"),
                     }
                 );
             }
@@ -2138,7 +2121,7 @@ fn test_udp_guestfwd_integration() {
         config.guest_ipv4,
         match virtual_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("Expected IPv4"),
+            IpAddr::V6(_) => panic!("Expected IPv4"),
         },
     )
     .unwrap();
@@ -2237,9 +2220,8 @@ fn test_tcp_connect_failure_sends_icmp_unreachable() {
 
     // Verify it returns an ICMP Host Unreachable packet!
     assert_eq!(replies.len(), 1);
-    let reply_packet = match &replies[0] {
-        SlirpResponse::Packet(p) => p,
-        _ => panic!("Expected a packet response, got {replies:?}"),
+    let SlirpResponse::Packet(reply_packet) = &replies[0] else {
+        panic!("Expected a packet response, got {replies:?}");
     };
 
     // Parse reply packet
@@ -2637,9 +2619,8 @@ impl World {
         expected_payload: &[u8],
     ) {
         assert_eq!(self.last_responses.len(), 1, "Should return exactly one reply packet");
-        let response_packet = match &self.last_responses[0] {
-            SlirpResponse::Packet(p) => p,
-            _ => panic!("Expected Packet response"),
+        let SlirpResponse::Packet(response_packet) = &self.last_responses[0] else {
+            panic!("Expected Packet response");
         };
         let (eth_frame_reply, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
         assert_eq!(eth_frame_reply.dst_addr, self.config.guest_mac);
@@ -2661,9 +2642,8 @@ impl World {
         expected_payload: &[u8],
     ) {
         assert_eq!(self.last_responses.len(), 1, "Should return exactly one reply packet");
-        let response_packet = match &self.last_responses[0] {
-            SlirpResponse::Packet(p) => p,
-            _ => panic!("Expected Packet response"),
+        let SlirpResponse::Packet(response_packet) = &self.last_responses[0] else {
+            panic!("Expected Packet response");
         };
         let (eth_frame_reply, eth_payload_reply) = EthernetFrame::parse(response_packet).unwrap();
         assert_eq!(eth_frame_reply.dst_addr, self.config.guest_mac);

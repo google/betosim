@@ -766,45 +766,38 @@ fn register_icmp_connection(
     let reader_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         loop {
-            match reader_socket.recv_from(&mut buf).await {
-                Ok((n, src_addr)) => {
-                    let Some(slice) = buf.get(..n) else {
-                        continue;
-                    };
-                    let mut packet_data = slice.to_vec();
-                    // Rewrite the ICMP ID back to the guest's original ID only for Echo
-                    // Reply/Request!
-                    if let [icmp_type, _, c0, c1, id0, id1, _, _, ..] = packet_data.as_mut_slice()
-                        && ((!is_ipv6 && matches!(*icmp_type, 0 | 8))
-                            || (is_ipv6 && matches!(*icmp_type, 128 | 129)))
+            if let Ok((n, src_addr)) = reader_socket.recv_from(&mut buf).await {
+                let Some(slice) = buf.get(..n) else {
+                    continue;
+                };
+                let mut packet_data = slice.to_vec();
+                // Rewrite the ICMP ID back to the guest's original ID only for Echo
+                // Reply/Request!
+                if let [icmp_type, _, c0, c1, id0, id1, _, _, ..] = packet_data.as_mut_slice()
+                    && ((!is_ipv6 && matches!(*icmp_type, 0 | 8))
+                        || (is_ipv6 && matches!(*icmp_type, 128 | 129)))
+                {
+                    [*id0, *id1] = guest_id.to_be_bytes();
+                    [*c0, *c1] = [0, 0];
+                    let checksum = if !is_ipv6 {
+                        Some(netsim_packets::ipv4_checksum(&packet_data))
+                    } else if let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) =
+                        (src_addr.ip(), guest_ip)
                     {
-                        [*id0, *id1] = guest_id.to_be_bytes();
-                        [*c0, *c1] = [0, 0];
-                        let checksum = if !is_ipv6 {
-                            Some(netsim_packets::ipv4_checksum(&packet_data))
-                        } else if let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) =
-                            (src_addr.ip(), guest_ip)
-                        {
-                            Some(netsim_packets::icmpv6_checksum(&packet_data, src_v6, dst_v6))
-                        } else {
-                            None
-                        };
-                        if let (Some(csum), [_, _, c0, c1, ..]) =
-                            (checksum, packet_data.as_mut_slice())
-                        {
-                            [*c0, *c1] = csum.to_be_bytes();
-                        }
+                        Some(netsim_packets::icmpv6_checksum(&packet_data, src_v6, dst_v6))
+                    } else {
+                        None
+                    };
+                    if let (Some(csum), [_, _, c0, c1, ..]) = (checksum, packet_data.as_mut_slice())
+                    {
+                        [*c0, *c1] = csum.to_be_bytes();
                     }
+                }
 
-                    slirp_sender
-                        .send(SlirpRequest::Data(conn_id, Bytes::from(packet_data)))
-                        .await
-                        .ok();
-                }
-                Err(_) => {
-                    slirp_sender.send(SlirpRequest::ConnectionClosed(conn_id)).await.ok();
-                    break;
-                }
+                slirp_sender.send(SlirpRequest::Data(conn_id, Bytes::from(packet_data))).await.ok();
+            } else {
+                slirp_sender.send(SlirpRequest::ConnectionClosed(conn_id)).await.ok();
+                break;
             }
         }
     });

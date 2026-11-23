@@ -42,7 +42,7 @@ pub(crate) fn execute(cmd: SmsCommand, client: &impl CellClient, verbose: bool) 
                 req.set_receive_pdu(action);
             })?;
             if verbose {
-                println!("PDU received on cell {}.", id);
+                println!("PDU received on cell {id}.");
             }
         }
     }

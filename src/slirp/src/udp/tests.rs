@@ -67,9 +67,8 @@ fn test_udp_flow_lifecycle() {
 
     // 1. Establish flow
     udp_manager.handle_packet(&mut responses, payload, source, dest, None);
-    let conn_id = match responses[0] {
-        SlirpResponse::EstablishConnection(id, _) => id,
-        _ => panic!("Expected EstablishConnection"),
+    let SlirpResponse::EstablishConnection(conn_id, _) = responses[0] else {
+        panic!("Expected EstablishConnection");
     };
 
     // Verify get_connections

@@ -81,6 +81,89 @@ NETSIM_TEST_CLIPPY_ALLOWS = {
     "unwrap_used": "allow",
 }
 
+NETSIM_PEDANTIC_CLIPPY_LINTS = {
+    "checked_conversions": "warn",
+    "collapsible_else_if": "warn",
+    "comparison_chain": "warn",
+    "copy_iterator": "warn",
+    "doc_broken_link": "warn",
+    "expl_impl_clone_on_copy": "warn",
+    "explicit_deref_methods": "warn",
+    "explicit_into_iter_loop": "warn",
+    "filter_map_next": "warn",
+    "flat_map_option": "warn",
+    "from_iter_instead_of_collect": "warn",
+    "invalid_upcast_comparisons": "warn",
+    "iter_filter_is_ok": "warn",
+    "iter_filter_is_some": "warn",
+    "iter_not_returning_iterator": "warn",
+    "macro_use_imports": "warn",
+    "manual_ilog2": "warn",
+    "manual_instant_elapsed": "warn",
+    "manual_is_power_of_two": "warn",
+    "manual_midpoint": "warn",
+    "mismatching_type_param_order": "warn",
+    "mut_mut": "warn",
+    "needless_bitwise_bool": "warn",
+    "no_mangle_with_rust_abi": "warn",
+    "non_std_lazy_statics": "warn",
+    "option_as_ref_cloned": "warn",
+    "ptr_offset_by_literal": "warn",
+    "range_minus_one": "warn",
+    "ref_binding_to_reference": "warn",
+    "ref_option_ref": "warn",
+    "same_functions_in_if_condition": "warn",
+    "same_length_and_capacity": "warn",
+    "self_only_used_in_recursion": "warn",
+    "should_panic_without_expect": "warn",
+    "str_split_at_newline": "warn",
+    "string_add_assign": "warn",
+    "transmute_ptr_to_ptr": "warn",
+    "unicode_not_nfc": "warn",
+    "unnecessary_box_returns": "warn",
+    "unnecessary_join": "warn",
+    "unnecessary_literal_bound": "warn",
+    "unsafe_derive_deserialize": "warn",
+    "used_underscore_items": "warn",
+    "verbose_bit_mask": "warn",
+    "zero_sized_map_values": "warn",
+    "uninlined_format_args": "warn",
+    "cast_lossless": "warn",
+    "manual_let_else": "warn",
+    "semicolon_if_nothing_returned": "warn",
+    "redundant_closure_for_method_calls": "warn",
+    "match_same_arms": "warn",
+    "ignored_unit_patterns": "warn",
+    "assigning_clones": "warn",
+    "bool_to_int_with_if": "warn",
+    "needless_raw_string_hashes": "warn",
+    "match_wildcard_for_single_variants": "warn",
+    "map_unwrap_or": "warn",
+    "single_match_else": "warn",
+    "if_not_else": "warn",
+    "manual_string_new": "warn",
+    "elidable_lifetime_names": "warn",
+    "used_underscore_binding": "warn",
+    "implicit_clone": "warn",
+    "needless_continue": "warn",
+    "redundant_else": "warn",
+    "explicit_iter_loop": "warn",
+    "unnecessary_debug_formatting": "warn",
+    "format_collect": "warn",
+    "unnecessary_semicolon": "warn",
+    "case_sensitive_file_extension_comparisons": "warn",
+    "no_effect_underscore_binding": "warn",
+    "inconsistent_struct_constructor": "warn",
+    "manual_is_variant_and": "warn",
+    "maybe_infinite_iter": "warn",
+    "missing_fields_in_debug": "warn",
+    "needless_for_each": "warn",
+    "ref_option": "warn",
+    "single_char_pattern": "warn",
+    "unnested_or_patterns": "warn",
+    "match_bool": "warn",
+}
+
 # Unfortunately, we can't use the rules_rust version because netsim is in external/.
 def _netsim_rustfmt_test_impl(ctx):
     toolchain = ctx.toolchains["@rules_rust//rust:toolchain_type"]
@@ -161,6 +244,7 @@ def netsim_rust_library(
         enable_integration_test = True,
         enable_doc = True,
         enable_doc_test = True,
+        pedantic_clippy = False,
         test_args = [],
         integration_test_args = [],
         **kwargs):
@@ -191,16 +275,22 @@ def netsim_rust_library(
         enable_integration_test: Whether to generate an integration test target if files exist.
         enable_doc: Whether to generate documentation.
         enable_doc_test: Whether to generate a doc test target.
+        pedantic_clippy: Whether to enable NETSIM_PEDANTIC_CLIPPY_LINTS.
         test_args: Command-line arguments passed to the unit test binary.
         integration_test_args: Command-line arguments passed to the integration test binary.
         **kwargs: Additional arguments passed to rust_library.
     """
 
-    default_lint_config = (
-        Label("//src:test_clippy_lint_config") if kwargs.get("testonly", False) else Label("//src:clippy_lint_config")
-    )
+    if pedantic_clippy:
+        prod_lint_config = Label("//src:pedantic_clippy_lint_config")
+        test_lint_cfg = Label("//src:pedantic_test_clippy_lint_config")
+    else:
+        prod_lint_config = Label("//src:clippy_lint_config")
+        test_lint_cfg = Label("//src:test_clippy_lint_config")
+
+    default_lint_config = test_lint_cfg if kwargs.get("testonly", False) else prod_lint_config
     lint_config = kwargs.pop("lint_config", default_lint_config if enable_clippy else None)
-    test_lint_config = Label("//src:test_clippy_lint_config") if enable_clippy else None
+    test_lint_config = test_lint_cfg if enable_clippy else None
 
     # 1. The Main Library (Always created)
     rustc_flags = NETSIM_RUSTC_FLAGS + kwargs.pop("rustc_flags", [])
@@ -358,6 +448,7 @@ def netsim_rust_binary(
         # Feature Flags (Default to True for safety)
         enable_clippy = True,
         enable_rustfmt = True,
+        pedantic_clippy = False,
         **kwargs):
     """
     Defines a Netsim Rust binary with standard targets.
@@ -374,12 +465,18 @@ def netsim_rust_binary(
         crate_features: the crate features
         enable_clippy: Whether to enable clippy checks.
         enable_rustfmt: Whether to enable rustfmt checks.
+        pedantic_clippy: Whether to enable NETSIM_PEDANTIC_CLIPPY_LINTS.
         **kwargs: Additional arguments passed to rust_binary.
     """
 
-    default_lint_config = (
-        Label("//src:test_clippy_lint_config") if kwargs.get("testonly", False) else Label("//src:clippy_lint_config")
-    )
+    if pedantic_clippy:
+        prod_lint_config = Label("//src:pedantic_clippy_lint_config")
+        test_lint_cfg = Label("//src:pedantic_test_clippy_lint_config")
+    else:
+        prod_lint_config = Label("//src:clippy_lint_config")
+        test_lint_cfg = Label("//src:test_clippy_lint_config")
+
+    default_lint_config = test_lint_cfg if kwargs.get("testonly", False) else prod_lint_config
     lint_config = kwargs.pop("lint_config", default_lint_config if enable_clippy else None)
 
     # 1. The Main Binary

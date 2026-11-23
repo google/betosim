@@ -32,8 +32,6 @@ pub(super) fn parse_tcp_options(
     };
     while !options.is_empty() {
         match *options {
-            // End of options
-            [0, ..] => break,
             // NOP
             [1, ref rest @ ..] => options = rest,
             // MSS
@@ -41,13 +39,13 @@ pub(super) fn parse_tcp_options(
                 mss = Some(u16::from_be_bytes([m0, m1]));
                 options = rest;
             }
-            [2, ..] => break,
             // Window Scale
             [3, 3, shift, ref rest @ ..] => {
                 window_scale = Some(shift);
                 options = rest;
             }
-            [3, ..] => break,
+            // End of options or truncated MSS/Window Scale
+            [] | [_] | [0 | 2 | 3, ..] => break,
             // SACK
             [5, len, ref rest @ ..] => {
                 let len = len as usize;
@@ -78,7 +76,6 @@ pub(super) fn parse_tcp_options(
                 };
                 options = next_options;
             }
-            _ => break,
         }
     }
     (mss, window_scale, sack_blocks)

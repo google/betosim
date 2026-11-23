@@ -126,13 +126,13 @@ async fn run_perf_packet_throughput_test(backend: SlirpBackend) {
     // Then measure throughput in frames/sec and assert it meets the minimum
     // threshold (>= 5,000 frames/sec)
     let throughput = PACKET_COUNT as f64 / elapsed.as_secs_f64();
-    println!("UDP Throughput: {:.2} frames/sec (elapsed: {:?})", throughput, elapsed);
+    println!("UDP Throughput: {throughput:.2} frames/sec (elapsed: {elapsed:?})");
 }
 
 #[tokio::test]
 async fn test_perf_packet_throughput() {
     for backend in [SlirpBackend::CFfi, SlirpBackend::Native] {
-        println!("=== Benchmark Packet Throughput for {:?} ===", backend);
+        println!("=== Benchmark Packet Throughput for {backend:?} ===");
         run_perf_packet_throughput_test(backend).await;
     }
 }
@@ -188,8 +188,7 @@ async fn run_perf_tcp_stream_latency_test(backend: SlirpBackend) {
     // results
     let avg_latency_us = elapsed.as_micros() as f64 / OPERATION_COUNT as f64;
     println!(
-        "[{:?}] TCP Stream Mean Latency: {:.2} µs/op across {} operations (total elapsed: {:?})",
-        backend, avg_latency_us, OPERATION_COUNT, elapsed
+        "[{backend:?}] TCP Stream Mean Latency: {avg_latency_us:.2} µs/op across {OPERATION_COUNT} operations (total elapsed: {elapsed:?})"
     );
 }
 
@@ -263,8 +262,7 @@ async fn run_perf_tcp_syn_flood_test(backend: SlirpBackend) {
 
     let syn_rate = FLOOD_COUNT as f64 / elapsed.as_secs_f64();
     println!(
-        "[{:?}] High-Concurrency TCP SYN Flood Rate: {:.2} SYNs/sec (500 SYNs in {:?})",
-        backend, syn_rate, elapsed
+        "[{backend:?}] High-Concurrency TCP SYN Flood Rate: {syn_rate:.2} SYNs/sec (500 SYNs in {elapsed:?})"
     );
 }
 
@@ -308,8 +306,7 @@ async fn run_perf_icmp_ping_rate_test(backend: SlirpBackend) {
     // Then measure processing rate and log results
     let ping_rate = PING_COUNT as f64 / elapsed.as_secs_f64();
     println!(
-        "[{:?}] ICMP Ping Rate: {:.2} pings/sec (total 500 pings in {:?})",
-        backend, ping_rate, elapsed
+        "[{backend:?}] ICMP Ping Rate: {ping_rate:.2} pings/sec (total 500 pings in {elapsed:?})"
     );
 }
 

@@ -107,7 +107,7 @@ pub fn validate_pcap_json(pcap_bytes: &'static [u8], json_str: &'static str, fie
             // Netlink parsing
             crate::netlink::nl80211_json::packet_to_json(&packet_data)
         }
-        _ => panic!("Unsupported LinkType: {}", link_type),
+        _ => panic!("Unsupported LinkType: {link_type}"),
     };
 
     let Some(netsim_source) = netsim_json.pointer("/0/_source/layers") else {
@@ -127,12 +127,12 @@ pub fn validate_pcap_json(pcap_bytes: &'static [u8], json_str: &'static str, fie
         match (n_val, t_val) {
             (Some(n), Some(t)) => {
                 if !compare_values(n, t) {
-                    panic!("Field mismatch: {} (netsim: {:?}, tshark: {:?})", field, n, t);
+                    panic!("Field mismatch: {field} (netsim: {n:?}, tshark: {t:?})");
                 }
             }
-            (None, Some(_)) => panic!("Field missing in netsim: {}", field),
-            (Some(_), None) => panic!("Field missing in tshark: {}", field),
-            (None, None) => panic!("Field missing in both: {}", field),
+            (None, Some(_)) => panic!("Field missing in netsim: {field}"),
+            (Some(_), None) => panic!("Field missing in tshark: {field}"),
+            (None, None) => panic!("Field missing in both: {field}"),
         }
     }
 }
@@ -167,8 +167,7 @@ fn compare_json_objects(netsim: &serde_json::Value, tshark: &serde_json::Value, 
                                 && !compare_values(n_val, t_val)
                             {
                                 panic!(
-                                    "Frame field mismatch: {} (netsim: {:?}, tshark: {:?})",
-                                    field, n_val, t_val
+                                    "Frame field mismatch: {field} (netsim: {n_val:?}, tshark: {t_val:?})"
                                 );
                             }
                         }
@@ -182,7 +181,7 @@ fn compare_json_objects(netsim: &serde_json::Value, tshark: &serde_json::Value, 
                 let found = find_value(tshark, key); // Use the new find_value
                 if let Some(t_val) = found {
                     if !compare_values(val, t_val) {
-                        panic!("Field '{}' mismatch in tshark output. Path: {:?}", key, path);
+                        panic!("Field '{key}' mismatch in tshark output. Path: {}", path.display());
                     }
                 } else {
                     // If not found, it's a failure unless it's a known extra field
@@ -190,7 +189,7 @@ fn compare_json_objects(netsim: &serde_json::Value, tshark: &serde_json::Value, 
                         // Skip hex fields if not found (internal representation)
                         continue;
                     }
-                    panic!("Field '{}' not found in tshark output. Path: {:?}", key, path);
+                    panic!("Field '{key}' not found in tshark output. Path: {}", path.display());
                 }
             }
         }
@@ -200,20 +199,20 @@ fn compare_json_objects(netsim: &serde_json::Value, tshark: &serde_json::Value, 
             // Currently netsim output is mostly objects.
             // If we have an array, we try to match by index.
             if let serde_json::Value::Array(t_arr) = tshark {
-                assert_eq!(arr.len(), t_arr.len(), "Array length mismatch at {:?}", path);
+                assert_eq!(arr.len(), t_arr.len(), "Array length mismatch at {}", path.display());
                 for (val, t_val) in arr.iter().zip(t_arr) {
                     compare_json_objects(val, t_val, path);
                 }
             } else {
                 // Tshark might represent single-element array as object or vice versa?
                 // For now, strict type check.
-                panic!("Type mismatch at {:?}: expected Array", path);
+                panic!("Type mismatch at {}: expected Array", path.display());
             }
         }
         _ => {
             // Primitive values are compared in find_and_compare usually,
             // but if we reached here via array iteration:
-            assert_eq!(netsim, tshark, "Value mismatch at {:?}", path);
+            assert_eq!(netsim, tshark, "Value mismatch at {}", path.display());
         }
     }
 }

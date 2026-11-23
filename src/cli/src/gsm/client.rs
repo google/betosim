@@ -120,7 +120,7 @@ pub(crate) fn execute(cmd: GsmCommand, client: &impl CellClient, verbose: bool) 
                 req.set_remote_hold(action);
             })?;
             if verbose {
-                println!("Remote hold set to {} for cell {}.", on_hold, id);
+                println!("Remote hold set to {on_hold} for cell {id}.");
             }
         }
         GsmCommand::Signal(args) => {
@@ -195,7 +195,7 @@ pub(crate) fn execute(cmd: GsmCommand, client: &impl CellClient, verbose: bool) 
         GsmCommand::Operator(args) => {
             let id = execute_cell_action(args.id, client, |req| {
                 let mut action = netsim_proto::cell::SetOperator::new();
-                action.operator = args.operator.clone();
+                action.operator.clone_from(&args.operator);
                 req.set_set_operator(action);
             })?;
             if verbose {

@@ -164,7 +164,7 @@ impl SlirpTestDriver {
     /// Sends a packet into the Slirp stack.
     pub async fn send_packet(&mut self, packet: bytes::Bytes) -> Result<(), ()> {
         let req = SlirpReq::SendPacket(packet);
-        self.actor.handle_action(None, req, &mut self.ctx).await.map(|_| ()).map_err(|_e| ())
+        self.actor.handle_action(None, req, &mut self.ctx).await.map_err(|_e| ())
     }
 
     /// Sends a batch of packets into the Slirp stack in a single action
@@ -231,8 +231,7 @@ impl SlirpTestDriver {
         self.actor
             .handle_get(0, &mut self.ctx)
             .await
-            .map(|opt| opt.map(|s| s.initialized).unwrap_or(false))
-            .unwrap_or(false)
+            .is_ok_and(|opt| opt.is_some_and(|s| s.initialized))
     }
 }
 

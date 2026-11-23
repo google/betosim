@@ -211,14 +211,14 @@ struct BeaconRestWorld {
     server: RestServer,
     last_status: Option<StatusCode>,
     last_body: Vec<u8>,
-    _device_task: tokio::task::JoinHandle<()>,
-    _ap_task: tokio::task::JoinHandle<()>,
+    device_task: tokio::task::JoinHandle<()>,
+    ap_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for BeaconRestWorld {
     fn drop(&mut self) {
-        self._device_task.abort();
-        self._ap_task.abort();
+        self.device_task.abort();
+        self.ap_task.abort();
     }
 }
 
@@ -258,13 +258,7 @@ impl BeaconRestWorld {
         let server =
             RestServer::new(device_client, link_client, ap_client, capture_client, "0.3.92".into());
 
-        Self {
-            server,
-            last_status: None,
-            last_body: Vec::new(),
-            _device_task: device_task,
-            _ap_task: ap_task,
-        }
+        Self { server, last_status: None, last_body: Vec::new(), device_task, ap_task }
     }
 
     fn sample_beacon_create_request(
@@ -373,26 +367,26 @@ impl BeaconRestWorld {
         let device: Device =
             serde_json::from_slice(&self.last_body).expect("deserialize response as Device");
         assert!(device.id > 0, "expected positive device id");
-        if !expected_name.is_empty() {
-            assert_eq!(device.name, expected_name);
-        } else {
+        if expected_name.is_empty() {
             assert!(
                 device.name.is_empty() || device.name.starts_with("Beacon-"),
                 "expected empty or default Beacon-{{id}} device name before sync, got: {}",
                 device.name
             );
+        } else {
+            assert_eq!(device.name, expected_name);
         }
         assert_eq!(device.chips.len(), 1, "expected exactly 1 chip on beacon device");
         let chip = &device.chips[0];
         assert_eq!(chip.kind, ChipKind::BLUETOOTH);
-        if !expected_chip_name.is_empty() {
-            assert_eq!(chip.name, expected_chip_name);
-        } else {
+        if expected_chip_name.is_empty() {
             assert!(
                 chip.name.starts_with("Beacon-"),
                 "expected default Beacon-{{id}} chip name, got: {}",
                 chip.name
             );
+        } else {
+            assert_eq!(chip.name, expected_chip_name);
         }
 
         match &chip.variant {

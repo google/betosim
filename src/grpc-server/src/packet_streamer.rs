@@ -133,22 +133,21 @@ async fn handle_grpc_initial_info(
         }
     };
 
-    match initial_info_req.request_type {
-        Some(packet_streamer::packet_request::Request_type::InitialInfo(info)) => {
-            Ok((packet_stream_converter::proto_to_chip_info(info), stream, sink))
-        }
-        _ => {
-            error!("First message was not InitialInfo");
-            let _ = sink
-                .fail(grpcio::RpcStatus::with_message(
-                    grpcio::RpcStatusCode::INVALID_ARGUMENT,
-                    "First message must be InitialInfo".to_string(),
-                ))
-                .await;
-            Err(PacketStreamError::Protocol(packet_stream::error::ProtocolError::InvalidFormat(
+    if let Some(packet_streamer::packet_request::Request_type::InitialInfo(info)) =
+        initial_info_req.request_type
+    {
+        Ok((packet_stream_converter::proto_to_chip_info(info), stream, sink))
+    } else {
+        error!("First message was not InitialInfo");
+        let _ = sink
+            .fail(grpcio::RpcStatus::with_message(
+                grpcio::RpcStatusCode::INVALID_ARGUMENT,
                 "First message must be InitialInfo".to_string(),
-            )))
-        }
+            ))
+            .await;
+        Err(PacketStreamError::Protocol(packet_stream::error::ProtocolError::InvalidFormat(
+            "First message must be InitialInfo".to_string(),
+        )))
     }
 }
 
@@ -165,9 +164,8 @@ impl PacketStreamer for PacketStreamerService {
         ctx.spawn(async move {
             // Do not call Tokio I/O from within this future, it will panic!
             // https://github.com/tikv/grpc-rs/issues/338
-            let (chip_info, stream, sink) = match handle_grpc_initial_info(stream, sink).await {
-                Ok(info) => info,
-                Err(_) => return, // Error already logged and sink failed
+            let Ok((chip_info, stream, sink)) = handle_grpc_initial_info(stream, sink).await else {
+                return; // Error already logged and sink failed
             };
 
             // Send the new connection's channels to the listener's accept loop

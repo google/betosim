@@ -39,10 +39,10 @@ impl fmt::Display for JsonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JsonError::SerdeJson(e) => {
-                write!(f, "JSON serialization/deserialization error: {}", e)
+                write!(f, "JSON serialization/deserialization error: {e}")
             }
-            JsonError::HexParse(s) => write!(f, "Hex parsing error: {}", s),
-            JsonError::Conversion(s) => write!(f, "Conversion error: {}", s),
+            JsonError::HexParse(s) => write!(f, "Hex parsing error: {s}"),
+            JsonError::Conversion(s) => write!(f, "Conversion error: {s}"),
         }
     }
 }
@@ -196,7 +196,7 @@ mod tests {
 
         let json_llc_layer = JsonLlc::from(&original_header);
         let json_string = serde_json::to_string_pretty(&json_llc_layer).unwrap();
-        println!("JSON: {}", json_string);
+        println!("JSON: {json_string}");
 
         let parsed_json_llc: JsonLlc = serde_json::from_str(&json_string).unwrap();
         let deserialized_header = LlcSnapHeader::try_from(&parsed_json_llc).unwrap();

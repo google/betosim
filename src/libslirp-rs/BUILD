@@ -27,6 +27,7 @@ netsim_rust_library(
     # resource leaks on Drop of World. Running integration tests in parallel causes FD
     # count race conditions, so serial execution (--test-threads=1) is strictly required.
     integration_test_args = ["--test-threads=1"],
+    pedantic_clippy = True,
     select_deps = select({
         "//:standalone": [],
         "//conditions:default": [

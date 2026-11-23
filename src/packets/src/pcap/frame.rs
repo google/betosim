@@ -58,7 +58,7 @@ impl<R: Read + 'static> PcapReader<R> {
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Invalid pcap magic number: {:#x}", magic_number),
+                format!("Invalid pcap magic number: {magic_number:#x}"),
             ))
         }
     }
@@ -244,7 +244,7 @@ impl<R: Read> PcapngReader<R> {
                     idb.link_type.get()
                 };
 
-                self.link_type = Some(link_type as u32);
+                self.link_type = Some(u32::from(link_type));
 
                 let remaining_len = block_total_length as usize - idb_size;
                 io::copy(&mut self.reader.by_ref().take(remaining_len as u64), &mut io::sink())?;

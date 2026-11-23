@@ -53,7 +53,7 @@ pub fn process_responses(host: &mut MockHost, responses: Vec<SlirpResponse>) {
         match response {
             SlirpResponse::Packet(p) => host.packets_to_guest.borrow_mut().push(p.to_vec()),
             SlirpResponse::CloseConnection { conn_id, .. } => {
-                host.closed_connections.borrow_mut().push(conn_id)
+                host.closed_connections.borrow_mut().push(conn_id);
             }
             SlirpResponse::WriteToConnection(conn_id, data) => host
                 .data_received_by_host
@@ -116,11 +116,11 @@ pub fn create_tcp_packet(args: &CreateTcpPacketArgs) -> Vec<u8> {
         IP_P_TCP,
         match args.src_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("IPv6 not supported"),
+            IpAddr::V6(_) => panic!("IPv6 not supported"),
         },
         match args.dst_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("IPv6 not supported"),
+            IpAddr::V6(_) => panic!("IPv6 not supported"),
         },
     )
     .unwrap();
@@ -134,11 +134,11 @@ pub fn create_tcp_packet(args: &CreateTcpPacketArgs) -> Vec<u8> {
         tcp_segment_slice,
         match args.src_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("IPv6 not supported"),
+            IpAddr::V6(_) => panic!("IPv6 not supported"),
         },
         match args.dst_addr.ip() {
             IpAddr::V4(ip) => ip,
-            _ => panic!("IPv6 not supported"),
+            IpAddr::V6(_) => panic!("IPv6 not supported"),
         },
     )
     .unwrap();
@@ -192,12 +192,10 @@ pub fn establish_connection_for_test(
     });
 
     let parsed_packet = ParsedPacket::parse(&ethernet_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_packet.network {
-            (h, p)
-        } else {
-            panic!();
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_packet.network
+    else {
+        panic!();
+    };
 
     tcp_manager.handle_packet(&mut responses, timers, &parsed_packet, &ipv4_header, tcp_packet);
     process_responses(host, responses);
@@ -226,12 +224,10 @@ pub fn establish_connection_for_test(
         payload: &[],
     });
     let parsed_packet = ParsedPacket::parse(&ethernet_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_packet.network {
-            (h, p)
-        } else {
-            panic!();
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_packet.network
+    else {
+        panic!();
+    };
     let mut responses = Vec::new();
     tcp_manager.handle_packet(&mut responses, timers, &parsed_packet, &ipv4_header, tcp_packet);
     process_responses(host, responses);

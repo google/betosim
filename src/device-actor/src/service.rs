@@ -213,7 +213,7 @@ impl DeviceActor {
                 tokio::time::timeout(CHIP_READ_TIMEOUT, client.read_statistics())
                     .await
                     .ok()
-                    .and_then(|res| res.ok())
+                    .and_then(Result::ok)
             });
         }
 
@@ -237,7 +237,7 @@ impl DeviceActor {
                     let res = tokio::time::timeout(CHIP_READ_TIMEOUT, client.read(id))
                         .await
                         .ok()
-                        .and_then(|res| res.ok());
+                        .and_then(Result::ok);
                     (id, res)
                 });
             }
@@ -268,12 +268,11 @@ impl DeviceActor {
                     && let Some(fresh_chip) = chip_state_map.get(&ChipId(chip.id))
                 {
                     chip.enabled = fresh_chip.enabled;
-                    chip.variant = fresh_chip.variant.clone();
+                    chip.variant.clone_from(&fresh_chip.variant);
                 }
 
                 let stream_stats = device_entry.chip_stats.get(&ChipId(chip.id));
-                let duration_secs =
-                    stream_stats.map(|s| s.start_time.elapsed().as_secs()).unwrap_or(0);
+                let duration_secs = stream_stats.map_or(0, |s| s.start_time.elapsed().as_secs());
 
                 if let Some(client_stats) =
                     chip_stats_map.get(&ChipId(chip.id)).filter(|v| !v.is_empty())
@@ -430,7 +429,7 @@ impl DeviceActor {
             tokio::time::timeout(CHIP_READ_TIMEOUT, client.read(ChipId(chip.id)))
                 .await
                 .ok()
-                .and_then(|res| res.ok())
+                .and_then(Result::ok)
         } else {
             None
         };
@@ -636,7 +635,7 @@ impl DeviceActor {
         next_chip_id: &Arc<AtomicU32>,
         chip_clients: &HashMap<ChipKind, Box<dyn ChipClient>>,
         link_client: &dyn LinkClient,
-        capture_client: &Option<Arc<dyn CaptureSender>>,
+        capture_client: Option<&Arc<dyn CaptureSender>>,
         existing_bt_addresses: &[String],
         entity: &mut InternalDevice,
         mut chip: netsim_model::Chip,
@@ -690,7 +689,7 @@ impl DeviceActor {
             && let netsim_model::BluetoothMode::Beacon(ref mut beacon_params) = bt.mode
         {
             if entity.device.name.is_empty() {
-                entity.device.name = chip_name.clone();
+                entity.device.name.clone_from(&chip_name);
             }
             let addr = if let Some(existing) =
                 Some(bt.address.as_str()).filter(|s| !s.is_empty()).or_else(|| {
@@ -707,7 +706,7 @@ impl DeviceActor {
                 }
                 generated
             };
-            bt.address = addr.clone();
+            bt.address.clone_from(&addr);
             beacon_params.ble_beacon.address = addr;
             bt.low_energy.state.get_or_insert(true);
             bt.classic.state.get_or_insert(false);
@@ -717,8 +716,7 @@ impl DeviceActor {
                 .device
                 .device_info
                 .as_ref()
-                .map(|info| info.kind.clone())
-                .unwrap_or("Unknown".to_string())
+                .map_or_else(|| "Unknown".to_string(), |info| info.kind.clone())
         } else {
             chip.manufacturer.clone()
         };
@@ -741,7 +739,7 @@ impl DeviceActor {
         }
 
         let (packet_stream, packet_sink, stream_stats) = create_capture_and_wrap_streams(
-            capture_client.clone(),
+            capture_client.cloned(),
             chip_id,
             chip_kind,
             entity.device.name.clone(),
@@ -797,7 +795,7 @@ impl DeviceActor {
             &self.next_chip_id,
             &self.chip_clients,
             self.link_client.as_ref(),
-            &self.capture_client,
+            self.capture_client.as_ref(),
             &existing_bt_addresses,
             &mut entity,
             chip,
@@ -842,7 +840,7 @@ impl DeviceActor {
                 &self.next_chip_id,
                 &self.chip_clients,
                 self.link_client.as_ref(),
-                &self.capture_client,
+                self.capture_client.as_ref(),
                 &existing_bt_addresses,
                 entity,
                 params.chip,
@@ -948,7 +946,7 @@ impl DeviceActor {
         let (devices_to_delete, devices_to_reset) = if let Some(target_id) = target_id {
             if !self.devices.contains_key(&target_id) {
                 return Err(DeviceError::DeviceNotFound(target_id.to_string()));
-            };
+            }
             (vec![], vec![target_id])
         } else {
             let mut to_delete = vec![];
@@ -990,7 +988,7 @@ impl DeviceActor {
             device.device.pose.position = original_pos;
             device.device.pose.orientation = original_orient;
 
-            for chip in device.device.chips.iter_mut() {
+            for chip in &mut device.device.chips {
                 chip.pose.position = original_pos;
                 chip.pose.orientation = original_orient;
 
@@ -1027,14 +1025,14 @@ impl DeviceActor {
         self.save_stats_async().await;
         self.last_modified = std::time::SystemTime::now();
 
-        if !chip_reset_errors.is_empty() {
+        if chip_reset_errors.is_empty() {
+            Ok(())
+        } else {
             Err(DeviceError::ResetErrors {
                 device_delete_errors,
                 chip_reset_errors,
                 link_client_error,
             })
-        } else {
-            Ok(())
         }
     }
 
@@ -1201,10 +1199,10 @@ impl ActorService for DeviceActor {
         params: Self::Create,
         ctx: &mut DynContext<Self>,
     ) -> Result<Self::Id, Self::Error> {
-        let effective_name = if !params.device_config.name.is_empty() {
-            &params.device_config.name
-        } else {
+        let effective_name = if params.device_config.name.is_empty() {
             &params.chip.name
+        } else {
+            &params.device_config.name
         };
         if !effective_name.is_empty()
             && self.devices.values().any(|d| d.device.name == *effective_name)
@@ -1318,8 +1316,7 @@ impl ActorService for DeviceActor {
                     && id != device_id
                 {
                     return Err(DeviceError::NotFound(format!(
-                        "Device ID mismatch: {} vs {}",
-                        id, device_id
+                        "Device ID mismatch: {id} vs {device_id}"
                     )));
                 }
 
@@ -1329,7 +1326,7 @@ impl ActorService for DeviceActor {
 
             DeviceAction::DeleteDevice(id) => {
                 let Some(internal_device) = self.devices.get(&id) else {
-                    return Err(DeviceError::NotFound(format!("Device not found: {}", id)));
+                    return Err(DeviceError::NotFound(format!("Device not found: {id}")));
                 };
                 if internal_device.guid.is_some() {
                     return Err(DeviceError::NotFound("Cannot delete external device".to_string()));
@@ -1370,7 +1367,7 @@ impl ActorService for DeviceActor {
                     &self.next_chip_id,
                     &self.chip_clients,
                     self.link_client.as_ref(),
-                    &self.capture_client,
+                    self.capture_client.as_ref(),
                     &existing_bt_addresses,
                     entity,
                     chip,
@@ -1525,7 +1522,7 @@ mod tests {
 
         let empty_name_update = vec![ChipUpdate {
             id: None,
-            name: Some("".to_string()),
+            name: Some(String::new()),
             variant: None,
             ..Default::default()
         }];
@@ -1923,7 +1920,7 @@ mod tests {
         assert!(matches!(
             &res,
             Err(DeviceError::NotFound(msg))
-                if msg == &format!("Device ID mismatch: {} vs {}", MISMATCHED_DEVICE_ID, device_id)
+                if msg == &format!("Device ID mismatch: {MISMATCHED_DEVICE_ID} vs {device_id}")
         ));
         assert!(
             actor.devices.get(&device_id).is_some_and(|d| d

@@ -29,6 +29,7 @@ netsim_rust_binary(
     compile_data = ["src/openapi/reserved_idents.inc"],
     crate_root = "src/bin/gen_api.rs",
     edition = "2024",
+    pedantic_clippy = True,
     rustc_flags = [
         "-Aunreachable_pub",
     ],
@@ -63,6 +64,7 @@ netsim_rust_library(
     crate_root = "src/lib.rs",
     edition = "2024",
     enable_doc_test = False,
+    pedantic_clippy = True,
     proc_macro_test_deps = [
         "@async-trait",
     ],

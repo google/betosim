@@ -13,7 +13,12 @@
 # limitations under the License.
 
 load("@rules_rust//rust:defs.bzl", "rust_lint_config")
-load("//src:defs.bzl", "NETSIM_CLIPPY_LINTS", "NETSIM_TEST_CLIPPY_ALLOWS")
+load(
+    "//src:defs.bzl",
+    "NETSIM_CLIPPY_LINTS",
+    "NETSIM_PEDANTIC_CLIPPY_LINTS",
+    "NETSIM_TEST_CLIPPY_ALLOWS",
+)
 
 exports_files(["rustfmt_stable.toml"])
 
@@ -33,6 +38,20 @@ rust_lint_config(
 rust_lint_config(
     name = "test_clippy_lint_config",
     clippy = NETSIM_CLIPPY_LINTS | NETSIM_TEST_CLIPPY_ALLOWS,
+    rustc = {"warnings": "deny"},
+    visibility = ["//visibility:public"],
+)
+
+rust_lint_config(
+    name = "pedantic_clippy_lint_config",
+    clippy = NETSIM_CLIPPY_LINTS | NETSIM_PEDANTIC_CLIPPY_LINTS,
+    rustc = {"warnings": "deny"},
+    visibility = ["//visibility:public"],
+)
+
+rust_lint_config(
+    name = "pedantic_test_clippy_lint_config",
+    clippy = NETSIM_CLIPPY_LINTS | NETSIM_PEDANTIC_CLIPPY_LINTS | NETSIM_TEST_CLIPPY_ALLOWS,
     rustc = {"warnings": "deny"},
     visibility = ["//visibility:public"],
 )

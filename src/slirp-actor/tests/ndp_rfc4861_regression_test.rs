@@ -86,15 +86,14 @@ async fn recv_icmpv6_type(
                 }
             } else {
                 panic!(
-                    "[backend={:?}] Driver closed before receiving ICMPv6 type {}",
-                    backend, expected_type
+                    "[backend={backend:?}] Driver closed before receiving ICMPv6 type {expected_type}"
                 );
             }
         }
     })
     .await
     .unwrap_or_else(|_| {
-        panic!("[backend={:?}] Timed out waiting for ICMPv6 type {}", backend, expected_type)
+        panic!("[backend={backend:?}] Timed out waiting for ICMPv6 type {expected_type}")
     })
 }
 
@@ -105,79 +104,76 @@ fn assert_na_wire_layout(
     backend: SlirpBackend,
 ) -> [u8; 6] {
     let payload_len = u16::from_be_bytes([frame[18], frame[19]]) as usize;
-    assert_eq!(frame.len(), 54 + payload_len, "[backend={:?}] Frame length mismatch", backend);
+    assert_eq!(frame.len(), 54 + payload_len, "[backend={backend:?}] Frame length mismatch");
     let icmpv6 = &frame[54..54 + payload_len];
 
-    assert_eq!(icmpv6.len(), 32, "[backend={:?}] NA payload length", backend);
-    assert_eq!(icmpv6[0], 136, "[backend={:?}] ICMPv6 NA Type", backend);
-    assert_eq!(icmpv6[1], 0, "[backend={:?}] ICMPv6 NA Code", backend);
-    assert_ne!(&icmpv6[2..4], &[0, 0], "[backend={:?}] ICMPv6 Checksum must be non-zero", backend);
+    assert_eq!(icmpv6.len(), 32, "[backend={backend:?}] NA payload length");
+    assert_eq!(icmpv6[0], 136, "[backend={backend:?}] ICMPv6 NA Type");
+    assert_eq!(icmpv6[1], 0, "[backend={backend:?}] ICMPv6 NA Code");
+    assert_ne!(&icmpv6[2..4], &[0, 0], "[backend={backend:?}] ICMPv6 Checksum must be non-zero");
 
     let src_ip = *<&[u8; 16]>::try_from(&frame[22..38]).expect("Failed to parse src_ip");
     let dst_ip = *<&[u8; 16]>::try_from(&frame[38..54]).expect("Failed to parse dst_ip");
-    assert_eq!(&src_ip, expected_target_ip, "[backend={:?}] NA IPv6 Source Address", backend);
+    assert_eq!(&src_ip, expected_target_ip, "[backend={backend:?}] NA IPv6 Source Address");
     assert_eq!(
         &dst_ip,
         &GUEST_LINK_LOCAL.octets(),
-        "[backend={:?}] NA IPv6 Destination Address",
-        backend
+        "[backend={backend:?}] NA IPv6 Destination Address"
     );
     let checksum = icmpv6_checksum(icmpv6, Ipv6Addr::from(src_ip), Ipv6Addr::from(dst_ip));
-    assert_eq!(checksum, 0, "[backend={:?}] ICMPv6 Checksum validation", backend);
+    assert_eq!(checksum, 0, "[backend={backend:?}] ICMPv6 Checksum validation");
 
-    assert_eq!(frame[21], 255, "[backend={:?}] IPv6 Hop Limit", backend);
+    assert_eq!(frame[21], 255, "[backend={backend:?}] IPv6 Hop Limit");
 
     if matches!(backend, SlirpBackend::Native) {
-        assert_eq!(icmpv6[4], 0xe0, "[backend={:?}] NA Flags (Native)", backend);
+        assert_eq!(icmpv6[4], 0xe0, "[backend={backend:?}] NA Flags (Native)");
     } else {
-        assert_eq!(icmpv6[4] & 0xc0, 0xc0, "[backend={:?}] NA Router and Solicited flags", backend);
+        assert_eq!(icmpv6[4] & 0xc0, 0xc0, "[backend={backend:?}] NA Router and Solicited flags");
     }
 
-    assert_eq!(&icmpv6[5..8], &[0, 0, 0], "[backend={:?}] NA Reserved fields", backend);
-    assert_eq!(&icmpv6[8..24], expected_target_ip, "[backend={:?}] NA Target IP", backend);
+    assert_eq!(&icmpv6[5..8], &[0, 0, 0], "[backend={backend:?}] NA Reserved fields");
+    assert_eq!(&icmpv6[8..24], expected_target_ip, "[backend={backend:?}] NA Target IP");
 
-    assert_eq!(icmpv6[24], 2, "[backend={:?}] NA TLLA Option Type", backend);
-    assert_eq!(icmpv6[25], 1, "[backend={:?}] NA TLLA Option Length", backend);
+    assert_eq!(icmpv6[24], 2, "[backend={backend:?}] NA TLLA Option Type");
+    assert_eq!(icmpv6[25], 1, "[backend={backend:?}] NA TLLA Option Length");
 
     let gateway_mac = *<&[u8; 6]>::try_from(&frame[6..12]).expect("Failed to parse gateway_mac");
-    assert_eq!(&icmpv6[26..32], &gateway_mac, "[backend={:?}] NA TLLA Address", backend);
+    assert_eq!(&icmpv6[26..32], &gateway_mac, "[backend={backend:?}] NA TLLA Address");
 
-    assert_eq!(&frame[0..6], expected_dst_mac, "[backend={:?}] Ethernet Dst MAC", backend);
+    assert_eq!(&frame[0..6], expected_dst_mac, "[backend={backend:?}] Ethernet Dst MAC");
 
     gateway_mac
 }
 
 fn assert_ra_wire_layout(frame: &[u8], backend: SlirpBackend) {
     let payload_len = u16::from_be_bytes([frame[18], frame[19]]) as usize;
-    assert_eq!(frame.len(), 54 + payload_len, "[backend={:?}] Frame length mismatch", backend);
+    assert_eq!(frame.len(), 54 + payload_len, "[backend={backend:?}] Frame length mismatch");
     let icmpv6 = &frame[54..54 + payload_len];
 
-    assert!(icmpv6.len() >= 16, "[backend={:?}] RA payload length", backend);
-    assert_eq!(icmpv6[0], 134, "[backend={:?}] ICMPv6 RA Type", backend);
-    assert_eq!(icmpv6[1], 0, "[backend={:?}] ICMPv6 RA Code", backend);
-    assert_ne!(&icmpv6[2..4], &[0, 0], "[backend={:?}] ICMPv6 Checksum must be non-zero", backend);
+    assert!(icmpv6.len() >= 16, "[backend={backend:?}] RA payload length");
+    assert_eq!(icmpv6[0], 134, "[backend={backend:?}] ICMPv6 RA Type");
+    assert_eq!(icmpv6[1], 0, "[backend={backend:?}] ICMPv6 RA Code");
+    assert_ne!(&icmpv6[2..4], &[0, 0], "[backend={backend:?}] ICMPv6 Checksum must be non-zero");
 
     let src_ip = *<&[u8; 16]>::try_from(&frame[22..38]).expect("Failed to parse src_ip");
     let dst_ip = *<&[u8; 16]>::try_from(&frame[38..54]).expect("Failed to parse dst_ip");
     let checksum = icmpv6_checksum(icmpv6, Ipv6Addr::from(src_ip), Ipv6Addr::from(dst_ip));
-    assert_eq!(checksum, 0, "[backend={:?}] ICMPv6 Checksum validation", backend);
+    assert_eq!(checksum, 0, "[backend={backend:?}] ICMPv6 Checksum validation");
 
-    assert_eq!(frame[21], 255, "[backend={:?}] IPv6 Hop Limit", backend);
+    assert_eq!(frame[21], 255, "[backend={backend:?}] IPv6 Hop Limit");
 
-    assert!(icmpv6[4] > 0, "[backend={:?}] RA Cur Hop Limit must be > 0", backend);
+    assert!(icmpv6[4] > 0, "[backend={backend:?}] RA Cur Hop Limit must be > 0");
     if matches!(backend, SlirpBackend::Native) {
-        assert_eq!(icmpv6[4], 64, "[backend={:?}] RA Cur Hop Limit", backend);
+        assert_eq!(icmpv6[4], 64, "[backend={backend:?}] RA Cur Hop Limit");
         assert_eq!(
             u16::from_be_bytes([icmpv6[6], icmpv6[7]]),
             1800,
-            "[backend={:?}] RA Router Lifetime",
-            backend
+            "[backend={backend:?}] RA Router Lifetime"
         );
     } else {
         assert!(
             u16::from_be_bytes([icmpv6[6], icmpv6[7]]) > 0,
-            "[backend={:?}] RA Router Lifetime must be > 0",
-            backend
+            "[backend={backend:?}] RA Router Lifetime must be > 0"
         );
     }
 
@@ -190,65 +186,59 @@ fn assert_ra_wire_layout(frame: &[u8], backend: SlirpBackend) {
     while offset < icmpv6.len() {
         assert!(
             offset + 2 <= icmpv6.len(),
-            "[backend={:?}] Truncated NDP option header at offset {}",
-            backend,
-            offset
+            "[backend={backend:?}] Truncated NDP option header at offset {offset}"
         );
 
         let opt_type = icmpv6[offset];
         let opt_len = icmpv6[offset + 1];
-        assert_ne!(opt_type, 0, "[backend={:?}] Option type must not be 0", backend);
-        assert!(opt_len > 0, "[backend={:?}] Option length must be > 0", backend);
+        assert_ne!(opt_type, 0, "[backend={backend:?}] Option type must not be 0");
+        assert!(opt_len > 0, "[backend={backend:?}] Option length must be > 0");
 
         let byte_len = (opt_len as usize) * 8;
         assert!(
             offset + byte_len <= icmpv6.len(),
-            "[backend={:?}] Option length exceeds payload",
-            backend
+            "[backend={backend:?}] Option length exceeds payload"
         );
 
         match opt_type {
             1 => {
                 // SLLA
-                assert_eq!(opt_len, 1, "[backend={:?}] SLLA Option length", backend);
+                assert_eq!(opt_len, 1, "[backend={backend:?}] SLLA Option length");
                 assert_eq!(
                     &icmpv6[offset + 2..offset + 8],
                     gateway_mac,
-                    "[backend={:?}] SLLA Address",
-                    backend
+                    "[backend={backend:?}] SLLA Address"
                 );
                 slla_found = true;
             }
             3 => {
                 // PI
-                assert_eq!(opt_len, 4, "[backend={:?}] PI Option length", backend);
-                assert_eq!(icmpv6[offset + 2], 64, "[backend={:?}] PI Prefix length", backend);
+                assert_eq!(opt_len, 4, "[backend={backend:?}] PI Option length");
+                assert_eq!(icmpv6[offset + 2], 64, "[backend={backend:?}] PI Prefix length");
                 assert_eq!(
                     icmpv6[offset + 3] & 0xc0,
                     0xc0,
-                    "[backend={:?}] PI Flags (On-link and Autonomous)",
-                    backend
+                    "[backend={backend:?}] PI Flags (On-link and Autonomous)"
                 );
                 let prefix = &icmpv6[offset + 16..offset + 32];
                 let expected_prefix = Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0).octets();
-                assert_eq!(prefix, &expected_prefix, "[backend={:?}] PI Prefix", backend);
+                assert_eq!(prefix, &expected_prefix, "[backend={backend:?}] PI Prefix");
                 pi_found = true;
             }
             25 => {
                 // RDNSS
                 rdnss_found = true;
-                assert_eq!(opt_len, 3, "[backend={:?}] RDNSS Option length", backend);
+                assert_eq!(opt_len, 3, "[backend={backend:?}] RDNSS Option length");
                 let address = &icmpv6[offset + 8..offset + 24];
                 if matches!(backend, SlirpBackend::Native) {
                     let expected_address = GATEWAY_IPV6.octets();
-                    assert_eq!(address, &expected_address, "[backend={:?}] RDNSS Address", backend);
+                    assert_eq!(address, &expected_address, "[backend={backend:?}] RDNSS Address");
                 } else {
                     let expected_address1 = Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 3).octets();
                     let expected_address2 = GATEWAY_IPV6.octets();
                     assert!(
                         address == expected_address1 || address == expected_address2,
-                        "[backend={:?}] RDNSS Address",
-                        backend
+                        "[backend={backend:?}] RDNSS Address"
                     );
                 }
             }
@@ -261,17 +251,12 @@ fn assert_ra_wire_layout(frame: &[u8], backend: SlirpBackend) {
     assert_eq!(
         offset,
         icmpv6.len(),
-        "[backend={:?}] Options must exactly match payload length",
-        backend
+        "[backend={backend:?}] Options must exactly match payload length"
     );
-    assert!(slla_found, "[backend={:?}] RA must contain SLLA option", backend);
-    assert!(pi_found, "[backend={:?}] RA must contain Prefix Information option", backend);
+    assert!(slla_found, "[backend={backend:?}] RA must contain SLLA option");
+    assert!(pi_found, "[backend={backend:?}] RA must contain Prefix Information option");
     if matches!(backend, SlirpBackend::Native) {
-        assert!(
-            rdnss_found,
-            "[backend={:?}] Native RA must contain RDNSS option (Type 25)",
-            backend
-        );
+        assert!(rdnss_found, "[backend={backend:?}] Native RA must contain RDNSS option (Type 25)");
     }
 }
 

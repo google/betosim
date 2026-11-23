@@ -36,7 +36,7 @@ fn to_native_config(config: &libslirp_rs::SlirpConfig) -> slirp::Config {
     let dns_search =
         if config.vdnssearch.is_empty() { None } else { Some(config.vdnssearch.clone()) };
 
-    let dns_servers = config.host_dns.iter().map(|addr| addr.ip()).collect::<Vec<_>>();
+    let dns_servers = config.host_dns.iter().map(std::net::SocketAddr::ip).collect::<Vec<_>>();
 
     slirp::Config {
         host_ipv4: config.vhost,
@@ -231,7 +231,7 @@ impl ActorService for SlirpActor {
     async fn handle_update(
         &mut self,
         _id: Self::Id,
-        _: Self::Update,
+        (): Self::Update,
         _: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
         Err(SlirpError::Internal("Update not supported".into()))

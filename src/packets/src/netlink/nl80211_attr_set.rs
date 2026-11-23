@@ -331,7 +331,7 @@ impl Nl80211AttrSetBuilder {
             attr_id::MESH_PATH => self.set.mesh_path = Some(value.to_vec()),
             attr_id::MESH_ID => self.set.mesh_id = Some(value.to_vec()),
             attr_id::MESH_GATE_ANNOUNCEMENT => {
-                self.set.mesh_gate_announcement = Some(value.to_vec())
+                self.set.mesh_gate_announcement = Some(value.to_vec());
             }
             attr_id::HWSIM_ATTR_FRAME_DATA => self.set.hwsim_attr_frame_data = Some(value.to_vec()),
             _ => (),
@@ -385,112 +385,112 @@ impl<'a> Nl80211AttrPacket<'a> {
             let attr_id = nl80211_util::get_attr_id_from_type(hdr.attr_type());
             match attr_id {
                 attr_id::HW_INDEX => {
-                    set.hw_index = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.hw_index = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::IFACE_MAC => {
-                    set.iface_mac = Some(nl80211_util::parse_mac_addr_from_payload(payload)?)
+                    set.iface_mac = Some(nl80211_util::parse_mac_addr_from_payload(payload)?);
                 }
                 attr_id::IFACE_NAME => {
                     set.iface_name = nl80211_util::parse_string_from_payload(payload).ok();
                 }
                 attr_id::IFACE_TYPE => {
-                    set.iface_type = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.iface_type = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::REQ_IFACE_NUM => {
-                    set.req_iface_num = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.req_iface_num = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::MAX_IFACES => {
-                    set.max_ifaces = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.max_ifaces = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::REG_DOM => {
                     if payload.len() == 4 {
-                        set.reg_dom = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                        set.reg_dom = Some(nl80211_util::parse_u32_from_payload(payload)?);
                     }
                 }
                 attr_id::REG_ALPHA2 => {
                     set.reg_alpha2 = nl80211_util::parse_string_from_payload(payload).ok();
                 }
                 attr_id::CHANNEL => {
-                    set.channel = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.channel = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::FREQUENCY => {
-                    set.frequency = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.frequency = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::CHANNEL_TYPE => {
-                    set.channel_type = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.channel_type = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::CHANNEL_FLAGS => {
-                    set.channel_flags = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.channel_flags = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::MAX_TX_POWER => {
-                    set.max_tx_power = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.max_tx_power = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::CENTER_FREQ1 => {
-                    set.center_freq1 = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.center_freq1 = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::CENTER_FREQ2 => {
-                    set.center_freq2 = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.center_freq2 = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::SIGNAL => {
-                    set.signal = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.signal = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::NOISE => set.noise = Some(nl80211_util::parse_u32_from_payload(payload)?),
                 attr_id::RX_RATE => {
-                    set.rx_rate = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.rx_rate = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::KEY => set.key = Some(payload.to_vec()),
                 attr_id::KEY_IDX => {
-                    set.key_idx = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.key_idx = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::KEY_DATA => set.key_data = Some(payload.to_vec()),
                 attr_id::KEY_SEQ => set.key_seq = Some(payload.to_vec()),
                 attr_id::KEY_FLAGS => {
-                    set.key_flags = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.key_flags = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::CIPHER => {
-                    set.cipher = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.cipher = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::BEACON_INTERVAL => {
-                    set.beacon_interval = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.beacon_interval = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::DTIM_PERIOD => {
-                    set.dtim_period = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.dtim_period = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::HIDDEN_SSID => {
-                    set.hidden_ssid = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.hidden_ssid = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::SUPPORTED_RATES => set.supported_rates = Some(payload.to_vec()),
                 attr_id::SHORT_PREAMBLE => {
-                    set.short_preamble = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.short_preamble = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::SHORT_SLOT_TIME => {
-                    set.short_slot_time = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.short_slot_time = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::EDCA_PARAMS => set.edca_params = Some(payload.to_vec()),
                 attr_id::WMM_ENABLED => {
-                    set.wmm_enabled = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.wmm_enabled = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::POWER_CONSTRAINT => {
-                    set.power_constraint = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.power_constraint = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::LOCAL_POWER_CONSTRAINT => {
                     set.local_power_constraint =
-                        Some(nl80211_util::parse_u32_from_payload(payload)?)
+                        Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::TXPOWER => {
-                    set.txpower = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.txpower = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::SUPPORTED_CHANNELS => set.supported_channels = Some(payload.to_vec()),
                 attr_id::MESH_PATH => set.mesh_path = Some(payload.to_vec()),
                 attr_id::MESH_ID => set.mesh_id = Some(payload.to_vec()),
                 attr_id::MESH_PLINK_STATE => {
-                    set.mesh_plink_state = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.mesh_plink_state = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 attr_id::MESH_GATE_ANNOUNCEMENT => {
-                    set.mesh_gate_announcement = Some(payload.to_vec())
+                    set.mesh_gate_announcement = Some(payload.to_vec());
                 }
                 attr_id::HWSIM_ATTR_FRAME_DATA => {
-                    set.hwsim_attr_frame_data = Some(payload.to_vec())
+                    set.hwsim_attr_frame_data = Some(payload.to_vec());
                 }
                 attr_id::HWSIM_ATTR_COOKIE => {
                     if payload.len() == 8 {
@@ -502,7 +502,7 @@ impl<'a> Nl80211AttrPacket<'a> {
                     }
                 }
                 attr_id::HWSIM_ATTR_FLAGS => {
-                    set.hwsim_attr_flags = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.hwsim_attr_flags = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 _ => (),
             }
@@ -522,17 +522,17 @@ impl<'a> Nl80211AttrPacket<'a> {
 
             match attr_enum {
                 Some(HwsimAttrEnum::AddrTransmitter) => {
-                    set.iface_mac = Some(nl80211_util::parse_mac_addr_from_payload(payload)?)
+                    set.iface_mac = Some(nl80211_util::parse_mac_addr_from_payload(payload)?);
                 }
                 Some(HwsimAttrEnum::Frame) => set.hwsim_attr_frame_data = Some(payload.to_vec()),
                 Some(HwsimAttrEnum::Flags) => {
-                    set.hwsim_attr_flags = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.hwsim_attr_flags = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 Some(HwsimAttrEnum::RxRate) => {
-                    set.rx_rate = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.rx_rate = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 Some(HwsimAttrEnum::Signal) => {
-                    set.signal = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.signal = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 Some(HwsimAttrEnum::Cookie) => {
                     if payload.len() == 8 {
@@ -544,7 +544,7 @@ impl<'a> Nl80211AttrPacket<'a> {
                     }
                 }
                 Some(HwsimAttrEnum::Freq) => {
-                    set.frequency = Some(nl80211_util::parse_u32_from_payload(payload)?)
+                    set.frequency = Some(nl80211_util::parse_u32_from_payload(payload)?);
                 }
                 _ => {}
             }
@@ -633,7 +633,7 @@ mod tests {
         let payload = &packet[20..];
         let attrs = Nl80211AttrSet::parse_hwsim(payload).unwrap();
 
-        let fmt_attrs = format!("{}", attrs);
+        let fmt_attrs = format!("{attrs}");
         assert!(fmt_attrs.contains("iface_mac: 02:15:B2:00:00:00"));
         assert!(fmt_attrs.contains("hwsim_attr_cookie: 201"));
     }

@@ -21,6 +21,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "hci_server",
     edition = "2024",
+    pedantic_clippy = True,
     test_deps = [
         "//src/actor-framework",
         "//src/common",

@@ -58,7 +58,7 @@ impl LinkTestState {
 /// The BDD World for Device Actor tests.
 pub struct World {
     pub client: DeviceClient,
-    _actor_task: tokio::task::JoinHandle<()>,
+    actor_task: tokio::task::JoinHandle<()>,
     pub radio_stats: Arc<std::sync::Mutex<Vec<netsim_model::NetsimRadioStats>>>,
     pub wifi_stats: Arc<std::sync::Mutex<HashMap<u32, netsim_proto::stats::WifiStats>>>,
     pub last_radio_stats: Option<Vec<netsim_model::NetsimRadioStats>>,
@@ -76,7 +76,7 @@ pub struct World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        self._actor_task.abort();
+        self.actor_task.abort();
         if let Some(path) = &self.stats_file_to_cleanup
             && path.exists()
         {
@@ -253,7 +253,7 @@ impl World {
         let actor_task = tokio::spawn(runner.run(actor));
         World {
             client,
-            _actor_task: actor_task,
+            actor_task,
             radio_stats,
             wifi_stats,
             last_radio_stats: None,
@@ -390,10 +390,10 @@ impl World {
                     chip.pose.orientation = *orient;
                 }
                 if let Some(mfr) = &patch.manufacturer {
-                    chip.manufacturer = mfr.clone();
+                    chip.manufacturer.clone_from(mfr);
                 }
                 if let Some(prod) = &patch.product_name {
-                    chip.product_name = prod.clone();
+                    chip.product_name.clone_from(prod);
                 }
                 if let Some(enabled) = patch.enabled {
                     chip.enabled = enabled;
@@ -592,7 +592,7 @@ impl World {
         let mut params = Self::create_device_add_chip_params(
             device_guid.to_string(),
             chip_name.to_string(),
-            "".to_string(),
+            String::new(),
         );
         params.chip.kind = netsim_model::ChipKind::WIFI;
         params.chip.variant =
@@ -604,7 +604,7 @@ impl World {
         let mut params = Self::create_device_add_chip_params(
             device_guid.to_string(),
             chip_name.to_string(),
-            "".to_string(),
+            String::new(),
         );
         params.chip.kind = netsim_model::ChipKind::UWB;
         params.chip.variant =
@@ -795,7 +795,7 @@ impl World {
         let mut params = Self::create_device_add_chip_params(
             device_guid.to_string(),
             chip_name.to_string(),
-            "".to_string(),
+            String::new(),
         );
         params.chip.kind = netsim_model::ChipKind::WIFI;
         params.chip.variant =
@@ -809,7 +809,7 @@ impl World {
 
     /// Checks if the actor task has finished (e.g. due to shutdown).
     pub fn is_actor_finished(&self) -> bool {
-        self._actor_task.is_finished()
+        self.actor_task.is_finished()
     }
 
     pub async fn then_actor_should_shutdown(&self) {
@@ -891,7 +891,7 @@ impl World {
             std::thread::current().id(),
             time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_nanos()
         );
-        let filename = format!("netsim_session_stats_{}.json", unique_id);
+        let filename = format!("netsim_session_stats_{unique_id}.json");
         path.push(&filename);
         if path.exists() {
             let _ = std::fs::remove_file(&path);
@@ -915,7 +915,7 @@ impl World {
             }
             tokio::time::sleep(Self::STATS_RETRY_INTERVAL).await;
         }
-        panic!("Stats file content mismatch or timeout. Last content: {}", last_content);
+        panic!("Stats file content mismatch or timeout. Last content: {last_content}");
     }
 
     /// Verifies the content of the stats file.
@@ -929,11 +929,11 @@ impl World {
         assert_eq!(json["version"], expected_version, "version mismatch");
 
         let val = json["device_count"].as_u64().expect("device_count missing");
-        assert_eq!(val, expected_device_count as u64, "device_count mismatch");
+        assert_eq!(val, u64::from(expected_device_count), "device_count mismatch");
 
         let val =
             json["peak_concurrent_devices"].as_u64().expect("peak_concurrent_devices missing");
-        assert_eq!(val, expected_peak_devices as u64, "peak_concurrent_devices mismatch");
+        assert_eq!(val, u64::from(expected_peak_devices), "peak_concurrent_devices mismatch");
 
         let duration = json["duration_secs"].as_u64();
 
@@ -962,7 +962,7 @@ impl World {
                     for s in radio_stats {
                         let id = s["device_id"].as_u64().unwrap_or(0);
                         let tx_count = s["tx_count"].as_u64().unwrap_or(0);
-                        if id == device_id.0 as u64 && tx_count > 0 {
+                        if id == u64::from(device_id.0) && tx_count > 0 {
                             found_any = true;
                         }
                     }
@@ -974,11 +974,7 @@ impl World {
             tokio::time::sleep(Self::STATS_RETRY_INTERVAL).await;
         }
 
-        assert!(
-            !found_any,
-            "Radio stats should be absent for device {}, but were found.",
-            device_id
-        );
+        assert!(!found_any, "Radio stats should be absent for device {device_id}, but were found.");
     }
 
     pub async fn verify_radio_stats_persisted(
@@ -1006,14 +1002,14 @@ impl World {
             if content.is_empty() {
                 continue;
             }
-            last_content = content.clone();
+            last_content.clone_from(&content);
 
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
                 && let Some(radio_stats) = json["radio_stats"].as_array()
             {
                 for s in radio_stats {
                     let id = s["device_id"].as_u64().unwrap_or(0);
-                    if id != device_id.0 as u64 {
+                    if id != u64::from(device_id.0) {
                         continue;
                     }
 
@@ -1084,8 +1080,7 @@ impl World {
 
         assert!(
             found,
-            "Radio stats matching criteria not found for device {}. Last content: {}",
-            device_id, last_content
+            "Radio stats matching criteria not found for device {device_id}. Last content: {last_content}"
         );
     }
 
@@ -1164,10 +1159,10 @@ impl World {
         let s = stats
             .iter()
             .find(|s| s.id == device_id)
-            .unwrap_or_else(|| panic!("No stats found for device {}", device_id));
+            .unwrap_or_else(|| panic!("No stats found for device {device_id}"));
 
-        assert_eq!(s.tx_bytes, expected_tx, "Tx bytes mismatch for device {}", device_id);
-        assert_eq!(s.rx_bytes, expected_rx, "Rx bytes mismatch for device {}", device_id);
+        assert_eq!(s.tx_bytes, expected_tx, "Tx bytes mismatch for device {device_id}");
+        assert_eq!(s.rx_bytes, expected_rx, "Rx bytes mismatch for device {device_id}");
     }
 
     /// Helper to setup mock for verifying radio stats
@@ -1185,8 +1180,8 @@ impl World {
         stats.tx_bytes = tx;
         stats.rx_bytes = rx;
         // Assume nonzero equals 1
-        stats.tx_count = if tx > 0 { 1 } else { 0 };
-        stats.rx_count = if rx > 0 { 1 } else { 0 };
+        stats.tx_count = u64::from(tx > 0);
+        stats.rx_count = u64::from(rx > 0);
 
         // Replace or Append
         if let Some(existing) = stats_vec.iter_mut().find(|s| s.id == device_id) {
@@ -1200,7 +1195,7 @@ impl World {
     pub async fn when_fetch_radio_stats(&mut self) {
         match self.client.get_radio_stats().await {
             Ok(stats) => self.last_radio_stats = Some(stats),
-            Err(e) => panic!("Failed to get radio stats: {}", e),
+            Err(e) => panic!("Failed to get radio stats: {e}"),
         }
     }
 
@@ -1260,16 +1255,16 @@ impl World {
 
         let device_stats = json["device_stats"]
             .as_array()
-            .expect(&format!("device_stats missing in JSON: {}", json));
+            .expect(&format!("device_stats missing in JSON: {json}"));
 
         let device_id = self.current_device_id.expect("No current_device_id").0;
 
         let ds = device_stats.iter().find(|s| {
             let id_val = s["device_id"].as_u64();
-            id_val == Some(device_id as u64)
+            id_val == Some(u64::from(device_id))
         });
 
-        assert!(ds.is_some(), "Stats for device {} not found in: {:?}", device_id, device_stats);
+        assert!(ds.is_some(), "Stats for device {device_id} not found in: {device_stats:?}");
         let ds = ds.unwrap();
 
         assert_eq!(ds["kind"], kind);
@@ -2126,7 +2121,7 @@ impl World {
 
     /// BDD Step: When I release a keepalive lease.
     pub async fn when_release_keepalive(&self, id: u64) {
-        self.client.release_keepalive(id).await.unwrap()
+        self.client.release_keepalive(id).await.unwrap();
     }
 
     /// BDD Step: Given a running DeviceActor configured with startup and idle timeouts.

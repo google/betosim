@@ -68,8 +68,9 @@ impl Dhcpv6Manager {
             // send a Reply
             if let Some(client_id_val) = client_id {
                 let guest_mac = match packet.ethernet {
-                    EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                    EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                    EthernetPacket::Untagged { frame, .. } | EthernetPacket::Vlan { frame, .. } => {
+                        frame.src_addr
+                    }
                 };
                 self.send_reply(
                     responses,
@@ -107,8 +108,7 @@ impl Dhcpv6Manager {
         // 4. Domain Search List Option (Option 24):
         let domain_list_bytes =
             config.dns_search.as_ref().map(|search| encode_dns_search_list(search));
-        let domain_list_opt_len =
-            domain_list_bytes.as_ref().map(|bytes| 4 + bytes.len()).unwrap_or(0);
+        let domain_list_opt_len = domain_list_bytes.as_ref().map_or(0, |bytes| 4 + bytes.len());
 
         let total_options_len =
             client_id_opt_len + server_id_opt_len + dns_servers_opt_len + domain_list_opt_len;

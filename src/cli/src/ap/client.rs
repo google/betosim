@@ -40,13 +40,13 @@ pub(crate) fn execute(
         ApCommand::Create(args) => {
             let mut req = netsim_model::ApCreate::default();
             if let Some(ssid) = &args.ssid {
-                req.ssid = ssid.clone();
+                req.ssid.clone_from(ssid);
             }
             if let Some(channel) = args.channel {
                 req.channel = parse_channel(channel)?;
             }
             if let Some(bssid) = &args.bssid {
-                req.bssid = bssid.clone();
+                req.bssid.clone_from(bssid);
             }
 
             if let Some(password) = &args.password {

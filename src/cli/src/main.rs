@@ -74,7 +74,7 @@ fn perform_command(
         if let Err(error) = process_result(command, result, Some(req), verbose) {
             error!(%error);
             process_error = true;
-        };
+        }
     }
     if process_error {
         return Err("Not all requests were processed successfully.".into());

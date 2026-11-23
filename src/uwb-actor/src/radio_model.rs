@@ -70,8 +70,8 @@ impl RangingDataSet {
             && lower_k < upper_k
             && let (Some(&y1), Some(&y2)) = (lower_vals.choose(rng), upper_vals.choose(rng))
         {
-            let x1 = lower_k as f32;
-            let x2 = upper_k as f32;
+            let x1 = f32::from(lower_k);
+            let x2 = f32::from(upper_k);
             return y1 + (range_cm - x1) * ((y2 - y1) / (x2 - x1));
         }
 
@@ -107,8 +107,8 @@ impl RangingDataSet {
         let az_noise = sample_normal(rng, AZIMUTH_SIGMA_DEG);
         let el_noise = sample_normal(rng, ELEVATION_SIGMA_DEG);
 
-        let sampled_azimuth = wrap_azimuth(azimuth_deg as f32 + az_noise);
-        let sampled_elevation = (elevation_deg as f32 + el_noise)
+        let sampled_azimuth = wrap_azimuth(f32::from(azimuth_deg) + az_noise);
+        let sampled_elevation = (f32::from(elevation_deg) + el_noise)
             .clamp(MIN_ELEVATION_DEGREES, MAX_ELEVATION_DEGREES)
             .round() as i8;
 

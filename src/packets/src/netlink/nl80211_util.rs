@@ -67,10 +67,10 @@ pub enum NetlinkError {
 impl core::fmt::Display for NetlinkError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            NetlinkError::BufferTooShort(msg) => write!(f, "Buffer too short: {}", msg),
+            NetlinkError::BufferTooShort(msg) => write!(f, "Buffer too short: {msg}"),
             NetlinkError::InvalidPayloadLength => write!(f, "Invalid payload length"),
             NetlinkError::InvalidString => write!(f, "Invalid string in payload"),
-            NetlinkError::BuildError(s) => write!(f, "Netlink build error: {}", s),
+            NetlinkError::BuildError(s) => write!(f, "Netlink build error: {s}"),
         }
     }
 }
@@ -160,7 +160,7 @@ pub fn attr_id_to_string(attr_id_val: u16) -> String {
         attr_id::HWSIM_ATTR_FRAME_DATA => "HWSIM_ATTR_FRAME_DATA",
         attr_id::HWSIM_ATTR_COOKIE => "HWSIM_ATTR_COOKIE",
         attr_id::HWSIM_ATTR_FLAGS => "HWSIM_ATTR_FLAGS",
-        _ => return format!("Unknown(0x{:04X})", attr_id_val), // format! already returns String
+        _ => return format!("Unknown(0x{attr_id_val:04X})"), // format! already returns String
     };
     s.to_string()
 }
@@ -197,9 +197,8 @@ impl<'a> Iterator for NlAttrIter<'a> {
         }
 
         // Parse the header using from_prefix to get a Ref
-        let hdr_ref = match Ref::<&'a [u8], NlAttrHdr>::from_prefix(self.buffer) {
-            Ok((hdr, _)) => hdr,
-            Err(_) => return None, // Error during parsing (e.g. alignment, size)
+        let Ok((hdr_ref, _)) = Ref::<&'a [u8], NlAttrHdr>::from_prefix(self.buffer) else {
+            return None; // Error during parsing (e.g. alignment, size)
         };
 
         let nla_len = hdr_ref.length() as usize;

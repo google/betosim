@@ -408,7 +408,7 @@ mod tests {
         // Check basic field conversions
         assert_eq!(c_configs.c_slirp_config().version, rust_config.version);
         assert_eq!(c_configs.c_slirp_config().restricted, rust_config.restricted);
-        assert_eq!(c_configs.c_slirp_config().in_enabled as i32, rust_config.in_enabled as i32);
+        assert_eq!(c_configs.c_slirp_config().in_enabled, rust_config.in_enabled);
 
         // Check string conversions and null pointers
         assert_eq!(c_configs.c_slirp_config().vhostname, std::ptr::null());

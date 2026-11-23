@@ -67,7 +67,7 @@ impl ActorLifecycle for NfcActor {
                         self.nfc_stats.incr(NfcApi::CardEmulationSendResponseApdu);
                         self.nfc_stats.incr_card_emulation_count();
                     }
-                    _ => {}
+                    NfcMode::Idle => {}
                 }
             }
         } else {
@@ -503,10 +503,10 @@ mod tests {
         ctx: DummyContext,
         table: Arc<ErrorStatsTable>,
         subscriber: S,
-        _multi_dispatch_guard: tracing::Dispatch,
+        multi_dispatch_guard: tracing::Dispatch,
         stats: Arc<NfcStats>,
         chip_id: ChipId,
-        _casimir_peer: Option<tokio::io::DuplexStream>,
+        casimir_peer: Option<tokio::io::DuplexStream>,
     }
 
     fn setup_error_stats_actor(
@@ -522,18 +522,17 @@ mod tests {
         actor.active_chips.insert(chip_id, ChipState::for_test(chip_id, nfc_writer));
         let casimir_peer = if drop_casimir_peer { None } else { Some(peer) };
 
-        let (table, subscriber, _multi_dispatch_guard) =
-            crate::test_utils::setup_error_stats_test();
+        let (table, subscriber, multi_dispatch_guard) = crate::test_utils::setup_error_stats_test();
 
         ErrorStatsHarness {
             actor,
             ctx: DummyContext,
             table,
             subscriber,
-            _multi_dispatch_guard,
+            multi_dispatch_guard,
             stats,
             chip_id,
-            _casimir_peer: casimir_peer,
+            casimir_peer,
         }
     }
 
@@ -549,6 +548,8 @@ mod tests {
 
         assert_eq!(h.table.snapshot(), vec![(Code::DataPacketDecodeFailed as u32, 1)]);
         assert_eq!(h.stats.to_proto().nci_errors(), 1);
+        drop(h.casimir_peer);
+        drop(h.multi_dispatch_guard);
     }
 
     #[tokio::test]
@@ -565,5 +566,7 @@ mod tests {
 
         assert_eq!(h.table.snapshot(), vec![(Code::CasimirPacketWriteFailed as u32, 1)]);
         assert_eq!(h.stats.to_proto().casimir_errors(), 1);
+        drop(h.casimir_peer);
+        drop(h.multi_dispatch_guard);
     }
 }

@@ -89,7 +89,7 @@ macro_rules! slirp_debug {
 #[cfg(test)]
 pub fn reset_for_testing(val: Option<&str>) {
     init(); // Ensure Once is marked as run!
-    let flags = val.map(Topic::parse_debug_topics).unwrap_or(0);
+    let flags = val.map_or(0, Topic::parse_debug_topics);
     ENABLED_TOPICS.store(flags, Ordering::Relaxed);
 }
 

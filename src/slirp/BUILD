@@ -21,6 +21,7 @@ netsim_rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "slirp",
     edition = "2024",
+    pedantic_clippy = True,
     select_deps = select({
         "@bazel_tools//src/conditions:windows": [
             "@windows-sys",

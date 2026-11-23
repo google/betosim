@@ -471,7 +471,7 @@ impl ActorService for NfcActor {
                     .map(|(id, state)| {
                         let mut radio_stats = netsim_model::NetsimRadioStats::default();
                         radio_stats.id = id.0;
-                        radio_stats.name = state.chip.name.clone();
+                        radio_stats.name.clone_from(&state.chip.name);
                         radio_stats.kind = netsim_model::RadioKind::Nfc;
                         radio_stats.tx_count = state.tx_count.load(Ordering::Relaxed);
                         radio_stats.rx_count = state.rx_count.load(Ordering::Relaxed);
@@ -530,7 +530,7 @@ impl ActorService for NfcActor {
                     }
                 } else {
                     let err_msg = "Casimir scene not started".to_string();
-                    error!(code = Code::SceneNotStarted as u32, "NfcActor: {}", err_msg);
+                    error!(code = Code::SceneNotStarted as u32, "NfcActor: {err_msg}");
                     self.nfc_stats.incr_casimir_error();
                     let _ = respond_to.send(Err(NfcError::Internal(err_msg)));
                     Ok(crate::nfc_actor::NfcActionResult::Ok)

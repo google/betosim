@@ -490,7 +490,7 @@ impl Ieee80211 {
 
     pub fn get_payload(&self) -> Vec<u8> {
         let offset = self.hdr_length();
-        self.bytes.get(offset..).map_or_else(Vec::new, |p| p.to_vec())
+        self.bytes.get(offset..).map_or_else(Vec::new, <[u8]>::to_vec)
     }
 
     pub fn get_aad(&self) -> Vec<u8> {
@@ -539,8 +539,7 @@ impl Ieee80211 {
         self.bytes
             .get(offset..offset + 6)
             .and_then(|slice| slice.try_into().ok())
-            .map(MacAddress::new)
-            .unwrap_or(MacAddress::new([0; 6]))
+            .map_or_else(|| MacAddress::new([0; 6]), MacAddress::new)
     }
 
     pub fn get_addr1(&self) -> MacAddress {
@@ -763,12 +762,12 @@ impl Ieee80211 {
             bssid: self.get_bssid().ok_or_else(|| "Missing BSSID".to_string())?,
             seq_ctrl,
             qos_ctrl,
-            protected: if (fc & 0x4000) != 0 { 1 } else { 0 },
-            order: if (fc & 0x8000) != 0 { 1 } else { 0 },
-            more_frags: if (fc & 0x0400) != 0 { 1 } else { 0 },
-            retry: if (fc & 0x0800) != 0 { 1 } else { 0 },
-            pm: if (fc & 0x1000) != 0 { 1 } else { 0 },
-            more_data: if (fc & 0x2000) != 0 { 1 } else { 0 },
+            protected: u8::from((fc & 0x4000) != 0),
+            order: u8::from((fc & 0x8000) != 0),
+            more_frags: u8::from((fc & 0x0400) != 0),
+            retry: u8::from((fc & 0x0800) != 0),
+            pm: u8::from((fc & 0x1000) != 0),
+            more_data: u8::from((fc & 0x2000) != 0),
             version: (fc & 0x0003) as u8,
             payload: self.get_payload(),
         })
@@ -803,9 +802,9 @@ impl Ieee80211ToAp {
         payload: &[u8],
     ) -> Result<Vec<u8>, String> {
         let mut fc = 0u16;
-        fc |= (self.version as u16) & 0x03;
+        fc |= u16::from(self.version) & 0x03;
         fc |= ((self.ftype as u16) & 0x03) << 2;
-        fc |= ((self.stype as u16) & 0x0F) << 4;
+        fc |= (u16::from(self.stype) & 0x0F) << 4;
         let (ds_flag, addrs) = match direction {
             FrameDirection::ToAp => {
                 // ToDS=1, Addr1=BSSID, Addr2=SA, Addr3=DA
@@ -838,7 +837,7 @@ impl Ieee80211ToAp {
         }
 
         let [a1, a2, a3] = addrs;
-        let qos_slice: &[u8] = self.qos_ctrl.as_ref().map_or(&[], |q| q.as_slice());
+        let qos_slice: &[u8] = self.qos_ctrl.as_ref().map_or(&[], <[u8; 2]>::as_slice);
         Ok([
             &fc.to_le_bytes()[..],
             &self.duration_id.to_le_bytes(),

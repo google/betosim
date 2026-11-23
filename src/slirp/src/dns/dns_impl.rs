@@ -139,7 +139,7 @@ impl DnsProxy {
             let key = DnsCacheKey { name: qname.clone(), qtype };
             if let Some(entry) = self.cache.get(&key) {
                 let age = now.saturating_duration_since(entry.created_at);
-                if age.as_secs() < entry.ttl as u64 {
+                if age.as_secs() < u64::from(entry.ttl) {
                     let remaining_ttl = entry.ttl - age.as_secs() as u32;
                     debug!(
                         "DNS Proxy: Cache hit for '{}' -> {} (TTL={})",
@@ -151,10 +151,9 @@ impl DnsProxy {
                         return DnsQueryResult::Ignore;
                     };
                     return DnsQueryResult::Cached(reply_payload);
-                } else {
-                    debug!("DNS Proxy: Cache expired for '{qname}'");
-                    self.cache.remove(&key);
                 }
+                debug!("DNS Proxy: Cache expired for '{qname}'");
+                self.cache.remove(&key);
             }
         }
 
@@ -437,7 +436,7 @@ fn discover_host_dns_servers_windows() -> Vec<IpAddr> {
     // on overflow.
     let mut ret = unsafe {
         GetAdaptersAddresses(
-            AF_UNSPEC as u32,
+            u32::from(AF_UNSPEC),
             GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
             core::ptr::null_mut(),
             buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
@@ -451,7 +450,7 @@ fn discover_host_dns_servers_windows() -> Vec<IpAddr> {
         // previous call.
         ret = unsafe {
             GetAdaptersAddresses(
-                AF_UNSPEC as u32,
+                u32::from(AF_UNSPEC),
                 GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
                 core::ptr::null_mut(),
                 buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
@@ -485,15 +484,15 @@ fn discover_host_dns_servers_windows() -> Vec<IpAddr> {
                 if !sockaddr.is_null() {
                     // SAFETY: `sockaddr` is checked non-null and points to a
                     // valid OS-initialized `SOCKADDR`.
-                    let family = unsafe { (*sockaddr).sa_family as u32 };
+                    let family = unsafe { u32::from((*sockaddr).sa_family) };
 
-                    let ip = if family == AF_INET as u32 {
+                    let ip = if family == u32::from(AF_INET) {
                         let sin = sockaddr.cast::<SOCKADDR_IN>();
                         // SAFETY: `family == AF_INET` guarantees `sockaddr` is
                         // a valid `SOCKADDR_IN`.
                         let ip_bytes = unsafe { (*sin).sin_addr.S_un.S_addr.to_ne_bytes() };
                         Some(IpAddr::V4(Ipv4Addr::from(ip_bytes)))
-                    } else if family == AF_INET6 as u32 {
+                    } else if family == u32::from(AF_INET6) {
                         let sin6 = sockaddr.cast::<SOCKADDR_IN6>();
                         // SAFETY: `family == AF_INET6` guarantees `sockaddr` is
                         // a valid `SOCKADDR_IN6`.

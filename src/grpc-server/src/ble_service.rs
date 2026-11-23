@@ -65,7 +65,7 @@ fn build_ble_chip(
         product_name: product_name.to_string(),
         kind: netsim_model::ChipKind::BLUETOOTH,
         variant: Some(netsim_model::ChipVariant::Bluetooth(Box::new(netsim_model::Bluetooth {
-            address: "".to_string(),
+            address: String::new(),
             mode,
             bt_properties: Default::default(),
             ..Default::default()

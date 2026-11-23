@@ -50,9 +50,8 @@ impl<'a> Iterator for NetlinkStream<'a> {
             return Some(Err("Buffer too short for NlMsgHdr".to_string()));
         }
 
-        let (hdr, _) = match Ref::<&[u8], NlMsgHdr>::from_prefix(self.buffer) {
-            Ok(res) => res,
-            Err(_) => return Some(Err("Failed to read NlMsgHdr".to_string())),
+        let Ok((hdr, _)) = Ref::<&[u8], NlMsgHdr>::from_prefix(self.buffer) else {
+            return Some(Err("Failed to read NlMsgHdr".to_string()));
         };
 
         let msg_len = hdr.nlmsg_len as usize;

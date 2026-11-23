@@ -59,8 +59,8 @@ pub enum JsonError {
 impl fmt::Display for JsonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JsonError::SerdeJson(e) => write!(f, "JSON error: {}", e),
-            JsonError::MacAddrParse(s) => write!(f, "MAC address parse error: {}", s),
+            JsonError::SerdeJson(e) => write!(f, "JSON error: {e}"),
+            JsonError::MacAddrParse(s) => write!(f, "MAC address parse error: {s}"),
         }
     }
 }
@@ -128,9 +128,9 @@ pub fn parse_ethernet_header(ethernet_frame: &EthernetFrame, n: usize) -> Ethern
     let src_addr = ethernet_frame.src_addr.to_string();
     let eth_val = ethernet_frame.ethertype.get();
     let (ethertype, len) = if eth_val <= 1500 {
-        (None, Some(format!("{}", eth_val)))
+        (None, Some(format!("{eth_val}")))
     } else {
-        (Some(format!("{:#06x}", eth_val)), None)
+        (Some(format!("{eth_val:#06x}")), None)
     };
 
     Ethernet {

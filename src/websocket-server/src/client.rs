@@ -127,7 +127,7 @@ pub fn build_packet_stream_path(chip_info: &ChipInfo, device_guid: &str) -> Stri
         }
     }
     if let Some(chip) = &chip_info.chip {
-        let chip_id = if !chip.id.is_empty() { chip.id.as_str() } else { chip.name.as_str() };
+        let chip_id = if chip.id.is_empty() { chip.name.as_str() } else { chip.id.as_str() };
         for (key, value) in [
             ("chip_id", chip_id),
             ("manufacturer", chip.manufacturer.as_str()),

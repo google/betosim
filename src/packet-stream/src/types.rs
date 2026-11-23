@@ -52,12 +52,12 @@ impl std::fmt::Display for StreamAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StreamAddress::Uds(path) => write!(f, "UDS:{}", path.display()),
-            StreamAddress::Tcp(addr) => write!(f, "TCP:{}", addr),
+            StreamAddress::Tcp(addr) => write!(f, "TCP:{addr}"),
             StreamAddress::Fd { in_fd, out_fd } => match out_fd {
                 Some(out_fd) => write!(f, "fd://{in_fd}:{out_fd}"),
                 None => write!(f, "fd://{in_fd}"),
             },
-            StreamAddress::Grpc(addr) => write!(f, "GRPC:{}", addr),
+            StreamAddress::Grpc(addr) => write!(f, "GRPC:{addr}"),
         }
     }
 }

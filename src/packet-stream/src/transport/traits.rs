@@ -45,7 +45,8 @@ where
 
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
     let (sink, stream) = framed.split();
-    let stream = stream.map(|item| item.map(|b| b.freeze()).map_err(PacketStreamError::Io));
+    let stream =
+        stream.map(|item| item.map(bytes::BytesMut::freeze).map_err(PacketStreamError::Io));
     let sink = sink.sink_map_err(PacketStreamError::Io);
     (Box::pin(stream), Box::pin(sink))
 }

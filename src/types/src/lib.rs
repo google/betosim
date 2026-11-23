@@ -584,7 +584,7 @@ impl std::str::FromStr for ChipKind {
             "CELLULAR" | "MODEM" => Ok(ChipKind::CELLULAR),
             "CELLULAR_DATA" => Ok(ChipKind::CELLULAR_DATA),
             "ETHERNET" => Ok(ChipKind::ETHERNET),
-            _ => Err(format!("invalid chip kind: {}", s)),
+            _ => Err(format!("invalid chip kind: {s}")),
         }
     }
 }

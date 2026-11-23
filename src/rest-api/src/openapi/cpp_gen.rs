@@ -20,12 +20,12 @@ use serde_json::Value;
 
 use super::{SchemaKind, Spec, to_pascal_case};
 
-const CPP_HEADER: &str = r#"#include <cstdint>
+const CPP_HEADER: &str = r"#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
-"#;
+";
 
 /// Generates C++ `nlohmann::json` types from an OpenAPI 3.1 document.
 pub fn generate_cpp(doc: &Value) -> String {
@@ -36,44 +36,44 @@ pub fn generate_cpp(doc: &Value) -> String {
         out.push('\n');
         match &schema.kind {
             SchemaKind::Enum(variants) => {
-                let decls = variants
-                    .iter()
-                    .map(|v| format!("  k{},\n", to_pascal_case(v)))
-                    .collect::<String>();
-                let pairs = variants
-                    .iter()
-                    .map(|v| format!("  {{{name}::k{}, {v:?}}},\n", to_pascal_case(v)))
-                    .collect::<String>();
+                let decls = variants.iter().fold(String::new(), |mut s, v| {
+                    let _ = writeln!(s, "  k{},", to_pascal_case(v));
+                    s
+                });
+                let pairs = variants.iter().fold(String::new(), |mut s, v| {
+                    let _ = writeln!(s, "  {{{name}::k{}, {v:?}}},", to_pascal_case(v));
+                    s
+                });
                 let _ = write!(
                     out,
-                    r#"enum class {name} {{
+                    r"enum class {name} {{
 {decls}}};
 NLOHMANN_JSON_SERIALIZE_ENUM({name}, {{
 {pairs}}})
-"#
+"
                 );
             }
             SchemaKind::Struct(fields) if fields.is_empty() => {
                 let _ = writeln!(out, "struct {name} {{}};");
             }
             SchemaKind::Struct(fields) => {
-                let members = fields
-                    .iter()
-                    .map(|f| {
-                        let base = f
-                            .ty
-                            .render(["std::string", "int64_t", "double", "bool"], "std::vector");
-                        let ty = if f.required { base } else { format!("std::optional<{base}>") };
-                        format!("  {ty} {};\n", f.name)
-                    })
-                    .collect::<String>();
+                let members = fields.iter().fold(String::new(), |mut s, f| {
+                    let base =
+                        f.ty.render(["std::string", "int64_t", "double", "bool"], "std::vector");
+                    if f.required {
+                        let _ = writeln!(s, "  {base} {};", f.name);
+                    } else {
+                        let _ = writeln!(s, "  std::optional<{base}> {};", f.name);
+                    }
+                    s
+                });
                 let names = fields.iter().map(|f| f.name).collect::<Vec<_>>().join(", ");
                 let _ = write!(
                     out,
-                    r#"struct {name} {{
+                    r"struct {name} {{
 {members}}};
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT({name}, {names})
-"#
+"
                 );
             }
         }

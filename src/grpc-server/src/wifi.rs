@@ -57,7 +57,7 @@ impl WifiService for WifiServiceImpl {
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::INTERNAL,
-                                format!("Failed to list Wifi chips: {}", error),
+                                format!("Failed to list Wifi chips: {error}"),
                             ))
                             .await;
                     }
@@ -122,7 +122,7 @@ impl WifiService for WifiServiceImpl {
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::INTERNAL,
-                                format!("Failed to list chips for power operation: {}", e),
+                                format!("Failed to list chips for power operation: {e}"),
                             ))
                             .await;
                     }

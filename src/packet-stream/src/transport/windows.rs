@@ -25,7 +25,7 @@ pub struct WindowsListener {
 
 impl WindowsListener {
     pub fn bind_named_pipe(pipe_name: &str) -> Result<Self> {
-        let full_name = format!(r"\\.\pipe\{}", pipe_name);
+        let full_name = format!(r"\\.\pipe\{pipe_name}");
 
         let server = ServerOptions::new().first_pipe_instance(true).create(&full_name)?;
 
@@ -50,7 +50,7 @@ impl WindowsListener {
 }
 
 pub fn connect_named_pipe(pipe_name: &str) -> Result<NamedPipeClient> {
-    let full_name = format!(r"\\.\pipe\{}", pipe_name);
+    let full_name = format!(r"\\.\pipe\{pipe_name}");
     let client = ClientOptions::new().open(&full_name)?;
     Ok(client)
 }

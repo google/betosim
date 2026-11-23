@@ -228,7 +228,7 @@ impl ActorService for CellActor {
         id: Self::Id,
         _ctx: &mut DynContext<Self>,
     ) -> Result<Option<Self::Entity>, Self::Error> {
-        let enabled = self.active_chips.get(&id).map(|s| s.enabled).unwrap_or(true);
+        let enabled = self.active_chips.get(&id).is_none_or(|s| s.enabled);
         Ok(self.get_chip_for_modem(id.0, enabled))
     }
 
@@ -311,12 +311,12 @@ impl ActorService for CellActor {
             CellAction::SetSignalStrength { rssi, ber } => {
                 let rssi_u8 = u8::try_from(rssi).map_err(|e| {
                     CellError::Chip(ChipError::InvalidArguments(
-                        format!("rssi out of range ({}): {}", rssi, e).into(),
+                        format!("rssi out of range ({rssi}): {e}").into(),
                     ))
                 })?;
                 let ber_u8 = u8::try_from(ber).map_err(|e| {
                     CellError::Chip(ChipError::InvalidArguments(
-                        format!("ber out of range ({}): {}", ber, e).into(),
+                        format!("ber out of range ({ber}): {e}").into(),
                     ))
                 })?;
                 ModemAction::SetSignalStrength { id: chip_id, rssi: rssi_u8, ber: ber_u8 }

@@ -64,7 +64,7 @@ impl NlAttrHdr {
             return Err("Packet too short for NlAttrHdr".into());
         }
         let (hdr, _) = zerocopy::Ref::<&[u8], NlAttrHdr>::from_prefix(bytes)
-            .map_err(|err| format!("Failed to read NlAttrHdr: {}", err))?;
+            .map_err(|err| format!("Failed to read NlAttrHdr: {err}"))?;
         Ok(*hdr)
     }
 }

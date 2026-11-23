@@ -75,8 +75,8 @@ impl Icmpv6Manager {
 
             if dest_ip == config.host_ipv6 {
                 let guest_mac = match packet.ethernet {
-                    netsim_packets::EthernetPacket::Untagged { frame, .. } => frame.src_addr,
-                    netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
+                    netsim_packets::EthernetPacket::Untagged { frame, .. }
+                    | netsim_packets::EthernetPacket::Vlan { frame, .. } => frame.src_addr,
                 };
                 self.send_echo_reply(
                     responses,

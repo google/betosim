@@ -45,7 +45,9 @@ pub(crate) fn resolve_tx_power_dbm(settings: Option<&netsim_model::AdvertiseSett
             netsim_model::AdvertiseTxPower::Medium => -7,
             netsim_model::AdvertiseTxPower::High => 1,
         },
-        Some(netsim_model::TxPower::Dbm(dbm)) => (*dbm).clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+        Some(netsim_model::TxPower::Dbm(dbm)) => {
+            (*dbm).clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8
+        }
         None => DEFAULT_TX_POWER_DBM,
     }
 }
@@ -103,7 +105,7 @@ pub(crate) fn construct_data(
     let mut uuids_128 = Vec::new();
 
     for service in &adv_data.services {
-        let hex_str = service.uuid.replace("-", "");
+        let hex_str = service.uuid.replace('-', "");
         if let Ok(mut uuid_bytes) = hex::decode(&hex_str) {
             uuid_bytes.reverse(); // UUIDs are little-endian in AD
             match uuid_bytes.len() {
@@ -150,7 +152,7 @@ pub(crate) fn generate_legacy_address(chip_id: u32) -> String {
 
 /// Generates a default name for a beacon from a Chip ID.
 pub(crate) fn generate_default_name(chip_id: u32) -> String {
-    format!("Beacon-{}", chip_id)
+    format!("Beacon-{chip_id}")
 }
 
 // HCI Constants used for testing and packet parsing

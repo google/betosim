@@ -56,12 +56,10 @@ fn test_handle_syn_sends_syn_ack() {
     });
 
     let parsed_packet = ParsedPacket::parse(&ethernet_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_packet.network {
-            (h, p)
-        } else {
-            panic!();
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_packet.network
+    else {
+        panic!();
+    };
 
     tcp_manager.handle_packet(
         &mut responses,
@@ -72,9 +70,8 @@ fn test_handle_syn_sends_syn_ack() {
     );
 
     assert_eq!(responses.len(), 2);
-    let response_packet = match responses.get(1).unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(response_packet) = responses.get(1).unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_eth, _ipv4, tcp_header, _payload) = parse_tcp_packet(response_packet);
@@ -106,19 +103,15 @@ fn test_handle_syn_sent_ack_with_payload() {
     });
 
     let parsed_syn = ParsedPacket::parse(&syn_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_syn.network {
-            (h, p)
-        } else {
-            panic!("Expected IPv4 packet");
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_syn.network else {
+        panic!("Expected IPv4 packet");
+    };
 
     tcp_manager.handle_packet(&mut responses, &mut timers, &parsed_syn, &ipv4_header, tcp_packet);
 
     assert_eq!(responses.len(), 2);
-    let response_packet = match responses.get(1).unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(response_packet) = responses.get(1).unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_eth, _ipv4, syn_ack_header, _payload) = parse_tcp_packet(response_packet);
@@ -142,12 +135,9 @@ fn test_handle_syn_sent_ack_with_payload() {
     });
 
     let parsed_ack = ParsedPacket::parse(&ack_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_ack.network {
-            (h, p)
-        } else {
-            panic!("Expected IPv4 packet");
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_ack.network else {
+        panic!("Expected IPv4 packet");
+    };
 
     tcp_manager.handle_packet(&mut responses, &mut timers, &parsed_ack, &ipv4_header, tcp_packet);
 
@@ -209,19 +199,15 @@ fn test_handle_syn_sent_ack_with_payload_and_fin() {
     });
 
     let parsed_syn = ParsedPacket::parse(&syn_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_syn.network {
-            (h, p)
-        } else {
-            panic!("Expected IPv4 packet");
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_syn.network else {
+        panic!("Expected IPv4 packet");
+    };
 
     tcp_manager.handle_packet(&mut responses, &mut timers, &parsed_syn, &ipv4_header, tcp_packet);
 
     assert_eq!(responses.len(), 2);
-    let response_packet = match responses.get(1).unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(response_packet) = responses.get(1).unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_eth, _ipv4, syn_ack_header, _payload) = parse_tcp_packet(response_packet);
@@ -245,12 +231,9 @@ fn test_handle_syn_sent_ack_with_payload_and_fin() {
     });
 
     let parsed_ack = ParsedPacket::parse(&ack_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_ack.network {
-            (h, p)
-        } else {
-            panic!("Expected IPv4 packet");
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_ack.network else {
+        panic!("Expected IPv4 packet");
+    };
 
     tcp_manager.handle_packet(&mut responses, &mut timers, &parsed_ack, &ipv4_header, tcp_packet);
 
@@ -330,12 +313,9 @@ fn test_handle_established_payload_and_fin_acknowledges_both() {
     });
 
     let parsed_fin = ParsedPacket::parse(&fin_packet).unwrap();
-    let (ipv4_header, tcp_packet) =
-        if let Some(NetworkPacket::Ip(IpPacket::V4(h, p))) = parsed_fin.network {
-            (h, p)
-        } else {
-            panic!("Expected IPv4 packet");
-        };
+    let Some(NetworkPacket::Ip(IpPacket::V4(ipv4_header, tcp_packet))) = parsed_fin.network else {
+        panic!("Expected IPv4 packet");
+    };
 
     tcp_manager.handle_packet(&mut responses, &mut timers, &parsed_fin, &ipv4_header, tcp_packet);
 

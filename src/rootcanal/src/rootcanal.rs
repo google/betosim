@@ -359,7 +359,7 @@ mod tests {
     /// controllers.
     fn setup_bluetooth_with_controllers(bluetooth: &Arc<Rootcanal>, num_controllers: u32) {
         for i in 1..=num_controllers {
-            let addr = Address::from_str(&format!("01:02:03:04:05:{:02X}", i)).unwrap();
+            let addr = Address::from_str(&format!("01:02:03:04:05:{i:02X}")).unwrap();
             bluetooth.add_controller(i, addr, Box::new(MockControllerCallbacks {}), None).unwrap();
         }
     }

@@ -63,7 +63,7 @@ pub(crate) async fn write_http_response(
     let status_line =
         format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or(""));
     stream.write_all(status_line.as_bytes()).await?;
-    for (name, value) in response.headers().iter() {
+    for (name, value) in response.headers() {
         let header_line = format!("{}: {}\r\n", name, value.to_str()?);
         stream.write_all(header_line.as_bytes()).await?;
     }

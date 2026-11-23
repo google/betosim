@@ -25,6 +25,7 @@ netsim_rust_binary(
     name = "netsim",
     srcs = glob(["src/**/*.rs"]),
     edition = "2024",
+    pedantic_clippy = True,
     tags = ["no-sandbox"],
     deps = [
         "//proto",

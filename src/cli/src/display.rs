@@ -154,7 +154,7 @@ impl fmt::Display for Displayer<&Device> {
             Displayer::new(&self.value.pose.position, self.verbose)
         )?;
 
-        for chip in self.value.chips.iter() {
+        for chip in &self.value.chips {
             let mut chip_displayer = Displayer::new(chip, self.verbose);
             write!(f, "{:indent$}{}", "", chip_displayer.indent(self.indent))?;
         }
@@ -169,8 +169,8 @@ impl fmt::Display for Displayer<&Chip> {
         let width = 9;
 
         match self.value.variant.as_ref() {
-            Some(ChipVariant::Bluetooth(bt)) => match &bt.mode {
-                BluetoothMode::Beacon(beacon_params) => {
+            Some(ChipVariant::Bluetooth(bt)) => {
+                if let BluetoothMode::Beacon(beacon_params) = &bt.mode {
                     let beacon_width = 16 + width;
 
                     writeln!(f)?;
@@ -191,8 +191,7 @@ impl fmt::Display for Displayer<&Chip> {
                                 .indent(self.indent)
                         )?;
                     }
-                }
-                _ => {
+                } else {
                     writeln!(f)?;
                     write!(
                         f,
@@ -211,7 +210,7 @@ impl fmt::Display for Displayer<&Chip> {
                         Displayer::new(&bt.classic, self.verbose)
                     )?;
                 }
-            },
+            }
             Some(ChipVariant::Wifi(wifi)) => {
                 writeln!(f)?;
                 write!(
@@ -245,7 +244,9 @@ impl fmt::Display for Displayer<&Chip> {
             Some(ChipVariant::Cell(cell)) => {
                 writeln!(f)?;
                 write!(f, "{:indent$}{:width$}", "", "cellular: ")?;
-                if !cell.state.is_empty() {
+                if cell.state.is_empty() {
+                    write!(f, "{}", Displayer::new(&cell.radio, self.verbose))?;
+                } else {
                     write!(f, "state: {} | rssi: {}", cell.state, cell.rssi)?;
                     if self.verbose {
                         write!(f, " | ber: {} | sms_count: {}", cell.ber, cell.sms_count)?;
@@ -266,8 +267,6 @@ impl fmt::Display for Displayer<&Chip> {
                             }
                         }
                     }
-                } else {
-                    write!(f, "{}", Displayer::new(&cell.radio, self.verbose))?;
                 }
             }
             Some(ChipVariant::CellularData(cell_data)) => {
@@ -293,7 +292,7 @@ impl fmt::Display for Displayer<&Chip> {
             None => {
                 if self.verbose {
                     writeln!(f)?;
-                    write!(f, "{:indent$}Unknown chip (Kind: {:?})", "", self.value.kind)?
+                    write!(f, "{:indent$}Unknown chip (Kind: {:?})", "", self.value.kind)?;
                 }
             }
         }

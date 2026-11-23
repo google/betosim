@@ -85,11 +85,11 @@ mod tests {
     #[test]
     fn handle_list_map_transforms_entities() {
         let empty: HashMap<u32, String> = HashMap::new();
-        let empty_mapped = handle_list_map(&empty, |v| v.len());
+        let empty_mapped = handle_list_map(&empty, String::len);
         assert!(empty_mapped.is_empty());
 
         let map = HashMap::from([(1_u32, "a".to_string()), (2_u32, "abcd".to_string())]);
-        let mut lengths = handle_list_map(&map, |v| v.len());
+        let mut lengths = handle_list_map(&map, String::len);
         lengths.sort_unstable();
         assert_eq!(lengths, vec![1, 4]);
     }

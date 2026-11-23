@@ -274,10 +274,10 @@ mod tests {
     fn test_bind_tcp_loopback_ephemeral_retry_failure_records_ephemeral_bind_failed() {
         let (table, _guard) = crate::util::netsim_logger::isolated_error_stats();
         let result = bind_tcp_loopback_with_fallback_fn(6402, false, "HCI socket server", |port| {
-            if port != 0 {
-                Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use"))
-            } else {
+            if port == 0 {
                 Err(std::io::Error::other("ephemeral exhausted"))
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use"))
             }
         })
         .unwrap();

@@ -25,6 +25,7 @@ netsim_rust_library(
     }),
     crate_name = "slirp_actor",
     edition = "2024",
+    pedantic_clippy = True,
     select_deps = select({
         "//:standalone": [],
         "//conditions:default": [

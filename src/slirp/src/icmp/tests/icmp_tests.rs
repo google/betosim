@@ -72,9 +72,8 @@ fn test_echo_reply() {
     icmp_manager.handle_packet(&mut responses, &config, &parsed_packet, &icmp_packet);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();
@@ -108,9 +107,8 @@ fn test_time_exceeded() {
     icmp_manager.send_time_exceeded(&mut responses, &config, &ip_buf);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();
@@ -135,9 +133,8 @@ fn test_host_unreachable() {
     icmp_manager.send_host_unreachable(&mut responses, &config, &ip_buf);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();

@@ -59,7 +59,9 @@ fn map_proto_reg_status(
         netsim_proto::cell::RegistrationStatus::EMERGENCY => {
             netsim_model::RegistrationStatus::Emergency
         }
-        _ => netsim_model::RegistrationStatus::Unknown,
+        netsim_proto::cell::RegistrationStatus::UNKNOWN => {
+            netsim_model::RegistrationStatus::Unknown
+        }
     }
 }
 
@@ -100,7 +102,7 @@ fn map_model_reg_status(
 fn map_model_to_proto_cell(chip_id: u32, cell_info: &netsim_model::Cell) -> Cell {
     let mut cell = Cell::new();
     cell.id = chip_id;
-    cell.state = cell_info.state.clone();
+    cell.state.clone_from(&cell_info.state);
     cell.ringing = cell.state == MODEM_STATE_RINGING;
     cell.sms_count = cell_info.sms_count;
     cell.rssi = cell_info.rssi;
@@ -112,7 +114,7 @@ fn map_model_to_proto_cell(chip_id: u32, cell_info: &netsim_model::Cell) -> Cell
         .iter()
         .map(|c| {
             let mut proto_call = netsim_proto::cell::Call::new();
-            proto_call.number = c.number.clone();
+            proto_call.number.clone_from(&c.number);
             proto_call.state = protobuf::EnumOrUnknown::new(match c.state {
                 netsim_model::CallState::Unknown => netsim_proto::cell::call::State::UNKNOWN,
                 netsim_model::CallState::Active => netsim_proto::cell::call::State::ACTIVE,
@@ -158,7 +160,7 @@ impl CellService for CellServiceImpl {
                     error!(%error, "Get cell failed");
                     let status = grpcio::RpcStatus::with_message(
                         grpcio::RpcStatusCode::NOT_FOUND,
-                        format!("Failed to get cell: {}", error),
+                        format!("Failed to get cell: {error}"),
                     );
                     let _ = sink.fail(status).await;
                 }
@@ -188,7 +190,7 @@ impl CellService for CellServiceImpl {
                     error!(%error, "List cells failed");
                     let status = grpcio::RpcStatus::with_message(
                         grpcio::RpcStatusCode::INTERNAL,
-                        format!("Failed to list cells: {}", error),
+                        format!("Failed to list cells: {error}"),
                     );
                     let _ = sink.fail(status).await;
                 }
@@ -252,7 +254,9 @@ impl CellService for CellServiceImpl {
                         netsim_proto::cell::set_network_technology::RadioTechnology::NR => {
                             netsim_model::RadioTechnology::Nr
                         }
-                        _ => netsim_model::RadioTechnology::Unknown,
+                        netsim_proto::cell::set_network_technology::RadioTechnology::UNKNOWN => {
+                            netsim_model::RadioTechnology::Unknown
+                        }
                     };
                     CellAction::SetNetworkTechnology { tech }
                 }

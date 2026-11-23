@@ -378,7 +378,7 @@ impl ActorService for UwbActor {
                     .map(|state| {
                         let mut radio_stats = netsim_model::NetsimRadioStats::default();
                         radio_stats.id = state.chip.id;
-                        radio_stats.name = state.chip.name.clone();
+                        radio_stats.name.clone_from(&state.chip.name);
                         radio_stats.kind = netsim_model::RadioKind::Uwb;
                         radio_stats.tx_count =
                             state.tx_count.load(std::sync::atomic::Ordering::Relaxed);
@@ -517,10 +517,10 @@ pub(crate) fn parse_and_count_uci_command(bytes: &[u8], stats: &crate::stats::Uw
                             UpdateMulticastListAction::AddControlee
                             | UpdateMulticastListAction::AddControleeWithShortSubSessionKey
                             | UpdateMulticastListAction::AddControleeWithExtendedSubSessionKey => {
-                                stats.incr(UwbApi::AddControlee)
+                                stats.incr(UwbApi::AddControlee);
                             }
                             UpdateMulticastListAction::RemoveControlee => {
-                                stats.incr(UwbApi::RemoveControlee)
+                                stats.incr(UwbApi::RemoveControlee);
                             }
                         },
                         _ => {}

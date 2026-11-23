@@ -98,7 +98,7 @@ pub fn parse_ini(
                         column_number,
                         kind: IniParseErrorKind::DuplicateKey {
                             key: key.to_string(),
-                            existing_value: existing_value.to_string(),
+                            existing_value: existing_value.clone(),
                             new_value: value.to_string(),
                         },
                         line_content: line.to_string(),
@@ -159,9 +159,8 @@ where
     };
     // Non-strict `parse_ini` (`strict: false`) never returns `Err`.
     let map = parse_ini(&content, &IniParserOptions::default()).ok()?;
-    let addr = map
-        .get(key)
-        .map(|s| if s.contains(':') { s.to_string() } else { format!("localhost:{s}") })?;
+    let addr =
+        map.get(key).map(|s| if s.contains(':') { s.clone() } else { format!("localhost:{s}") })?;
     if !is_server_reachable(&addr) {
         warn!(
             code = crate::err::Code::IniServerAddrUnreachable as u32,

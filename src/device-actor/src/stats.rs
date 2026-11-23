@@ -244,7 +244,7 @@ impl Stats {
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Invalid stats path (no filename): {:?}", path),
+                format!("Invalid stats path (no filename): {}", path.display()),
             ));
         }
 

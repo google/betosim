@@ -20,9 +20,9 @@ use serde_json::Value;
 
 use super::{SchemaKind, Spec};
 
-const PY_HEADER: &str = r#"from dataclasses import dataclass
+const PY_HEADER: &str = r"from dataclasses import dataclass
 from enum import StrEnum
-"#;
+";
 
 /// Generates Python `StrEnum` and `@dataclass` types from an OpenAPI 3.1
 /// document.
@@ -42,8 +42,8 @@ pub fn generate_python(doc: &Value) -> String {
             SchemaKind::Struct(fields) => {
                 let _ = writeln!(
                     out,
-                    r#"@dataclass
-class {name}:"#
+                    r"@dataclass
+class {name}:"
                 );
                 if fields.is_empty() {
                     let _ = writeln!(out, "    pass");

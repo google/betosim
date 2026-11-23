@@ -108,9 +108,8 @@ impl World {
             .await
             .expect("Failed to create daemon");
 
-        let daemon = match startup_mode {
-            StartUpMode::Owner(daemon) => daemon,
-            _ => panic!("Expected daemon to start as Owner"),
+        let StartUpMode::Owner(daemon) = startup_mode else {
+            panic!("Expected daemon to start as Owner");
         };
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -140,7 +139,7 @@ impl World {
             self.device_client.get(DeviceId(device_id)).await.unwrap().expect("Device missing");
         let bt_chips: Vec<_> =
             device.chips.into_iter().filter(|c| c.kind == ChipKind::BLUETOOTH).collect();
-        assert!(!bt_chips.is_empty(), "No bluetooth chips found on device {}", device_id);
+        assert!(!bt_chips.is_empty(), "No bluetooth chips found on device {device_id}");
         bt_chips
     }
 
@@ -185,7 +184,7 @@ impl World {
             packet_sink: None,
             device_config,
             chip: Chip {
-                name: format!("chip_{}", device_guid),
+                name: format!("chip_{device_guid}"),
                 manufacturer: "Netsim".to_string(),
                 product_name: "RootcanalBeacon".to_string(),
                 kind: ChipKind::BLUETOOTH,
@@ -311,14 +310,14 @@ impl World {
     pub(crate) async fn when_concurrent_clients_send_command(&mut self, name: &str, args: &[&str]) {
         let clients = std::mem::take(&mut self.concurrent_clients);
         let name = name.to_string();
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
 
         let mut tasks = Vec::new();
         for mut client in clients {
             let name = name.clone();
             let args = args.clone();
             let task = tokio::spawn(async move {
-                let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let str_args: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
                 let resp = client.send_command(&name, &str_args).await;
                 (client, resp)
             });
@@ -373,19 +372,17 @@ impl World {
     ) {
         let cmd = if enable { "add_device_to_phy" } else { "del_device_from_phy" };
         let expected = format!(
-            "TestCommandHandler '{}' called with device {} and phy {}",
-            cmd, device_id, phy_index
+            "TestCommandHandler '{cmd}' called with device {device_id} and phy {phy_index}"
         );
         assert_eq!(self.last_response, expected);
     }
 
     pub(crate) fn then_list_contains_device(&self, device_id: u32) {
-        let expected_device_row = format!("{}:hci_device_{}", device_id, device_id);
+        let expected_device_row = format!("{device_id}:hci_device_{device_id}");
         assert!(self.last_response.contains("Devices:"), "Response missing Devices: category");
         assert!(
             self.last_response.contains(&expected_device_row),
-            "Response missing expected device entry: {}",
-            expected_device_row
+            "Response missing expected device entry: {expected_device_row}"
         );
         assert!(self.last_response.contains("Phys:"), "Response missing Phys: category");
     }
@@ -395,15 +392,12 @@ impl World {
             .last_response
             .lines()
             .find(|line| line.trim().starts_with(phy_prefix))
-            .unwrap_or_else(|| panic!("Missing {} physical category", phy_prefix));
+            .unwrap_or_else(|| panic!("Missing {phy_prefix} physical category"));
         let devices = phy_line.split(':').nth(2).unwrap().trim();
-        let device_ids: Vec<&str> = devices.split(',').map(|s| s.trim()).collect();
+        let device_ids: Vec<&str> = devices.split(',').map(str::trim).collect();
         assert!(
             device_ids.contains(&device_id.to_string().as_str()),
-            "Device {} not found in {} devices: {:?}",
-            device_id,
-            phy_prefix,
-            device_ids
+            "Device {device_id} not found in {phy_prefix} devices: {device_ids:?}"
         );
     }
 
@@ -420,9 +414,7 @@ impl World {
         for resp in &self.pipelined_responses {
             assert!(
                 resp.contains(substring),
-                "Pipelined response did not contain '{}': {}",
-                substring,
-                resp
+                "Pipelined response did not contain '{substring}': {resp}"
             );
         }
     }
@@ -430,7 +422,7 @@ impl World {
     pub(crate) fn then_all_concurrent_responses_contain(&self, substring: &str) {
         assert!(!self.concurrent_responses.is_empty(), "No concurrent responses recorded");
         for (i, resp) in self.concurrent_responses.iter().enumerate() {
-            assert!(resp.contains(substring), "Client {} got invalid response: {}", i, resp);
+            assert!(resp.contains(substring), "Client {i} got invalid response: {resp}");
         }
     }
 
@@ -495,6 +487,6 @@ impl World {
 
     pub(crate) async fn then_device_is_deleted(&mut self, id: u32) {
         let device = self.device_client.get(DeviceId(id)).await.unwrap();
-        assert!(device.is_none(), "Expected device {} to be fully deleted", id);
+        assert!(device.is_none(), "Expected device {id} to be fully deleted");
     }
 }

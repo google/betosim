@@ -48,7 +48,7 @@ struct World {
     addr: SocketAddr,
     capture_client: CaptureClient,
     device_rx: mpsc::Receiver<actor_framework::ResourceRequest<device_actor::DeviceActor>>,
-    _tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl World {
@@ -85,7 +85,7 @@ impl World {
             capture_client.clone(),
             "test".to_string(),
         ));
-        World { addr, capture_client, device_rx, _tasks: vec![capture_task, server_task] }
+        World { addr, capture_client, device_rx, tasks: vec![capture_task, server_task] }
     }
 
     /// Sends a raw HTTP request string and returns the socket and response head.
@@ -207,7 +207,7 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        for task in &self._tasks {
+        for task in &self.tasks {
             task.abort();
         }
     }

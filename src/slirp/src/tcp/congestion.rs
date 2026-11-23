@@ -27,21 +27,21 @@ pub(crate) struct CongestionControl {
 
 impl CongestionControl {
     pub(crate) fn new(mss: u16) -> Self {
-        Self { cwnd: INITIAL_CWND_PACKETS * mss as u32, ssthresh: INITIAL_SSTHRESH }
+        Self { cwnd: INITIAL_CWND_PACKETS * u32::from(mss), ssthresh: INITIAL_SSTHRESH }
     }
 
     pub(crate) fn on_ack(&mut self, mss: u16) {
         if self.cwnd < self.ssthresh {
             // Slow start
-            self.cwnd += mss as u32;
+            self.cwnd += u32::from(mss);
         } else {
             // Congestion avoidance
-            self.cwnd += (mss as u32 * mss as u32) / self.cwnd;
+            self.cwnd += (u32::from(mss) * u32::from(mss)) / self.cwnd;
         }
     }
 
     pub(crate) fn on_retransmission(&mut self, mss: u16) {
         self.ssthresh = self.cwnd / 2;
-        self.cwnd = mss as u32;
+        self.cwnd = u32::from(mss);
     }
 }

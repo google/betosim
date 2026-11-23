@@ -43,8 +43,8 @@ pub enum DeviceError {
 impl From<crate::client_error::ClientError> for DeviceError {
     fn from(err: crate::client_error::ClientError) -> Self {
         match err {
-            crate::client_error::ClientError::Send(s) => DeviceError::ChipClient(s),
-            crate::client_error::ClientError::Recv(s) => DeviceError::ChipClient(s),
+            crate::client_error::ClientError::Send(s)
+            | crate::client_error::ClientError::Recv(s) => DeviceError::ChipClient(s),
             crate::client_error::ClientError::Chip(e) => DeviceError::Chip(e),
             crate::client_error::ClientError::Framework(e) => DeviceError::Internal(e),
         }

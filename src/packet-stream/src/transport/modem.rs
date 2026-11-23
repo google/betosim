@@ -45,18 +45,16 @@ impl Decoder for ModemCodec {
                         continue;
                     }
                     return Ok(Some(data.freeze()));
-                } else {
-                    // Include \x1a or \x1b in the yielded frame for parser evaluation.
-                    let data = src.split_to(pos + 1);
-                    return Ok(Some(data.freeze()));
                 }
-            } else {
-                if src.len() >= 4096 {
-                    let data = src.split_to(4096);
-                    return Ok(Some(data.freeze()));
-                }
-                return Ok(None);
+                // Include \x1a or \x1b in the yielded frame for parser evaluation.
+                let data = src.split_to(pos + 1);
+                return Ok(Some(data.freeze()));
             }
+            if src.len() >= 4096 {
+                let data = src.split_to(4096);
+                return Ok(Some(data.freeze()));
+            }
+            return Ok(None);
         }
     }
 }

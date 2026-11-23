@@ -284,9 +284,8 @@ impl FaultWire {
         match self.decode()? {
             (Some(t), _) => Ok(t),
             (None, Some(true)) => Ok(NfcFaultTrigger::OnFirstWrite),
-            (None, Some(false)) => Ok(NfcFaultTrigger::None),
             (None, None) if require_disconnect => Err("missing field `disconnect_on_transceive`"),
-            (None, None) => Ok(NfcFaultTrigger::None),
+            (None, Some(false) | None) => Ok(NfcFaultTrigger::None),
         }
     }
 }

@@ -93,7 +93,7 @@ impl ReflectionData {
 }
 
 fn join_name(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() { name.to_string() } else { format!("{}.{}", prefix, name) }
+    if prefix.is_empty() { name.to_string() } else { format!("{prefix}.{name}") }
 }
 
 fn index_message(
@@ -155,7 +155,7 @@ impl ServerReflectionImpl {
                 file_aliases.insert(base_name.to_string(), file_name.to_string());
             }
 
-            file_deps.insert(file_name.to_string(), proto.dependency.to_vec());
+            file_deps.insert(file_name.to_string(), proto.dependency.clone());
 
             let pkg = proto.package();
             for s in &proto.service {
@@ -224,7 +224,7 @@ impl ServerReflection for ServerReflectionImpl {
                                     .iter()
                                     .map(|name| {
                                         let mut s = ServiceResponse::new();
-                                        s.name = name.clone();
+                                        s.name.clone_from(name);
                                         s
                                     })
                                     .collect();

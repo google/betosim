@@ -55,9 +55,10 @@ pub(super) fn parse_scan_packet(
         other => other,
     };
 
-    let reports = match parse_hci_event(payload) {
-        Some(HciEvent::LeMetaEvent(LeMetaEvent::LeAdvertisingReport(reports))) => reports,
-        _ => return events,
+    let Some(HciEvent::LeMetaEvent(LeMetaEvent::LeAdvertisingReport(reports))) =
+        parse_hci_event(payload)
+    else {
+        return events;
     };
 
     for report in reports {
@@ -74,10 +75,10 @@ pub(super) fn parse_scan_packet(
         let event_type_str = report.event_type.to_string();
         let is_scan_rsp = report.event_type == LeAdvertisingEventType::SCAN_RSP;
 
-        let ad_payloads = if !report.data.is_empty() {
-            parse_ad_structures(report.data, is_scan_rsp)
-        } else {
+        let ad_payloads = if report.data.is_empty() {
             BTreeMap::new()
+        } else {
+            parse_ad_structures(report.data, is_scan_rsp)
         };
 
         events.push(BleEvent {
@@ -168,7 +169,7 @@ fn parse_ad_structures(data: &[u8], is_scan_rsp: bool) -> BTreeMap<u16, AdPayloa
         };
 
         let map_key =
-            if is_scan_rsp { SCAN_RSP_KEY_OFFSET | (ad_type as u16) } else { ad_type as u16 };
+            if is_scan_rsp { SCAN_RSP_KEY_OFFSET | u16::from(ad_type) } else { u16::from(ad_type) };
 
         outputs.insert(map_key, AdPayload { ad_type, type_str, decoded_val });
 
@@ -188,8 +189,7 @@ fn format_32bit_uuid(uuid: [u8; 4]) -> String {
 fn format_128bit_uuid(uuid: &[u8; 16]) -> String {
     let &[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15] = uuid;
     format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b15, b14, b13, b12, b11, b10, b9, b8, b7, b6, b5, b4, b3, b2, b1, b0
+        "{b15:02x}{b14:02x}{b13:02x}{b12:02x}-{b11:02x}{b10:02x}-{b9:02x}{b8:02x}-{b7:02x}{b6:02x}-{b5:02x}{b4:02x}{b3:02x}{b2:02x}{b1:02x}{b0:02x}"
     )
 }
 
@@ -424,15 +424,15 @@ mod tests {
 
         let parsed = parse_ad_structures(&data, false);
         assert_eq!(
-            parsed.get(&(GapDataType::COMPLETE_16BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::COMPLETE_16BIT_UUIDS.0))).unwrap().decoded_val,
             UUID_16_PAIR_FORMATTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::INCOMPLETE_32BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::INCOMPLETE_32BIT_UUIDS.0))).unwrap().decoded_val,
             UUID_32_FORMATTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::COMPLETE_128BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::COMPLETE_128BIT_UUIDS.0))).unwrap().decoded_val,
             UUID_128_FORMATTED
         );
     }
@@ -479,19 +479,19 @@ mod tests {
 
         let parsed = parse_ad_structures(&data, false);
         assert_eq!(
-            parsed.get(&(GapDataType::SERVICE_DATA_16BIT.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::SERVICE_DATA_16BIT.0))).unwrap().decoded_val,
             SERVICE_DATA_16_EXPECTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::SERVICE_DATA_32BIT.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::SERVICE_DATA_32BIT.0))).unwrap().decoded_val,
             SERVICE_DATA_32_EXPECTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::SERVICE_DATA_128BIT.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::SERVICE_DATA_128BIT.0))).unwrap().decoded_val,
             SERVICE_DATA_128_EXPECTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::INCOMPLETE_16BIT_UUIDS.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::INCOMPLETE_16BIT_UUIDS.0))).unwrap().decoded_val,
             INCOMPLETE_16_EXPECTED
         );
     }
@@ -515,15 +515,15 @@ mod tests {
 
         let parsed = parse_ad_structures(&data, false);
         assert_eq!(
-            parsed.get(&(GapDataType::SERVICE_DATA_16BIT.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::SERVICE_DATA_16BIT.0))).unwrap().decoded_val,
             SHORT_SERVICE_16_EXPECTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::SERVICE_DATA_32BIT.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::SERVICE_DATA_32BIT.0))).unwrap().decoded_val,
             SHORT_SERVICE_32_EXPECTED
         );
         assert_eq!(
-            parsed.get(&(GapDataType::SERVICE_DATA_128BIT.0 as u16)).unwrap().decoded_val,
+            parsed.get(&(u16::from(GapDataType::SERVICE_DATA_128BIT.0))).unwrap().decoded_val,
             SHORT_SERVICE_128_EXPECTED
         );
     }

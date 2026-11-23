@@ -313,8 +313,9 @@ pub mod link_layer {
         match packet_type {
             PacketType::Acl => data_slice.len() > 15,
             PacketType::Sco => data_slice.len() > 13,
-            PacketType::LeConnectedIsochronousPdu => data_slice.len() > 17,
-            PacketType::LeBroadcastIsochronousPdu => data_slice.len() > 17,
+            PacketType::LeConnectedIsochronousPdu | PacketType::LeBroadcastIsochronousPdu => {
+                data_slice.len() > 17
+            }
             PacketType::LeLegacyAdvertisingPdu => data_slice.len() > 16,
             PacketType::LeExtendedAdvertisingPdu => data_slice.len() > 22,
             PacketType::LePeriodicAdvertisingPdu => data_slice.len() > 35,

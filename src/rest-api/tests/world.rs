@@ -200,12 +200,12 @@ pub struct World {
     last_response: Option<RawHttpResponse>,
     stats_path: PathBuf,
     pcap_dir: PathBuf,
-    _tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for World {
     fn drop(&mut self) {
-        for task in &self._tasks {
+        for task in &self.tasks {
             task.abort();
         }
         let _ = std::fs::remove_file(&self.stats_path);
@@ -278,15 +278,7 @@ impl World {
         )));
 
         let rest_client = NetsimRestClient::from_addr(addr.to_string());
-        Self {
-            addr,
-            rest_client,
-            device_client,
-            last_response: None,
-            stats_path,
-            pcap_dir,
-            _tasks: tasks,
-        }
+        Self { addr, rest_client, device_client, last_response: None, stats_path, pcap_dir, tasks }
     }
 
     fn last_response(&self) -> &RawHttpResponse {

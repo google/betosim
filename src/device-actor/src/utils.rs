@@ -82,11 +82,8 @@ pub(crate) async fn create_capture_and_wrap_streams(
     let enabled_flag = Arc::new(AtomicBool::new(false));
 
     if let Some(client) = &capture_client {
-        let capture_create = CaptureCreate {
-            chip_kind,
-            device_name: device_name.to_string(),
-            enabled_flag: enabled_flag.clone(),
-        };
+        let capture_create =
+            CaptureCreate { chip_kind, device_name, enabled_flag: enabled_flag.clone() };
         let _ = client.create_capture(chip_id, capture_create).await;
     }
 
@@ -171,8 +168,8 @@ pub(crate) fn distribute_stream_stats(
         // Distribute TX bytes proportional to TX counts
         for stat in radio_stats_list.iter_mut() {
             if stat.tx_bytes == 0 {
-                stat.tx_bytes = (stream_tx_bytes as u128 * stat.tx_count as u128
-                    / total_tx_count as u128) as u64;
+                stat.tx_bytes = (u128::from(stream_tx_bytes) * u128::from(stat.tx_count)
+                    / u128::from(total_tx_count)) as u64;
             }
         }
     } else if stream_tx_count > 0 {
@@ -193,8 +190,8 @@ pub(crate) fn distribute_stream_stats(
         // Distribute RX bytes proportional to RX counts
         for stat in radio_stats_list.iter_mut() {
             if stat.rx_bytes == 0 {
-                stat.rx_bytes = (stream_rx_bytes as u128 * stat.rx_count as u128
-                    / total_rx_count as u128) as u64;
+                stat.rx_bytes = (u128::from(stream_rx_bytes) * u128::from(stat.rx_count)
+                    / u128::from(total_rx_count)) as u64;
             }
         }
     } else if stream_rx_count > 0 {
@@ -283,7 +280,7 @@ pub(crate) fn stream_to_model_stats(
 ) -> netsim_model::NetsimRadioStats {
     let mut stats = netsim_model::NetsimRadioStats::default();
     stats.id = device_id;
-    stats.name = "".to_string(); // or derive from kind?
+    stats.name = String::new(); // or derive from kind?
     stats.kind = kind;
     stats.duration_secs = duration_secs;
     stats.tx_count = stream_stats.rx_packets.load(Ordering::Relaxed);

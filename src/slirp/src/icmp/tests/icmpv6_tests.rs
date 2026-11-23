@@ -73,9 +73,8 @@ fn test_echo_reply() {
     icmpv6_manager.handle_packet(&mut responses, &config, &parsed_packet, &icmp_packet);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();
@@ -105,9 +104,8 @@ fn test_port_unreachable() {
     icmpv6_manager.send_port_unreachable(&mut responses, &config, &ip_buf);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();
@@ -139,9 +137,8 @@ fn test_packet_too_big() {
     icmpv6_manager.send_packet_too_big(&mut responses, &config, &ip_buf, 1280);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();
@@ -174,9 +171,8 @@ fn test_host_unreachable() {
     icmpv6_manager.send_host_unreachable(&mut responses, &config, &ip_buf);
 
     assert_eq!(responses.len(), 1);
-    let reply_packet = match responses.pop().unwrap() {
-        SlirpResponse::Packet(packet) => packet,
-        _ => panic!("Expected a packet response"),
+    let SlirpResponse::Packet(reply_packet) = responses.pop().unwrap() else {
+        panic!("Expected a packet response");
     };
 
     let (_, reply_ip) = EthernetFrame::parse(&reply_packet).unwrap();

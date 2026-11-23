@@ -35,12 +35,12 @@ pub struct World {
     pub client: CaptureClient,
     pub temp_dir: PathBuf,
     pub keep_temp_dir: bool,
-    _actor_task: tokio::task::JoinHandle<()>,
+    actor_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for World {
     fn drop(&mut self) {
-        self._actor_task.abort();
+        self.actor_task.abort();
         if !self.keep_temp_dir && self.temp_dir.exists() {
             let _ = std::fs::remove_dir_all(&self.temp_dir);
         }
@@ -62,7 +62,7 @@ impl World {
         let actor = CaptureActor::new(default_capture_enabled, Some(temp_dir.clone()));
         let actor_task = tokio::spawn(runner.run(actor));
 
-        World { client, temp_dir, keep_temp_dir: false, _actor_task: actor_task }
+        World { client, temp_dir, keep_temp_dir: false, actor_task }
     }
 
     pub async fn when_create_capture(

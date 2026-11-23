@@ -130,8 +130,7 @@ impl Reassembler {
         let limit_exceeded = self
             .cache
             .get(&identification)
-            .map(|entry| entry.fragments.len() >= MAX_FRAGMENTS_PER_PACKET)
-            .unwrap_or(false);
+            .is_some_and(|entry| entry.fragments.len() >= MAX_FRAGMENTS_PER_PACKET);
 
         if limit_exceeded {
             self.cache.remove(&identification);

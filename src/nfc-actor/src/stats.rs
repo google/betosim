@@ -114,7 +114,7 @@ fn saturate_i32(val: u64) -> i32 {
 }
 
 fn saturate_u32(val: u64) -> u32 {
-    std::cmp::min(val, u32::MAX as u64) as u32
+    std::cmp::min(val, u64::from(u32::MAX)) as u32
 }
 
 impl NfcStats {

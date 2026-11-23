@@ -126,7 +126,7 @@ impl ModemPcapWriter {
         // Frame structure:
         // [Ext Header Size (0x00)][Direction (0x00 App->Module (Received) / 0x01
         // Module->App (Sent))][0xF9][Addr][Ctrl][Len...][Payload][FCS][0xF9]
-        let dir_byte = if matches!(direction, Direction::Received) { 0x00 } else { 0x01 };
+        let dir_byte = u8::from(matches!(direction, Direction::Sent));
         let header = [0x00, dir_byte, GSM0710_FLAG, addr, ctrl];
         let footer = [fcs, GSM0710_FLAG];
 
@@ -178,7 +178,7 @@ mod tests {
     const PCAP_RECORD_HEADER_SIZE: usize = size_of::<PcapRecordHeader>();
 
     fn check_frame<'a>(frame: &'a [u8], direction: Direction, payload: &[u8]) -> &'a [u8] {
-        let dir_byte = if matches!(direction, Direction::Received) { 0x00 } else { 0x01 };
+        let dir_byte = u8::from(matches!(direction, Direction::Sent));
         let len_field_size = if payload.len() <= 127 { 1 } else { 2 };
         assert_eq!(frame.len(), 5 + len_field_size + payload.len() + 2);
         assert_eq!(&frame[0..5], &[0x00, dir_byte, GSM0710_FLAG, 0x07, 0xEF]);

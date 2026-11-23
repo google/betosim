@@ -37,9 +37,9 @@ const FSPL_MULTIPLIER: f32 = 20.0;
 /// The rssi that would be measured at that distance, in the range -120..20 dBm.
 pub(crate) fn beacon_distance_to_rssi(tx_power: i8, distance: f32) -> i8 {
     if distance <= 0.0 {
-        (tx_power as f32 + PATH_LOSS_AT_1M).clamp(RSSI_MIN_DBM, RSSI_MAX_DBM) as i8
+        (f32::from(tx_power) + PATH_LOSS_AT_1M).clamp(RSSI_MIN_DBM, RSSI_MAX_DBM) as i8
     } else {
-        (tx_power as f32 - FSPL_MULTIPLIER * distance.log10()).clamp(RSSI_MIN_DBM, RSSI_MAX_DBM)
+        (f32::from(tx_power) - FSPL_MULTIPLIER * distance.log10()).clamp(RSSI_MIN_DBM, RSSI_MAX_DBM)
             as i8
     }
 }

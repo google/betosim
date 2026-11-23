@@ -652,8 +652,7 @@ impl RestServer {
                 crate::Op::PatchCapture => self.patch_capture(&params, body).await.into(),
             },
             None => {
-                error_response(StatusCode::NOT_FOUND, &format!("Not Found: {} {}", method, path))
-                    .into()
+                error_response(StatusCode::NOT_FOUND, &format!("Not Found: {method} {path}")).into()
             }
         };
         resp.0.map(Either::Left)

@@ -20,7 +20,7 @@ pub fn build_packet_json(mut layers: Value, packet_len: usize, protocols: &str) 
     let now = SystemTime::now();
     let epoch_secs = now.duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
     let frame = serde_json::json!({
-        "frame.time_epoch": format!("{:.9}", epoch_secs),
+        "frame.time_epoch": format!("{epoch_secs:.9}"),
         "frame.len": packet_len,
         "frame.cap_len": packet_len, // Assuming no truncation for now
         "frame.protocols": protocols

@@ -263,12 +263,11 @@ impl World {
                     Some((id, msg_opt)) = ctx.typed_streams.next(),
                         if !ctx.typed_streams.is_empty() =>
                     {
-                        match msg_opt {
-                            Some(msg) => actor.on_typed_stream(id, msg, &mut ctx).await,
-                            None => {
-                                ctx.remove_typed_stream(id);
-                                actor.on_typed_stream_closed(id, &mut ctx).await;
-                            }
+                        if let Some(msg) = msg_opt {
+                            actor.on_typed_stream(id, msg, &mut ctx).await;
+                        } else {
+                            ctx.remove_typed_stream(id);
+                            actor.on_typed_stream_closed(id, &mut ctx).await;
                         }
                     }
                     Some(res) = ctx.tasks.join_next(), if !ctx.tasks.is_empty() => {

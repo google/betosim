@@ -214,7 +214,7 @@ pub(crate) mod beacon {
         pub fn apply(&self, beacon: &mut BleBeacon) {
             let Self { address, settings, adv_data, scan_response } = self;
             if !address.is_empty() {
-                beacon.address = address.clone();
+                beacon.address.clone_from(address);
             }
             if let Some(patch_settings) = settings
                 && !patch_settings.is_empty()
@@ -366,10 +366,10 @@ pub(crate) mod beacon {
                 data.include_tx_power_level = include_tx_power_level;
             }
             if let Some(manufacturer_data) = manufacturer_data {
-                data.manufacturer_data = manufacturer_data.clone();
+                data.manufacturer_data.clone_from(manufacturer_data);
             }
             if let Some(services) = services {
-                data.services = services.clone();
+                data.services.clone_from(services);
             }
         }
     }
@@ -436,7 +436,7 @@ impl PacketType {
 
     /// Converts a byte to `PacketType`, returning `None` if invalid.
     pub fn from_u8(v: u8) -> Option<Self> {
-        Self::from_i32(v as i32)
+        Self::from_i32(i32::from(v))
     }
 }
 

@@ -162,7 +162,7 @@ pub(crate) struct SendTcpPacketArgs<'a> {
     pub(super) payload: &'a [u8],
 }
 
-impl<'a> SendTcpPacketArgs<'a> {
+impl SendTcpPacketArgs<'_> {
     pub(super) fn ack(conn_id: u64, conn: &TcpConnection) -> SendTcpPacketArgs<'static> {
         SendTcpPacketArgs {
             conn_id: Some(conn_id),

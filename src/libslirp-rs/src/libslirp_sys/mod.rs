@@ -42,17 +42,12 @@ use std::{
 
 mod bindings {
     #![allow(missing_docs)]
-    #![allow(clippy::missing_safety_doc)]
-    #![allow(clippy::ptr_as_ptr)]
+    #![allow(clippy::all, clippy::pedantic)]
     #![allow(unsafe_op_in_unsafe_fn)]
     #![allow(non_upper_case_globals)]
     #![allow(non_camel_case_types)]
     #![allow(non_snake_case)]
     #![allow(unnecessary_transmutes)]
-    #![allow(clippy::useless_transmute)]
-    #![allow(clippy::type_complexity)]
-    #![allow(clippy::too_many_arguments)]
-    #![allow(clippy::unnecessary_cast)]
     #![allow(clippy::undocumented_unsafe_blocks)]
     #![allow(clippy::indexing_slicing)]
     // TODO(b/203002625) - since rustc 1.53, bindgen causes UB warnings
@@ -125,7 +120,7 @@ pub type SlirpPollType = _bindgen_ty_5;
 impl TryFrom<sockaddr_storage> for SocketAddr {
     type Error = &'static str;
     fn try_from(storage: sockaddr_storage) -> Result<Self, Self::Error> {
-        match storage.ss_family as u32 {
+        match u32::from(storage.ss_family) {
             AF_INET => Ok(SocketAddr::V4((*v4_ref(&storage)).into())),
             AF_INET6 => Ok(SocketAddr::V6((*v6_ref(&storage)).into())),
             _ => Err("Unsupported address family"),

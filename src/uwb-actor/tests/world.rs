@@ -171,7 +171,7 @@ pub struct World {
     error_stats: Arc<ErrorStatsTable>,
     notify_behavior: Arc<Mutex<NotifyBehavior>>,
     notify_called_rx: mpsc::UnboundedReceiver<()>,
-    _actor_task: tokio::task::JoinHandle<()>,
+    actor_task: tokio::task::JoinHandle<()>,
     // Keeps >= 2 live Dispatchers so tracing_core Rebuilder::JustOne cannot
     // cache Interest::never() when parallel NoSubscriber tests run.
     _multi_dispatch_guard: Option<tracing::Dispatch>,
@@ -179,7 +179,7 @@ pub struct World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        self._actor_task.abort();
+        self.actor_task.abort();
     }
 }
 
@@ -202,7 +202,7 @@ impl World {
         // Spawn actor
         let actor = UwbActor::new(device_client.clone());
         let error_stats = Arc::new(ErrorStatsTable::new());
-        let (_actor_task, _multi_dispatch_guard) = if record_error_stats {
+        let (actor_task, multi_dispatch_guard) = if record_error_stats {
             let guard = tracing::Dispatch::new(tracing_subscriber::registry());
             let subscriber = tracing_subscriber::registry()
                 .with(ErrorStatsLayer::with_table(Arc::clone(&error_stats)));
@@ -220,8 +220,8 @@ impl World {
             error_stats,
             notify_behavior,
             notify_called_rx,
-            _actor_task,
-            _multi_dispatch_guard,
+            actor_task,
+            _multi_dispatch_guard: multi_dispatch_guard,
         }
     }
 
@@ -610,7 +610,7 @@ impl World {
             uci::ShortMacTwoWaySessionInfoNtf::decode(&packet).expect("ranging info notification");
 
         assert_eq!(ntf.two_way_ranging_measurements.len(), 1, "Expected exactly one measurement");
-        let tolerance = (6.0 * (expected_range as f32 / 500.0).max(1.0)).ceil() as u16;
+        let tolerance = (6.0 * (f32::from(expected_range) / 500.0).max(1.0)).ceil() as u16;
         assert!(
             (expected_range.saturating_sub(tolerance)..=expected_range.saturating_add(tolerance))
                 .contains(&ntf.two_way_ranging_measurements[0].distance)

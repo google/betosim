@@ -120,10 +120,10 @@ impl<'a> ParsedPacket<'a> {
 }
 
 /// Parses the transport layer packet from an IP payload given its protocol or next header.
-fn parse_transport_packet<'a>(
+fn parse_transport_packet(
     protocol: u8,
-    payload: &'a [u8],
-) -> Option<(Option<TransportPacket<'a>>, &'a [u8])> {
+    payload: &[u8],
+) -> Option<(Option<TransportPacket<'_>>, &[u8])> {
     match protocol {
         IP_P_ICMP => {
             let (icmp_header, icmp_payload) = IcmpHeader::parse(payload)?;
@@ -206,9 +206,8 @@ mod tests {
         }
 
         let network_packet = packet.network.expect("No network packet found");
-        let ip_packet = match network_packet {
-            NetworkPacket::Ip(ip) => ip,
-            _ => panic!("Expected IP packet"),
+        let NetworkPacket::Ip(ip_packet) = network_packet else {
+            panic!("Expected IP packet");
         };
         if let IpPacket::V4(header, payload) = ip_packet {
             assert_eq!(header.protocol, IP_P_ICMP);
@@ -243,9 +242,8 @@ mod tests {
         }
 
         let network_packet = packet.network.expect("No network packet found");
-        let ip_packet = match network_packet {
-            NetworkPacket::Ip(ip) => ip,
-            _ => panic!("Expected IP packet"),
+        let NetworkPacket::Ip(ip_packet) = network_packet else {
+            panic!("Expected IP packet");
         };
         if let IpPacket::V6(header, payload) = ip_packet {
             assert_eq!(header.next_header, IP_P_ICMPV6);

@@ -87,7 +87,7 @@ impl Ipv4Header {
             sum += u32::from(u16::from_be_bytes(chunk));
         }
         if let &[last] = remainder {
-            sum += (last as u32) << 8;
+            sum += u32::from(last) << 8;
         }
         while (sum >> 16) != 0 {
             sum = (sum & 0xFFFF) + (sum >> 16);

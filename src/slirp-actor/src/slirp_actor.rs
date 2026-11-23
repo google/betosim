@@ -128,7 +128,7 @@ impl std::fmt::Debug for SlirpReq {
                 write!(f, "SlirpReq::ReleaseLease {{ chip_id: {chip_id} }}")
             }
             SlirpReq::SwitchBackend(backend) => {
-                write!(f, "SlirpReq::SwitchBackend({:?})", backend)
+                write!(f, "SlirpReq::SwitchBackend({backend:?})")
             }
         }
     }
@@ -239,7 +239,7 @@ async fn resolve_dns_servers(host_dns: &str) -> Vec<IpAddr> {
             if let Ok(socket) = addr.parse::<SocketAddr>() {
                 return vec![socket.ip()];
             }
-            let host_port = if addr.contains(':') { addr.clone() } else { format!("{}:53", addr) };
+            let host_port = if addr.contains(':') { addr.clone() } else { format!("{addr}:53") };
             match tokio::net::lookup_host(host_port).await {
                 Ok(addrs) => addrs.map(|s| s.ip()).collect::<Vec<_>>(),
                 Err(error) => {
@@ -290,7 +290,7 @@ impl SlirpActor {
             }
             #[cfg(feature = "cuttlefish")]
             {
-                config.dns_servers = resolved_dns.clone();
+                config.dns_servers.clone_from(&resolved_dns);
             }
         }
 

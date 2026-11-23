@@ -320,11 +320,11 @@ impl ActorService for CaptureActor {
         &mut self,
         id: Option<Self::Id>,
         params: Self::Create,
-        _ctx: &mut DynContext<Self>,
+        ctx: &mut DynContext<Self>,
     ) -> Result<Self::Id, Self::Error> {
         let id = id.ok_or_else(|| ChipError::InvalidArguments(Box::from("chip id required")))?;
         let mut entity = InternalCaptureInfo::from_create_params(id, params)?;
-        self.create_entity(&mut entity, _ctx).await?;
+        self.create_entity(&mut entity, ctx).await?;
 
         self.entities.insert(id, entity);
         Ok(id)
@@ -350,10 +350,10 @@ impl ActorService for CaptureActor {
         &mut self,
         id: Self::Id,
         update: Self::Update,
-        _ctx: &mut DynContext<Self>,
+        ctx: &mut DynContext<Self>,
     ) -> Result<Self::Entity, Self::Error> {
         let mut entity = self.entities.remove(&id).ok_or_else(|| ChipError::ChipNotFound(id))?;
-        self.update_entity(&mut entity, update, _ctx).await?;
+        self.update_entity(&mut entity, update, ctx).await?;
         let (records_written, bytes_written) = self.file_stats(id);
         let mut info = entity.info.clone();
         info.records_written = records_written;

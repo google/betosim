@@ -133,12 +133,12 @@ fn build_bt_packet_header(
     arqn: bool,
     seqn: bool,
 ) -> u32 {
-    let mut header: u32 = (lt_addr as u32 & 0x7)
-        | (((packet_type as u32) & 0xF) << 3)
-        | ((flow as u32) << 7)
-        | ((arqn as u32) << 8)
-        | ((seqn as u32) << 9);
-    header |= (header_error_check(uap, header) as u32) << 10;
+    let mut header: u32 = (u32::from(lt_addr) & 0x7)
+        | ((u32::from(packet_type) & 0xF) << 3)
+        | (u32::from(flow) << 7)
+        | (u32::from(arqn) << 8)
+        | (u32::from(seqn) << 9);
+    header |= u32::from(header_error_check(uap, header)) << 10;
     header
 }
 
@@ -309,12 +309,12 @@ mod tests {
         let uap = 0x42;
         let header = build_bt_packet_header(uap, 0b101, BB_PTYPE_DM1, true, false, true);
         assert_eq!(header & 0x7, 0b101);
-        assert_eq!((header >> 3) & 0xF, BB_PTYPE_DM1 as u32);
+        assert_eq!((header >> 3) & 0xF, u32::from(BB_PTYPE_DM1));
         assert_eq!((header >> 7) & 1, 1);
         assert_eq!((header >> 8) & 1, 0);
         assert_eq!((header >> 9) & 1, 1);
         let expected_hec = header_error_check(uap, header & 0x3FF);
-        assert_eq!((header >> 10) & 0xFF, expected_hec as u32);
+        assert_eq!((header >> 10) & 0xFF, u32::from(expected_hec));
     }
 
     #[test]
@@ -406,8 +406,8 @@ mod tests {
                 { hdr.packet_header },
                 build_bt_packet_header(0x40, 0, BB_PTYPE_DH5, true, true, true)
             );
-            let expected_p_hdr: u16 = (LLID_L2CAP_START as u16)
-                | ((FLOW_GO as u16) << 2)
+            let expected_p_hdr: u16 = u16::from(LLID_L2CAP_START)
+                | (u16::from(FLOW_GO) << 2)
                 | ((payload.len() as u16 & 0x3FF) << 3);
             assert_eq!(&rest[0..2], &expected_p_hdr.to_le_bytes());
             assert_eq!(&rest[2..2 + payload.len()], &payload[..]);

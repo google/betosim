@@ -61,7 +61,7 @@ impl NfcService for NfcServiceImpl {
                         let _ = sink
                             .fail(grpcio::RpcStatus::with_message(
                                 grpcio::RpcStatusCode::INTERNAL,
-                                format!("Failed to list NFC chips: {}", error),
+                                format!("Failed to list NFC chips: {error}"),
                             ))
                             .await;
                     }

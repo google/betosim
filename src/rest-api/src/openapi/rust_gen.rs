@@ -28,9 +28,9 @@ pub fn generate_rust(doc: &Value) -> String {
     let json = serde_json::to_string_pretty(doc).unwrap_or_default();
     let _ = writeln!(
         out,
-        r#"/// OpenAPI 3.1 JSON document (from `openapi.yaml`) served by `GET /v1/openapi.json`.
+        r"/// OpenAPI 3.1 JSON document (from `openapi.yaml`) served by `GET /v1/openapi.json`.
 pub const OPENAPI_JSON: &str = {json:?};
-"#
+"
     );
 
     for schema in &spec.schemas {
@@ -50,24 +50,24 @@ pub const OPENAPI_JSON: &str = {json:?};
                     let ident = to_pascal_case(v);
                     let _ = writeln!(
                         body,
-                        r#"    #[serde(rename = {v:?})]
-    {ident},"#
+                        r"    #[serde(rename = {v:?})]
+    {ident},"
                     );
                 }
                 let _ = writeln!(
                     out,
-                    r#"#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+                    r"#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum {name} {{
 {body}}}
-"#
+"
                 );
             }
             SchemaKind::Struct(fields) if fields.is_empty() => {
                 let _ = writeln!(
                     out,
-                    r#"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+                    r"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct {name} {{}}
-"#
+"
                 );
             }
             SchemaKind::Struct(fields) => {
@@ -88,10 +88,10 @@ pub struct {name} {{}}
                 }
                 let _ = writeln!(
                     out,
-                    r#"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+                    r"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct {name} {{
 {body}}}
-"#
+"
                 );
             }
         }
@@ -108,13 +108,13 @@ pub struct {name} {{
     });
     let _ = write!(
         out,
-        r#"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        r"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {{
 {ops}}}
 
 pub const ROUTES: &[Route<Op>] = &[
 {routes}];
-"#
+"
     );
     out
 }

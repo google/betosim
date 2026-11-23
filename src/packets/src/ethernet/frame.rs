@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for MacAddr {
     {
         struct MacAddrVisitor;
 
-        impl<'de> Visitor<'de> for MacAddrVisitor {
+        impl Visitor<'_> for MacAddrVisitor {
             type Value = MacAddr;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -305,7 +305,7 @@ pub enum EthernetPacket<'a> {
     },
 }
 
-impl<'a> Serialize for EthernetPacket<'a> {
+impl Serialize for EthernetPacket<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn test_mac_addr_display() {
         let mac = MacAddr { bytes: [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02] };
-        assert_eq!(format!("{}", mac), "DE:AD:BE:EF:01:02");
+        assert_eq!(format!("{mac}"), "DE:AD:BE:EF:01:02");
     }
 
     #[test]
