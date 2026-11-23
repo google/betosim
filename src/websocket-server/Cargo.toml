@@ -46,6 +46,7 @@ tungstenite = { version = ">=0.19.0", default-features = false }
 [dev-dependencies]
 actor-framework = { path = "../actor-framework", features = ["testing"] }
 mockall = "0.14.0"
+tracing-subscriber = "0.3"
 websocket-server = { path = ".", features = ["testing"] }
 
 [features]

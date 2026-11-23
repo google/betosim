@@ -25,6 +25,7 @@ netsim_rust_library(
     test_deps = [
         "//src/actor-framework:testing",
         "@mockall",
+        "@tracing-subscriber",
     ],
     deps = [
         "//src/common",

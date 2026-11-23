@@ -37,7 +37,7 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tungstenite::{Message, WebSocket, protocol::Role};
 
 const MAX_HTTP_RESPONSE_SIZE: usize = 2048;
@@ -310,17 +310,25 @@ fn spawn_reader(
 
 /// Writes outbound frames on a single blocking thread and sends a Close frame
 /// once the sink is dropped.
-fn spawn_writer(
-    mut writer: WebSocket<StdTcpStream>,
+fn spawn_writer<W: io::Read + io::Write + Send + 'static>(
+    mut writer: WebSocket<W>,
     outbound_tx: mpsc::Sender<Message>,
     mut outbound_rx: mpsc::Receiver<Message>,
 ) -> ClientSink {
-    tokio::task::spawn_blocking(move || {
+    crate::transport::spawn_blocking_traced(move || {
         let mut close_sent = false;
         while let Some(msg) = outbound_rx.blocking_recv() {
             let is_close = matches!(msg, Message::Close(_));
             if let Err(error) = writer.send(msg) {
-                warn!(%error, "WebSocket packet stream write error");
+                if is_close || crate::transport::is_expected_write_close(&error) {
+                    debug!(%error, "WebSocket packet stream closed during write");
+                } else {
+                    warn!(
+                        code = crate::err::Code::ClientWriteFailed as u32,
+                        %error,
+                        "WebSocket packet stream write error"
+                    );
+                }
                 return;
             }
             if is_close {
@@ -546,5 +554,23 @@ mod tests {
         drop(client_sink);
         drop(client_stream);
         assert_eq!(del_rx.recv().await, Some((device_id, chip_id)));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_writer_records_client_write_failed() {
+        use crate::err::{Code, ErrWriteStream, assert_error_stats_async, write_error_cases};
+
+        let t = Duration::from_secs(2);
+        for (msg, kind, expected_code) in write_error_cases(Code::ClientWriteFailed) {
+            let fut = async move {
+                let writer = WebSocket::from_raw_socket(ErrWriteStream(kind), Role::Client, None);
+                let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
+                let tx_probe = outbound_tx.clone();
+                let _sink = spawn_writer(writer, outbound_tx, outbound_rx);
+                tokio::time::timeout(t, tx_probe.send(msg)).await.unwrap().unwrap();
+                tokio::time::timeout(t, tx_probe.closed()).await.unwrap();
+            };
+            assert_error_stats_async(fut, expected_code).await;
+        }
     }
 }

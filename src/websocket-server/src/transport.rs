@@ -198,8 +198,10 @@ pub(crate) async fn run_loopback(
     sink_tx: mpsc::Sender<Bytes>,
 ) {
     let (packet_stream, packet_sink) = packet_stream_and_sink(stream_rx, sink_tx);
+    // `packet_stream` yields only `Ok` items and `packet_sink` returns only `BrokenPipe` when
+    // `sink_rx` closes, so any error here is expected teardown.
     if let Err(error) = packet_stream.map(Ok).forward(packet_sink).await {
-        warn!(%error, "WebSocket loopback stream for {addr} failed");
+        debug!(%error, "WebSocket loopback stream for {addr} closed");
     }
 }
 
@@ -225,10 +227,80 @@ pub(crate) struct RegisteredDevice {
     pub(crate) client: DeviceClient,
 }
 
+/// Runs `f` on Tokio's blocking pool, forwarding the active test `tracing` dispatch.
+pub(crate) fn spawn_blocking_traced<F, R>(f: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    #[cfg(test)]
+    {
+        let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+        tokio::task::spawn_blocking(move || {
+            let _guard = tracing::dispatcher::set_default(&dispatch);
+            f()
+        })
+    }
+    #[cfg(not(test))]
+    {
+        tokio::task::spawn_blocking(f)
+    }
+}
+
+pub(crate) fn is_daemon_shutdown_client_error(
+    device_client: &DeviceClient,
+    error: &netsim_model::ClientError,
+) -> bool {
+    device_client.is_shutting_down()
+        && matches!(error, netsim_model::ClientError::Framework(_))
+        && device_actor::DeviceError::downcast_from(error).is_none()
+}
+
+pub(crate) fn is_expected_io_close(io_err: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(io_err.kind(), BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected)
+}
+
+fn is_expected_read_close(error: &tungstenite::Error) -> bool {
+    use tungstenite::{Error::*, error::ProtocolError::ResetWithoutClosingHandshake};
+    match error {
+        ConnectionClosed | AlreadyClosed | Protocol(ResetWithoutClosingHandshake) => true,
+        Io(e) => e.kind() == io::ErrorKind::UnexpectedEof || is_expected_io_close(e),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_expected_write_close(error: &tungstenite::Error) -> bool {
+    use tungstenite::Error::*;
+    matches!(error, ConnectionClosed | AlreadyClosed)
+        || matches!(error, Io(e) if is_expected_io_close(e))
+}
+
 /// Spawns threads and tasks to manage WebSocket traffic and chip lifecycle.
 ///
 /// `device` is the registered chip to remove on close; `None` for loopback.
 pub(crate) async fn run_websocket_transport(
+    websocket_reader: WebSocket<TcpStream>,
+    websocket_writer: WebSocket<TcpStream>,
+    addr: SocketAddr,
+    chip_kind: ChipKind,
+    stream_tx: mpsc::Sender<Result<Bytes, io::Error>>,
+    sink_rx: mpsc::Receiver<Bytes>,
+    device: Option<Arc<RegisteredDevice>>,
+) {
+    let _ = run_transport_inner(
+        websocket_reader,
+        websocket_writer,
+        addr,
+        chip_kind,
+        stream_tx,
+        sink_rx,
+        device,
+    )
+    .await;
+}
+
+async fn run_transport_inner(
     mut websocket_reader: WebSocket<TcpStream>,
     mut websocket_writer: WebSocket<TcpStream>,
     addr: SocketAddr,
@@ -236,7 +308,9 @@ pub(crate) async fn run_websocket_transport(
     stream_tx: mpsc::Sender<Result<Bytes, io::Error>>,
     mut sink_rx: mpsc::Receiver<Bytes>,
     device: Option<Arc<RegisteredDevice>>,
-) {
+) -> JoinSet<Result<(), tokio::task::JoinError>> {
+    // TODO(b/586144449): Drain both transport tasks with bounded close-flush/read timeouts and
+    // single Arc<TcpStream>.
     let (outbound_msg_tx, mut outbound_msg_rx) = mpsc::unbounded_channel::<Message>();
 
     // 1. Read Loop: WebSocket -> Packet Stream (HCI traffic from client)
@@ -246,7 +320,7 @@ pub(crate) async fn run_websocket_transport(
     // panicking on connection-scoped MockActorClient test mocks that only expect
     // a single clone_box() in server::run).
     let reader_device = device.clone();
-    let reader_task = tokio::task::spawn_blocking(move || {
+    let reader_task = spawn_blocking_traced(move || {
         let mut binary_seen = false;
         loop {
             // Ref: RFC 6455, Section 5.2 - Base Framing Protocol
@@ -260,12 +334,14 @@ pub(crate) async fn run_websocket_transport(
                 Ok(Message::Text(text)) => {
                     if binary_seen {
                         warn!(
+                            code = crate::err::Code::TextFrameAfterBinary as u32,
                             "Ignoring WebSocket Text message after binary streaming started for {addr}"
                         );
                         continue;
                     }
                     if chip_kind != ChipKind::BLUETOOTH {
                         warn!(
+                            code = crate::err::Code::TextFrameNonBluetooth as u32,
                             "Ignoring WebSocket Text config frame for non-Bluetooth chip {chip_kind:?} from {addr}"
                         );
                         continue;
@@ -274,12 +350,17 @@ pub(crate) async fn run_websocket_transport(
                         Ok(props) if !props.is_empty() => props,
                         Ok(_) => {
                             warn!(
+                                code = crate::err::Code::TextFrameEmptyBtProps as u32,
                                 "Ignoring WebSocket Text config frame with empty or unrecognized bt_properties for {addr}"
                             );
                             continue;
                         }
                         Err(error) => {
-                            warn!(%error, "Failed to parse WebSocket Text config frame for {addr}");
+                            warn!(
+                                code = crate::err::Code::TextFrameParseFailed as u32,
+                                %error,
+                                "Failed to parse WebSocket Text config frame for {addr}"
+                            );
                             continue;
                         }
                     };
@@ -303,7 +384,15 @@ pub(crate) async fn run_websocket_transport(
                         if let Err(error) =
                             rt_handle.block_on(device.client.update(device.device_id, update))
                         {
-                            warn!(%error, "Failed to apply WebSocket chip config for {addr}");
+                            if is_daemon_shutdown_client_error(&device.client, &error) {
+                                debug!(%error, "Skipping chip config during shutdown for {addr}");
+                            } else {
+                                warn!(
+                                    code = crate::err::Code::ApplyBtConfigFailed as u32,
+                                    %error,
+                                    "Failed to apply WebSocket chip config for {addr}"
+                                );
+                            }
                         }
                     }
                 }
@@ -316,7 +405,15 @@ pub(crate) async fn run_websocket_transport(
                 }
                 Ok(_) => {} // Ignore Pong, Frame
                 Err(error) => {
-                    warn!(%error, "WebSocket read error for {addr}");
+                    if is_expected_read_close(&error) {
+                        debug!(%error, "WebSocket reader closed for {addr}");
+                    } else {
+                        warn!(
+                            code = crate::err::Code::TransportReadFailed as u32,
+                            %error,
+                            "WebSocket read error for {addr}"
+                        );
+                    }
                     break;
                 }
             }
@@ -325,18 +422,8 @@ pub(crate) async fn run_websocket_transport(
     });
 
     // 2. Write Loop: ws_msg_rx -> WebSocket (HCI traffic to client)
-    let writer_task = tokio::task::spawn_blocking(move || {
-        while let Some(msg) = outbound_msg_rx.blocking_recv() {
-            let is_close = matches!(msg, Message::Close(_));
-            if let Err(error) = websocket_writer.send(msg) {
-                warn!(%error, "WebSocket write error for {addr}");
-                break;
-            }
-            if is_close {
-                break;
-            }
-        }
-        let _ = websocket_writer.flush();
+    let writer_task = spawn_blocking_traced(move || {
+        run_ws_writer_loop(&mut websocket_writer, addr, &mut outbound_msg_rx);
         let _ = websocket_writer.get_ref().shutdown(std::net::Shutdown::Read);
     });
 
@@ -351,16 +438,44 @@ pub(crate) async fn run_websocket_transport(
     });
 
     // 4. Cleanup Task: Triggered when WebSocket reader or writer closes
-    JoinSet::from_iter([reader_task, writer_task]).join_next().await;
+    let mut tasks = JoinSet::from_iter([reader_task, writer_task]);
+    tasks.join_next().await;
     let Some(device) = device else {
         info!("WebSocket loopback stream for {addr} closed");
-        return;
+        return tasks;
     };
     let RegisteredDevice { device_id, chip_id, client } = &*device;
     info!("Cleaning up WebSocket chip {chip_id} on device {device_id} for {addr}");
     if let Err(error) = client.notify_chip_removed(*device_id, *chip_id).await {
         debug!(%error, "WebSocket chip {chip_id} on device {device_id} already removed");
     }
+    tasks
+}
+
+fn run_ws_writer_loop<W: io::Read + io::Write>(
+    websocket_writer: &mut WebSocket<W>,
+    addr: SocketAddr,
+    outbound_msg_rx: &mut mpsc::UnboundedReceiver<Message>,
+) {
+    while let Some(msg) = outbound_msg_rx.blocking_recv() {
+        let is_close = matches!(msg, Message::Close(_));
+        if let Err(error) = websocket_writer.send(msg) {
+            if is_close || is_expected_write_close(&error) {
+                debug!(%error, "WebSocket writer closed for {addr}");
+            } else {
+                warn!(
+                    code = crate::err::Code::TransportWriteFailed as u32,
+                    %error,
+                    "WebSocket write error for {addr}"
+                );
+            }
+            break;
+        }
+        if is_close {
+            break;
+        }
+    }
+    let _ = websocket_writer.flush();
 }
 
 #[derive(serde::Deserialize)]
@@ -379,7 +494,15 @@ fn parse_ws_bt_properties(text: &str) -> Result<BtControllerProperties, serde_js
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use actor_framework::{FrameworkError, MockActorClient};
+    use device_actor::{DeviceActor, DeviceError};
+    use tokio::net::{TcpListener, TcpStream as AsyncTcpStream};
+    use tungstenite::protocol::Role;
+
     use super::*;
+    use crate::err::{Code, EXPECTED_IO_CLOSE_KINDS, ErrWriteStream, assert_error_stats_async};
 
     #[tokio::test]
     async fn test_resolve_bluetooth_address_named_device_is_stable() {
@@ -579,5 +702,191 @@ mod tests {
     #[test]
     fn test_parse_ws_bt_properties_invalid() {
         assert!(parse_ws_bt_properties("not json").is_err());
+    }
+
+    const TRANSPORT_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+    // RFC 6455 Section 5.1: unmasked client binary frame (FIN|Binary, len=1, 0xAA).
+    const UNMASKED_CLIENT_BINARY_FRAME: &[u8] = &[0x82, 0x01, 0xAA];
+
+    async fn run_ws<R: Send + 'static>(
+        chip_kind: ChipKind,
+        device: Option<Arc<RegisteredDevice>>,
+        drop_sink: bool,
+        expected: Option<Code>,
+        client_fn: impl FnOnce(TcpStream) -> R + Send + 'static,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (c, a) = tokio::join!(AsyncTcpStream::connect(addr), listener.accept());
+        let client_std = c.unwrap().into_std().unwrap();
+        client_std.set_nonblocking(false).unwrap();
+        client_std.set_read_timeout(Some(TRANSPORT_TEST_TIMEOUT)).unwrap();
+        client_std.set_write_timeout(Some(TRANSPORT_TEST_TIMEOUT)).unwrap();
+        let (server_stream, client_addr) = a.unwrap();
+        let server_std = server_stream.into_std().unwrap();
+        server_std.set_nonblocking(false).unwrap();
+        let writer =
+            WebSocket::from_raw_socket(server_std.try_clone().unwrap(), Role::Server, None);
+        let reader = WebSocket::from_raw_socket(server_std, Role::Server, None);
+        let (stream_tx, stream_rx) = mpsc::channel(4);
+        let (sink_tx, sink_rx) = mpsc::channel(4);
+        let keep_sink = (!drop_sink).then_some(sink_tx);
+        let fut = async move {
+            let client_task = tokio::task::spawn_blocking(move || client_fn(client_std));
+            let transport_task = run_transport_inner(
+                reader,
+                writer,
+                client_addr,
+                chip_kind,
+                stream_tx,
+                sink_rx,
+                device,
+            );
+            let done = async {
+                let (mut tasks, res) = tokio::join!(transport_task, client_task);
+                res.unwrap();
+                drop((keep_sink, stream_rx));
+                while let Some(res) = tasks.join_next().await {
+                    res.unwrap().unwrap();
+                }
+            };
+            tokio::time::timeout(TRANSPORT_TEST_TIMEOUT, done).await.unwrap();
+        };
+        assert_error_stats_async(fut, expected).await;
+    }
+
+    fn send_ws(client_std: TcpStream, messages: Vec<Message>) {
+        let mut ws = WebSocket::from_raw_socket(client_std, Role::Client, None);
+        messages.into_iter().for_each(|m| ws.send(m).unwrap());
+        let _ = ws.send(Message::Close(None));
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_records_text_frame_codes() {
+        use ChipKind::{BLUETOOTH, WIFI};
+        use Code::*;
+        let bin = Message::Binary(Bytes::from_static(&[0x01]));
+        for (chip_kind, messages, expected) in [
+            (BLUETOOTH, vec![bin, Message::text("{}")], TextFrameAfterBinary),
+            (WIFI, vec![Message::text("{}")], TextFrameNonBluetooth),
+            (BLUETOOTH, vec![Message::text("{}")], TextFrameEmptyBtProps),
+            (BLUETOOTH, vec![Message::text("{invalid")], TextFrameParseFailed),
+        ] {
+            run_ws(chip_kind, None, false, Some(expected), |s| send_ws(s, messages)).await;
+        }
+    }
+
+    async fn assert_bt_config_err(shut_down: bool, is_device_err: bool, expected: Option<Code>) {
+        let mut mock = MockActorClient::<DeviceActor>::new();
+        mock.expect_shutdown().returning(|| Ok(()));
+        mock.expect_update().returning(move |_, _| {
+            Err(if is_device_err {
+                FrameworkError::ServiceError(DeviceError::DeviceNotFound("1".into()))
+            } else {
+                FrameworkError::ActorClosed(Box::new(io::Error::other("closed")))
+            })
+        });
+        mock.expect_perform_action().returning(|_, _| Ok(device_api::DeviceActionResult::Success));
+        let device = Arc::new(RegisteredDevice {
+            device_id: DeviceId(1),
+            chip_id: ChipId(2),
+            client: DeviceClient::new(Box::new(mock)),
+        });
+        if shut_down {
+            device.client.shutdown().await.unwrap();
+        }
+        run_ws(ChipKind::BLUETOOTH, Some(device), false, expected, |s| {
+            send_ws(s, vec![Message::text(r#"{"preset":"laird_bl654"}"#)])
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_records_apply_bt_config_failed() {
+        assert_bt_config_err(false, true, Some(Code::ApplyBtConfigFailed)).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_shutdown_update_records_no_error_stat() {
+        assert_bt_config_err(true, false, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_unexpected_actor_closed_records_error_stat() {
+        assert_bt_config_err(false, false, Some(Code::ApplyBtConfigFailed)).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_shutdown_device_error_records_error_stat() {
+        assert_bt_config_err(true, true, Some(Code::ApplyBtConfigFailed)).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_records_read_failed() {
+        use ChipKind::BLUETOOTH;
+        let send_unmasked = |mut s: TcpStream| {
+            io::Write::write_all(&mut s, UNMASKED_CLIENT_BINARY_FRAME).unwrap();
+            s
+        };
+        run_ws(BLUETOOTH, None, false, Some(Code::TransportReadFailed), send_unmasked).await;
+    }
+
+    #[test]
+    fn test_is_expected_read_close_io_variants() {
+        let io_err = |k| tungstenite::Error::Io(io::Error::from(k));
+        for k in EXPECTED_IO_CLOSE_KINDS.into_iter().chain([io::ErrorKind::UnexpectedEof]) {
+            assert!(is_expected_read_close(&io_err(k)), "{k:?}");
+        }
+        assert!(!is_expected_read_close(&io_err(io::ErrorKind::Other)));
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_records_write_failed_and_expected_close() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        for (msg, kind, exp) in crate::err::write_error_cases(Code::TransportWriteFailed) {
+            let mut w = WebSocket::from_raw_socket(ErrWriteStream(kind), Role::Server, None);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            tx.send(msg).unwrap();
+            drop(tx);
+            let fut = async move {
+                spawn_blocking_traced(move || run_ws_writer_loop(&mut w, addr, &mut rx))
+                    .await
+                    .unwrap();
+            };
+            assert_error_stats_async(fut, exp).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_tcp_drop_records_no_error_stats() {
+        run_ws(ChipKind::BLUETOOTH, None, false, None, drop).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_clean_close_records_no_error_stats() {
+        run_ws(ChipKind::BLUETOOTH, None, false, None, |s| {
+            send_ws(s, vec![Message::Binary(Bytes::from_static(&[1, 2]))]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_run_websocket_transport_sink_drop_records_no_error_stats() {
+        run_ws(ChipKind::BLUETOOTH, None, true, None, |s| {
+            let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
+            assert!(matches!(ws.read(), Ok(Message::Close(_))));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_run_loopback_teardown_records_no_error_stats() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let (stream_tx, stream_rx) = mpsc::channel(4);
+        let (sink_tx, sink_rx) = mpsc::channel(4);
+        drop(sink_rx);
+        stream_tx.send(Ok(Bytes::from_static(&[0x01]))).await.unwrap();
+        let fut = assert_error_stats_async(run_loopback(addr, stream_rx, sink_tx), None);
+        tokio::time::timeout(TRANSPORT_TEST_TIMEOUT, fut).await.unwrap();
     }
 }

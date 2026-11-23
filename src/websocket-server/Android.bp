@@ -112,6 +112,7 @@ rust_test_host {
         "libtokio",
         "libtokio_stream",
         "libtracing",
+        "libtracing_subscriber",
         "libtungstenite",
     ],
 }
@@ -158,6 +159,7 @@ rust_test_host {
         "libtokio",
         "libtokio_stream",
         "libtracing",
+        "libtracing_subscriber",
         "libtungstenite",
     ],
 }

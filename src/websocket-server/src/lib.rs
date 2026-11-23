@@ -14,6 +14,7 @@
 
 pub mod client;
 pub use client::ClientError;
+pub(crate) mod err;
 pub(crate) mod error;
 pub(crate) mod handshake;
 pub mod server;
