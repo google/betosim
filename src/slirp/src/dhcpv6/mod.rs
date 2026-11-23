@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod dhcpv6_impl;
-pub use dhcpv6_impl::Dhcpv6Manager;
+pub(super) use dhcpv6_impl::Dhcpv6Manager;
 
 #[cfg(test)]
 mod tests;

@@ -16,7 +16,7 @@
 
 mod arp;
 pub mod dhcp;
-pub mod dhcpv6;
+mod dhcpv6;
 pub mod dns;
 pub mod icmp;
 pub mod ip_fragment;

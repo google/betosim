@@ -26,7 +26,7 @@ use zerocopy::FromBytes;
 
 use crate::{Config, SlirpResponse, dns::encode_dns_search_list, packet::ParsedPacket};
 
-pub struct Dhcpv6Manager;
+pub(crate) struct Dhcpv6Manager;
 
 impl Default for Dhcpv6Manager {
     fn default() -> Self {
@@ -35,12 +35,12 @@ impl Default for Dhcpv6Manager {
 }
 
 impl Dhcpv6Manager {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
     /// Handles an incoming DHCPv6 packet.
-    pub fn handle_packet(
+    pub(crate) fn handle_packet(
         &mut self,
         responses: &mut Vec<SlirpResponse>,
         config: &Config,
