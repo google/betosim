@@ -27,7 +27,7 @@ use std::{
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, warn};
+use tracing::warn;
 
 use crate::{
     ActorLifecycle, ActorService, DynContext, client::ResourceClient, context::FrameworkContext,
@@ -299,24 +299,14 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                     task(&mut actor, &mut self.ctx);
                     warn_if_elapsed_exceeds::<T>(start.elapsed(), threshold, "timer");
                 }
-                Some(res) = self.ctx.tasks.join_next(), if !self.ctx.tasks.is_empty() => {
-                    match res {
-                        Ok(id) => {
-                            Self::run_timed(
-                                threshold,
-                                "on_task_closed",
-                                Self::handle_task_closed(&mut actor, id, &mut self.ctx),
-                            )
-                            .await;
-                        }
-                        Err(error) if error.is_cancelled() => debug!(%error, "Monitored task cancelled"),
-                        Err(error) => {
-                            error!(
-                                code = err::Code::MonitoredTaskFailed as u32,
-                                %error,
-                                "Monitored task failed"
-                            );
-                        }
+                Some(res) = self.ctx.tasks.join_next_with_id(), if !self.ctx.tasks.is_empty() => {
+                    if let Some(id) = self.ctx.take_task_result(res) {
+                        Self::run_timed(
+                            threshold,
+                            "on_task_closed",
+                            Self::handle_task_closed(&mut actor, id, &mut self.ctx),
+                        )
+                        .await;
                     }
                 }
                 _ = &mut self.shutdown_rx => {
@@ -425,6 +415,7 @@ mod tests {
     use common::util::netsim_logger::isolated_error_stats;
 
     use super::*;
+    use crate::Context;
 
     #[test]
     fn test_stall_warning_ms_boundary_below_and_at_threshold() {
@@ -552,5 +543,66 @@ mod tests {
         handle.await.unwrap();
 
         assert_eq!(table.snapshot(), vec![(err::Code::MonitoredTaskFailed as u32, 1)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_monitored_task_panic_evicts_task_handle() {
+        let (_table, _guard) = isolated_error_stats();
+        let (mut ctx, _shutdown_rx) = FrameworkContext::<PanickingTaskActor>::new();
+        let id = 1u32;
+        ctx.spawn(id, Box::pin(async { panic!("monitored task panic") }));
+
+        let res = ctx.tasks.join_next_with_id().await.expect("panicked task result");
+        ctx.take_task_result(res);
+
+        assert!(!ctx.task_handles.contains_key(&id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_monitored_task_panic_preserves_replacement_handle() {
+        let (_table, _guard) = isolated_error_stats();
+        let (mut ctx, _shutdown_rx) = FrameworkContext::<PanickingTaskActor>::new();
+        let id = 1u32;
+        let (started_tx, started_rx) = oneshot::channel();
+        ctx.spawn(
+            id,
+            Box::pin(async move {
+                let _ = started_tx.send(());
+                panic!("monitored task panic");
+            }),
+        );
+        started_rx.await.unwrap();
+
+        ctx.spawn(
+            id,
+            Box::pin(async move {
+                std::future::pending::<()>().await;
+                id
+            }),
+        );
+        let replacement_id = ctx.task_handles.get(&id).expect("replacement handle").id();
+
+        let res = ctx.tasks.join_next_with_id().await.expect("panicked task result");
+        assert!(res.as_ref().is_err_and(tokio::task::JoinError::is_panic));
+
+        ctx.take_task_result(res);
+        assert_eq!(
+            ctx.task_handles.get(&id).map(tokio::task::AbortHandle::id),
+            Some(replacement_id)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_monitored_task_normal_completion_evicts_task_handle() {
+        let (mut ctx, _shutdown_rx) = FrameworkContext::<PanickingTaskActor>::new();
+        let id = 1u32;
+        ctx.spawn(id, Box::pin(async move { id }));
+        assert!(ctx.task_handles.contains_key(&id));
+
+        let res = ctx.tasks.join_next_with_id().await.expect("completed task result");
+        let completed = ctx.take_task_result(res);
+
+        assert_eq!(completed, Some(id));
+        assert!(!ctx.task_handles.contains_key(&id));
     }
 }

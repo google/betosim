@@ -19,7 +19,11 @@ use actor_framework::{
     TimerKey,
     utils::{handle_get_default, handle_list_default},
 };
-use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+    time::timeout,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{field::Visit, instrument::WithSubscriber};
 
@@ -108,7 +112,11 @@ enum UserAction {
     SimulateSlowAction(Duration),
     SpawnCompletingTask(u32),
     SpawnPendingTask(u32),
+    SpawnPendingTaskWithDropGuard { task_id: u32, drop_guard: oneshot::Sender<()> },
     AbortTask(u32),
+    AbortCompletedTask(u32),
+    RespawnAfterAbortingCompletedTask { task_id: u32, release_rx: oneshot::Receiver<()> },
+    SupersedeCompletedTask { task_id: u32, release_rx: oneshot::Receiver<()> },
     ScheduleTimer { timer_id: u32, delay: Duration },
     CancelTimer(u32),
 }
@@ -148,6 +156,32 @@ impl UserActor {
             byte_stream_delays: HashMap::new(),
             event_tx,
         }
+    }
+
+    async fn spawn_and_wait_completion(ctx: &mut DynContext<Self>, task_id: u32) {
+        let (done_tx, done_rx) = oneshot::channel();
+        ctx.spawn(
+            task_id,
+            Box::pin(async move {
+                let _ = done_tx.send(());
+                task_id
+            }),
+        );
+        let _ = done_rx.await;
+    }
+
+    fn spawn_gated_task(
+        ctx: &mut DynContext<Self>,
+        task_id: u32,
+        release_rx: oneshot::Receiver<()>,
+    ) {
+        ctx.spawn(
+            task_id,
+            Box::pin(async move {
+                let _ = release_rx.await;
+                task_id
+            }),
+        );
     }
 }
 
@@ -295,8 +329,35 @@ impl ActorService for UserActor {
                 );
                 Ok(task_id as usize)
             }
+            UserAction::SpawnPendingTaskWithDropGuard { task_id, drop_guard } => {
+                ctx.spawn(
+                    task_id,
+                    Box::pin(async move {
+                        let _drop_guard = drop_guard;
+                        std::future::pending::<()>().await;
+                        task_id
+                    }),
+                );
+                Ok(task_id as usize)
+            }
             UserAction::AbortTask(task_id) => {
                 ctx.abort(task_id);
+                Ok(task_id as usize)
+            }
+            UserAction::AbortCompletedTask(task_id) => {
+                Self::spawn_and_wait_completion(ctx, task_id).await;
+                ctx.abort(task_id);
+                Ok(task_id as usize)
+            }
+            UserAction::RespawnAfterAbortingCompletedTask { task_id, release_rx } => {
+                Self::spawn_and_wait_completion(ctx, task_id).await;
+                ctx.abort(task_id);
+                Self::spawn_gated_task(ctx, task_id, release_rx);
+                Ok(task_id as usize)
+            }
+            UserAction::SupersedeCompletedTask { task_id, release_rx } => {
+                Self::spawn_and_wait_completion(ctx, task_id).await;
+                Self::spawn_gated_task(ctx, task_id, release_rx);
                 Ok(task_id as usize)
             }
             UserAction::ScheduleTimer { timer_id, delay } => {
@@ -332,6 +393,8 @@ pub(crate) struct TestWorld {
     event_rx: mpsc::UnboundedReceiver<ActorEvent>,
     stream_senders: HashMap<usize, mpsc::Sender<String>>,
     byte_stream_senders: HashMap<u32, mpsc::Sender<bytes::Bytes>>,
+    task_drop_guards: HashMap<u32, oneshot::Receiver<()>>,
+    replacement_task_release: Option<oneshot::Sender<()>>,
     warn_rx: mpsc::UnboundedReceiver<CapturedWarning>,
     last_created_id: Option<u32>,
     last_action_result: Option<usize>,
@@ -368,6 +431,8 @@ impl TestWorld {
             event_rx,
             stream_senders: HashMap::new(),
             byte_stream_senders: HashMap::new(),
+            task_drop_guards: HashMap::new(),
+            replacement_task_release: None,
             warn_rx,
             last_created_id: None,
             last_action_result: None,
@@ -501,8 +566,44 @@ impl TestWorld {
         self.run_action(None, UserAction::SpawnPendingTask(task_id)).await
     }
 
+    pub(crate) async fn given_pending_task_with_drop_guard(&mut self, task_id: u32) -> &mut Self {
+        let (drop_guard, drop_rx) = oneshot::channel();
+        self.task_drop_guards.insert(task_id, drop_rx);
+        self.run_action(None, UserAction::SpawnPendingTaskWithDropGuard { task_id, drop_guard })
+            .await
+    }
+
     pub(crate) async fn when_abort_task(&mut self, task_id: u32) -> &mut Self {
         self.run_action(None, UserAction::AbortTask(task_id)).await
+    }
+
+    pub(crate) async fn when_abort_completed_task(&mut self, task_id: u32) -> &mut Self {
+        self.run_action(None, UserAction::AbortCompletedTask(task_id)).await
+    }
+
+    pub(crate) async fn when_respawn_after_aborting_completed_task(
+        &mut self,
+        task_id: u32,
+    ) -> &mut Self {
+        let (release_tx, release_rx) = oneshot::channel();
+        assert!(self.replacement_task_release.replace(release_tx).is_none());
+        self.run_action(None, UserAction::RespawnAfterAbortingCompletedTask { task_id, release_rx })
+            .await
+    }
+
+    pub(crate) async fn when_supersede_completed_task(&mut self, task_id: u32) -> &mut Self {
+        let (release_tx, release_rx) = oneshot::channel();
+        assert!(self.replacement_task_release.replace(release_tx).is_none());
+        self.run_action(None, UserAction::SupersedeCompletedTask { task_id, release_rx }).await
+    }
+
+    pub(crate) fn when_release_replacement_task(&mut self) -> &mut Self {
+        let release_tx = self
+            .replacement_task_release
+            .take()
+            .expect("replacement task release sender must be registered");
+        release_tx.send(()).expect("replacement task should still be waiting");
+        self
     }
 
     pub(crate) async fn when_schedule_timer(
@@ -625,6 +726,18 @@ impl TestWorld {
     pub(crate) async fn then_task_closed_received(&mut self, expected_task_id: u32) -> &mut Self {
         let event = self.next_event().await;
         assert_eq!(event, ActorEvent::TaskClosed(expected_task_id));
+        self
+    }
+
+    pub(crate) async fn then_pending_task_was_cancelled(&mut self, task_id: u32) -> &mut Self {
+        let rx = self
+            .task_drop_guards
+            .remove(&task_id)
+            .expect("drop guard receiver must be registered for task");
+        let result = timeout(EVENT_TIMEOUT, rx)
+            .await
+            .expect("timed out waiting for superseded task drop guard");
+        assert!(result.is_err(), "expected superseded task to be cancelled, got {result:?}");
         self
     }
 

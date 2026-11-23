@@ -28,11 +28,12 @@
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, task::JoinError};
 use tokio_stream::{StreamMap, StreamNotifyClose};
 use tokio_util::time::{DelayQueue, delay_queue};
+use tracing::{debug, error};
 
-use crate::{ActorService, BoxStream, BoxTypedStream};
+use crate::{ActorService, BoxStream, BoxTypedStream, err};
 
 pub type TimerKey = delay_queue::Key;
 
@@ -61,9 +62,11 @@ pub trait Context<T: ActorService>: Send + 'static {
 
     /// Spawns a background task to be managed by the runtime.
     ///
-    /// The task is identified by `id`. When it completes, the actor's
-    /// `on_task_closed` hook will be called with the value returned by the
-    /// task (which must be its `id`).
+    /// The task is identified by `id`. If an active task already exists for
+    /// `id`, it is aborted and replaced. When the active task completes
+    /// normally, the actor's `on_task_closed` hook will be called with the
+    /// value returned by the task (which must be its `id`); aborted or
+    /// superseded tasks are ignored.
     fn spawn(&mut self, id: T::Id, task: BoxFuture<'static, T::Id>);
 
     /// Aborts a background task by its ID.
@@ -113,6 +116,38 @@ impl<T: ActorService> FrameworkContext<T> {
             shutdown_rx,
         )
     }
+
+    pub(crate) fn take_task_result(
+        &mut self,
+        res: Result<(tokio::task::Id, T::Id), JoinError>,
+    ) -> Option<T::Id> {
+        match res {
+            Ok((task_id, id)) => {
+                // Skip stale completions whose task_id no longer matches `task_handles[&id]`
+                // (aborted after finishing into JoinSet, or replaced by a later spawn).
+                if self.task_handles.get(&id).is_some_and(|h| h.id() == task_id) {
+                    self.task_handles.remove(&id);
+                    Some(id)
+                } else {
+                    None
+                }
+            }
+            Err(error) if error.is_cancelled() => {
+                debug!(%error, "Monitored task cancelled");
+                None
+            }
+            Err(error) => {
+                let failed_id = error.id();
+                self.task_handles.retain(|_, h| h.id() != failed_id);
+                error!(
+                    code = err::Code::MonitoredTaskFailed as u32,
+                    %error,
+                    "Monitored task failed"
+                );
+                None
+            }
+        }
+    }
 }
 
 impl<T: ActorService> Context<T> for FrameworkContext<T> {
@@ -140,7 +175,9 @@ impl<T: ActorService> Context<T> for FrameworkContext<T> {
 
     fn spawn(&mut self, id: T::Id, task: BoxFuture<'static, T::Id>) {
         let handle = self.tasks.spawn(task);
-        self.task_handles.insert(id, handle);
+        if let Some(prev) = self.task_handles.insert(id, handle) {
+            prev.abort();
+        }
     }
 
     fn abort(&mut self, id: T::Id) {

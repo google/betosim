@@ -63,7 +63,10 @@ pub trait ActorLifecycle: ActorService {
         futures::future::ready(())
     }
 
-    /// Hook called when a background task managed by `spawn` completes.
+    /// Hook called when the active background task managed by `spawn` completes.
+    ///
+    /// Completions from tasks that were aborted via `abort` or superseded by a
+    /// later `spawn` with the same `id` are ignored.
     ///
     /// # Arguments
     ///

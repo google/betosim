@@ -245,3 +245,110 @@ async fn test_fast_handlers_below_stall_threshold_do_not_warn() {
     // Then
     world.then_no_stall_warnings_recorded().await;
 }
+
+// Scenario: Aborting a task that already completed into JoinSet suppresses stale on_task_closed
+//
+//   Given a running user actor
+//   When a task completes before the event loop polls tasks and is then aborted, followed by a 50ms sentinel timer
+//   Then the sentinel timer fires without emitting TaskClosed
+#[tokio::test(flavor = "current_thread")]
+async fn test_abort_after_task_completion_ignores_stale_close() {
+    const TASK_ID: u32 = 21;
+    const SENTINEL_TIMER_ID: u32 = 101;
+    const SENTINEL_DELAY: Duration = Duration::from_millis(50);
+
+    // Given
+    let mut world = TestWorld::new();
+
+    // When
+    world
+        .when_abort_completed_task(TASK_ID)
+        .await
+        .when_schedule_timer(SENTINEL_TIMER_ID, SENTINEL_DELAY)
+        .await;
+
+    // Then
+    world.then_timer_fired_received(SENTINEL_TIMER_ID).await;
+}
+
+// Scenario: Respawning with the same ID after aborting a completed task ignores stale close and runs the replacement
+//
+//   Given a running user actor
+//   When a completed task is aborted and replaced with a gated task for the same ID, followed by a 50ms sentinel timer
+//   Then the sentinel timer fires before any TaskClosed event, and releasing the replacement emits TaskClosed once
+#[tokio::test(flavor = "current_thread")]
+async fn test_respawn_after_aborting_completed_task_ignores_stale_close() {
+    const TASK_ID: u32 = 22;
+    const SENTINEL_TIMER_ID: u32 = 102;
+    const SENTINEL_DELAY: Duration = Duration::from_millis(50);
+
+    // Given
+    let mut world = TestWorld::new();
+
+    // When
+    world
+        .when_respawn_after_aborting_completed_task(TASK_ID)
+        .await
+        .when_schedule_timer(SENTINEL_TIMER_ID, SENTINEL_DELAY)
+        .await;
+
+    // Then
+    world.then_timer_fired_received(SENTINEL_TIMER_ID).await;
+
+    // When
+    world.when_release_replacement_task();
+
+    // Then
+    world.then_task_closed_received(TASK_ID).await;
+}
+
+// Scenario: Superseding a completed task with the same ID suppresses stale on_task_closed
+//
+//   Given a running user actor
+//   When a completed task is superseded by a gated task with the same ID without calling abort, followed by a 50ms sentinel timer
+//   Then the sentinel timer fires before any TaskClosed event, and releasing the replacement emits TaskClosed once
+#[tokio::test(flavor = "current_thread")]
+async fn test_superseded_task_completion_ignores_stale_close() {
+    const TASK_ID: u32 = 23;
+    const SENTINEL_TIMER_ID: u32 = 103;
+    const SENTINEL_DELAY: Duration = Duration::from_millis(50);
+
+    // Given
+    let mut world = TestWorld::new();
+
+    // When
+    world
+        .when_supersede_completed_task(TASK_ID)
+        .await
+        .when_schedule_timer(SENTINEL_TIMER_ID, SENTINEL_DELAY)
+        .await;
+
+    // Then
+    world.then_timer_fired_received(SENTINEL_TIMER_ID).await;
+
+    // When
+    world.when_release_replacement_task();
+
+    // Then
+    world.then_task_closed_received(TASK_ID).await;
+}
+
+// Scenario: Superseding a pending task with the same ID aborts the previous task
+//
+//   Given a running user actor with an active pending task
+//   When a new completing task is spawned for the same ID without calling abort
+//   Then the previous pending task's drop guard is cancelled and the replacement task emits TaskClosed
+#[tokio::test(flavor = "current_thread")]
+async fn test_superseding_pending_task_aborts_previous_task() {
+    const TASK_ID: u32 = 24;
+
+    // Given
+    let mut world = TestWorld::new();
+    world.given_pending_task_with_drop_guard(TASK_ID).await;
+
+    // When
+    world.when_spawn_completing_task(TASK_ID).await;
+
+    // Then
+    world.then_pending_task_was_cancelled(TASK_ID).await.then_task_closed_received(TASK_ID).await;
+}
