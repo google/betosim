@@ -56,7 +56,7 @@ default = []
 test-utils = []
 
 [dev-dependencies]
-common = { package = "netsim-common", path = "../common" }
+common = { package = "netsim-common", path = "../common", features = ["testing"] }
 netsim-model = { path = "../model", features = ["testing"] }
 netsim-testing = { path = "../testing", features = ["testing"] }
 rand = "0.8.5"

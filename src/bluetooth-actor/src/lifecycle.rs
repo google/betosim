@@ -56,6 +56,9 @@ impl ActorLifecycle for BluetoothActor {
         info!("Stream closed for chip {id}");
         // If the stream closes, we should also ensure the sink task is aborted.
         ctx.abort(id);
+        if !self.chips.read().contains_key(&id) {
+            return;
+        }
         if let Err(error) = self.handle_delete(id, ctx).await {
             error!(%error, "Failed to delete chip {id} after stream closed");
         }
@@ -65,6 +68,9 @@ impl ActorLifecycle for BluetoothActor {
         info!("Sink task closed for chip {id}");
         // If the sink task closes, we should also ensure the stream is removed.
         ctx.remove_stream(id);
+        if !self.chips.read().contains_key(&id) {
+            return;
+        }
         if let Err(error) = self.handle_delete(id, ctx).await {
             error!(%error, "Failed to delete chip {id} after sink task closed");
         }

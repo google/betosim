@@ -12,22 +12,133 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::Poll,
+};
 
-use actor_framework::ResourceClient;
+use actor_framework::{Context, ResourceClient};
 use bluetooth_actor::{BluetoothActor, BluetoothClient, BluetoothError};
-use common::util::scanner_util::{ScanResult, parse_hci_scan_report};
+use common::util::{
+    netsim_logger::ErrorStatsTable,
+    scanner_util::{ScanResult, parse_hci_scan_report},
+};
 use device_actor::client::DeviceClient;
 use netsim_model::{
     AdvertiseData, AdvertiseDataUpdate, AdvertiseSettings, AdvertiseSettingsUpdate,
     AdvertiseTxPower, BeaconParams, BleBeacon, BleBeaconUpdate, BluetoothMode, BluetoothUpdate,
-    Chip, ChipCreate, ChipId, ChipUpdate, ChipVariant, ChipVariantUpdate, DeviceId, DeviceParams,
-    Interval, PacketSink, PacketStream, ScannerParams, TxPower,
+    Chip, ChipClient, ChipCreate, ChipId, ChipUpdate, ChipVariant, ChipVariantUpdate, DeviceId,
+    DeviceParams, Interval, PacketSink, PacketStream, ScannerParams, TxPower,
 };
 use netsim_proto::{hci_packet::hcipacket::PacketType, protobuf::Enum};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 use zerocopy::{Immutable, IntoBytes, KnownLayout};
+
+/// Records stream removals and task aborts requested by lifecycle hooks.
+#[derive(Default)]
+pub(crate) struct RecordingContext {
+    pub(crate) removed_streams: Vec<ChipId>,
+    pub(crate) aborted_tasks: Vec<ChipId>,
+}
+
+impl Context<BluetoothActor> for RecordingContext {
+    fn set_interval(&mut self, _: std::time::Duration) {
+        unimplemented!()
+    }
+
+    fn add_stream(&mut self, _: ChipId, _: actor_framework::BoxStream) {
+        unimplemented!()
+    }
+
+    fn remove_stream(&mut self, id: ChipId) {
+        self.removed_streams.push(id);
+    }
+
+    fn add_typed_stream(
+        &mut self,
+        _: usize,
+        _: actor_framework::BoxTypedStream<bluetooth_actor::BluetoothEvent>,
+    ) {
+        unimplemented!()
+    }
+
+    fn remove_typed_stream(&mut self, _: usize) {
+        unimplemented!()
+    }
+
+    fn spawn(&mut self, _: ChipId, _: futures::future::BoxFuture<'static, ChipId>) {
+        unimplemented!()
+    }
+
+    fn abort(&mut self, id: ChipId) {
+        self.aborted_tasks.push(id);
+    }
+
+    fn shutdown(&mut self) {
+        unimplemented!()
+    }
+
+    fn run_later(
+        &mut self,
+        _: std::time::Duration,
+        _: actor_framework::TimerCallback<BluetoothActor>,
+    ) -> actor_framework::TimerKey {
+        unimplemented!()
+    }
+
+    fn cancel_timer(&mut self, _: actor_framework::TimerKey) {
+        unimplemented!()
+    }
+}
+
+/// Creates a standalone `BluetoothActor` with no registered chips.
+pub(crate) fn given_actor_without_chips() -> BluetoothActor {
+    let (device_tx, _device_rx) = mpsc::channel(10);
+    let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+    BluetoothActor::new(device_client, false)
+}
+
+/// Wraps a `PacketSink` and records whether `close()` was called on it.
+struct CloseTrackingSink {
+    inner: PacketSink,
+    closed: Arc<AtomicBool>,
+}
+
+impl futures::Sink<bytes::Bytes> for CloseTrackingSink {
+    type Error = std::io::Error;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: bytes::Bytes) -> Result<(), Self::Error> {
+        self.inner.as_mut().start_send(item)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.inner.as_mut().poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.closed.store(true, Ordering::SeqCst);
+        self.inner.as_mut().poll_close(cx)
+    }
+}
 
 /// The BDD World for Bluetooth Actor tests.
 pub struct World {
@@ -47,6 +158,8 @@ pub struct World {
     pub streams: HashMap<String, mpsc::Sender<bytes::Bytes>>,
     /// Map of chip names to their sink receivers (to capture packets).
     pub sinks: HashMap<String, mpsc::Receiver<Vec<u8>>>,
+    /// Map of chip names to flags recording whether their packet sink was closed.
+    sink_closed: HashMap<String, Arc<AtomicBool>>,
 }
 
 impl World {
@@ -64,7 +177,10 @@ impl World {
         // gracefully (ignoring them), so explicit draining is not needed.
 
         let actor_task = tokio::spawn(async move {
-            actor.run(BluetoothActor::new(resource_client_clone, false)).await;
+            actor
+                .with_stall_threshold(std::time::Duration::from_secs(60))
+                .run(BluetoothActor::new(resource_client_clone, false))
+                .await;
         });
 
         World {
@@ -76,6 +192,7 @@ impl World {
             chips: HashMap::new(),
             streams: HashMap::new(),
             sinks: HashMap::new(),
+            sink_closed: HashMap::new(),
         }
     }
 
@@ -187,8 +304,12 @@ impl World {
         bt_properties: netsim_model::BtControllerProperties,
     ) {
         let (sink, sink_rx) = crate::test_utils::mock_sink();
+        let closed = Arc::new(AtomicBool::new(false));
+        let sink: PacketSink =
+            Box::pin(CloseTrackingSink { inner: sink, closed: Arc::clone(&closed) });
         self.create_device_chip_with_sink(name, bt_properties, sink).await;
         self.sinks.insert(name.to_string(), sink_rx);
+        self.sink_closed.insert(name.to_string(), closed);
     }
 
     /// Creates a Bluetooth chip in Device mode backed by a SinkMapErr-wrapped broken sink.
@@ -470,6 +591,15 @@ impl World {
         self.streams.remove(name).expect("Stream not found for chip");
     }
 
+    /// Drives the actor loop with `yield_now()` plus actor round trips so any
+    /// queued stream-close or task-close events finish running.
+    pub(crate) async fn when_stream_drop_settles(&self) {
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+            self.client.read_count_for_testing().await.expect("actor round trip");
+        }
+    }
+
     /// Drops the sink receiver for the given chip, simulating a sink closure.
     pub fn when_sink_dropped(&mut self, name: &str) {
         self.sinks.remove(name).expect("Sink not found for chip");
@@ -586,6 +716,29 @@ impl World {
     }
 
     // --- Then Steps ---
+
+    /// Asserts that `table` recorded `expected` error-code counts.
+    #[track_caller]
+    pub(crate) fn then_error_stats_are(table: &ErrorStatsTable, expected: &[(u32, u32)]) {
+        assert_eq!(table.snapshot().as_slice(), expected, "unexpected error stats");
+    }
+
+    /// Asserts that the packet stream sender for `name` observes a closed receiver.
+    #[track_caller]
+    pub(crate) fn then_stream_is_closed(&self, name: &str) {
+        assert!(
+            self.streams.get(name).expect("Stream not found for chip").is_closed(),
+            "packet stream for chip {name} should be closed"
+        );
+    }
+
+    /// Asserts that the packet sink for `name` was never closed, i.e. its sink
+    /// task was aborted rather than reaching the clean-EOF `close()` path.
+    #[track_caller]
+    pub(crate) fn then_sink_is_not_closed(&self, name: &str) {
+        let closed = self.sink_closed.get(name).expect("Close flag not found for chip");
+        assert!(!closed.load(Ordering::SeqCst), "packet sink for chip {name} should not be closed");
+    }
 
     pub async fn then_chip_position_is(&self, name: &str, expected: netsim_model::Position) {
         let id = *self.chips.get(name).expect("Chip not found");
@@ -899,7 +1052,6 @@ impl World {
     }
 
     pub async fn then_classic_state_is(&self, id: ChipId, expected: Option<bool>) {
-        use netsim_model::ChipClient;
         let chip = self.client.read(id).await.unwrap();
         let Some(netsim_model::ChipVariant::Bluetooth(bt)) = &chip.variant else {
             panic!("Expected Bluetooth chip variant");

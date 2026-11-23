@@ -45,6 +45,7 @@ netsim_rust_library(
         "@async-trait",
     ],
     test_deps = [
+        "//src/common:testing",
         "//src/testing",
     ],
     deps = BLUETOOTH_DEPS,
@@ -66,7 +67,7 @@ rust_test(
         ":testing",
         "//proto",
         "//src/actor-framework:testing",
-        "//src/common",
+        "//src/common:testing",
         "//src/device-actor:testing",
         "//src/device-api:testing",
         "//src/model:testing",

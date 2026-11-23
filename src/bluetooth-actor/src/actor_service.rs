@@ -264,13 +264,16 @@ impl ActorService for BluetoothActor {
     async fn handle_delete(
         &mut self,
         id: Self::Id,
-        _ctx: &mut DynContext<Self>,
+        ctx: &mut DynContext<Self>,
     ) -> Result<(), Self::Error> {
         let chip_to_delete = {
             let mut chips = self.chips.write();
             chips.remove(&id)
         };
         if let Some(chip) = chip_to_delete {
+            ctx.abort(id);
+            ctx.remove_stream(id);
+
             let chip_id = ChipId(chip.id);
             let device_id = chip.device_id;
 

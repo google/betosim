@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use actor_framework::ActorLifecycle;
 use bytes::Bytes;
-use netsim_model::ChipClient;
+use common::util::netsim_logger::{err_bases, isolated_error_stats};
+use netsim_model::{ChipClient, ChipId};
 use netsim_packets::Reset;
 use tokio::time::Duration;
 
-use crate::world::World;
+use crate::world::{RecordingContext, World, given_actor_without_chips};
+
+const ABSENT_CHIP_ID: ChipId = ChipId(7);
 
 // Feature: Bluetooth Chip Lifecycle
 //
@@ -75,27 +79,32 @@ async fn test_chip_dies_on_packet_stream_error() {
     assert_eq!(chip_count, 0);
 }
 
-// Scenario: Chip removal on explicit delete
-//
-//   Given a bluetooth chip
-//   When a delete command is sent
-//   Then the chip is removed from the actor
-#[tokio::test]
+// Scenario: Chip removal on explicit delete closes stream and aborts sink task without errors
+#[tokio::test(flavor = "current_thread")]
 async fn test_delete_chip_shuts_down_task() {
+    // Given a bluetooth chip in device mode and isolated error stats
+    netsim_testing::setup(None);
+    let (table, _guard) = isolated_error_stats();
     let mut world = World::new();
-
-    // 1. Create a virtual device chip.
     world.given_device("A").await;
-
     let chip_count: usize = world.client.read_count_for_testing().await.expect("chip count");
     assert_eq!(chip_count, 1);
 
-    // 2. Send a DeleteChip command.
+    // When a delete command is sent
     world.when_delete_chip("A").await.expect("delete chip");
 
-    // 4. Verify the chip has been removed.
+    // Then the chip is removed and the packet stream is closed immediately
     let chip_count: usize = world.client.read_count_for_testing().await.expect("chip count");
     assert_eq!(chip_count, 0);
+    world.then_stream_is_closed("A");
+
+    // When the packet stream is dropped and the actor settles
+    world.when_stream_dropped("A");
+    world.when_stream_drop_settles().await;
+
+    // Then the packet sink is not closed and no error stats are recorded
+    world.then_sink_is_not_closed("A");
+    World::then_error_stats_are(&table, &[]);
 }
 
 // Scenario: Chip removal on packet sink error
@@ -132,21 +141,26 @@ async fn test_chip_dies_on_packet_sink_error() {
 }
 
 // Scenario: Chip removal on broken SinkMapErr packet sink without panic
-//
-//   Given a bluetooth chip backed by a SinkMapErr-wrapped broken sink
-//   When an HCI reset command triggers an outbound packet write failure
-//   Then the chip is removed from the actor without panicking
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_chip_dies_on_broken_sink_map_err_without_panic() {
-    // Given
+    // Given a bluetooth chip backed by a SinkMapErr-wrapped broken sink and isolated error stats
+    netsim_testing::setup(None);
+    let (table, _guard) = isolated_error_stats();
     let mut world = World::new();
     world.given_device_with_broken_sink("A").await;
 
-    // When
+    // When an HCI reset command triggers an outbound packet write failure
     world.when_command_sent("A", Reset {}).await;
 
-    // Then
+    // Then the chip is removed from the actor without panicking
     world.then_chip_eventually_removed("A").await;
+
+    // When the packet stream is dropped and the actor settles
+    world.when_stream_dropped("A");
+    world.when_stream_drop_settles().await;
+
+    // Then a single Bluetooth error stat is recorded
+    World::then_error_stats_are(&table, &[(err_bases::BLUETOOTH, 1)]);
 }
 
 // Scenario: Reset re-enables chip states
@@ -245,4 +259,38 @@ async fn test_create_chip_disabling_cis_feature_clears_feature_bits() {
     assert_eq!(&packet[0..7], &[0x04, 0x0e, 0x0c, 0x01, 0x03, 0x20, 0x00]);
     // Feature byte 3 (index 10 with H4 prefix) has CIS bits 0x30 cleared:
     assert_eq!(packet[10] & 0x30, 0x00, "CIS feature bits should be cleared");
+}
+
+// Scenario: Stream closure for an absent chip ID skips delete without errors
+#[tokio::test(flavor = "current_thread")]
+async fn test_on_stream_closed_for_absent_chip_skips_delete_without_error_stats() {
+    // Given a standalone bluetooth actor with no registered chips and isolated error stats
+    netsim_testing::setup(None);
+    let (table, _guard) = isolated_error_stats();
+    let mut actor = given_actor_without_chips();
+    let mut ctx = RecordingContext::default();
+
+    // When a stream-closed lifecycle event arrives for an absent chip ID
+    ActorLifecycle::on_stream_closed(&mut actor, ABSENT_CHIP_ID, &mut ctx).await;
+
+    // Then the sink task for that chip ID is aborted and no error stats are recorded
+    assert_eq!(ctx.aborted_tasks, [ABSENT_CHIP_ID]);
+    World::then_error_stats_are(&table, &[]);
+}
+
+// Scenario: Sink task closure for an absent chip ID skips delete without errors
+#[tokio::test(flavor = "current_thread")]
+async fn test_on_task_closed_for_absent_chip_skips_delete_without_error_stats() {
+    // Given a standalone bluetooth actor with no registered chips and isolated error stats
+    netsim_testing::setup(None);
+    let (table, _guard) = isolated_error_stats();
+    let mut actor = given_actor_without_chips();
+    let mut ctx = RecordingContext::default();
+
+    // When a task-closed lifecycle event arrives for an absent chip ID
+    ActorLifecycle::on_task_closed(&mut actor, ABSENT_CHIP_ID, &mut ctx).await;
+
+    // Then the packet stream for that chip ID is removed and no error stats are recorded
+    assert_eq!(ctx.removed_streams, [ABSENT_CHIP_ID]);
+    World::then_error_stats_are(&table, &[]);
 }

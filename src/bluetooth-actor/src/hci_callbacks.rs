@@ -118,7 +118,7 @@ pub(crate) async fn sink_loop(
         debug!("sink_loop: Sent packet successfully");
     }
     let _ = sink.close().await;
-    error!("Sink task for chip {} finished", id);
+    debug!("sink_loop: Sink task for chip {id} finished");
     id
 }
 
@@ -131,6 +131,7 @@ mod tests {
     };
 
     use bytes::Bytes;
+    use common::util::netsim_logger::{err_bases, isolated_error_stats};
     use futures::Sink;
     use netsim_testing::mock_broken_sink;
     use tokio::sync::{mpsc, mpsc::error::TryRecvError};
@@ -139,6 +140,7 @@ mod tests {
 
     struct CloseFlagSink {
         closed: Arc<AtomicBool>,
+        sent: Arc<Mutex<Vec<Bytes>>>,
     }
 
     impl Sink<Bytes> for CloseFlagSink {
@@ -151,7 +153,8 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-        fn start_send(self: Pin<&mut Self>, _item: Bytes) -> Result<(), Self::Error> {
+        fn start_send(self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
+            self.sent.lock().push(item);
             Ok(())
         }
 
@@ -228,8 +231,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sink_loop_broken_pipe_map_err_returns_without_panic() {
+        netsim_testing::setup(None);
+        let (table, _guard) = isolated_error_stats();
         let (tx, rx) = mpsc::channel(4);
         let sink = mock_broken_sink();
 
@@ -237,13 +242,18 @@ mod tests {
 
         let returned_id = sink_loop(sink, rx, ChipId::from(1)).await;
         assert_eq!(returned_id, ChipId::from(1));
+        assert_eq!(table.snapshot().as_slice(), &[(err_bases::BLUETOOTH, 1)]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sink_loop_clean_eof_closes_sink() {
+        netsim_testing::setup(None);
+        let (table, _guard) = isolated_error_stats();
         let closed = Arc::new(AtomicBool::new(false));
+        let sent = Arc::new(Mutex::new(Vec::new()));
         let sink: netsim_model::PacketSink = Box::pin(
-            CloseFlagSink { closed: Arc::clone(&closed) }.sink_map_err(std::io::Error::other),
+            CloseFlagSink { closed: Arc::clone(&closed), sent: Arc::clone(&sent) }
+                .sink_map_err(std::io::Error::other),
         );
         let (tx, rx) = mpsc::channel(4);
 
@@ -252,6 +262,8 @@ mod tests {
 
         let returned_id = sink_loop(sink, rx, ChipId::from(1)).await;
         assert_eq!(returned_id, ChipId::from(1));
+        assert_eq!(sent.lock().as_slice(), &[Bytes::from_static(b"packet")]);
         assert!(closed.load(Ordering::SeqCst));
+        assert_eq!(table.snapshot().as_slice(), &[]);
     }
 }
