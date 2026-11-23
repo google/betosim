@@ -24,14 +24,16 @@ use crate::world::ApWorld;
 // Given a registered AP with Enterprise (802.1X) enabled
 // When a Station initiates EAPOL (Start)
 // And responds to Identity Request
-// Then the AP sends EAP-Success
+// Then the AP sends EAP-Success and authorizes the controlled port
 #[tokio::test]
 async fn test_eap_mock_authentication_success() {
     // Given: A registered AP with Enterprise (802.1X) enabled
     let mut world = ApWorld::new().await;
     world.given_an_enterprise_ap("EntAP").await;
 
-    let client_mac: MacAddr = "02:00:00:00:11:11".try_into().unwrap();
+    let sta = "02:00:00:00:11:11";
+    let client_mac: MacAddr = sta.try_into().unwrap();
+    world.given_station_is_associated(sta).await;
 
     // When: Station sends EAPOL-Start
     world.when_station_sends_eapol_start(client_mac).await;
@@ -44,6 +46,46 @@ async fn test_eap_mock_authentication_success() {
 
     // Then: Station receives EAP-Success with incremented identifier
     world.then_station_receives_eap_success(req_id.wrapping_add(1)).await;
+    world.then_station_port_state_is(sta, world.ap_bssid, false);
+}
+
+// Scenario: Enterprise downlink frames buffer after EAP-Success until EAP flush drains them
+#[tokio::test]
+async fn test_enterprise_eap_success_buffers_downlink_until_eap_flush() {
+    // Given: An Enterprise AP and a station that completed EAP-Identity/Success
+    let mut world = ApWorld::new().await;
+    world.given_an_enterprise_ap("EntFlushAP").await;
+    let sta = "02:00:00:00:11:12";
+    let seq_ctrl = world.given_station_completed_eap_auth(sta).await;
+    // When: A downlink frame is gated before and after flushing with the EAP-Success seq_ctrl
+    let pre_flush = world.when_downlink_frame_is_gated(sta);
+    let drained = world.when_station_flushes_eap_success_buffer(sta, seq_ctrl);
+    let post_flush = world.when_downlink_frame_is_gated(sta);
+    // Then: Pre-flush downlink buffered, flush drained 1 frame, and post-flush delivers
+    world.then_downlink_action_is_buffered(&pre_flush);
+    world.then_eap_flush_drained_frames(drained, 1);
+    world.then_downlink_action_delivers_empty(&post_flush);
+}
+
+// Scenario: EAP-Success keeps controlled port blocked when wpa_passphrase is also set
+#[tokio::test]
+async fn test_eap_success_keeps_port_blocked_when_wpa_passphrase_is_set() {
+    // Given an Enterprise AP with wpa_passphrase set and an associated station
+    let mut world = ApWorld::new().await;
+    let mut cfg = ApWorld::base_config("EntPskAP", "02:00:00:00:00:10");
+    cfg.enterprise_enabled = true;
+    cfg.wpa_passphrase = Some("CorrectPassword".into());
+    world.given_a_registered_ap_with_config(cfg).await;
+    let sta = "02:00:00:00:11:66";
+    let client_mac: MacAddr = sta.try_into().unwrap();
+    world.given_station_is_associated(sta).await;
+    // When the station completes EAP-Identity/Success without 4-way handshake
+    world.when_station_sends_eapol_start(client_mac).await;
+    let req_id = world.then_station_receives_eap_request_identity().await;
+    world.when_station_sends_eap_response_identity(client_mac, req_id, b"User").await;
+    // Then EAP-Success is sent while the controlled port stays blocked
+    world.then_station_receives_eap_success(req_id.wrapping_add(1)).await;
+    world.then_station_port_state_is(sta, world.ap_bssid, true);
 }
 
 // Scenario: EAPOL-Start is ignored when Enterprise (802.1X) is disabled on the AP
@@ -58,6 +100,7 @@ async fn test_eap_ignored_when_enterprise_disabled() {
     world.given_a_registered_ap_with_config(config).await;
 
     let client_mac: MacAddr = "02:00:00:00:11:22".try_into().unwrap();
+    world.given_station_is_associated("02:00:00:00:11:22").await;
 
     // When
     world.when_station_sends_eapol_start(client_mac).await;
@@ -77,6 +120,7 @@ async fn test_eap_response_without_active_session_is_dropped() {
     world.given_an_enterprise_ap("EntAPNoSession").await;
 
     let client_mac: MacAddr = "02:00:00:00:11:33".try_into().unwrap();
+    world.given_station_is_associated("02:00:00:00:11:33").await;
 
     // When: Send EAP-Response/Identity without EAPOL-Start
     world.when_station_sends_eap_response_identity(client_mac, 1, b"User").await;
@@ -97,6 +141,7 @@ async fn test_eap_unexpected_response_type_does_not_succeed() {
     world.given_an_enterprise_ap("EntAPBadType").await;
 
     let client_mac: MacAddr = "02:00:00:00:11:44".try_into().unwrap();
+    world.given_station_is_associated("02:00:00:00:11:44").await;
     world.when_station_sends_eapol_start(client_mac).await;
     let req_id = world.then_station_receives_eap_request_identity().await;
 
@@ -121,6 +166,7 @@ async fn test_eap_truncated_packet_is_dropped() {
     world.given_an_enterprise_ap("EntAPTruncated").await;
 
     let client_mac: MacAddr = "02:00:00:00:11:55".try_into().unwrap();
+    world.given_station_is_associated("02:00:00:00:11:55").await;
     world.when_station_sends_eapol_start(client_mac).await;
     let req_id = world.then_station_receives_eap_request_identity().await;
 

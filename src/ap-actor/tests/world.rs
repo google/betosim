@@ -15,7 +15,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use actor_framework::ResourceActor;
-use ap_actor::{ApActor, ApClient, ApConfig, SharedKeyStore};
+use ap_actor::{ApActor, ApClient, ApConfig, DownlinkPortAction, SharedKeyStore};
 use common::util::netsim_logger::{ErrorStatsLayer, ErrorStatsTable};
 use netsim_model::WifiMode;
 use netsim_packets::{
@@ -37,6 +37,7 @@ pub const DEFAULT_AP_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const FC_MGMT_ASSOC_REQ: u16 = 0x0000;
 const FC_MGMT_PROBE_REQ: u16 = 0x0040;
 const FC_MGMT_DEAUTH: u16 = 0x00C0;
+pub(crate) const FC_DATA_TO_DS: u16 = 0x0108;
 const AUTH_ALG_OPEN_SYSTEM: u16 = 0;
 pub(crate) const DEAUTH_REASON_STA_LEAVING: u16 = 3;
 const BARRIER_TIMEOUT_SECS: u64 = 2;
@@ -46,6 +47,15 @@ const ASSOC_REQ_LISTEN_INTERVAL: u16 = 0x000A;
 pub fn generate_random_mac() -> [u8; 6] {
     let mut rng = rand::rng();
     [0x02, 0x00, 0x00, 0x00, rng.random(), rng.random()]
+}
+
+pub(crate) fn create_downlink_data_frame(sta_addr: MacAddr, bssid: MacAddr) -> Ieee80211 {
+    use netsim_packets::{EthernetFrame, FrameDirection, ether_type};
+    const MIN_ETHERNET_LEN: usize = 60;
+    const DEFAULT_SEQ_NUM: u16 = 1;
+    let mut eth = EthernetFrame::new(sta_addr, sta_addr, ether_type::IPV4).as_bytes().to_vec();
+    eth.resize(MIN_ETHERNET_LEN, 0);
+    Ieee80211::from_ieee8023(&eth, bssid, FrameDirection::FromAp, DEFAULT_SEQ_NUM).unwrap()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,12 +135,9 @@ impl ApWorld {
         }
     }
 
-    pub async fn given_a_registered_ap_with_config(&mut self, config: ApConfig) {
-        info!("Given a registered AP '{}'", config.ssid);
-        let bssid = config.bssid;
-        let id = self.given_extra_ap(config).await;
+    async fn register_ap_channels(&mut self, id: u32, bssid: MacAddr) {
         self.ap_bssid = bssid;
-        self.ap_id = Some(id.0);
+        self.ap_id = Some(id);
 
         if self.tx_to_ap.is_none() {
             let (tx_to_ap, rx_for_ap) = mpsc::unbounded_channel::<bytes::Bytes>();
@@ -144,6 +151,23 @@ impl ApWorld {
             self.tx_to_ap = Some(tx_to_ap);
             self.rx_from_ap = Some(rx_from_ap);
         }
+    }
+
+    pub async fn create_default_ap(&mut self, config: ApConfig) {
+        const DEFAULT_AP_ID: u32 = 0;
+        let bssid = config.bssid;
+        self.client
+            .create_ap(Some(DEFAULT_AP_ID), config)
+            .await
+            .expect("Failed to create default AP");
+        self.register_ap_channels(DEFAULT_AP_ID, bssid).await;
+    }
+
+    pub async fn given_a_registered_ap_with_config(&mut self, config: ApConfig) {
+        info!("Given a registered AP '{}'", config.ssid);
+        let bssid = config.bssid;
+        let id = self.given_extra_ap(config).await;
+        self.register_ap_channels(id.0, bssid).await;
     }
 
     pub async fn given_a_registered_ap(&mut self, ssid: &str) {
@@ -430,6 +454,26 @@ impl ApWorld {
         )
     }
 
+    pub(crate) fn build_eapol_frame_with_header(
+        &self,
+        header: MacHeader3Addr,
+        version: u8,
+        packet_type: u8,
+        body: &[u8],
+    ) -> Vec<u8> {
+        use netsim_packets::{EapolHeader, LlcSnapHeader, control_field, sap};
+
+        let llc = LlcSnapHeader::new(
+            sap::SNAP,
+            sap::SNAP,
+            control_field::UI,
+            [0x00, 0x00, 0x00],
+            netsim_packets::ether_type::EAPOL,
+        );
+        let eapol = EapolHeader::new(version, packet_type, body.len() as u16);
+        [header.as_bytes(), llc.as_bytes(), eapol.as_bytes(), body].concat()
+    }
+
     pub(crate) fn build_eapol_frame_with_bssid(
         &self,
         bssid: MacAddr,
@@ -439,31 +483,15 @@ impl ApWorld {
         packet_type: u8,
         body: &[u8],
     ) -> Vec<u8> {
-        use netsim_packets::{EapolHeader, LlcSnapHeader, control_field, sap};
-
-        let mut frame = Vec::new();
         let header = self.header_to_bssid(frame_control, client_mac, bssid);
-        frame.extend_from_slice(header.as_bytes());
-
-        let llc = LlcSnapHeader::new(
-            sap::SNAP,
-            sap::SNAP,
-            control_field::UI,
-            [0x00, 0x00, 0x00],
-            netsim_packets::ether_type::EAPOL,
-        );
-        frame.extend_from_slice(llc.as_bytes());
-
-        let eapol = EapolHeader::new(version, packet_type, body.len() as u16);
-        frame.extend_from_slice(eapol.as_bytes());
-        frame.extend_from_slice(body);
-        frame
+        self.build_eapol_frame_with_header(header, version, packet_type, body)
     }
 
     pub async fn when_station_sends_eapol_start(&mut self, client_mac: MacAddr) {
         use netsim_packets::EAPOL_TYPE_START;
 
-        let start_frame = self.build_eapol_frame(client_mac, 0x0008, 1, EAPOL_TYPE_START, &[]);
+        let start_frame =
+            self.build_eapol_frame(client_mac, FC_DATA_TO_DS, 1, EAPOL_TYPE_START, &[]);
         let tx = self.tx_to_ap.as_mut().expect("AP not registered");
         tx.send(bytes::Bytes::from(start_frame)).expect("Failed to send EAPOL-Start");
     }
@@ -497,7 +525,7 @@ impl ApWorld {
         body.extend_from_slice(eap_header.as_bytes());
         body.extend_from_slice(eap_type_and_data);
 
-        let frame = self.build_eapol_frame(client_mac, 0x0008, 1, EAPOL_TYPE_PACKET, &body);
+        let frame = self.build_eapol_frame(client_mac, FC_DATA_TO_DS, 1, EAPOL_TYPE_PACKET, &body);
         let tx = self.tx_to_ap.as_mut().expect("AP not registered");
         tx.send(bytes::Bytes::from(frame)).expect("Failed to send EAP packet");
     }
@@ -509,9 +537,24 @@ impl ApWorld {
     ) {
         use netsim_packets::EAPOL_TYPE_PACKET;
 
-        let frame = self.build_eapol_frame(client_mac, 0x0008, 1, EAPOL_TYPE_PACKET, raw_body);
+        let frame =
+            self.build_eapol_frame(client_mac, FC_DATA_TO_DS, 1, EAPOL_TYPE_PACKET, raw_body);
         let tx = self.tx_to_ap.as_mut().expect("AP not registered");
         tx.send(bytes::Bytes::from(frame)).expect("Failed to send raw EAPOL packet");
+    }
+
+    async fn recv_eap_packet_frame(&mut self) -> Vec<u8> {
+        use netsim_packets::{EAPOL_TYPE_PACKET, EapolHeader};
+
+        self.recv_frame(|frame, msg| {
+            frame.stype() != management_subtype::BEACON
+                && msg.len() > 32
+                && msg[30] == 0x88
+                && msg[31] == 0x8E
+                && Ref::<&[u8], EapolHeader>::from_prefix(&msg[32..])
+                    .is_ok_and(|(header, _)| header.packet_type == EAPOL_TYPE_PACKET)
+        })
+        .await
     }
 
     pub async fn then_station_receives_eap_request_identity(&mut self) -> u8 {
@@ -519,14 +562,7 @@ impl ApWorld {
             EAP_CODE_REQUEST, EAP_TYPE_IDENTITY, EAPOL_TYPE_PACKET, EapHeader, EapolHeader,
         };
 
-        let msg = self
-            .recv_frame(|frame, msg| {
-                if frame.stype() == management_subtype::BEACON {
-                    return false;
-                }
-                msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-            })
-            .await;
+        let msg = self.recv_eap_packet_frame().await;
 
         let payload = &msg[32..];
         let eapol_header = Ref::<&[u8], EapolHeader>::from_prefix(payload).unwrap().0;
@@ -539,23 +575,18 @@ impl ApWorld {
         eap_header.id
     }
 
-    pub async fn then_station_receives_eap_success(&mut self, expected_id: u8) {
+    pub async fn then_station_receives_eap_success(&mut self, expected_id: u8) -> u16 {
         use netsim_packets::{EAP_CODE_SUCCESS, EapHeader};
 
-        let msg = self
-            .recv_frame(|frame, msg| {
-                if frame.stype() == management_subtype::BEACON {
-                    return false;
-                }
-                msg.len() > 32 && msg[30] == 0x88 && msg[31] == 0x8E
-            })
-            .await;
+        let msg = self.recv_eap_packet_frame().await;
 
         let payload = &msg[32..];
         let eap_packet = &payload[4..];
         let eap_header = Ref::<&[u8], EapHeader>::from_prefix(eap_packet).unwrap().0;
         assert_eq!(eap_header.code, EAP_CODE_SUCCESS);
         assert_eq!(eap_header.id, expected_id);
+        let header = Ref::<&[u8], MacHeader3Addr>::from_prefix(&msg).unwrap().0;
+        header.sequence_control.get()
     }
 
     pub async fn then_no_eap_or_auth_frame_is_received(&mut self) {
@@ -657,6 +688,10 @@ impl ApWorld {
             .expect("Failed to disconnect station");
     }
 
+    pub(crate) async fn when_ap_service_is_reset(&mut self) {
+        self.client.reset().await.expect("Failed to reset AP service");
+    }
+
     pub(crate) async fn given_extra_ap(&mut self, config: ApConfig) -> TestApId {
         let id = self.next_ap_id;
         self.next_ap_id += 1;
@@ -669,6 +704,61 @@ impl ApWorld {
             expected.iter().map(|m| m.parse().expect("valid MAC")).collect();
         let ap = self.client.get_ap(ap_id.0).await.expect("get_ap").expect("AP exists");
         assert_eq!(ap.associations, expected_set);
+    }
+
+    pub(crate) fn then_station_buffered_frame_count_is(&self, sta_mac: &str, expected: usize) {
+        let sta = sta_mac.parse().expect("valid MAC");
+        assert_eq!(self.shared_keys.buffered_frame_count(&sta), expected);
+    }
+
+    pub(crate) fn then_station_state_is(&self, sta: &str, expected_bssid: MacAddr) {
+        let mac: MacAddr = sta.parse().expect("valid MAC");
+        assert!(self.shared_keys.has_station(&mac));
+        assert_eq!(self.shared_keys.get_station_bssid(&mac), Some(expected_bssid));
+    }
+
+    pub(crate) fn then_station_port_state_is(&self, sta: &str, bssid: MacAddr, blocked: bool) {
+        self.then_station_state_is(sta, bssid);
+        let mac: MacAddr = sta.parse().expect("valid MAC");
+        assert_eq!(self.shared_keys.is_uplink_port_blocked(&mac, &bssid), blocked);
+    }
+
+    pub(crate) async fn given_station_completed_eap_auth(&mut self, sta_addr: &str) -> u16 {
+        let client_mac: MacAddr = sta_addr.try_into().expect("valid MAC");
+        self.given_station_is_associated(sta_addr).await;
+        self.when_station_sends_eapol_start(client_mac).await;
+        let req_id = self.then_station_receives_eap_request_identity().await;
+        self.when_station_sends_eap_response_identity(client_mac, req_id, b"User").await;
+        self.then_station_receives_eap_success(req_id.wrapping_add(1)).await
+    }
+
+    pub(crate) fn when_downlink_frame_is_gated(&self, sta_addr: &str) -> DownlinkPortAction {
+        let mac: MacAddr = sta_addr.parse().expect("valid MAC");
+        let frame = create_downlink_data_frame(mac, self.ap_bssid);
+        self.shared_keys.gate_downlink_frame(mac, &self.ap_bssid, &frame)
+    }
+
+    pub(crate) fn when_station_flushes_eap_success_buffer(
+        &self,
+        sta_addr: &str,
+        seq_ctrl: u16,
+    ) -> usize {
+        let mac: MacAddr = sta_addr.parse().expect("valid MAC");
+        let epoch =
+            self.shared_keys.take_eap_success_epoch(&mac, &self.ap_bssid, seq_ctrl).unwrap();
+        self.shared_keys.take_authorized_buffered_frames(&mac, &self.ap_bssid, epoch).len()
+    }
+
+    pub(crate) fn then_eap_flush_drained_frames(&self, drained: usize, expected: usize) {
+        assert_eq!(drained, expected);
+    }
+
+    pub(crate) fn then_downlink_action_is_buffered(&self, action: &DownlinkPortAction) {
+        assert!(matches!(action, DownlinkPortAction::Buffered));
+    }
+
+    pub(crate) fn then_downlink_action_delivers_empty(&self, action: &DownlinkPortAction) {
+        assert!(matches!(action, DownlinkPortAction::Deliver(queue) if queue.is_empty()));
     }
 
     pub async fn when_malformed_raw_bytes_sent(&mut self, raw: &[u8]) {
@@ -690,7 +780,8 @@ impl ApWorld {
     }
 
     pub async fn when_station_sends_truncated_eapol_key(&mut self, src_mac: MacAddr) {
-        let frame = self.build_eapol_frame(src_mac, 0x0108, EAPOL_VERSION, EAPOL_TYPE_KEY, &[]);
+        let frame =
+            self.build_eapol_frame(src_mac, FC_DATA_TO_DS, EAPOL_VERSION, EAPOL_TYPE_KEY, &[]);
         self.tx_to_ap
             .as_mut()
             .expect("AP not registered")

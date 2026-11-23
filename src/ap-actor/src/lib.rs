@@ -38,7 +38,9 @@ pub use crate::{
     ap_client::ApClient,
     error::ApError,
     sae::SaeStateMachine,
-    shared::SharedKeyStore,
+    shared::{
+        DownlinkPortAction, MAX_BUFFERED_FRAMES_PER_STATION, PortAuthorizedEvent, SharedKeyStore,
+    },
 };
 
 /// Creates a new ApActor and returns the runner and a client.

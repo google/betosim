@@ -16,7 +16,9 @@ use actor_framework::{ActorService, DynContext};
 use tracing::{error, info, warn};
 
 use crate::{
-    ap_actor::{ApActor, ApId, ApReq, ApResponse, ApState, DEFAULT_AP_ID, WIFI_STREAM_ID},
+    ap_actor::{
+        ApActor, ApConfig, ApId, ApReq, ApResponse, ApState, DEFAULT_AP_ID, WIFI_STREAM_ID,
+    },
     error::ApError,
 };
 
@@ -65,7 +67,7 @@ impl ActorService for ApActor {
         if id_val == DEFAULT_AP_ID {
             self.default_ap_config = Some(state.config.clone());
         }
-        self.shared_keys.add_bssid(state.config.bssid);
+        self.register_bssid(&state.config);
         self.aps.insert(id_val, state);
 
         info!("Created AP with ID: {}", id_val);
@@ -212,19 +214,28 @@ impl ActorService for ApActor {
 }
 
 impl ApActor {
+    fn register_bssid(&self, config: &ApConfig) {
+        let (is_secure, enterprise) = bssid_mode_flags(config);
+        self.shared_keys.register_bssid(config.bssid, is_secure, enterprise);
+    }
+
     fn handle_reset(&mut self) {
         self.aps.retain(|id, _| *id == DEFAULT_AP_ID);
         let base_config =
             self.default_ap_config.clone().unwrap_or_else(|| ApState::default().config);
-        let default_bssid = base_config.bssid;
+        let (is_secure, enterprise) = bssid_mode_flags(&base_config);
+        self.shared_keys.reset_with_mode(base_config.bssid, is_secure, enterprise);
         if let Some(default_ap) = self.aps.get_mut(&DEFAULT_AP_ID) {
             default_ap.reset(base_config);
         } else {
             self.aps.insert(DEFAULT_AP_ID, ApState::new(DEFAULT_AP_ID, base_config));
         }
-        self.shared_keys.reset(default_bssid);
         self.next_ap_id = DEFAULT_AP_ID.0 + 1;
     }
+}
+
+fn bssid_mode_flags(cfg: &ApConfig) -> (bool, bool) {
+    (cfg.wpa_passphrase.is_some(), cfg.enterprise_enabled)
 }
 
 fn send_deauth(

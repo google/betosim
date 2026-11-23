@@ -176,6 +176,7 @@ async fn test_eapol_start_enterprise_disabled_records_error_stat() {
     // Given: A registered AP with WPA-Enterprise disabled
     let mut world = ApWorld::with_error_stats().await;
     world.given_a_registered_ap("ErrStatsEnterpriseDisabledAP").await;
+    world.given_station_is_associated(STATION_MAC).await;
 
     // When: A station sends an EAPOL-Start frame
     world.when_station_sends_eapol_start(STATION_MAC.parse().expect("valid station MAC")).await;

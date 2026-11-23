@@ -130,13 +130,15 @@ gRPC API. It maintains state for multiple virtual Access Points simultaneously.
 
 - **RQ-SEC-01**: The system shall support Open System (No Auth).
 - **RQ-SEC-02**: The system shall support WPA2-Personal (PSK) using 4-Way
-  Handshake.
+  Handshake with per-station IEEE 802.1X Controlled Port gating (`Blocked`
+  until PTK install; unassociated downlink dropped).
 - **RQ-SEC-03**: The system shall support WPA3-Personal (SAE) using internal
   commit/confirm state machines.
 - **RQ-SEC-04**: The system shall support ACLs (Allow/Deny lists) based on MAC
   address.
 - **RQ-SEC-05**: The system shall support WPA2-Enterprise (802.1X) with basic
-  EAP-Identity/Success flow.
+  EAP-Identity/Success flow, gating the station's IEEE 802.1X Controlled Port
+  until `EAP-Success` authorizes it when no WPA2 passphrase is set.
 
 ### 4.3 Management Configuration
 
@@ -200,13 +202,13 @@ Verification is performed via a hierarchical testing strategy:
 | **ACLs (Allow/Deny)**               | `acl_test.rs`                           | **RQ-SEC-04**                                                     |
 | **FTM/RTT Ranging**                 | `ftm_test.rs`                           | **RQ-MGMT-04**                                                    |
 | **WPA3-SAE**                        | `sae_handshake_test.rs`                 | **RQ-SEC-03**                                                     |
-| **WPA2-Enterprise**                 | `eap_auth_test.rs`                      | **RQ-SEC-05**                                                     |
+| **WPA2-Enterprise**                 | `eap_auth_test.rs`, `association_test.rs` | **RQ-SEC-05**                                                   |
 | **Hidden SSID**                     | `beacon_test.rs`, `creation_test.rs`    | **RQ-CONF-04**                                                    |
 | **Country Code & DTIM**             | `beacon_test.rs`                        | **RQ-CONF-02, RQ-CONF-05**                                        |
 | **WMM (QoS)**                       | `beacon_test.rs`                        | **RQ-CONF-03**                                                    |
 | **Configurable PHY (ax)**           | `creation_test.rs`                      | **RQ-CONF-01**                                                    |
 | **Control Interface (hostapd_cli)** | `ap_control_test.rs`                    | **RQ-CTRL-04** (Partial - covers `chan_switch`, `deauthenticate`) |
-| **Basic Mgmt (Assoc, Probe)**       | `association_test.rs`, `beacon_test.rs` | **RQ-MGMT-01, RQ-MGMT-02, RQ-MGMT-03**                            |
+| **Basic Mgmt & WPA2 802.1X Port**   | `association_test.rs`, `beacon_test.rs` | **RQ-MGMT-01, RQ-MGMT-02, RQ-MGMT-03, RQ-SEC-02**                 |
 
 ### 6.2 BDD Coverage Gaps
 

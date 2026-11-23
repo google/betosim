@@ -691,6 +691,13 @@ impl Ieee80211Manager {
         }
 
         let src = ieee80211_frame.get_source();
+        if ieee80211_frame.needs_decryption()
+            || !ieee80211_frame.is_to_ap()
+            || ieee80211_frame.get_bssid() != Some(ap.config.bssid)
+            || !ap.associations.contains(&src)
+        {
+            return Ok(vec![]);
+        }
         info!("ApActor: Received EAPOL frame from src={}", src);
         let frame_payload = ieee80211_frame.get_payload();
         let Some(payload) = frame_payload.get(std::mem::size_of::<LlcSnapHeader>()..) else {
@@ -740,15 +747,29 @@ impl Ieee80211Manager {
                 match auth.handle_eap(eap_packet) {
                     Ok(outputs) => {
                         let mut frames = Vec::new();
+                        let mut last_seq_ctrl = None;
                         for out in outputs {
                             match out {
                                 EapOutput::Frame(data) => {
-                                    frames.push(bytes::Bytes::from(self.wrap_eapol(ap, src, &data)))
+                                    let raw = self.wrap_eapol(ap, src, &data);
+                                    last_seq_ctrl = MacHeader3Addr::read_from_prefix(&raw)
+                                        .ok()
+                                        .map(|(header, _)| header.sequence_control.get());
+                                    frames.push(bytes::Bytes::from(raw));
                                 }
                                 EapOutput::Success => {
                                     info!("EAP: Success for {}", src);
                                     // TODO: Key Derivation / PMK setting?
                                     // For now, we are Authenticated.
+                                    if ap.config.wpa_passphrase.is_none()
+                                        && let Some(seq_ctrl) = last_seq_ctrl
+                                    {
+                                        shared_keys.authorize_eap_station(
+                                            src,
+                                            ap.config.bssid,
+                                            seq_ctrl,
+                                        );
+                                    }
                                 }
                                 _ => {}
                             }
@@ -813,7 +834,7 @@ impl Ieee80211Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::CCMP_TK_LEN;
+    use crate::shared::{CCMP_TK_LEN, FC_PROTECTED_BIT};
 
     const AUTH_FC: u16 = 0x00B0;
     const MIN_ETHERNET_LEN: usize = 60;
@@ -1032,8 +1053,8 @@ mod tests {
         let mut ap = ApState::default();
         ap.config.bssid = b2;
         let keys = SharedKeyStore::new();
-        keys.add_bssid(b1);
-        keys.add_bssid(b2);
+        keys.register_bssid(b1, true, false);
+        keys.register_bssid(b2, true, false);
         keys.associate_station(sta1, b1);
         keys.authorize_station(sta1, b1, vec![0x42; CCMP_TK_LEN]);
         keys.associate_station(sta2, b2);
@@ -1047,8 +1068,38 @@ mod tests {
 
         // Then sta1's session on b1 stays intact while sta2's matching b2 session is cleared
         assert_eq!(keys.get_station_bssid(&sta1), Some(b1));
+        assert!(!keys.is_uplink_port_blocked(&sta1, &b1));
         assert!(keys.try_encrypt(&downlink_data(b1, sta1)).is_some());
         assert!(keys.get_station_bssid(&sta2).is_none());
         assert!(keys.try_encrypt(&downlink_data(b2, sta2)).is_none());
+    }
+
+    #[test]
+    fn test_handle_data_frame_ignores_protected_uplink_eapol() {
+        use netsim_packets::{
+            EAPOL_VERSION, EapolHeader, EthernetFrame, FrameDirection, MacAddr, ether_type,
+        };
+        use zerocopy::IntoBytes;
+        let bssid = MacAddr::new([2, 0, 0, 0, 0, 1]);
+        let sta = MacAddr::new([2, 0, 0, 0, 0, 0x55]);
+        let mgr = Ieee80211Manager::new();
+        let mut ap = ApState::default();
+        let keys = SharedKeyStore::new();
+        ap.config.enterprise_enabled = true;
+        ap.config.bssid = bssid;
+        ap.associations.insert(sta);
+        keys.register_bssid(bssid, false, true);
+        keys.associate_station(sta, bssid);
+        let mut eth = EthernetFrame::new(bssid, sta, ether_type::EAPOL).as_bytes().to_vec();
+        let eapol = EapolHeader::new(EAPOL_VERSION, EAPOL_TYPE_START, 0);
+        eth.extend_from_slice(eapol.as_bytes());
+        let frame = Ieee80211::from_ieee8023(&eth, bssid, FrameDirection::ToAp, 1).unwrap();
+        let mut raw = frame.as_bytes().to_vec();
+        raw[1] |= FC_PROTECTED_BIT;
+        let out =
+            mgr.handle_data_frame(&mut ap, &raw, Ieee80211::decode(&raw).unwrap(), &keys).unwrap();
+        assert!(out.is_empty());
+        assert!(ap.eap_sessions.is_empty());
+        assert!(keys.is_uplink_port_blocked(&sta, &bssid));
     }
 }

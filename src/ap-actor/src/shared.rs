@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -22,15 +22,34 @@ use std::{
 
 use netsim_packets::{CcmpHeader, Ieee80211, MacAddress};
 use parking_lot::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error};
 use zerocopy::IntoBytes;
 
 use crate::ffi::{AesCcmDecrypt, AesCcmEncrypt};
 
 const CCMP_HDR_LEN: usize = 8;
-const FC_PROTECTED_BIT: u8 = 0x40;
+pub(crate) const FC_PROTECTED_BIT: u8 = 0x40;
 pub(crate) const CCMP_TK_LEN: usize = 16;
 const CCMP_MIC_LEN: usize = 8;
+pub const MAX_BUFFERED_FRAMES_PER_STATION: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PortState {
+    Blocked,
+    Authorized,
+}
+
+/// Decision returned by [`SharedKeyStore::gate_downlink_frame`] for outbound data frames.
+#[derive(Clone, Debug)]
+pub enum DownlinkPortAction {
+    /// Port is open or authorized; contained frames must be sent before the current frame.
+    Deliver(VecDeque<Ieee80211>),
+    /// Controlled port is blocked or awaiting EAP-Success flush; queued FIFO.
+    Buffered,
+    /// Drop without buffering (associated to another BSSID, or unassociated on controlled port).
+    Drop,
+}
 
 #[derive(Debug)]
 struct SessionKeys {
@@ -38,24 +57,100 @@ struct SessionKeys {
     tx_pn: AtomicU64,
 }
 
+impl SessionKeys {
+    fn new(tk: Vec<u8>) -> Arc<Self> {
+        Arc::new(Self { tk, tx_pn: AtomicU64::new(1) })
+    }
+}
+
+/// Emitted when an associated station's controlled port transitions to `Authorized`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PortAuthorizedEvent {
+    pub sta_addr: MacAddress,
+    pub bssid: MacAddress,
+    pub epoch: u64,
+}
+
+type AuthTx = UnboundedSender<PortAuthorizedEvent>;
+
+fn notify_port_authorized(tx: Option<AuthTx>, event: Option<PortAuthorizedEvent>) {
+    if let (Some(tx), Some(event)) = (tx, event)
+        && tx.send(event).is_err()
+    {
+        debug!(sta_addr = %event.sta_addr, "port_authorized_tx receiver closed");
+    }
+}
+
+fn set_bssid_flag(set: &mut HashSet<MacAddress>, bssid: MacAddress, on: bool) {
+    let _ = if on { set.insert(bssid) } else { set.remove(&bssid) };
+}
+
+fn push_bounded<T>(queue: &mut VecDeque<T>, item: T) {
+    if queue.len() >= MAX_BUFFERED_FRAMES_PER_STATION {
+        queue.pop_front();
+    }
+    queue.push_back(item);
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EapFlushState {
+    #[default]
+    Idle,
+    AwaitingTx(u16),
+    ReadyToDrain,
+}
+
 #[derive(Debug, Default)]
 struct StationState {
     bssid: Option<MacAddress>,
-    associated: bool,
+    port_state: Option<PortState>,
+    epoch: u64,
+    eap_flush: EapFlushState,
     session: Option<Arc<SessionKeys>>,
+    pending_downlink: VecDeque<Ieee80211>,
 }
 
 impl StationState {
+    fn is_blocked(&self, requires_cp: bool) -> bool {
+        self.port_state.map_or(requires_cp, |port_state| port_state == PortState::Blocked)
+    }
+
+    fn is_associated_to_other_bssid(&self, bssid: &MacAddress) -> bool {
+        self.bssid != Some(*bssid) && self.port_state.is_some()
+    }
+
     fn session_for(&self, bssid: Option<MacAddress>) -> Option<&SessionKeys> {
         // `bssid: None` only occurs for test-only `add_session` entries.
-        self.session.as_deref().filter(|_| self.bssid.is_none_or(|b| bssid == Some(b)))
+        self.session
+            .as_deref()
+            .filter(|_| self.bssid.is_none_or(|sta_bssid| bssid == Some(sta_bssid)))
     }
 }
 
 #[derive(Debug, Default)]
 struct KeyStoreState {
+    secure_bssids: HashSet<MacAddress>,
+    controlled_port_bssids: HashSet<MacAddress>,
     stations: HashMap<MacAddress, StationState>,
+    port_authorized_tx: Option<AuthTx>,
     gtks: HashMap<MacAddress, [u8; 16]>,
+    next_epoch: u64,
+}
+
+impl KeyStoreState {
+    fn requires_controlled_port(&self, bssid: &MacAddress) -> bool {
+        self.controlled_port_bssids.contains(bssid)
+    }
+
+    fn alloc_epoch(&mut self) -> u64 {
+        self.next_epoch += 1;
+        self.next_epoch
+    }
+
+    fn apply_bssid_mode(&mut self, bssid: MacAddress, is_secure: bool, enterprise: bool) {
+        set_bssid_flag(&mut self.secure_bssids, bssid, is_secure);
+        set_bssid_flag(&mut self.controlled_port_bssids, bssid, is_secure || enterprise);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -81,21 +176,33 @@ impl SharedKeyStore {
         Self::default()
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn add_bssid(&self, bssid: MacAddress) {
-        self.bssids.write().insert(bssid);
+        self.register_bssid(bssid, false, false);
     }
 
     pub fn has_bssid(&self, bssid: &MacAddress) -> bool {
         self.bssids.read().contains(bssid)
     }
 
-    /// Records a candidate BSSID for `sta_addr` before association; an associated entry
-    /// keeps its associated BSSID.
+    /// Records a candidate BSSID before association, promoting a pre-installed test session.
     pub fn set_station_bssid(&self, sta_addr: MacAddress, bssid: MacAddress) {
-        let mut s = self.state.write();
-        let e = s.stations.entry(sta_addr).or_default();
-        if !e.associated {
-            e.bssid = Some(bssid);
+        let mut state = self.state.write();
+        let entry = state.stations.entry(sta_addr).or_default();
+        let unassociated = entry.port_state.is_none();
+        if unassociated {
+            entry.bssid = Some(bssid);
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if unassociated && entry.session.is_some() {
+            let epoch = state.alloc_epoch();
+            let tx = state.port_authorized_tx.clone();
+            let entry = state.stations.get_mut(&sta_addr).expect("inserted above");
+            entry.port_state = Some(PortState::Authorized);
+            entry.eap_flush = EapFlushState::Idle;
+            entry.epoch = epoch;
+            drop(state);
+            notify_port_authorized(tx, Some(PortAuthorizedEvent { sta_addr, bssid, epoch }));
         }
     }
 
@@ -105,30 +212,201 @@ impl SharedKeyStore {
     }
 
     pub fn get_station_bssid(&self, sta_addr: &MacAddress) -> Option<MacAddress> {
-        self.state.read().stations.get(sta_addr).and_then(|e| e.bssid)
+        self.state.read().stations.get(sta_addr).and_then(|entry| entry.bssid)
     }
 
-    pub(crate) fn associate_station(&self, sta: MacAddress, bssid: MacAddress) {
-        let st = StationState { bssid: Some(bssid), associated: true, ..Default::default() };
-        self.state.write().stations.insert(sta, st);
+    pub fn set_port_authorized_sender(&self, sender: AuthTx) {
+        self.state.write().port_authorized_tx = Some(sender);
     }
 
-    pub(crate) fn authorize_station(&self, sta: MacAddress, bssid: MacAddress, tk: Vec<u8>) {
-        let mut s = self.state.write();
-        let Some(entry) =
-            s.stations.get_mut(&sta).filter(|e| e.associated && e.bssid == Some(bssid))
+    pub(crate) fn register_bssid(&self, bssid: MacAddress, is_secure: bool, enterprise: bool) {
+        let mut bssids = self.bssids.write();
+        let mut state = self.state.write();
+        bssids.insert(bssid);
+        state.apply_bssid_mode(bssid, is_secure, enterprise);
+    }
+
+    #[cfg(test)]
+    fn is_secure_bssid(&self, bssid: &MacAddress) -> bool {
+        self.state.read().secure_bssids.contains(bssid)
+    }
+
+    pub fn requires_controlled_port(&self, bssid: &MacAddress) -> bool {
+        self.state.read().requires_controlled_port(bssid)
+    }
+
+    pub(crate) fn associate_station(&self, sta_addr: MacAddress, bssid: MacAddress) {
+        let mut state = self.state.write();
+        let requires_cp = state.requires_controlled_port(&bssid);
+        let epoch = state.alloc_epoch();
+        let port_state = Some(if requires_cp { PortState::Blocked } else { PortState::Authorized });
+        let station = StationState { bssid: Some(bssid), port_state, epoch, ..Default::default() };
+        state.stations.insert(sta_addr, station);
+    }
+
+    pub(crate) fn authorize_station(&self, sta_addr: MacAddress, bssid: MacAddress, tk: Vec<u8>) {
+        self.authorize(sta_addr, bssid, Some(tk), None);
+    }
+
+    pub(crate) fn authorize_eap_station(
+        &self,
+        sta_addr: MacAddress,
+        bssid: MacAddress,
+        seq_ctrl: u16,
+    ) {
+        self.authorize(sta_addr, bssid, None, Some(seq_ctrl));
+    }
+
+    fn authorize(
+        &self,
+        sta_addr: MacAddress,
+        bssid: MacAddress,
+        tk: Option<Vec<u8>>,
+        seq_ctrl: Option<u16>,
+    ) {
+        let mut state = self.state.write();
+        let Some(entry) = state
+            .stations
+            .get_mut(&sta_addr)
+            .filter(|entry| entry.port_state.is_some() && entry.bssid == Some(bssid))
         else {
-            debug!(%sta, %bssid, "ignoring authorize_station for unassociated/mismatched");
+            debug!(%sta_addr, %bssid, "ignoring authorize for unassociated/mismatched");
             return;
         };
-        entry.session = Some(Arc::new(SessionKeys { tk, tx_pn: AtomicU64::new(1) }));
+        let has_tk = tk.is_some();
+        let epoch = entry.epoch;
+        entry.port_state = Some(PortState::Authorized);
+        entry.eap_flush = match seq_ctrl {
+            Some(seq_ctrl) if !has_tk => EapFlushState::AwaitingTx(seq_ctrl),
+            _ => EapFlushState::Idle,
+        };
+        if let Some(tk) = tk {
+            entry.session = Some(SessionKeys::new(tk));
+        }
+        let event = has_tk.then_some(PortAuthorizedEvent { sta_addr, bssid, epoch });
+        let tx = has_tk.then(|| state.port_authorized_tx.clone()).flatten();
+        drop(state);
+        notify_port_authorized(tx, event);
+    }
+
+    /// Returns `true` if non-EAPOL uplink data from `sta_addr` toward `frame_bssid` must drop.
+    pub fn is_uplink_port_blocked(&self, sta_addr: &MacAddress, frame_bssid: &MacAddress) -> bool {
+        let state = self.state.read();
+        let requires_cp = state.requires_controlled_port(frame_bssid);
+        state.stations.get(sta_addr).map_or(requires_cp, |entry| {
+            entry.is_associated_to_other_bssid(frame_bssid) || entry.is_blocked(requires_cp)
+        })
+    }
+
+    /// Gates a downlink frame: buffers while blocked/pending, delivers, or drops.
+    pub fn gate_downlink_frame(
+        &self,
+        sta_addr: MacAddress,
+        bssid: &MacAddress,
+        frame: &Ieee80211,
+    ) -> DownlinkPortAction {
+        use DownlinkPortAction::{Buffered, Deliver, Drop};
+        if !frame.is_payload_bearing_data() {
+            return Deliver(VecDeque::new());
+        }
+        let mut state = self.state.write();
+        let requires_cp = state.requires_controlled_port(bssid);
+        let Some(entry) = state.stations.get_mut(&sta_addr) else {
+            return if requires_cp { Drop } else { Deliver(VecDeque::new()) };
+        };
+        if entry.is_associated_to_other_bssid(bssid) || (entry.port_state.is_none() && requires_cp)
+        {
+            return Drop;
+        }
+        if !frame.needs_decryption()
+            && frame.is_from_ds()
+            && !frame.is_to_ds()
+            && frame.get_bssid() == Some(*bssid)
+            && frame.get_source() == *bssid
+            && frame.get_destination() == sta_addr
+            && frame.is_eapol().unwrap_or(false)
+        {
+            return Deliver(VecDeque::new());
+        }
+        if !entry.is_blocked(requires_cp) && entry.eap_flush == EapFlushState::Idle {
+            return Deliver(std::mem::take(&mut entry.pending_downlink));
+        }
+        push_bounded(&mut entry.pending_downlink, frame.clone());
+        Buffered
+    }
+
+    /// Marks a pending `EAP-Success` matching `seq_ctrl` ready to drain and returns its epoch.
+    pub fn take_eap_success_epoch(
+        &self,
+        sta_addr: &MacAddress,
+        bssid: &MacAddress,
+        seq_ctrl: u16,
+    ) -> Option<u64> {
+        let mut state = self.state.write();
+        let entry = state.stations.get_mut(sta_addr)?;
+        if entry.port_state == Some(PortState::Authorized)
+            && entry.bssid == Some(*bssid)
+            && entry.eap_flush == EapFlushState::AwaitingTx(seq_ctrl)
+        {
+            entry.eap_flush = EapFlushState::ReadyToDrain;
+            Some(entry.epoch)
+        } else {
+            None
+        }
+    }
+
+    /// Drains queued downlink frames for `sta_addr` on `bssid` matching `epoch`.
+    pub fn take_authorized_buffered_frames(
+        &self,
+        sta_addr: &MacAddress,
+        bssid: &MacAddress,
+        epoch: u64,
+    ) -> VecDeque<Ieee80211> {
+        let mut state = self.state.write();
+        let Some(entry) = state.stations.get_mut(sta_addr) else { return VecDeque::new() };
+        if entry.port_state != Some(PortState::Authorized)
+            || entry.bssid != Some(*bssid)
+            || entry.epoch != epoch
+            || matches!(entry.eap_flush, EapFlushState::AwaitingTx(_))
+        {
+            return VecDeque::new();
+        }
+        entry.eap_flush = EapFlushState::Idle;
+        std::mem::take(&mut entry.pending_downlink)
+    }
+
+    /// Discards queued downlink frames for `sta_addr` without changing port state.
+    pub fn clear_station_buffer(&self, sta_addr: &MacAddress) {
+        if let Some(entry) = self.state.write().stations.get_mut(sta_addr) {
+            entry.pending_downlink.clear();
+        }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn buffered_frame_count(&self, sta_addr: &MacAddress) -> usize {
+        self.state.read().stations.get(sta_addr).map_or(0, |entry| entry.pending_downlink.len())
     }
 
     #[cfg(any(test, feature = "testing"))]
     pub fn add_session(&self, sta_addr: MacAddress, tk: Vec<u8>) {
-        let mut s = self.state.write();
-        let entry = s.stations.entry(sta_addr).or_default();
-        entry.session = Some(Arc::new(SessionKeys { tk, tx_pn: AtomicU64::new(1) }));
+        let mut state = self.state.write();
+        let promote = state.stations.get(&sta_addr).is_some_and(|entry| {
+            entry.bssid.is_some() && entry.port_state != Some(PortState::Authorized)
+        });
+        let epoch = promote.then(|| state.alloc_epoch());
+        let tx = epoch.and_then(|_| state.port_authorized_tx.clone());
+        let entry = state.stations.entry(sta_addr).or_default();
+        entry.session = Some(SessionKeys::new(tk));
+        if entry.bssid.is_some() {
+            entry.eap_flush = EapFlushState::Idle;
+        }
+        let event = entry.bssid.zip(epoch).map(|(bssid, epoch)| {
+            entry.port_state = Some(PortState::Authorized);
+            entry.epoch = epoch;
+            PortAuthorizedEvent { sta_addr, bssid, epoch }
+        });
+        drop(state);
+        notify_port_authorized(tx, event);
     }
 
     pub fn get_gtk(&self, bssid: &MacAddress) -> Option<[u8; 16]> {
@@ -141,22 +419,35 @@ impl SharedKeyStore {
 
     pub(crate) fn remove_station_for_bssid(&self, sta_addr: &MacAddress, bssid: &MacAddress) {
         let mut state = self.state.write();
-        if state.stations.get(sta_addr).is_some_and(|s| s.bssid == Some(*bssid)) {
+        if state.stations.get(sta_addr).is_some_and(|station| station.bssid == Some(*bssid)) {
             state.stations.remove(sta_addr);
         }
     }
 
     pub(crate) fn remove_bssid(&self, bssid: &MacAddress) {
-        self.bssids.write().remove(bssid);
-        let state = &mut *self.state.write();
+        let mut bssids = self.bssids.write();
+        let mut state = self.state.write();
+        bssids.remove(bssid);
+        state.secure_bssids.remove(bssid);
+        state.controlled_port_bssids.remove(bssid);
         state.gtks.remove(bssid);
-        state.stations.retain(|_, s| s.bssid != Some(*bssid));
+        state.stations.retain(|_, station| station.bssid != Some(*bssid));
     }
 
-    pub(crate) fn reset(&self, default_bssid: MacAddress) {
-        *self.bssids.write() = HashSet::from([default_bssid]);
+    pub(crate) fn reset_with_mode(
+        &self,
+        default_bssid: MacAddress,
+        is_secure: bool,
+        enterprise: bool,
+    ) {
+        let mut bssids = self.bssids.write();
+        let mut state = self.state.write();
         self.gtk_tx_pn.store(1, Ordering::SeqCst);
-        *self.state.write() = KeyStoreState::default();
+        *bssids = HashSet::from([default_bssid]);
+        let port_authorized_tx = state.port_authorized_tx.take();
+        let next_epoch = state.next_epoch;
+        *state = KeyStoreState { port_authorized_tx, next_epoch, ..Default::default() };
+        state.apply_bssid_mode(default_bssid, is_secure, enterprise);
     }
 
     pub fn try_encrypt(&self, ieee80211: &Ieee80211) -> Option<Vec<u8>> {
@@ -267,16 +558,19 @@ mod tests {
         let default_bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
         let other_bssid = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
         let sta = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
+        let post_reset_sta = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x56]);
+        let mut rx = with_auth_rx(&store);
 
         store.add_bssid(default_bssid);
-        store.add_bssid(other_bssid);
+        store.register_bssid(other_bssid, true, true);
         store.set_station_bssid(sta, other_bssid);
         store.add_session(sta, vec![0x42; 16]);
+        let prior_epoch = assert_auth_event(&mut rx, sta, other_bssid);
         store.set_gtk(default_bssid, [0x11; 16]);
         store.set_gtk(other_bssid, [0x24; 16]);
 
         store.gtk_tx_pn.store(42, Ordering::SeqCst);
-        store.reset(default_bssid);
+        store.reset_with_mode(default_bssid, true, false);
 
         assert!(store.has_bssid(&default_bssid));
         assert!(!store.has_bssid(&other_bssid));
@@ -285,12 +579,20 @@ mod tests {
         assert!(store.get_gtk(&other_bssid).is_none());
         assert!(store.state.read().stations.is_empty());
         assert_eq!(store.gtk_tx_pn.load(Ordering::SeqCst), 1);
+        assert!(!store.is_secure_bssid(&other_bssid));
+        assert!(!store.requires_controlled_port(&other_bssid));
+        assert!(store.is_secure_bssid(&default_bssid));
+        assert!(store.requires_controlled_port(&default_bssid));
+        store.associate_station(post_reset_sta, default_bssid);
+        store.authorize_station(post_reset_sta, default_bssid, vec![0x99; 16]);
+        assert!(assert_auth_event(&mut rx, post_reset_sta, default_bssid) > prior_epoch);
     }
 
     use netsim_packets::{
-        BeaconFixedFields, DataSubType, FrameControl, FrameType, MacHeader3Addr, SequenceControl,
-        management_subtype,
+        BeaconFixedFields, DataSubType, FrameControl, FrameType, LlcSnapHeader, MacHeader3Addr,
+        SequenceControl, management_subtype,
     };
+    use zerocopy::FromBytes;
 
     const MIN_ETHERNET_LEN: usize = 60;
 
@@ -504,6 +806,7 @@ mod tests {
 
     const TEST_BSSID_1: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     const TEST_BSSID_2: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+    const TEST_BSSID_3: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x03]);
     const TEST_STA_MAC: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
     const TEST_STA_MAC_2: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x66]);
 
@@ -512,9 +815,35 @@ mod tests {
         Ieee80211::from_ieee8023(&eth, bssid, netsim_packets::FrameDirection::FromAp, seq).unwrap()
     }
 
+    use netsim_packets::{
+        EthernetFrame,
+        FrameDirection::{self, FromAp, ToAp},
+        ether_type,
+    };
+
+    fn dummy_eapol_to(
+        dst: MacAddress,
+        src: MacAddress,
+        bssid: MacAddress,
+        dir: FrameDirection,
+    ) -> Ieee80211 {
+        let eth = EthernetFrame::new(dst, src, ether_type::EAPOL);
+        let mut bytes = [0u8; MIN_ETHERNET_LEN];
+        bytes[..eth.as_bytes().len()].copy_from_slice(eth.as_bytes());
+        Ieee80211::from_ieee8023(&bytes, bssid, dir, 1).unwrap()
+    }
+
+    fn dummy_eapol(src: MacAddress, bssid: MacAddress, dir: FrameDirection) -> Ieee80211 {
+        dummy_eapol_to(TEST_STA_MAC, src, bssid, dir)
+    }
+
+    fn dummy_from_ap_eapol(src: MacAddress, bssid: MacAddress) -> Ieee80211 {
+        dummy_eapol(src, bssid, FromAp)
+    }
+
     fn associated_store() -> SharedKeyStore {
         let store = SharedKeyStore::new();
-        store.add_bssid(TEST_BSSID_1);
+        store.register_bssid(TEST_BSSID_1, true, false);
         store.add_bssid(TEST_BSSID_2);
         store.associate_station(TEST_STA_MAC, TEST_BSSID_1);
         store
@@ -524,6 +853,7 @@ mod tests {
     fn test_remove_station_for_bssid_removes_only_matching_bssid() {
         // Given
         let s = associated_store();
+        gate_and_expect_buffered(&s, TEST_BSSID_1, 1, b"queued");
 
         // When
         s.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_2);
@@ -537,6 +867,8 @@ mod tests {
         // Then
         assert!(!s.has_station(&TEST_STA_MAC));
         assert_eq!(s.get_station_bssid(&TEST_STA_MAC), None);
+        assert_eq!(s.buffered_frame_count(&TEST_STA_MAC), 0);
+        assert!(matches!(gate(&s, TEST_BSSID_1, b"x"), DownlinkPortAction::Drop));
     }
 
     #[test]
@@ -544,6 +876,7 @@ mod tests {
         // Given
         let store = SharedKeyStore::new();
         store.add_bssid(TEST_BSSID_1);
+        let mut rx = with_auth_rx(&store);
 
         // When
         store.authorize_station(TEST_STA_MAC, TEST_BSSID_1, vec![0x42; CCMP_TK_LEN]);
@@ -558,6 +891,7 @@ mod tests {
         store.authorize_station(TEST_STA_MAC, TEST_BSSID_1, vec![0x42; CCMP_TK_LEN]);
 
         // Then
+        assert!(rx.try_recv().is_err());
         assert!(
             store.try_encrypt(&dummy_from_ap_frame(TEST_BSSID_1, TEST_STA_MAC, 1, b"x")).is_none()
         );
@@ -567,11 +901,14 @@ mod tests {
     fn test_authorize_station_ignores_mismatched_bssid() {
         // Given
         let store = associated_store();
+        let mut rx = with_auth_rx(&store);
 
         // When
         store.authorize_station(TEST_STA_MAC, TEST_BSSID_2, vec![0x42; CCMP_TK_LEN]);
 
         // Then
+        assert!(rx.try_recv().is_err());
+        assert!(store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_1));
         assert!(
             store.try_encrypt(&dummy_from_ap_frame(TEST_BSSID_1, TEST_STA_MAC, 1, b"x")).is_none()
         );
@@ -580,6 +917,8 @@ mod tests {
         store.authorize_station(TEST_STA_MAC, TEST_BSSID_1, vec![0x11; CCMP_TK_LEN]);
 
         // Then
+        assert!(!store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_1));
+        assert_auth_event(&mut rx, TEST_STA_MAC, TEST_BSSID_1);
         assert!(
             store.try_encrypt(&dummy_from_ap_frame(TEST_BSSID_1, TEST_STA_MAC, 1, b"x")).is_some()
         );
@@ -596,10 +935,12 @@ mod tests {
         let dec = SharedKeyStore::new();
 
         // When
-        dec.add_session(enc.get_source(), vec![0x42; CCMP_TK_LEN]);
+        let src = enc.get_source();
+        dec.add_session(src, vec![0x42; CCMP_TK_LEN]);
 
         // Then
-        assert!(dec.get_station_bssid(&enc.get_source()).is_none());
+        assert!(dec.get_station_bssid(&src).is_none());
+        assert!(!dec.is_uplink_port_blocked(&src, &TEST_BSSID_1));
         assert!(dec.try_decrypt(&enc).is_some());
     }
 
@@ -609,25 +950,30 @@ mod tests {
         let s = associated_store();
 
         // When
+        s.set_station_bssid(TEST_STA_MAC_2, TEST_BSSID_1);
         s.set_station_bssid(TEST_STA_MAC_2, TEST_BSSID_2);
 
         // Then
         assert_eq!(s.get_station_bssid(&TEST_STA_MAC_2), Some(TEST_BSSID_2));
+        gate_and_expect_buffered(&s, TEST_BSSID_1, 1, b"queued");
 
         // When
         s.set_station_bssid(TEST_STA_MAC, TEST_BSSID_2);
 
         // Then
         assert_eq!(s.get_station_bssid(&TEST_STA_MAC), Some(TEST_BSSID_1));
+        assert!(s.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_1));
+        assert_eq!(s.buffered_frame_count(&TEST_STA_MAC), 1);
     }
 
     #[test]
     fn test_remove_bssid_clears_only_its_stations_and_gtk() {
         // Given
         let s = SharedKeyStore::new();
-        s.add_bssid(TEST_BSSID_1);
-        s.add_bssid(TEST_BSSID_2);
+        s.register_bssid(TEST_BSSID_1, false, true);
+        s.register_bssid(TEST_BSSID_2, true, true);
         s.associate_station(TEST_STA_MAC, TEST_BSSID_2);
+        s.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_2, 1);
         s.associate_station(TEST_STA_MAC_2, TEST_BSSID_1);
         s.set_gtk(TEST_BSSID_2, [0x22; 16]);
 
@@ -636,8 +982,12 @@ mod tests {
 
         // Then
         assert!(!s.has_station(&TEST_STA_MAC));
+        assert!(!s.is_secure_bssid(&TEST_BSSID_2));
+        assert!(!s.requires_controlled_port(&TEST_BSSID_2));
+        assert!(s.requires_controlled_port(&TEST_BSSID_1));
         assert!(s.has_station(&TEST_STA_MAC_2));
         assert!(s.get_gtk(&TEST_BSSID_2).is_none());
+        assert!(s.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_2, 1).is_none());
     }
 
     #[test]
@@ -717,5 +1067,332 @@ mod tests {
         // Then
         assert!(decrypted.is_none());
         assert!(error_stats.is_empty());
+    }
+
+    fn gate(store: &SharedKeyStore, bssid: MacAddress, payload: &[u8]) -> DownlinkPortAction {
+        let frame = dummy_from_ap_frame(bssid, TEST_STA_MAC, 1, payload);
+        store.gate_downlink_frame(TEST_STA_MAC, &bssid, &frame)
+    }
+
+    fn gate_and_expect_buffered(store: &SharedKeyStore, bssid: MacAddress, seq: u16, body: &[u8]) {
+        let frame = dummy_from_ap_frame(bssid, TEST_STA_MAC, seq, body);
+        let action = store.gate_downlink_frame(TEST_STA_MAC, &bssid, &frame);
+        assert!(matches!(action, DownlinkPortAction::Buffered));
+    }
+
+    fn drain(store: &SharedKeyStore, bssid: MacAddress, epoch: u64) -> VecDeque<Ieee80211> {
+        store.take_authorized_buffered_frames(&TEST_STA_MAC, &bssid, epoch)
+    }
+
+    fn deliver(action: DownlinkPortAction) -> VecDeque<Ieee80211> {
+        let DownlinkPortAction::Deliver(frames) = action else { panic!("expected Deliver") };
+        frames
+    }
+
+    type AuthRx = tokio::sync::mpsc::UnboundedReceiver<PortAuthorizedEvent>;
+
+    fn assert_auth_event(rx: &mut AuthRx, sta_addr: MacAddress, bssid: MacAddress) -> u64 {
+        let event = rx.try_recv().expect("port authorized event");
+        assert_eq!(event.sta_addr, sta_addr);
+        assert_eq!(event.bssid, bssid);
+        assert!(event.epoch > 0);
+        event.epoch
+    }
+
+    fn with_auth_rx(store: &SharedKeyStore) -> AuthRx {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        store.set_port_authorized_sender(tx);
+        rx
+    }
+
+    fn snap_body(frame: &Ieee80211) -> Vec<u8> {
+        LlcSnapHeader::read_from_prefix(&frame.get_payload()).expect("LLC/SNAP header").1.to_vec()
+    }
+
+    fn bssid_store() -> SharedKeyStore {
+        let store = SharedKeyStore::new();
+        store.add_bssid(TEST_BSSID_1);
+        store.register_bssid(TEST_BSSID_2, true, false);
+        store.register_bssid(TEST_BSSID_3, false, true);
+        store
+    }
+
+    #[test]
+    fn test_uplink_port_isolated_per_bssid() {
+        let store = bssid_store();
+        assert!(store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_2));
+        assert!(!store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_1));
+        store.associate_station(TEST_STA_MAC, TEST_BSSID_2);
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_2, 1);
+        assert!(!store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_2));
+        assert!(store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_1));
+    }
+
+    #[test]
+    fn test_bssid_security_and_controlled_port_flags() {
+        let store = bssid_store();
+        let check_bssid = |bssid, is_secure, requires_cp| {
+            assert_eq!(store.is_secure_bssid(&bssid), is_secure);
+            assert_eq!(store.requires_controlled_port(&bssid), requires_cp);
+        };
+        check_bssid(TEST_BSSID_1, false, false);
+        check_bssid(TEST_BSSID_2, true, true);
+        check_bssid(TEST_BSSID_3, false, true);
+        check_bssid(MacAddress::new([2, 0, 0, 0, 0, 0xFF]), false, false);
+    }
+
+    #[test]
+    fn test_register_bssid_downgrade_to_open_clears_flags() {
+        let store = bssid_store();
+        for bssid in [TEST_BSSID_2, TEST_BSSID_3] {
+            store.register_bssid(bssid, false, false);
+            assert!(!store.is_secure_bssid(&bssid));
+            assert!(!store.requires_controlled_port(&bssid));
+        }
+    }
+
+    #[test]
+    fn test_add_bssid_on_secure_or_enterprise_bssid_clears_flags() {
+        let store = bssid_store();
+        for bssid in [TEST_BSSID_2, TEST_BSSID_3] {
+            store.add_bssid(bssid);
+            assert!(!store.is_secure_bssid(&bssid));
+            assert!(!store.requires_controlled_port(&bssid));
+        }
+    }
+
+    #[test]
+    fn test_buffered_frame_count_tracks_queued_and_cleared_frames() {
+        let store = associated_store();
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 0);
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 1, b"one");
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 2, b"two");
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 2);
+        store.clear_station_buffer(&TEST_STA_MAC);
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 0);
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 1);
+        let epoch = store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 1).unwrap();
+        assert!(drain(&store, TEST_BSSID_1, epoch).is_empty());
+    }
+
+    #[test]
+    fn test_downlink_gate_drops_unassociated_frames_on_controlled_port_bssid() {
+        let store = bssid_store();
+        for bssid in [TEST_BSSID_2, TEST_BSSID_3] {
+            assert!(matches!(gate(&store, bssid, b"x"), DownlinkPortAction::Drop));
+            let eapol = dummy_from_ap_eapol(bssid, bssid);
+            let action = store.gate_downlink_frame(TEST_STA_MAC, &bssid, &eapol);
+            assert!(matches!(action, DownlinkPortAction::Drop));
+        }
+    }
+
+    #[test]
+    fn test_downlink_gate_drops_unassociated_station_entry_on_controlled_port_bssid() {
+        for (is_secure, enterprise) in [(true, false), (false, true)] {
+            let store = bssid_store();
+            store.set_station_bssid(TEST_STA_MAC, TEST_BSSID_1);
+            store.register_bssid(TEST_BSSID_1, is_secure, enterprise);
+            assert!(matches!(gate(&store, TEST_BSSID_1, b"x"), DownlinkPortAction::Drop));
+            assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 0);
+        }
+    }
+
+    #[test]
+    fn test_downlink_gate_associated_station_on_other_bssid_drops() {
+        let store = associated_store();
+        store.add_bssid(TEST_BSSID_3);
+        assert!(matches!(gate(&store, TEST_BSSID_2, b"x"), DownlinkPortAction::Drop));
+        assert!(matches!(gate(&store, TEST_BSSID_3, b"x"), DownlinkPortAction::Drop));
+    }
+
+    #[test]
+    fn test_downlink_gate_absent_station_on_open_bssid_delivers() {
+        let store = SharedKeyStore::new();
+        store.add_bssid(TEST_BSSID_3);
+        assert!(deliver(gate(&store, TEST_BSSID_3, b"absent-open")).is_empty());
+    }
+
+    #[test]
+    fn test_downlink_gate_unassociated_candidate_on_open_bssid_delivers() {
+        let store = SharedKeyStore::new();
+        store.add_bssid(TEST_BSSID_2);
+        store.add_bssid(TEST_BSSID_3);
+        store.set_station_bssid(TEST_STA_MAC, TEST_BSSID_2);
+        assert!(store.has_station(&TEST_STA_MAC));
+        assert!(deliver(gate(&store, TEST_BSSID_3, b"open")).is_empty());
+    }
+
+    #[test]
+    fn test_take_authorized_buffered_frames_returns_empty_while_blocked() {
+        let store = associated_store();
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 1, b"blocked");
+        let epoch = store.state.read().stations[&TEST_STA_MAC].epoch;
+        assert!(drain(&store, TEST_BSSID_1, epoch).is_empty());
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 1);
+    }
+
+    #[test]
+    fn test_downlink_gate_buffers_bounded_fifo_evicting_oldest() {
+        let store = associated_store();
+        let total = MAX_BUFFERED_FRAMES_PER_STATION as u16 + 5;
+        for seq in 0..total {
+            gate_and_expect_buffered(&store, TEST_BSSID_1, seq, &seq.to_be_bytes());
+        }
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), MAX_BUFFERED_FRAMES_PER_STATION);
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 1);
+        let epoch = store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 1).unwrap();
+        let to_u16 =
+            |frame: Ieee80211| u16::from_be_bytes(snap_body(&frame)[..2].try_into().unwrap());
+        let drained = drain(&store, TEST_BSSID_1, epoch);
+        assert!(drained.into_iter().map(to_u16).eq(5..total));
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 0);
+    }
+
+    #[test]
+    fn test_downlink_gate_deliver_drains_pending_frames_once_authorized() {
+        let store = associated_store();
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 1, b"first");
+        store.authorize_station(TEST_STA_MAC, TEST_BSSID_1, vec![0x11; CCMP_TK_LEN]);
+        let drained = deliver(gate(&store, TEST_BSSID_1, b"second"));
+        assert_eq!(drained.len(), 1);
+        assert!(snap_body(&drained[0]).starts_with(b"first"));
+    }
+
+    #[test]
+    fn test_downlink_gate_buffers_after_eap_success_until_flush_drains() {
+        let store = associated_store();
+        let mut rx = with_auth_rx(&store);
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 1, b"early");
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 1);
+        assert!(rx.try_recv().is_err());
+        let pre_tx_epoch = store.state.read().stations[&TEST_STA_MAC].epoch;
+        assert!(drain(&store, TEST_BSSID_1, pre_tx_epoch).is_empty());
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 2, b"during");
+        let epoch = store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 1).unwrap();
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 3, b"ready");
+        let drained = drain(&store, TEST_BSSID_1, epoch);
+        assert_eq!(drained.len(), 3);
+        assert!(snap_body(&drained[0]).starts_with(b"early"));
+        assert!(snap_body(&drained[1]).starts_with(b"during"));
+        assert!(snap_body(&drained[2]).starts_with(b"ready"));
+        assert!(deliver(gate(&store, TEST_BSSID_1, b"after")).is_empty());
+    }
+
+    #[test]
+    fn test_take_authorized_buffered_frames_ignores_stale_epoch_after_roam() {
+        let store = associated_store();
+        store.authorize_station(TEST_STA_MAC, TEST_BSSID_1, vec![0x11; CCMP_TK_LEN]);
+        let prior_epoch = store.state.read().stations[&TEST_STA_MAC].epoch;
+        store.register_bssid(TEST_BSSID_3, false, true);
+        store.associate_station(TEST_STA_MAC, TEST_BSSID_3);
+        gate_and_expect_buffered(&store, TEST_BSSID_3, 1, b"ent");
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_3, 10);
+        assert!(drain(&store, TEST_BSSID_1, prior_epoch).is_empty());
+        assert!(drain(&store, TEST_BSSID_3, prior_epoch).is_empty());
+        gate_and_expect_buffered(&store, TEST_BSSID_3, 2, b"still-buffered");
+        let eap_epoch = store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_3, 10).unwrap();
+        assert_eq!(drain(&store, TEST_BSSID_3, eap_epoch).len(), 2);
+    }
+
+    #[test]
+    fn test_remove_station_for_bssid_clears_eap_flush_state() {
+        let store = associated_store();
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 10);
+        store.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_1);
+        assert!(store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 10).is_none());
+    }
+
+    #[test]
+    fn test_reassociation_clears_stale_eap_seq_ctrl() {
+        let store = associated_store();
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 10);
+        store.associate_station(TEST_STA_MAC, TEST_BSSID_1);
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 20);
+        assert!(store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 10).is_none());
+    }
+
+    #[test]
+    fn test_reassociation_allows_seq_ctrl_reuse_without_wedging_downlink() {
+        let store = associated_store();
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 10);
+        store.associate_station(TEST_STA_MAC, TEST_BSSID_1);
+        gate_and_expect_buffered(&store, TEST_BSSID_1, 1, b"reused");
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 10);
+        let epoch = store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 10).unwrap();
+        let drained = drain(&store, TEST_BSSID_1, epoch);
+        assert_eq!(drained.len(), 1);
+        assert!(snap_body(&drained[0]).starts_with(b"reused"));
+        assert!(deliver(gate(&store, TEST_BSSID_1, b"after")).is_empty());
+    }
+
+    #[test]
+    fn test_take_eap_success_epoch_is_one_shot_per_association() {
+        let store = associated_store();
+        store.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_1, 10);
+        assert!(store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 10).is_some());
+        assert!(store.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_1, 10).is_none());
+    }
+
+    #[test]
+    fn test_downlink_gate_delivers_eapol_and_mgmt_while_preserving_blocked_data_buffer() {
+        let store = associated_store();
+        let bssid = TEST_BSSID_1;
+        gate_and_expect_buffered(&store, bssid, 1, b"blocked");
+        let eapol = dummy_from_ap_eapol(bssid, bssid);
+        let frame_ctrl = FrameControl::new((management_subtype::PROBE_RESPONSE as u16) << 4);
+        let header =
+            MacHeader3Addr::new(frame_ctrl, 0, TEST_STA_MAC, bssid, bssid, SequenceControl::new(3));
+        let mgmt = Ieee80211::decode(header.as_bytes()).unwrap();
+        assert!(eapol.is_eapol().unwrap_or(false));
+        assert!(!mgmt.is_payload_bearing_data());
+        assert!(deliver(store.gate_downlink_frame(TEST_STA_MAC, &bssid, &eapol)).is_empty());
+        assert!(deliver(store.gate_downlink_frame(TEST_STA_MAC, &bssid, &mgmt)).is_empty());
+        store.authorize_station(TEST_STA_MAC, bssid, vec![0x11; CCMP_TK_LEN]);
+        let drained = deliver(gate(&store, bssid, b"after"));
+        assert_eq!(drained.len(), 1);
+        assert!(snap_body(&drained[0]).starts_with(b"blocked"));
+    }
+
+    fn assert_non_authentic_eapol_buffered(frame: &Ieee80211) {
+        assert!(frame.is_eapol().unwrap_or(false));
+        let store = associated_store();
+        let action = store.gate_downlink_frame(TEST_STA_MAC, &TEST_BSSID_1, frame);
+        assert!(matches!(action, DownlinkPortAction::Buffered));
+        assert_eq!(store.buffered_frame_count(&TEST_STA_MAC), 1);
+    }
+
+    #[test]
+    fn test_downlink_gate_buffers_non_authentic_eapol_while_blocked() {
+        let mut raw = dummy_from_ap_eapol(TEST_BSSID_1, TEST_BSSID_1).as_bytes().to_vec();
+        raw[1] |= FC_PROTECTED_BIT;
+        let protected_eapol = Ieee80211::decode(&raw).unwrap();
+        for frame in [
+            dummy_eapol(TEST_STA_MAC_2, TEST_BSSID_1, FromAp),
+            dummy_eapol(TEST_BSSID_1, TEST_BSSID_1, ToAp),
+            dummy_eapol(TEST_BSSID_1, TEST_BSSID_2, FromAp),
+            protected_eapol,
+        ] {
+            assert_non_authentic_eapol_buffered(&frame);
+        }
+    }
+
+    #[test]
+    fn test_downlink_gate_buffers_wrong_destination_eapol_while_blocked() {
+        for dst in [TEST_STA_MAC_2, MacAddress::BROADCAST] {
+            let frame = dummy_eapol_to(dst, TEST_BSSID_1, TEST_BSSID_1, FromAp);
+            assert_non_authentic_eapol_buffered(&frame);
+        }
+    }
+
+    #[test]
+    fn test_set_station_bssid_promotes_existing_session_to_authorized() {
+        let store = bssid_store();
+        let mut rx = with_auth_rx(&store);
+        store.add_session(TEST_STA_MAC, vec![0x42; CCMP_TK_LEN]);
+        assert!(rx.try_recv().is_err());
+        store.set_station_bssid(TEST_STA_MAC, TEST_BSSID_2);
+        assert_auth_event(&mut rx, TEST_STA_MAC, TEST_BSSID_2);
+        assert!(!store.is_uplink_port_blocked(&TEST_STA_MAC, &TEST_BSSID_2));
+        assert!(deliver(gate(&store, TEST_BSSID_2, b"ok")).is_empty());
     }
 }

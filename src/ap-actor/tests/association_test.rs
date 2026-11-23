@@ -17,13 +17,16 @@ use ap_actor::{
     ffi::{DigestType, Hmac, Pbkdf2HmacSha1},
 };
 use netsim_packets::{
-    EAPOL_KEY_DESC_TYPE_RSN, EAPOL_TYPE_KEY, EAPOL_VERSION, EapolHeader, EapolKeyFrame,
-    EthernetFrame, FrameDirection, Ieee80211, LlcSnapHeader, MacAddr, ether_type,
+    EAPOL_KEY_DESC_TYPE_RSN, EAPOL_TYPE_KEY, EAPOL_TYPE_START, EAPOL_VERSION, EapolHeader,
+    EapolKeyFrame, FrameControl, Ieee80211, LlcSnapHeader, MacAddr, MacHeader3Addr,
+    SequenceControl,
 };
 use tracing::info;
 use zerocopy::{FromBytes, IntoBytes};
 
-use crate::world::{ApWorld, DEAUTH_REASON_STA_LEAVING, TestApId};
+use crate::world::{
+    ApWorld, DEAUTH_REASON_STA_LEAVING, FC_DATA_TO_DS, TestApId, create_downlink_data_frame,
+};
 
 // Helper: Calculate MIC (from wpa_auth.rs logic reversed/reused)
 fn calc_mic(kck: &[u8], frame: &[u8]) -> Vec<u8> {
@@ -84,10 +87,13 @@ async fn test_station_association_flow() {
 
     // Then
     world.then_station_receives_assoc_resp(station_mac).await;
+    world.then_station_port_state_is(station_mac, world.ap_bssid, false);
 }
 
-const FC_DATA_TO_DS: u16 = 0x0108;
+const FC_DATA_FROM_DS: u16 = 0x0208;
 const OLD_BSSID: MacAddr = MacAddr::new([2, 0, 0, 0, 0, 0x22]);
+const ENTERPRISE_BSSID: MacAddr = MacAddr::new([2, 0, 0, 0, 0, 0x33]);
+const TEST_STA_93: &str = "02:00:00:00:00:93";
 const TEST_STA_94: &str = "02:00:00:00:00:94";
 const TEST_STA_95: &str = "02:00:00:00:00:95";
 const TEST_STA_96: &str = "02:00:00:00:00:96";
@@ -100,8 +106,6 @@ const PMK_LEN: usize = 32;
 const KCK_LEN: usize = 16;
 const TEST_SNONCE: [u8; 32] = [0x55; 32];
 const WRONG_PMK_BYTE: u8 = 0xEE;
-const MIN_ETHERNET_LEN: usize = 60;
-const DEFAULT_SEQ_NUM: u16 = 1;
 
 fn parse_mac(mac: &str) -> MacAddr {
     mac.try_into().expect("valid MAC")
@@ -117,12 +121,6 @@ fn decode_eapol_key(raw_msg: &[u8]) -> EapolKeyFrame {
     let (hdr, body) = EapolHeader::read_from_prefix(eapol).expect("EAPOL header");
     assert_eq!(hdr.packet_type, EAPOL_TYPE_KEY);
     EapolKeyFrame::read_from_prefix(body).expect("EAPOL-Key body").0
-}
-
-fn create_downlink_data_frame(sta_addr: MacAddr, bssid: MacAddr) -> Ieee80211 {
-    let mut bytes = EthernetFrame::new(sta_addr, sta_addr, ether_type::IPV4).as_bytes().to_vec();
-    bytes.resize(MIN_ETHERNET_LEN, 0);
-    Ieee80211::from_ieee8023(&bytes, bssid, FrameDirection::FromAp, DEFAULT_SEQ_NUM).unwrap()
 }
 
 impl ApWorld {
@@ -160,6 +158,10 @@ impl ApWorld {
         decode_eapol_key(&msg)
     }
 
+    async fn given_default_wpa_ap(&mut self, ssid: &str, pass: &str) {
+        self.create_default_ap(Self::ap_cfg(ssid, self.ap_bssid, Some(pass))).await;
+    }
+
     fn ap_cfg(ssid: &str, bssid: MacAddr, passphrase: Option<&str>) -> ApConfig {
         ApConfig {
             ssid: ssid.into(),
@@ -179,6 +181,12 @@ impl ApWorld {
         self.given_extra_ap(Self::ap_cfg(ssid, bssid, None)).await
     }
 
+    async fn given_extra_enterprise_ap(&mut self, ssid: &str, bssid: MacAddr) -> TestApId {
+        let mut cfg = Self::ap_cfg(ssid, bssid, None);
+        cfg.enterprise_enabled = true;
+        self.given_extra_ap(cfg).await
+    }
+
     async fn given_station_associated_to_bssid(&mut self, sta: &str, bssid: MacAddr) {
         self.when_station_sends_assoc_req_to_bssid(sta, bssid).await;
         self.then_station_receives_assoc_resp(sta).await;
@@ -187,6 +195,17 @@ impl ApWorld {
     async fn given_authorized_wpa_station(&mut self, sta: &str, ssid: &str, pass: &str) {
         self.given_station_is_associated(sta).await;
         self.when_station_completes_wpa_handshake(sta, ssid, pass).await;
+    }
+
+    async fn given_captured_eapol_m4(&mut self, sta: &str, ssid: &str, pass: &str) -> Vec<u8> {
+        let sta = parse_mac(sta);
+        let m1 = self.recv_eapol_key_for(sta).await;
+        let pmk = Pbkdf2HmacSha1(pass.as_bytes(), ssid.as_bytes(), PBKDF2_ITERATIONS, PMK_LEN);
+        let ptk = sta_ptk(&pmk, self.ap_bssid, sta, &m1.key_nonce);
+        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M2, m1.replay_counter, &ptk));
+        let m3 = self.recv_eapol_key_for(sta).await;
+        assert!(u16::from_be_bytes(m3.key_data_len) > 0, "M3 must contain RSN IE + GTK");
+        self.build_eapol_key_frame(sta, KEY_INFO_M4, m3.replay_counter, &ptk)
     }
 
     async fn recv_eapol_pair(&mut self, a: MacAddr, b: MacAddr) -> (EapolKeyFrame, EapolKeyFrame) {
@@ -235,16 +254,9 @@ impl ApWorld {
         ssid: &str,
         pass: &str,
     ) {
-        let sta = parse_mac(station_mac);
-        let m1 = self.recv_eapol_key_for(sta).await;
-        let pmk = Pbkdf2HmacSha1(pass.as_bytes(), ssid.as_bytes(), PBKDF2_ITERATIONS, PMK_LEN);
-        let ptk = sta_ptk(&pmk, self.ap_bssid, sta, &m1.key_nonce);
-        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M2, m1.replay_counter, &ptk));
-
-        let m3 = self.recv_eapol_key_for(sta).await;
-        assert!(u16::from_be_bytes(m3.key_data_len) > 0, "M3 must contain RSN IE + GTK");
-        self.send_to_ap(self.build_eapol_key_frame(sta, KEY_INFO_M4, m3.replay_counter, &ptk));
-        self.await_probe_barrier(sta, false).await;
+        let m4 = self.given_captured_eapol_m4(station_mac, ssid, pass).await;
+        self.send_to_ap(m4);
+        self.await_probe_barrier(parse_mac(station_mac), false).await;
     }
 
     async fn when_two_stations_complete_wpa(
@@ -296,6 +308,41 @@ impl ApWorld {
         self.await_probe_barrier(sta, false).await;
     }
 
+    async fn when_station_sends_eapol_start_to_bssid(&mut self, sta_mac: &str, bssid: MacAddr) {
+        let frame = self.build_eapol_frame_with_bssid(
+            bssid,
+            parse_mac(sta_mac),
+            FC_DATA_TO_DS,
+            EAPOL_VERSION,
+            EAPOL_TYPE_START,
+            &[],
+        );
+        self.send_to_ap(frame);
+    }
+
+    async fn when_station_sends_from_ds_eapol_start(&mut self, sta_mac: &str) {
+        let bssid = self.ap_bssid;
+        let header = MacHeader3Addr::new(
+            FrameControl::new(FC_DATA_FROM_DS),
+            0,
+            bssid,
+            bssid,
+            parse_mac(sta_mac),
+            SequenceControl::new(0),
+        );
+        self.send_to_ap(self.build_eapol_frame_with_header(
+            header,
+            EAPOL_VERSION,
+            EAPOL_TYPE_START,
+            &[],
+        ));
+    }
+
+    async fn when_station_replays_eapol_frame(&mut self, mac: &str, frame: Vec<u8>) {
+        self.send_to_ap(frame);
+        self.await_probe_barrier(parse_mac(mac), true).await;
+    }
+
     fn then_station_has_ptk_session(&self, station_mac: &str, expected: bool) {
         self.then_station_has_ptk_session_on_bssid(station_mac, self.ap_bssid, expected);
     }
@@ -309,21 +356,24 @@ impl ApWorld {
         assert!(self.shared_keys.try_decrypt(frame).is_none());
     }
 
-    fn then_station_state_is(&self, sta: &str, expected_bssid: MacAddr) {
-        let mac = parse_mac(sta);
-        assert!(self.shared_keys.has_station(&mac));
-        assert_eq!(self.shared_keys.get_station_bssid(&mac), Some(expected_bssid));
-    }
-
     fn then_roamed_station_state_is_preserved(&self, sta: &str) {
         self.then_station_state_is(sta, self.ap_bssid);
         self.then_station_has_ptk_session(sta, true);
+    }
+
+    async fn then_station_stays_blocked_without_eapol(&mut self, sta: &str) {
+        self.await_probe_barrier(parse_mac(sta), false).await;
+        self.then_station_port_state_is(sta, self.ap_bssid, true);
     }
 
     fn then_unassociated_station_is_cleared(&self, station_mac: &str) {
         let sta = parse_mac(station_mac);
         assert!(!self.shared_keys.has_station(&sta));
         self.then_station_has_ptk_session(station_mac, false);
+    }
+
+    fn then_default_ap_requires_controlled_port(&self) {
+        assert!(self.shared_keys.requires_controlled_port(&self.ap_bssid));
     }
 }
 
@@ -335,10 +385,14 @@ async fn test_wpa_handshake_failure_wrong_password() {
     world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
     let sta = "02:00:00:00:00:99";
     world.given_station_is_associated(sta).await;
+    let buffered = world.when_downlink_frame_is_gated(sta);
+    world.then_downlink_action_is_buffered(&buffered);
     // When
     world.when_station_sends_invalid_m2(sta).await;
     // Then
     world.then_no_eap_or_auth_frame_is_received().await;
+    world.then_station_port_state_is(sta, world.ap_bssid, true);
+    world.then_station_buffered_frame_count_is(sta, 1);
 }
 
 // Scenario: WPA Handshake Success
@@ -543,4 +597,98 @@ async fn test_roam_auth_seq1_clears_prior_ap_and_session() {
     world.then_station_state_is(TEST_STA_95, new_bssid);
     world.then_station_has_ptk_session_on_bssid(TEST_STA_95, OLD_BSSID, false);
     world.then_station_has_ptk_session(TEST_STA_95, true);
+}
+
+// Scenario: Unassociated EAPOL-Start on another Enterprise AP is ignored and keeps port blocked.
+#[tokio::test]
+async fn test_unassociated_enterprise_eapol_start_keeps_other_ap_blocked() {
+    // Given a blocked WPA2 station with M1 drained and an Enterprise AP it is not associated to
+    let mut world = ApWorld::new().await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_station_has_pending_wpa_handshake(TEST_STA_94).await;
+    world.given_extra_enterprise_ap("EntAP", ENTERPRISE_BSSID).await;
+    // When the unassociated station sends EAPOL-Start to the Enterprise AP's BSSID
+    world.when_station_sends_eapol_start_to_bssid(TEST_STA_94, ENTERPRISE_BSSID).await;
+    // Then no EAP frame is emitted and the station remains blocked on its associated WPA2 AP
+    world.then_station_stays_blocked_without_eapol(TEST_STA_94).await;
+}
+
+// Scenario: Broadcast-addr1 EAPOL-Start is ignored and keeps Enterprise port blocked.
+#[tokio::test]
+async fn test_broadcast_eapol_start_keeps_enterprise_port_blocked() {
+    // Given a blocked station associated to an Enterprise AP
+    let mut world = ApWorld::new().await;
+    world.given_an_enterprise_ap("EntAP").await;
+    world.given_station_is_associated(TEST_STA_93).await;
+    // When the station sends a broadcast-addr1 EAPOL-Start frame
+    world.when_station_sends_eapol_start_to_bssid(TEST_STA_93, [0xff; 6].into()).await;
+    // Then no EAP frame is emitted and the controlled port stays blocked
+    world.then_station_stays_blocked_without_eapol(TEST_STA_93).await;
+}
+
+// Scenario: FromDS=1 EAPOL-Start is ignored and keeps Enterprise port blocked.
+#[tokio::test]
+async fn test_from_ds_eapol_start_keeps_enterprise_port_blocked() {
+    // Given a blocked station associated to an Enterprise AP
+    let mut world = ApWorld::new().await;
+    world.given_an_enterprise_ap("EntAP").await;
+    world.given_station_is_associated(TEST_STA_93).await;
+    // When the station sends an EAPOL-Start frame with FromDS=1
+    world.when_station_sends_from_ds_eapol_start(TEST_STA_93).await;
+    // Then no EAP frame is emitted and the controlled port stays blocked
+    world.then_station_stays_blocked_without_eapol(TEST_STA_93).await;
+}
+
+// Scenario: Replaying an old AP M4 after roaming does not authorize the new AP.
+#[tokio::test]
+async fn test_stale_old_ap_m4_after_roam_does_not_authorize_new_ap() {
+    // Given a station capturing M4 on OldWpaAP before associating to a new WPA2 AP
+    let mut world = ApWorld::new().await;
+    world.given_old_wpa_ap().await;
+    world.given_station_is_associated(TEST_STA_95).await;
+    let old_m4 = world.given_captured_eapol_m4(TEST_STA_95, "OldWpaAP", "OldPassword").await;
+    world.given_a_registered_ap_with_wpa("WpaAP", "CorrectPassword").await;
+    world.given_station_is_associated(TEST_STA_95).await;
+    // When the station replays the stale M4 frame (Addr1 = OLD_BSSID)
+    world.when_station_replays_eapol_frame(TEST_STA_95, old_m4).await;
+    // Then the new AP keeps the controlled port blocked without installing a PTK session
+    world.then_station_port_state_is(TEST_STA_95, world.ap_bssid, true);
+    world.then_station_has_ptk_session(TEST_STA_95, false);
+}
+
+// Scenario: Creating a WPA2 AP registers its controlled-port flag in SharedKeyStore.
+#[tokio::test]
+async fn test_wpa_ap_creation_registers_controlled_port_flag() {
+    // Given an initialized AP world
+    let mut world = ApWorld::new().await;
+    // When the default WPA2 AP is created
+    world.given_default_wpa_ap("WpaAP", "CorrectPassword").await;
+    // Then the default AP requires a controlled port
+    world.then_default_ap_requires_controlled_port();
+}
+
+// Scenario: Resetting the AP service preserves the default WPA2 AP controlled-port flag.
+#[tokio::test]
+async fn test_reset_preserves_default_ap_controlled_port_flag() {
+    // Given the default WPA2 AP
+    let mut world = ApWorld::new().await;
+    world.given_default_wpa_ap("WpaAP", "CorrectPassword").await;
+    // When the AP service is reset
+    world.when_ap_service_is_reset().await;
+    // Then the default AP still requires a controlled port
+    world.then_default_ap_requires_controlled_port();
+}
+
+// Scenario: Resetting the AP service keeps re-associated stations blocked on the default WPA2 AP.
+#[tokio::test]
+async fn test_reset_blocks_reassociated_station_on_default_wpa_ap() {
+    // Given the default WPA2 AP has been reset
+    let mut world = ApWorld::new().await;
+    world.given_default_wpa_ap("WpaAP", "CorrectPassword").await;
+    world.when_ap_service_is_reset().await;
+    // When a station authenticates and associates to the default WPA2 AP
+    world.when_station_sends_open_auth(parse_mac(TEST_STA_99)).await;
+    world.given_station_is_associated(TEST_STA_99).await;
+    // Then the station starts with a blocked controlled port
+    world.then_station_port_state_is(TEST_STA_99, world.ap_bssid, true);
 }
