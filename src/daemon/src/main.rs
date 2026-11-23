@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::process;
+use std::{env, process};
 
 #[cfg(all(target_os = "linux", feature = "cuttlefish"))]
 use command_fds::inherited::init_inherited_fds;
@@ -26,6 +26,13 @@ fn main() {
     if let Err(e) = unsafe { init_inherited_fds() } {
         eprintln!("Failed to initialize inherited FDs: {}", e);
         process::exit(1);
+    }
+
+    if env::var_os("RUST_BACKTRACE").is_none() {
+        // SAFETY: Runs at startup after `init_inherited_fds()` and before `daemon::run()`
+        // creates the Tokio runtime or spawns Rust threads, assuming no linked C/C++
+        // static initializer spawns background threads calling `getenv`.
+        unsafe { env::set_var("RUST_BACKTRACE", "full") };
     }
 
     match run() {
