@@ -12,219 +12,218 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use netsim_model::{
-    Chip, ChipClient, ChipCreate, ChipError, ChipId, ChipUpdate, ChipVariant, DeviceId, PoseUpdate,
-    Position, Uwb, UwbMode,
-};
+use netsim_model::{Chip, ChipClient, ChipCreate, ChipError, ChipVariant, Position, UwbMode};
 use netsim_testing::mock_stream;
 use pica::packets::uci;
 
 use crate::world::World;
 
-// Feature: UWB Ranging between chips
-//
-//   As a client
-//   I want to place two UWB chips at different positions
-//   And establish a ranging session between them
-//   So that I can verify that pica computes the correct range
+// Feature: UWB ranging between chips and anchors
 
-// Scenario: Ranging between two chips at 10 meters distance
-//
-//   Given a chip 100 at (0, 0, 0)
-//   And a chip 200 at (10, 0, 0)
-//   When UCI session 1 is established on chip 100 as CONTROLLER with peer mac
-// [0, 1]   And UCI session 1 is established on chip 200 as CONTROLEE with peer
-// mac [0, 0]   And ranging is started on chip 100 for session 1
-//   Then a ranging measurement of 1000 cm is received on chip 100
-#[tokio::test]
-async fn test_ranging_between_two_chips() {
-    let mut world = World::new().await;
+const SESSION_ID: u32 = 1;
+const CHIP_A: u32 = 1;
+const CHIP_A_MAC: [u8; 2] = [0x00, 0x00];
+const ANCHOR_ID: u32 = 2;
+const ANCHOR_CHIP: netsim_model::ChipId = netsim_model::ChipId(ANCHOR_ID);
+const OTHER_ANCHOR_ID: u32 = 3;
+const ANCHOR_ADDR: &str = "00:01";
+const ANCHOR_MAC: [u8; 2] = [0x00, 0x01];
+const ORIGIN: Position = Position { x: 0.0, y: 0.0, z: 0.0 };
+const ANCHOR_POS: Position = Position { x: 3.0, y: 4.0, z: 0.0 };
 
-    let chip_a = 1;
-    let chip_a_mac = [0, 0];
-    let chip_b = 2;
-    let chip_b_mac = [0, 1];
-
-    // Given
-    world.given_a_chip_at(chip_a, Position { x: 0.0, y: 0.0, z: 0.0 }).await;
-    world.given_a_chip_at(chip_b, Position { x: 10.0, y: 0.0, z: 0.0 }).await;
-
-    // Clear initial READY notifications and RESET
-    world.then_status_notification_is_received(chip_a, uci::DeviceState::DeviceStateReady).await;
-    world.when_uci_is_reset(chip_a).await;
-
-    world.then_status_notification_is_received(chip_b, uci::DeviceState::DeviceStateReady).await;
-    world.when_uci_is_reset(chip_b).await;
-
-    // When
-    world
-        .when_uci_session_is_established(
-            chip_a,
-            1,
-            uci::DeviceType::Controller,
-            uci::DeviceRole::Initiator,
-            chip_a_mac,
-            chip_b_mac,
-        )
-        .await;
-
-    world
-        .when_uci_session_is_established(
-            chip_b,
-            1,
-            uci::DeviceType::Controlee,
-            uci::DeviceRole::Responder,
-            chip_b_mac,
-            chip_a_mac,
-        )
-        .await;
-
-    world.when_ranging_is_started(chip_b, 1).await;
-    world.when_ranging_is_started(chip_a, 1).await;
-
-    // Then
-    // distance = 10m = 1000cm
-    world.then_ranging_measurement_is_received(chip_a, 1000).await;
-    let extra = world.when_ranging_is_stopped(chip_a, 1).await;
-
-    // Verify telemetry
-    let stats = world.client.read_statistics().await.expect("Failed to read statistics");
-    let stats_a = stats.iter().find(|s| s.id == chip_a).unwrap();
-    let stats_b = stats.iter().find(|s| s.id == chip_b).unwrap();
-    assert_eq!(stats_a.p2p_tx_count, 1 + extra);
-    assert_eq!(stats_a.p2p_rx_count, 1 + extra);
-    assert_eq!(stats_b.p2p_tx_count, 0);
-    assert_eq!(stats_b.p2p_rx_count, 0);
+async fn setup_chip_at(world: &mut World, chip_id: u32, pos: Position) {
+    world.given_a_chip_at(chip_id, pos).await;
+    world.then_status_notification_is_received(chip_id, uci::DeviceState::DeviceStateReady).await;
+    world.when_uci_is_reset(chip_id).await;
 }
 
-#[tokio::test]
-async fn test_ranging_between_chip_and_anchor() {
-    let mut world = World::new().await;
-
-    let chip_a = 1;
-    let chip_a_mac = [0, 0];
-    let anchor_id = 2;
-    let anchor_mac = [0xFF, 0xFE];
-
-    world.given_a_chip_at(chip_a, Position { x: 0.0, y: 0.0, z: 0.0 }).await;
-    world.given_an_anchor_at(anchor_id, None, Position { x: 3.0, y: 4.0, z: 0.0 }).await;
-
-    let anchor_chip = world.when_get_chip(anchor_id).await.unwrap();
-    assert_eq!(
-        anchor_chip.variant,
-        Some(ChipVariant::Uwb(Uwb {
-            radio: Default::default(),
-            address: "FF:FE".to_string(),
-            mode: UwbMode::Anchor,
-        }))
-    );
-
-    assert_eq!(world.client.read_count_for_testing().await.unwrap(), 2);
-    assert_eq!(world.client.read_statistics().await.unwrap().len(), 2);
-
-    world.then_status_notification_is_received(chip_a, uci::DeviceState::DeviceStateReady).await;
-    world.when_uci_is_reset(chip_a).await;
-
+async fn setup_anchor_session(
+    world: &mut World,
+    chip_pos: Position,
+    anchor_pos: Position,
+    anchor_addr: Option<&str>,
+    anchor_mac: [u8; 2],
+) {
+    setup_chip_at(world, CHIP_A, chip_pos).await;
+    world.given_an_anchor_at(ANCHOR_ID, anchor_addr, anchor_pos).await;
     world
         .when_uci_session_is_established(
-            chip_a,
-            1,
+            CHIP_A,
+            SESSION_ID,
             uci::DeviceType::Controller,
             uci::DeviceRole::Initiator,
-            chip_a_mac,
+            CHIP_A_MAC,
             anchor_mac,
         )
         .await;
-
-    world.when_ranging_is_started(chip_a, 1).await;
-
-    let m = world.then_single_ranging_measurement_is_received(chip_a).await;
-    assert!((480..=520).contains(&m.distance));
-    assert!((87..=93).contains(&((m.aoa_azimuth as i16) >> 7)));
-    assert!((50..=56).contains(&((m.aoa_elevation as i16) >> 7)));
-    assert!((-93..=-87).contains(&((m.aoa_destination_azimuth as i16) >> 7)));
-    assert!((-56..=-50).contains(&((m.aoa_destination_elevation as i16) >> 7)));
-
-    world.when_ranging_is_stopped(chip_a, 1).await;
-
-    world
-        .client
-        .update(
-            ChipId(anchor_id),
-            ChipUpdate {
-                pose: PoseUpdate {
-                    position: Some(Position { x: 0.0, y: 0.0, z: 10.0 }),
-                    orientation: None,
-                },
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    world.when_ranging_is_triggered(chip_a, 1).await;
-
-    let m2 = world.then_single_ranging_measurement_is_received(chip_a).await;
-    assert!((980..=1020).contains(&m2.distance));
-    assert!((-3..=3).contains(&((m2.aoa_azimuth as i16) >> 7)));
-    assert!((-3..=3).contains(&((m2.aoa_elevation as i16) >> 7)));
-    let dest_az = (m2.aoa_destination_azimuth as i16) >> 7;
-    assert!(dest_az >= 177 || dest_az <= -177);
-    assert!((-3..=3).contains(&((m2.aoa_destination_elevation as i16) >> 7)));
-
-    world.when_ranging_is_stopped(chip_a, 1).await;
-
-    world.client.delete(ChipId(anchor_id)).await.unwrap();
-    assert_eq!(world.client.read_count_for_testing().await.unwrap(), 1);
-
-    world.when_ranging_is_triggered(chip_a, 1).await;
-    let m3 = world.then_single_ranging_measurement_is_received(chip_a).await;
-    assert_eq!(m3.status, uci::Status::RangingRxTimeout);
-
-    world.when_ranging_is_stopped(chip_a, 1).await;
 }
 
+fn q9_7_deg(raw: u16) -> i16 {
+    (raw as i16) >> 7
+}
+
+async fn expect_create_anchor_invalid_arg(world: &mut World, chip_id: u32, addr: &str) {
+    let Err(err) = world.when_create_anchor(chip_id, Some(addr), Position::default()).await else {
+        panic!("create_anchor({addr}) unexpectedly succeeded");
+    };
+    let e = err.as_chip_error();
+    assert!(matches!(e, Some(ChipError::InvalidArguments(_))), "{addr}: {err:?}");
+}
+
+// Scenario: Two chips measure 10m range and update p2p telemetry
 #[tokio::test]
-async fn test_anchor_crud_errors() {
+async fn test_ranging_between_two_chips() {
     let mut world = World::new().await;
+    let (chip_b, chip_b_mac) = (2, [0, 1]);
+    // Given two reset UWB chips 10m apart
+    setup_chip_at(&mut world, CHIP_A, ORIGIN).await;
+    setup_chip_at(&mut world, chip_b, Position { x: 10.0, y: 0.0, z: 0.0 }).await;
+    // When a controller/controlee session starts ranging
+    world
+        .when_uci_session_is_established(
+            CHIP_A,
+            SESSION_ID,
+            uci::DeviceType::Controller,
+            uci::DeviceRole::Initiator,
+            CHIP_A_MAC,
+            chip_b_mac,
+        )
+        .await;
+    world
+        .when_uci_session_is_established(
+            chip_b,
+            SESSION_ID,
+            uci::DeviceType::Controlee,
+            uci::DeviceRole::Responder,
+            chip_b_mac,
+            CHIP_A_MAC,
+        )
+        .await;
+    world.when_ranging_is_started(chip_b, SESSION_ID).await;
+    world.when_ranging_is_started(CHIP_A, SESSION_ID).await;
+    // Then the initiator receives 1000cm and, after stop, only its p2p counters increment
+    world.then_ranging_measurement_is_received(CHIP_A, 1000).await;
+    let extra = world.when_ranging_is_stopped(CHIP_A, SESSION_ID).await;
+    let stats = world.client.read_statistics().await.expect("Failed to read statistics");
+    let stats_a = stats.iter().find(|s| s.id == CHIP_A).unwrap();
+    let stats_b = stats.iter().find(|s| s.id == chip_b).unwrap();
+    assert_eq!((stats_a.p2p_tx_count, stats_a.p2p_rx_count), (1 + extra, 1 + extra));
+    assert_eq!((stats_b.p2p_tx_count, stats_b.p2p_rx_count), (0, 0));
+}
 
-    world.given_an_anchor_at(1, Some("00:03"), Position::default()).await;
+// Scenario: Creating an anchor without an address allocates the default short MAC
+#[tokio::test]
+async fn test_anchor_creation_allocates_short_mac() {
+    let mut world = World::new().await;
+    // When an anchor is created without an explicit address
+    world.given_an_anchor_at(ANCHOR_ID, None, ORIGIN).await;
+    // Then the anchor gets FF:FE in Anchor mode and appears once in count and stats
+    let anchor_chip = world.when_get_chip(ANCHOR_ID).await.unwrap();
+    let Some(ChipVariant::Uwb(uwb)) = anchor_chip.variant else {
+        panic!("expected UWB variant");
+    };
+    assert_eq!(uwb.mode, UwbMode::Anchor);
+    assert_eq!(uwb.address, "FF:FE");
+    assert_eq!(world.client.read_count_for_testing().await.unwrap(), 1);
+    let stats = world.client.read_statistics().await.unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].id, ANCHOR_ID);
+}
 
-    let err = world
-        .when_create_anchor(2, Some("00:03"), Position::default())
-        .await
-        .expect_err("duplicate anchor creation fails");
-    assert!(matches!(err.as_chip_error(), Some(ChipError::InvalidArguments(_))));
+// Scenario: Chip ranging with a stationary anchor reports distance and AoA
+#[tokio::test]
+async fn test_ranging_between_chip_and_anchor() {
+    let mut world = World::new().await;
+    // Given a chip at origin and an auto-addressed anchor at (3, 4, 0) in an established session
+    setup_anchor_session(&mut world, ORIGIN, ANCHOR_POS, None, [0xFF, 0xFE]).await;
+    // When ranging starts
+    world.when_ranging_is_started(CHIP_A, SESSION_ID).await;
+    // Then the measurement reports 5m distance and expected AoA bounds
+    let m = world.then_single_ranging_measurement_is_received(CHIP_A).await;
+    assert!((480..=520).contains(&m.distance));
+    assert!((87..=93).contains(&q9_7_deg(m.aoa_azimuth)));
+    assert!((50..=56).contains(&q9_7_deg(m.aoa_elevation)));
+    assert!((-93..=-87).contains(&q9_7_deg(m.aoa_destination_azimuth)));
+    assert!((-56..=-50).contains(&q9_7_deg(m.aoa_destination_elevation)));
+}
 
-    let err = world
-        .when_create_anchor(2, Some("FF:FF"), Position::default())
-        .await
-        .expect_err("broadcast anchor creation fails");
-    assert!(matches!(err.as_chip_error(), Some(ChipError::InvalidArguments(_))));
+// Scenario: Moving an anchor updates ranging distance and AoA after stop and restart
+#[tokio::test]
+async fn test_ranging_updates_after_anchor_move() {
+    let mut world = World::new().await;
+    // Given an established chip-anchor session that measured 5m and stopped
+    setup_anchor_session(&mut world, ORIGIN, ANCHOR_POS, Some(ANCHOR_ADDR), ANCHOR_MAC).await;
+    world.when_ranging_is_started(CHIP_A, SESSION_ID).await;
+    let before = world.then_single_ranging_measurement_is_received(CHIP_A).await;
+    assert!((480..=520).contains(&before.distance));
+    world.when_ranging_is_stopped(CHIP_A, SESSION_ID).await;
+    // When the anchor moves to (0, 0, 10) and ranging restarts
+    world.when_chip_moves_to(ANCHOR_CHIP, Position { x: 0.0, y: 0.0, z: 10.0 }).await;
+    world.when_ranging_is_triggered(CHIP_A, SESSION_ID).await;
+    // Then the measurement reflects 10m vertical distance and updated AoA
+    let m = world.then_single_ranging_measurement_is_received(CHIP_A).await;
+    assert!((980..=1020).contains(&m.distance));
+    assert!((-3..=3).contains(&q9_7_deg(m.aoa_azimuth)));
+    assert!((-3..=3).contains(&q9_7_deg(m.aoa_elevation)));
+    assert!(q9_7_deg(m.aoa_destination_azimuth).abs() >= 177);
+    assert!((-3..=3).contains(&q9_7_deg(m.aoa_destination_elevation)));
+}
 
-    let err = world
-        .when_create_anchor(3, Some("00:11:22:33:44:55:66:77"), Position::default())
-        .await
-        .expect_err("extended anchor creation fails");
-    assert!(matches!(err.as_chip_error(), Some(ChipError::InvalidArguments(_))));
+// Scenario: Ranging times out after the target anchor is deleted
+#[tokio::test]
+async fn test_ranging_times_out_after_anchor_deleted() {
+    let mut world = World::new().await;
+    // Given an established chip-anchor ranging session
+    setup_anchor_session(&mut world, ORIGIN, ANCHOR_POS, Some(ANCHOR_ADDR), ANCHOR_MAC).await;
+    // When the anchor is deleted and ranging is triggered
+    world.when_delete_chip(ANCHOR_ID).await.unwrap();
+    world.when_ranging_is_triggered(CHIP_A, SESSION_ID).await;
+    // Then only the device chip remains, ranging times out, and the session stops
+    assert_eq!(world.client.read_count_for_testing().await.unwrap(), 1);
+    let m = world.then_single_ranging_measurement_is_received(CHIP_A).await;
+    assert_eq!(m.status, uci::Status::RangingRxTimeout);
+    world.when_ranging_is_stopped(CHIP_A, SESSION_ID).await;
+}
 
-    let err = world
-        .when_create_anchor(4, Some("invalid"), Position::default())
-        .await
-        .expect_err("malformed anchor address fails");
-    assert!(matches!(err.as_chip_error(), Some(ChipError::InvalidArguments(_))));
+// Scenario: Creating an anchor rejects duplicate, broadcast, extended, and malformed addresses
+#[tokio::test]
+async fn test_create_anchor_rejects_invalid_addresses() {
+    let mut world = World::new().await;
+    // Given an existing anchor with a valid short address
+    world.given_an_anchor_at(ANCHOR_ID, Some(ANCHOR_ADDR), Position::default()).await;
+    // When creating another anchor with duplicate, broadcast, extended, or malformed address
+    // Then each attempt fails with InvalidArguments
+    expect_create_anchor_invalid_arg(&mut world, OTHER_ANCHOR_ID, ANCHOR_ADDR).await;
+    expect_create_anchor_invalid_arg(&mut world, OTHER_ANCHOR_ID, "FF:FF").await;
+    expect_create_anchor_invalid_arg(&mut world, OTHER_ANCHOR_ID, "00:11:22:33:44:55:66:77").await;
+    expect_create_anchor_invalid_arg(&mut world, OTHER_ANCHOR_ID, "invalid").await;
+}
 
-    let err = world.client.start_ranging(ChipId(1), 1).await.expect_err("start ranging fails");
-    assert!(matches!(err.as_chip_error(), Some(ChipError::Unsupported)));
+// Scenario: An anchor rejects start_ranging and stop_ranging commands
+#[tokio::test]
+async fn test_anchor_rejects_ranging_commands() {
+    let mut world = World::new().await;
+    // Given an anchor
+    world.given_an_anchor_at(ANCHOR_ID, Some(ANCHOR_ADDR), Position::default()).await;
+    // When start_ranging and stop_ranging are invoked on the anchor
+    let c = &world.client;
+    let start_err = c.start_ranging(ANCHOR_CHIP, SESSION_ID).await.expect_err("start fails");
+    let stop_err = c.stop_ranging(ANCHOR_CHIP, SESSION_ID).await.expect_err("stop fails");
+    // Then both fail with Unsupported
+    assert!(matches!(start_err.as_chip_error(), Some(ChipError::Unsupported)));
+    assert!(matches!(stop_err.as_chip_error(), Some(ChipError::Unsupported)));
+}
 
-    let err = world.client.stop_ranging(ChipId(1), 1).await.expect_err("stop ranging fails");
-    assert!(matches!(err.as_chip_error(), Some(ChipError::Unsupported)));
-
+// Scenario: Creating an anchor with a packet stream fails with InvalidArguments
+#[tokio::test]
+async fn test_anchor_rejects_packet_stream() {
+    let world = World::new().await;
+    // Given anchor create params carrying a packet stream
     let (stream, _tx) = mock_stream();
-    let mut chip = Chip::new_test_uwb_anchor("uwb_anchor_5".to_string(), None);
-    chip.id = 5;
-    chip.device_id = DeviceId(1);
+    let chip = Chip::new_test_uwb_anchor("uwb_anchor".to_string(), None);
     let params = ChipCreate { packet_stream: Some(stream), packet_sink: None, chip };
-    let err = world.client.create(ChipId(5), params).await.expect_err("anchor with stream fails");
+    // When creating the anchor
+    let err = world.client.create(ANCHOR_CHIP, params).await.expect_err("stream fails");
+    // Then creation fails with InvalidArguments
     assert!(matches!(err.as_chip_error(), Some(ChipError::InvalidArguments(_))));
 }

@@ -430,18 +430,15 @@ impl World {
         assert_eq!(ntf.device_state, uci::DeviceState::DeviceStateReady);
     }
 
+    pub(crate) async fn when_chip_moves_to(&self, chip_id: ChipId, pos: Position) {
+        let pose = netsim_model::PoseUpdate { position: Some(pos), orientation: None };
+        let update = ChipUpdate { pose, ..Default::default() };
+        self.client.update(chip_id, update).await.expect("Failed to set chip position");
+    }
+
     pub async fn given_a_chip_at(&mut self, chip_id: u32, pos: netsim_model::Position) {
         self.given_a_chip(chip_id).await;
-        self.client
-            .update(
-                ChipId(chip_id),
-                ChipUpdate {
-                    pose: netsim_model::PoseUpdate { position: Some(pos), orientation: None },
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("Failed to set chip position");
+        self.when_chip_moves_to(ChipId(chip_id), pos).await;
     }
 
     pub async fn when_uci_session_is_established(
