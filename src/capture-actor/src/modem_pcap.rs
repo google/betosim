@@ -46,9 +46,8 @@
 //! 3. Alternatively, right-click any packet in the capture -> **Decode As...**
 //!    -> select `MUX27010`.
 
-use std::{io, path::Path, time::SystemTime};
+use std::{io, path::Path};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use capture_api::Direction;
 use tokio::sync::mpsc;
@@ -80,21 +79,23 @@ fn compute_fcs<I: IntoIterator<Item = u8>>(data: I) -> u8 {
 }
 
 /// PCAP writer for Cellular Modem AT command traffic.
-pub(crate) struct ModemPcapWriter {
-    inner: PcapWriter,
-}
+pub(crate) struct ModemPcapWriter;
 
 impl ModemPcapWriter {
     /// Creates a new Modem AT PCAP writer using User0 / DLT_USER0 (147).
     #[allow(clippy::new_ret_no_self)]
     pub(crate) async fn new<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn CaptureWriter>> {
         let inner = PcapWriter::new(path, DataLinkType::User0).await?;
-        Ok(Box::new(Self { inner }))
+        Ok(Box::new(inner.with_encoder(Self::encode_packet)))
     }
 
     pub(crate) fn new_stream() -> (Box<dyn CaptureWriter>, mpsc::Receiver<Bytes>) {
         let (inner, rx) = PcapWriter::new_stream(DataLinkType::User0);
-        (Box::new(Self { inner }), rx)
+        (Box::new(inner.with_encoder(Self::encode_packet)), rx)
+    }
+
+    fn encode_packet(direction: Direction, payload: &[u8]) -> Option<Vec<u8>> {
+        Some(Self::frame_gsm0710(direction, payload))
     }
 
     /// Encapsulates an AT command or response into a standard 3GPP TS 27.010
@@ -139,37 +140,10 @@ impl ModemPcapWriter {
     }
 }
 
-#[async_trait]
-impl CaptureWriter for ModemPcapWriter {
-    async fn write_packet(
-        &mut self,
-        timestamp: SystemTime,
-        direction: Direction,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let frame = Self::frame_gsm0710(direction, data);
-        self.inner.write_packet(timestamp, direction, &frame).await
-    }
-
-    async fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush().await
-    }
-
-    fn get_stats(&self) -> (u64, u64) {
-        self.inner.get_stats()
-    }
-
-    fn is_file(&self) -> bool {
-        self.inner.is_file()
-    }
-
-    fn is_closed(&self) -> bool {
-        self.inner.is_closed()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use netsim_packets::{PcapHeader, PcapRecordHeader};
 
     use super::*;
