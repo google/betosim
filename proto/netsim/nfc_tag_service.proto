@@ -25,12 +25,15 @@ service NfcTagService {
   // Defaults when omitted/UNSPECIFIED: protocol = NFC_TAG_PROTOCOL_T4AT,
   // uid = auto-generated 7-byte hex UID (or explicit 4-, 7-, or 10-byte hex),
   // placement = position (0, 0, 0) meters, visible = true, formatted = true,
-  // fault_trigger = NFC_FAULT_TRIGGER_NONE. When formatted is true, payload
-  // must be set; when formatted is false, payload may be omitted.
+  // fault_trigger = NFC_FAULT_TRIGGER_NONE. When formatted is true (the
+  // default), a non-empty payload must be set; when formatted is false,
+  // non-empty payloads are rejected with INVALID_ARGUMENT (omit payload or
+  // pass empty ndef_bytes for empty unformatted storage).
   // Returns INVALID_ARGUMENT on malformed UID/NDEF inputs, unsupported
-  // protocol, missing payload on a formatted tag, or invalid fault trigger
-  // counts; NOT_FOUND if target_device does not exist; and ALREADY_EXISTS if
-  // name collides with an existing tag.
+  // protocol, missing or empty payload on a formatted tag, non-empty payload
+  // on an unformatted tag, or invalid fault trigger counts; NOT_FOUND if
+  // target_device does not exist; and ALREADY_EXISTS if name collides with an
+  // existing tag.
   rpc CreateTag(CreateTagRequest) returns (NfcTag);
 
   // Returns the current state and counters of a virtual NFC tag.
@@ -42,9 +45,12 @@ service NfcTagService {
   rpc ListTags(google.protobuf.Empty) returns (ListTagsResponse);
 
   // Partially updates a virtual NFC tag's metadata, placement, NDEF payload,
-  // lock state, or fault trigger. Returns INVALID_ARGUMENT on invalid inputs
-  // or unset tag selector, NOT_FOUND if the tag or target_device does not
-  // exist, and ALREADY_EXISTS on a duplicate tag name.
+  // lock state, or fault trigger. When formatted is false (or updating an
+  // unformatted tag without setting formatted = true), non-empty payloads are
+  // rejected with INVALID_ARGUMENT (omit payload or pass empty ndef_bytes for
+  // empty unformatted storage). Returns INVALID_ARGUMENT on invalid inputs or
+  // unset tag selector, NOT_FOUND if the tag or target_device does not exist,
+  // and ALREADY_EXISTS on a duplicate tag name.
   rpc UpdateTag(UpdateTagRequest) returns (NfcTag);
 
   // Removes a virtual NFC tag from the RF scene and releases any active reader.
@@ -138,8 +144,9 @@ message NfcTag {
   uint32 rx_count = 14;
 }
 
-// Formatted tags (the default) require payload to be set. Unformatted tags
-// accept an optional payload or omit payload for empty NDEF storage.
+// Formatted tags (the default) require a non-empty payload. Unformatted tags
+// reject non-empty payloads with INVALID_ARGUMENT (omit payload or pass empty
+// ndef_bytes for empty NDEF storage).
 message CreateTagRequest {
   string name = 1;
   NfcTagProtocol protocol = 2;
@@ -177,7 +184,10 @@ message ListTagsResponse {
 
 // Updates selected fields on an existing virtual NFC tag; unset fields and
 // NFC_FAULT_TRIGGER_UNSPECIFIED preserve existing state, while
-// NFC_FAULT_TRIGGER_NONE clears an armed fault trigger.
+// NFC_FAULT_TRIGGER_NONE clears an armed fault trigger. Non-empty payloads are
+// rejected with INVALID_ARGUMENT when formatted is false or when updating an
+// unformatted tag without setting formatted = true (omit payload or pass empty
+// ndef_bytes for empty unformatted storage).
 message UpdateTagRequest {
   TagSelector tag = 1;
   optional string name = 2;
