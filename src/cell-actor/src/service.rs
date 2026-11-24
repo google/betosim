@@ -14,7 +14,7 @@
 
 use actor_framework::{ActorService, DynContext};
 use futures::SinkExt;
-use modem_rs::ModemSink;
+use hayes::ModemSink;
 use netsim_model::{
     Cell, CellNetworkConfig, Chip, ChipCreate, ChipError, ChipId, ChipKind, ChipUpdate,
     ChipVariant, ChipVariantUpdate, MODEM_STATE_DOWN, MODEM_STATE_IDLE, MODEM_STATE_RINGING,
@@ -88,7 +88,7 @@ impl ActorService for CellActor {
     type ActionResult = CellActionResult;
     type Error = CellError;
     type Entity = Chip;
-    type TypedStream = modem_rs::HostEvent;
+    type TypedStream = hayes::HostEvent;
 
     async fn handle_create(
         &mut self,
@@ -174,7 +174,7 @@ impl ActorService for CellActor {
         if let Err(e) = self.controller.add_modem_with_options(
             chip_id.0,
             modem_sink,
-            modem_rs::modem_network::ModemOptions {
+            hayes::modem_network::ModemOptions {
                 sim_type,
                 sim_profile,
                 timezone_override,

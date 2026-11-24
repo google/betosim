@@ -21,7 +21,7 @@ DEPS = [
     "//src/device-actor",
     "//src/device-api",
     "//src/model",
-    "//src/modem-rs",
+    "//src/hayes",
     "//src/slirp-actor",
     "@tokio",
     "@tracing",

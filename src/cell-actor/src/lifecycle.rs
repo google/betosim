@@ -14,7 +14,7 @@
 
 use actor_framework::{ActorLifecycle, ActorService, DynContext};
 use bytes::Bytes;
-use modem_rs::HostEvent;
+use hayes::HostEvent;
 use tracing::{error, info, warn};
 
 use crate::cell_actor::CellActor;
@@ -45,7 +45,7 @@ impl ActorLifecycle for CellActor {
     async fn on_typed_stream(
         &mut self,
         id: usize,
-        event: modem_rs::HostEvent,
+        event: hayes::HostEvent,
         ctx: &mut DynContext<Self>,
     ) {
         if id == 0 {

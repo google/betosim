@@ -214,7 +214,7 @@ pub fn default_error_code_for_target(target: &str) -> u32 {
         "casimir" => NFC_CASIMIR,
         "uwb_actor" => UWB,
         "pica" => UWB_PICA,
-        "cell_actor" | "modem_rs" => CELL,
+        "cell_actor" | "hayes" => CELL,
         "slirp_actor" | "ethernet_actor" | "http_proxy" | "slirp" | "slirp_host"
         | "libslirp_rs" => SLIRP,
         "capture_actor" | "capture_api" => CAPTURE,
@@ -969,7 +969,7 @@ mod tests {
         assert_eq!(default_error_code_for_target("uwb_actor::ranging"), 90000);
         assert_eq!(default_error_code_for_target("pica::uci"), 98000);
         assert_eq!(default_error_code_for_target("cell_actor"), 100000);
-        assert_eq!(default_error_code_for_target("modem_rs::at"), 100000);
+        assert_eq!(default_error_code_for_target("hayes::at"), 100000);
         assert_eq!(default_error_code_for_target("slirp_actor"), 110000);
         assert_eq!(default_error_code_for_target("ethernet_actor"), 110000);
         assert_eq!(default_error_code_for_target("http_proxy"), 110000);

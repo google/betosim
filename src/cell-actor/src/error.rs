@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use modem_rs::ModemError;
+use hayes::ModemError;
 use netsim_model::ChipError;
 
 #[derive(thiserror::Error, Debug)]

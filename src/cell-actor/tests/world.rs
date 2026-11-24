@@ -59,7 +59,7 @@ pub(crate) struct World {
     pending_device_reply: Option<Response<DeviceActionResult, DeviceError>>,
     pending_delete: Option<JoinHandle<Result<(), ClientError>>>,
     guests: HashMap<ChipId, GuestChannel>,
-    event_tx: mpsc::UnboundedSender<modem_rs::HostEvent>,
+    event_tx: mpsc::UnboundedSender<hayes::HostEvent>,
     server_handle: JoinHandle<()>,
     slirp_handle: JoinHandle<()>,
     last_error: Option<ClientError>,
@@ -86,8 +86,8 @@ impl World {
         let slirp_actor = slirp_actor::SlirpActor::new(Default::default(), None, None).await;
         let slirp_handle = tokio::spawn(slirp_runner.run(slirp_actor));
 
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<modem_rs::HostEvent>();
-        let controller = Box::new(modem_rs::ModemNetworkSimulator::new(event_tx.clone()));
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<hayes::HostEvent>();
+        let controller = Box::new(hayes::ModemNetworkSimulator::new(event_tx.clone()));
         let (actor, client) = cell_actor::new();
         let service = cell_actor::CellActor {
             device_client,
@@ -247,7 +247,7 @@ impl World {
     }
 
     pub(crate) fn when_host_emits_sink_error(&self, id: u32) {
-        self.event_tx.send(modem_rs::HostEvent::SinkError(id)).expect("send HostEvent::SinkError");
+        self.event_tx.send(hayes::HostEvent::SinkError(id)).expect("send HostEvent::SinkError");
     }
 
     pub(crate) async fn when_set_signal_strength(&self, id: u32, rssi: u32, ber: u32) {
@@ -646,7 +646,7 @@ impl World {
             .strip_prefix(&cbm_prefix)
             .and_then(|rest| rest.strip_suffix("\r\n"))
             .expect("valid +CBM framing");
-        let parsed = modem_rs::CbsPdu::parse(hex_pdu).expect("parse CBS hex PDU");
+        let parsed = hayes::CbsPdu::parse(hex_pdu).expect("parse CBS hex PDU");
         assert_eq!(parsed.decode_content().expect("decode CBS content"), text);
     }
 

@@ -281,7 +281,7 @@ ALLOWED_TESTING_TARGETS = {
     "packets",
     "rootcanal",
     "rootcanal-server",
-    "modem-rs",
+    "hayes",
     "websocket-server",
     "bluetooth-actor",
     "capture-actor",

@@ -40,7 +40,7 @@ impl CellAction {
     /// It rejects double quotes, strips the separators ` `, `-`, `(`, `)`,
     /// and `.`, then applies strict 3GPP phone number validation.
     fn is_valid_phone_number(s: &str) -> bool {
-        modem_rs::PhoneNumber::parse_formatted(s).is_ok()
+        hayes::PhoneNumber::parse_formatted(s).is_ok()
     }
 
     /// Validates whether an SMS sender identifier contains only allowed characters.

@@ -2,7 +2,7 @@
 
 This crate implements the `CellServer` actor, responsible for managing simulated
 cellular controllers, interfacing with a modem emulator backend (like
-`modem-rs`).
+`hayes`).
 
 ## Features
 
@@ -26,7 +26,7 @@ typically spawned and run within the main `netsimd` process.
 
 The crate includes a `StubCellularController` that implements the
 `CellularControllerInterface`. This is used for testing the `CellServer` logic
-independently of the actual `modem-rs` implementation. It currently echoes back
+independently of the actual `hayes` implementation. It currently echoes back
 any data sent to it.
 
 ## Building and Testing
