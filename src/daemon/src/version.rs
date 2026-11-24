@@ -16,7 +16,7 @@
 
 /// Version library.
 
-const VERSION: &str = "1.0.33";
+const VERSION: &str = "1.0.34";
 
 pub(crate) fn get_version() -> String {
     format!("{VERSION}{}", option_env!("NETSIM_VERSION_SUFFIX").unwrap_or_default())
