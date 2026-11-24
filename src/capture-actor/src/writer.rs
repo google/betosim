@@ -395,4 +395,12 @@ mod tests {
         assert_eq!(record_header.orig_len.get(), expected_len);
         assert_eq!(record_payload, expected.as_slice());
     }
+
+    #[tokio::test]
+    async fn new_file_writer_rejects_missing_parent_directory() {
+        let temp_file = TempPcapFile::new("netsim_missing_parent_test");
+        let missing_path = temp_file.path().join("missing_parent/capture.pcap");
+        let res = PcapWriter::new(&missing_path, DataLinkType::User0).await;
+        assert!(matches!(res, Err(err) if err.kind() == io::ErrorKind::NotFound));
+    }
 }

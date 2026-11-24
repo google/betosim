@@ -16,6 +16,8 @@ use netsim_model::ChipKind;
 
 use crate::world::World;
 
+const LIFECYCLE_CHIP_ID: u32 = 1;
+
 // Feature: Capture Entity Lifecycle
 //
 //   As a client
@@ -179,4 +181,43 @@ async fn test_unregistered_chip_id_operations_fail() {
     // When: deleting an unregistered ChipId, Then: ChipNotFound error is returned
     let delete_res = world.when_delete_capture(invalid_id).await;
     world.then_capture_error_is_chip_not_found(delete_res, invalid_id).await;
+}
+
+// Scenario: Creating a capture without a ChipId returns InvalidArguments
+#[tokio::test]
+async fn test_create_without_chip_id_returns_invalid_arguments() {
+    let world = World::new().await;
+
+    // When: creating a capture without supplying a ChipId
+    let res = world.when_create_without_chip_id(ChipKind::BLUETOOTH, "bt-dev", false).await;
+
+    // Then: InvalidArguments is returned
+    world.then_error_is_invalid_arguments(res);
+}
+
+// Scenario: Re-enabling a disabled capture creates a new file writer and records packets
+#[tokio::test]
+async fn test_reenabling_disabled_capture_resumes_file_writes() {
+    const BT_H4_HEADER_BYTES: u64 = 4;
+    const SAMPLE_PACKET: &[u8] = &[0x01, 0x02, 0x03];
+
+    let world = World::new().await;
+    let expected_record_bytes = BT_H4_HEADER_BYTES + u64::try_from(SAMPLE_PACKET.len()).unwrap();
+
+    // Given: an enabled capture that has recorded two packets
+    world
+        .when_create_capture(LIFECYCLE_CHIP_ID, ChipKind::BLUETOOTH, "bt-dev", true)
+        .await
+        .unwrap();
+    world.when_packet_is_sent(LIFECYCLE_CHIP_ID, SAMPLE_PACKET).await;
+    world.when_packet_is_sent(LIFECYCLE_CHIP_ID, SAMPLE_PACKET).await;
+    world.then_capture_stats_are(LIFECYCLE_CHIP_ID, 2, 2 * expected_record_bytes).await;
+
+    // When: disabling, re-enabling, and sending one Bluetooth packet
+    world.when_update_capture(LIFECYCLE_CHIP_ID, false).await.unwrap();
+    world.when_update_capture(LIFECYCLE_CHIP_ID, true).await.unwrap();
+    world.when_packet_is_sent(LIFECYCLE_CHIP_ID, SAMPLE_PACKET).await;
+
+    // Then: only the single packet sent after re-enabling is recorded on the new writer
+    world.then_capture_stats_are(LIFECYCLE_CHIP_ID, 1, expected_record_bytes).await;
 }

@@ -17,9 +17,10 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
+use capture_actor::DataLinkType;
 use capture_api::{CaptureCreate, CaptureSender};
 use netsim_model::{ChipId, ChipKind};
 use netsim_packets::{PcapHeader, PcapRecordHeader};
@@ -35,6 +36,7 @@ use crate::world::World;
 //   So that I can watch traffic live without enabling file capture
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
+const STREAM_CHIP_ID: u32 = 1;
 
 async fn create_capture_with_flag(world: &World, chip_id: u32) -> Arc<AtomicBool> {
     let enabled_flag = Arc::new(AtomicBool::new(false));
@@ -163,4 +165,54 @@ async fn test_stream_ends_on_delete() {
 async fn test_stream_unknown_chip() {
     let world = World::new().await;
     assert!(world.client.stream_capture(ChipId(99)).await.is_err());
+}
+
+// Scenario: Subscribing to a Wi-Fi capture emits a Radiotap PCAP global header
+#[tokio::test]
+async fn test_wifi_stream_emits_radiotap_dlt_header() {
+    let world = World::new().await;
+
+    // Given: a Wi-Fi capture session
+    world.when_create_capture(STREAM_CHIP_ID, ChipKind::WIFI, "wifi-dev", false).await.unwrap();
+
+    // When: subscribing to the Wi-Fi capture stream
+    let header_bytes = world.when_stream_header_received(STREAM_CHIP_ID).await;
+
+    // Then: the PCAP global header advertises the Radiotap data link type
+    world.then_pcap_header_dlt_is(&header_bytes, DataLinkType::Ieee80211Radio);
+}
+
+// Scenario: Subscribing to an NFC capture emits a User0 PCAP global header
+#[tokio::test]
+async fn test_nfc_stream_emits_user0_dlt_header() {
+    let world = World::new().await;
+
+    // Given: an NFC capture session
+    world.when_create_capture(STREAM_CHIP_ID, ChipKind::NFC, "nfc-dev", false).await.unwrap();
+
+    // When: subscribing to the NFC capture stream
+    let header_bytes = world.when_stream_header_received(STREAM_CHIP_ID).await;
+
+    // Then: the PCAP global header advertises the User0 data link type
+    world.then_pcap_header_dlt_is(&header_bytes, DataLinkType::User0);
+}
+
+// Scenario: Pre-epoch write errors do not break subsequent stream packets
+#[tokio::test]
+async fn test_stream_continues_after_pre_epoch_write_errors() {
+    let world = World::new().await;
+    let pre_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+
+    // Given: an active Bluetooth live capture stream
+    world.when_create_capture(STREAM_CHIP_ID, ChipKind::BLUETOOTH, "bt-dev", false).await.unwrap();
+    let mut rx = world.when_stream_capture_started(STREAM_CHIP_ID).await;
+
+    // When: two invalid pre-epoch packets and one valid packet are sent
+    world.when_timed_packet_is_sent(STREAM_CHIP_ID, pre_epoch, b"bad1").await;
+    // Second pre-epoch write exercises the `has_warned_on_write` suppression path in `lifecycle.rs`.
+    world.when_timed_packet_is_sent(STREAM_CHIP_ID, pre_epoch, b"bad2").await;
+    world.when_timed_packet_is_sent(STREAM_CHIP_ID, SystemTime::now(), b"good").await;
+
+    // Then: the valid packet still arrives on the stream
+    world.then_next_stream_bt_payload_is(&mut rx, b"good").await;
 }
