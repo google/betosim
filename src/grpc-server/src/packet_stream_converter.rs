@@ -20,8 +20,9 @@ use netsim_proto::{
     startup as proto_startup,
 };
 use packet_stream::{
-    BtControllerProperties, Chip, ChipInfo, ChipKind, DeviceInfo,
+    BtControllerProperties, CellularProperties, Chip, ChipInfo, ChipKind, DeviceInfo,
     error::{PacketStreamError, Result},
+    non_empty_trimmed,
 };
 use protobuf::Enum;
 
@@ -32,6 +33,19 @@ fn proto_to_chip_kind(proto: protobuf::EnumOrUnknown<proto_common::ChipKind>) ->
 
 fn proto_to_chip(proto: proto_startup::Chip) -> Chip {
     let bt_properties = proto.bt_properties.as_ref().and_then(BtControllerProperties::from_proto);
+    let cell_props = proto.cellular_properties.as_ref();
+    let sim_type = cell_props
+        .and_then(|p| p.sim_type)
+        .or_else(|| (proto.sim_type != 0).then_some(proto.sim_type));
+    let sim_profile = non_empty_trimmed(cell_props.and_then(|p| p.sim_profile.as_deref()))
+        .or_else(|| non_empty_trimmed(proto.sim_profile.as_deref()));
+    let phone_number = non_empty_trimmed(cell_props.and_then(|p| p.phone_number.as_deref()));
+    let cellular_properties =
+        if sim_type.is_some() || sim_profile.is_some() || phone_number.is_some() {
+            Some(CellularProperties { sim_type, sim_profile, phone_number })
+        } else {
+            None
+        };
     Chip {
         kind: proto_to_chip_kind(proto.kind),
         id: proto.id,
@@ -39,8 +53,7 @@ fn proto_to_chip(proto: proto_startup::Chip) -> Chip {
         manufacturer: proto.manufacturer,
         product_name: proto.product_name,
         address: proto.address,
-        sim_type: if proto.sim_type != 0 { Some(proto.sim_type) } else { None },
-        sim_profile: proto.sim_profile,
+        cellular_properties,
         loopback: proto.loopback,
         bt_properties,
     }
@@ -249,5 +262,72 @@ mod tests {
         unset_proto.name = "Pixel_6".to_string();
         let unset_info = proto_to_device_info(unset_proto);
         assert_eq!(unset_info.adb_serial, "");
+    }
+
+    const SIM_TYPE_NO_SIM: i32 = 0;
+    const SIM_TYPE_NORMAL: i32 = 1;
+    const SIM_TYPE_CTS_CARRIER: i32 = 2;
+
+    #[test]
+    fn test_proto_to_chip_legacy_cellular_fallback() {
+        let proto = proto_startup::Chip {
+            sim_type: SIM_TYPE_NORMAL,
+            sim_profile: Some("custom.xml".to_string()),
+            cellular_properties: MessageField::none(),
+            ..Default::default()
+        };
+
+        let chip = proto_to_chip(proto);
+        assert_eq!(
+            chip.cellular_properties,
+            Some(CellularProperties {
+                sim_type: Some(SIM_TYPE_NORMAL),
+                sim_profile: Some("custom.xml".to_string()),
+                phone_number: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_proto_to_chip_cellular_properties_overrides_legacy() {
+        let proto = proto_startup::Chip {
+            sim_type: SIM_TYPE_CTS_CARRIER,
+            sim_profile: Some("legacy.xml".to_string()),
+            cellular_properties: MessageField::some(proto_startup::CellularProperties {
+                sim_type: Some(SIM_TYPE_NO_SIM),
+                sim_profile: Some("   ".to_string()),
+                phone_number: Some("+15550199999".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let chip = proto_to_chip(proto);
+        assert_eq!(
+            chip.cellular_properties,
+            Some(CellularProperties {
+                sim_type: Some(SIM_TYPE_NO_SIM),
+                sim_profile: Some("legacy.xml".to_string()),
+                phone_number: Some("+15550199999".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_proto_to_chip_empty_cellular_fields_yield_none() {
+        let proto = proto_startup::Chip {
+            sim_type: SIM_TYPE_NO_SIM,
+            sim_profile: Some("   ".to_string()),
+            cellular_properties: MessageField::some(proto_startup::CellularProperties {
+                sim_type: None,
+                sim_profile: Some(String::new()),
+                phone_number: Some(" ".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let chip = proto_to_chip(proto);
+        assert_eq!(chip.cellular_properties, None);
     }
 }

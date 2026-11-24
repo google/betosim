@@ -25,7 +25,7 @@ use async_trait::async_trait;
 #[cfg(all(not(test), feature = "cuttlefish"))]
 use command_fds::inherited::take_fd_ownership;
 use futures::{SinkExt, ready, stream::StreamExt};
-use netsim_types::{Chip, ChipInfo, ChipKind, DeviceInfo};
+use netsim_types::{CellularProperties, Chip, ChipInfo, ChipKind, DeviceInfo, non_empty_trimmed};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
     sys::socket::{SockFlag, accept4, getsockopt, sockopt},
@@ -53,6 +53,17 @@ pub struct DeviceConfig {
     pub device_info: Option<DeviceInfo>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CellularPropertiesConfig {
+    #[serde(rename = "simType", alias = "sim_type")]
+    pub sim_type: Option<i32>,
+    #[serde(rename = "simProfile", alias = "sim_profile")]
+    pub sim_profile: Option<String>,
+    #[serde(rename = "phoneNumber", alias = "phone_number")]
+    pub phone_number: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipConfig {
     pub kind: String,
@@ -67,6 +78,8 @@ pub struct ChipConfig {
     pub sim_type: Option<i32>,
     #[serde(rename = "simProfile")]
     pub sim_profile: Option<String>,
+    #[serde(default, rename = "cellularProperties", alias = "cellular_properties")]
+    pub cellular_properties: Option<CellularPropertiesConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,8 +95,7 @@ pub struct DualFdChipEndpoints {
     /// Output from the device (netsim reads from it). When `None`, `in_fd` is
     /// bidirectional; must be `None` when `in_fd` is a listening socket.
     pub out_fd: Option<OwnedFd>,
-    pub sim_type: Option<i32>,
-    pub sim_profile: Option<String>,
+    pub cellular_properties: Option<CellularProperties>,
 }
 
 #[derive(Debug)]
@@ -199,8 +211,21 @@ pub struct DualFdListener {
     listening_sockets: Vec<ListeningSocketEntry>,
 }
 
-type StaticStreamEntry = (DeviceInfo, String, Option<i32>, Option<String>, (OwnedFd, OwnedFd));
-type ListeningSocketEntry = (DeviceInfo, String, Option<i32>, Option<String>, AsyncFd<OwnedFd>);
+type StaticStreamEntry = (DeviceInfo, String, Option<CellularProperties>, (OwnedFd, OwnedFd));
+type ListeningSocketEntry = (DeviceInfo, String, Option<CellularProperties>, AsyncFd<OwnedFd>);
+
+fn resolve_cellular_properties(chip: &ChipConfig) -> Option<CellularProperties> {
+    let cell_props = chip.cellular_properties.as_ref();
+    let sim_type = cell_props.and_then(|p| p.sim_type).or(chip.sim_type);
+    let sim_profile = non_empty_trimmed(cell_props.and_then(|p| p.sim_profile.as_deref()))
+        .or_else(|| non_empty_trimmed(chip.sim_profile.as_deref()));
+    let phone_number = non_empty_trimmed(cell_props.and_then(|p| p.phone_number.as_deref()));
+    if sim_type.is_some() || sim_profile.is_some() || phone_number.is_some() {
+        Some(CellularProperties { sim_type, sim_profile, phone_number })
+    } else {
+        None
+    }
+}
 
 fn resolve_device_info(name: Option<&str>, device_info: Option<DeviceInfo>) -> DeviceInfo {
     let mut info = device_info.unwrap_or_default();
@@ -258,8 +283,7 @@ impl DualFdListener {
                 listener.add_stream_endpoints(
                     device_info.clone(),
                     chip.kind,
-                    chip.sim_type,
-                    chip.sim_profile,
+                    chip.cellular_properties,
                     chip.in_fd,
                     chip.out_fd,
                 )?;
@@ -281,11 +305,11 @@ impl DualFdListener {
                 } else {
                     chip.fd_out.filter(|&fd| fd != chip.fd_in).map(claim_fd).transpose()?
                 };
+                let cellular_properties = resolve_cellular_properties(chip);
                 self.add_stream_endpoints(
                     device_info.clone(),
                     chip.kind.clone(),
-                    chip.sim_type,
-                    chip.sim_profile.clone(),
+                    cellular_properties,
                     in_fd,
                     out_fd,
                 )?;
@@ -298,8 +322,7 @@ impl DualFdListener {
         &mut self,
         device_info: DeviceInfo,
         kind: String,
-        sim_type: Option<i32>,
-        sim_profile: Option<String>,
+        cellular_properties: Option<CellularProperties>,
         in_fd: OwnedFd,
         out_fd: Option<OwnedFd>,
     ) -> Result<()> {
@@ -318,7 +341,7 @@ impl DualFdListener {
                     "Failed to create AsyncFd for listening socket: {e}"
                 ))
             })?;
-            self.listening_sockets.push((device_info, kind, sim_type, sim_profile, async_fd));
+            self.listening_sockets.push((device_info, kind, cellular_properties, async_fd));
         } else {
             let out_fd = match out_fd {
                 Some(fd) => fd,
@@ -328,8 +351,7 @@ impl DualFdListener {
             self.pending_static_streams.push_back((
                 device_info,
                 kind,
-                sim_type,
-                sim_profile,
+                cellular_properties,
                 (in_fd, out_fd),
             ));
         }
@@ -361,8 +383,7 @@ async fn accept_one_connection(async_fd: &AsyncFd<OwnedFd>) -> Result<(OwnedFd, 
 fn create_stream_and_sink(
     device_info: DeviceInfo,
     chip_kind: String,
-    sim_type: Option<i32>,
-    sim_profile: Option<String>,
+    cellular_properties: Option<CellularProperties>,
     in_fd: OwnedFd,
     out_fd: OwnedFd,
 ) -> Result<(PacketStream, PacketSink, ChipInfo, String)> {
@@ -378,8 +399,7 @@ fn create_stream_and_sink(
             manufacturer: String::new(),
             product_name: String::new(),
             address: String::new(),
-            sim_type,
-            sim_profile,
+            cellular_properties,
             loopback: false,
             bt_properties: None,
         }),
@@ -428,10 +448,10 @@ fn create_stream_and_sink(
 #[async_trait]
 impl TransportListener for DualFdListener {
     async fn accept(&mut self) -> Result<(PacketStream, PacketSink, ChipInfo, String)> {
-        while let Some((device, chip_kind, sim_type, sim_profile, (in_fd, out_fd))) =
+        while let Some((device, chip_kind, cellular_properties, (in_fd, out_fd))) =
             self.pending_static_streams.pop_front()
         {
-            match create_stream_and_sink(device, chip_kind, sim_type, sim_profile, in_fd, out_fd) {
+            match create_stream_and_sink(device, chip_kind, cellular_properties, in_fd, out_fd) {
                 Ok(res) => return Ok(res),
                 Err(error) => {
                     tracing::warn!(%error, "Failed to create transport for static FD, skipping");
@@ -447,23 +467,22 @@ impl TransportListener for DualFdListener {
         // loop on transient accept errors, which are rare. This is not a hot path.
         loop {
             let mut accept_futures = Vec::new();
-            for (device, chip_kind, sim_type, sim_profile, async_fd) in &self.listening_sockets {
+            for (device, chip_kind, cellular_properties, async_fd) in &self.listening_sockets {
                 accept_futures.push(Box::pin(async move {
                     let res = accept_one_connection(async_fd).await;
-                    (device, chip_kind, *sim_type, sim_profile, res)
+                    (device, chip_kind, cellular_properties, res)
                 }));
             }
 
             let (result, _, _remaining) = futures::future::select_all(accept_futures).await;
-            let (device, chip_kind, sim_type, sim_profile, res) = result;
+            let (device, chip_kind, cellular_properties, res) = result;
 
             match res {
                 Ok((connected_fd, cloned_fd)) => {
                     match create_stream_and_sink(
                         device.clone(),
                         chip_kind.clone(),
-                        sim_type,
-                        sim_profile.clone(),
+                        cellular_properties.clone(),
                         connected_fd,
                         cloned_fd,
                     ) {
@@ -527,6 +546,7 @@ mod tests {
                 model: None,
                 sim_type: None,
                 sim_profile: None,
+                cellular_properties: None,
             })
             .collect();
         let config = DualFdConfig {
@@ -624,8 +644,9 @@ mod tests {
         let (mut stream1, mut sink1, chip_info1, _guid) = listener.accept().await.unwrap();
         let chip1 = chip_info1.chip.unwrap();
         assert_eq!(chip1.name, "BLUETOOTH");
-        assert_eq!(chip1.sim_type, Some(expected_sim_type));
-        assert_eq!(chip1.sim_profile.as_deref(), Some(expected_sim_profile));
+        let cell_props = chip1.cellular_properties.unwrap();
+        assert_eq!(cell_props.sim_type, Some(expected_sim_type));
+        assert_eq!(cell_props.sim_profile.as_deref(), Some(expected_sim_profile));
 
         nix::unistd::write(&guest_to_host_w, HCI_RESET_CMD).unwrap();
 
@@ -843,8 +864,7 @@ mod tests {
                 kind: "CELLULAR".to_string(),
                 in_fd,
                 out_fd: None,
-                sim_type: None,
-                sim_profile: None,
+                cellular_properties: None,
             }],
         }];
 
@@ -868,8 +888,7 @@ mod tests {
                 kind: "CELLULAR".to_string(),
                 in_fd,
                 out_fd: Some(out_fd),
-                sim_type: None,
-                sim_profile: None,
+                cellular_properties: None,
             }],
         }];
 
@@ -898,8 +917,7 @@ mod tests {
                 kind: "CELLULAR".to_string(),
                 in_fd: w_fd,
                 out_fd: Some(r_fd),
-                sim_type: None,
-                sim_profile: None,
+                cellular_properties: None,
             }],
         }];
         let mut listener = DualFdListener::try_new_with_owned_fds(endpoints).unwrap();
@@ -958,8 +976,7 @@ mod tests {
                     kind: "CELLULAR".to_string(),
                     in_fd: w_fd1,
                     out_fd: Some(r_fd1),
-                    sim_type: None,
-                    sim_profile: None,
+                    cellular_properties: None,
                 }],
             },
             DualFdDeviceEndpoints {
@@ -973,8 +990,7 @@ mod tests {
                     kind: "BLUETOOTH".to_string(),
                     in_fd: w_fd2,
                     out_fd: Some(r_fd2),
-                    sim_type: None,
-                    sim_profile: None,
+                    cellular_properties: None,
                 }],
             },
         ];
@@ -1020,15 +1036,17 @@ mod tests {
                     kind: "CELLULAR".to_string(),
                     in_fd: OwnedFd::from(host_sock),
                     out_fd: None,
-                    sim_type: None,
-                    sim_profile: None,
+                    cellular_properties: None,
                 },
                 DualFdChipEndpoints {
                     kind: "BLUETOOTH".to_string(),
                     in_fd: host_to_guest_w,
                     out_fd: Some(guest_to_host_r),
-                    sim_type: Some(CHIP1_SIM_TYPE),
-                    sim_profile: Some(CHIP1_SIM_PROFILE.to_string()),
+                    cellular_properties: Some(CellularProperties {
+                        sim_type: Some(CHIP1_SIM_TYPE),
+                        sim_profile: Some(CHIP1_SIM_PROFILE.to_string()),
+                        phone_number: None,
+                    }),
                 },
             ],
         }];
@@ -1107,5 +1125,85 @@ mod tests {
             listener.accept().now_or_never().is_none(),
             "DualFdListener::accept should remain pending after shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn test_dual_fd_listener_cellular_properties_override_and_fallback() {
+        const LEGACY_SIM_TYPE: i32 = 2;
+        const OVERRIDE_SIM_TYPE: i32 = 0;
+        const LEGACY_SIM_PROFILE: &str = "legacy.xml";
+        const OVERRIDE_PHONE_NUMBER: &str = "+15550199999";
+
+        let (r_fd, w_fd) = pipe().unwrap();
+        let json_config = format!(
+            r#"{{
+                "devices": [
+                    {{
+                        "name": "cell-dev",
+                        "chips": [
+                            {{
+                                "kind": "CELLULAR",
+                                "fdIn": {},
+                                "fdOut": {},
+                                "simType": {LEGACY_SIM_TYPE},
+                                "simProfile": "  {LEGACY_SIM_PROFILE}  ",
+                                "cellularProperties": {{
+                                    "simType": {OVERRIDE_SIM_TYPE},
+                                    "simProfile": "   ",
+                                    "phoneNumber": "  {OVERRIDE_PHONE_NUMBER}  "
+                                }}
+                            }}
+                        ]
+                    }}
+                ]
+            }}"#,
+            w_fd.into_raw_fd(),
+            r_fd.into_raw_fd(),
+        );
+        let config: DualFdConfig = serde_json::from_str(&json_config).unwrap();
+        let mut listener = DualFdListener::new(config).unwrap();
+        let (_stream, _sink, chip_info, _guid) = listener.accept().await.unwrap();
+        let chip = chip_info.chip.unwrap();
+        assert_eq!(
+            chip.cellular_properties,
+            Some(CellularProperties {
+                sim_type: Some(OVERRIDE_SIM_TYPE),
+                sim_profile: Some(LEGACY_SIM_PROFILE.to_string()),
+                phone_number: Some(OVERRIDE_PHONE_NUMBER.to_string()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dual_fd_listener_blank_cellular_properties_normalizes_to_none() {
+        let (r_fd, w_fd) = pipe().unwrap();
+        let json_config = format!(
+            r#"{{
+                "devices": [
+                    {{
+                        "name": "blank-cell-dev",
+                        "chips": [
+                            {{
+                                "kind": "CELLULAR",
+                                "fdIn": {},
+                                "fdOut": {},
+                                "simProfile": "   ",
+                                "cellularProperties": {{
+                                    "simProfile": " ",
+                                    "phoneNumber": "\t"
+                                }}
+                            }}
+                        ]
+                    }}
+                ]
+            }}"#,
+            w_fd.into_raw_fd(),
+            r_fd.into_raw_fd(),
+        );
+        let config: DualFdConfig = serde_json::from_str(&json_config).unwrap();
+        let mut listener = DualFdListener::new(config).unwrap();
+        let (_stream, _sink, chip_info, _guid) = listener.accept().await.unwrap();
+        let chip = chip_info.chip.unwrap();
+        assert_eq!(chip.cellular_properties, None);
     }
 }

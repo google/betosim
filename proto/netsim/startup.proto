@@ -116,8 +116,19 @@ message Chip {
   string address = 9;
   // Offset of the chip position from center of device
   optional model.Position offset = 10;
-  // Sim type for modem simulator (1 for normal, 2 for CtsCarrierApiTestCases)
+  // Legacy sim type (1 normal, 2 CtsCarrierApiTestCases); supported as fallback.
   int32 sim_type = 11;
-  // XML SIM ICC profile content
+  // Legacy XML SIM ICC profile; supported when cellular_properties omits it.
   optional string sim_profile = 12;
+  // Optional properties for cellular chipsets
+  optional CellularProperties cellular_properties = 13;
+}
+
+message CellularProperties {
+  // Sim type for modem simulator (0 for No SIM, 1 for normal, 2 for CtsCarrierApiTestCases)
+  optional int32 sim_type = 1;
+  // XML SIM ICC profile content
+  optional string sim_profile = 2;
+  // Phone number (MSISDN) override for cellular chip
+  optional string phone_number = 3;
 }

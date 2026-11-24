@@ -42,7 +42,7 @@ use netsim_model::{
     PacketStream as ApiPacketStream, Pose, set_if_some,
 };
 use packet_stream::{
-    StreamAddress, Streams,
+    StreamAddress, Streams, non_empty_trimmed,
     transport::traits::{PacketSink, PacketStream},
 };
 use slirp_actor::SlirpClient;
@@ -103,6 +103,26 @@ async fn run_loopback(stream: PacketStream, sink: PacketSink, device_name: &str)
         warn!(%error, %device_name, "Loopback packet stream failed");
     }
     info!("Loopback packet stream for {device_name} closed");
+}
+
+fn cellular_chip_variant(
+    chip: &packet_stream::Chip,
+    device_info: Option<&packet_stream::DeviceInfo>,
+    quirks: netsim_model::Quirks,
+    network_configs: Vec<netsim_model::CellNetworkConfig>,
+) -> netsim_model::ChipVariant {
+    let cell_props = chip.cellular_properties.as_ref();
+    let sim_type = cell_props.and_then(|p| p.sim_type);
+    let sim_profile = non_empty_trimmed(cell_props.and_then(|p| p.sim_profile.as_deref()));
+    let timezone_override = non_empty_trimmed(device_info.and_then(|d| d.timezone.as_deref()));
+    netsim_model::ChipVariant::Cell(netsim_model::Cell {
+        sim_type,
+        sim_profile,
+        timezone_override,
+        quirks,
+        network_configs,
+        ..Default::default()
+    })
 }
 
 async fn handle_new_connection(
@@ -180,22 +200,12 @@ async fn handle_new_connection(
                 Vec::new()
             };
 
-            let timezone_override = chip_info
-                .device_info
-                .as_ref()
-                .and_then(|d| d.timezone.as_deref())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-
-            Some(netsim_model::ChipVariant::Cell(netsim_model::Cell {
-                sim_type: chip.sim_type,
-                sim_profile: chip.sim_profile.clone(),
-                timezone_override,
+            Some(cellular_chip_variant(
+                &chip,
+                chip_info.device_info.as_ref(),
                 quirks,
                 network_configs,
-                ..Default::default()
-            }))
+            ))
         }
         ChipKind::NFC => Some(netsim_model::ChipVariant::Nfc(netsim_model::Nfc::default())),
         ChipKind::ETHERNET | ChipKind::CELLULAR_DATA => None,
@@ -1503,5 +1513,30 @@ mod tests {
         assert!(!finished_in_time);
         assert!(start.elapsed() < Duration::from_secs(1));
         drop(unblock_zip_tx);
+    }
+
+    #[test]
+    fn test_cellular_chip_variant_reads_cellular_properties() {
+        let mut chip = packet_stream::Chip::new(ChipKind::CELLULAR, "modem");
+        chip.cellular_properties = Some(packet_stream::CellularProperties {
+            sim_type: Some(2),
+            sim_profile: Some("  <p/>  ".to_string()),
+            phone_number: None,
+        });
+        let device_info = packet_stream::DeviceInfo {
+            timezone: Some("  UTC  ".to_string()),
+            ..Default::default()
+        };
+        let netsim_model::ChipVariant::Cell(cell) = cellular_chip_variant(
+            &chip,
+            Some(&device_info),
+            netsim_model::Quirks::default(),
+            Vec::new(),
+        ) else {
+            panic!("expected Cell variant");
+        };
+        assert_eq!(cell.sim_type, Some(2));
+        assert_eq!(cell.sim_profile.as_deref(), Some("<p/>"));
+        assert_eq!(cell.timezone_override.as_deref(), Some("UTC"));
     }
 }

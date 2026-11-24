@@ -89,4 +89,7 @@ pub use transport::dual_fd::{
 pub use transport::{
     CrossPlatformListener, CrossPlatformStream, ListenerConfig, SocketConfig, SocketType,
 };
-pub use types::{BtControllerProperties, Chip, ChipInfo, ChipKind, DeviceInfo, StreamAddress};
+pub use types::{
+    BtControllerProperties, CellularProperties, Chip, ChipInfo, ChipKind, DeviceInfo,
+    StreamAddress, non_empty_trimmed,
+};

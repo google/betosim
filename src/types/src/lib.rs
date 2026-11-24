@@ -80,6 +80,20 @@ impl ChipInfo {
     }
 }
 
+/// Cellular modem configuration properties (`startup.CellularProperties`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellularProperties {
+    /// SIM card type (0 = No SIM, 1 = Normal SIM, 2 = CtsCarrierApiTestCases).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_type: Option<i32>,
+    /// XML SIM ICC profile content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_profile: Option<String>,
+    /// Phone number (MSISDN) override for cellular chip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_number: Option<String>,
+}
+
 /// Details about a specific chip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chip {
@@ -95,12 +109,9 @@ pub struct Chip {
     pub product_name: String,
     /// Address of the chip (e.g. MAC address).
     pub address: String,
-    /// SIM card type (0 = No SIM, 1 = Normal SIM, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sim_type: Option<i32>,
-    /// XML SIM ICC profile content.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sim_profile: Option<String>,
+    /// Cellular modem properties (SIM type, SIM profile, phone number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cellular_properties: Option<CellularProperties>,
     /// Echo every packet back to the sender instead of attaching a chip.
     /// For transport tests and benchmarks (`startup.Chip.loopback`).
     #[serde(default)]
@@ -121,8 +132,7 @@ impl Chip {
             manufacturer: DEFAULT_MANUFACTURER.to_string(),
             product_name: DEFAULT_PRODUCT_NAME.to_string(),
             address: String::new(),
-            sim_type: None,
-            sim_profile: None,
+            cellular_properties: None,
             loopback: false,
             bt_properties: None,
         }
@@ -601,6 +611,11 @@ impl std::fmt::Display for ChipInfo {
     }
 }
 
+/// Trims `value`, returning `None` if it is `None` or empty after trimming.
+pub fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,5 +753,12 @@ mod tests {
         let props = BtControllerProperties::default();
         assert!(props.to_proto().is_none());
         assert!(BtControllerProperties::from_proto(&Controller::new()).is_none());
+    }
+
+    #[test]
+    fn test_non_empty_trimmed() {
+        assert_eq!(non_empty_trimmed(Some("  15551234567  ")).as_deref(), Some("15551234567"));
+        assert_eq!(non_empty_trimmed(Some("   ")), None);
+        assert_eq!(non_empty_trimmed(None), None);
     }
 }
