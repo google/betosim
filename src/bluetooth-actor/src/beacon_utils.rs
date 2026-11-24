@@ -114,6 +114,7 @@ pub(crate) fn construct_data(
                 16 => uuids_128.extend(uuid_bytes),
                 _ => {
                     tracing::error!(
+                        code = crate::err::Code::InvalidUuidLength as u32,
                         "Invalid UUID length {} bytes for advertising data, skipping",
                         uuid_bytes.len()
                     );
@@ -276,6 +277,8 @@ mod tests {
 
     #[test]
     fn test_construct_data_with_invalid_service_uuid() {
+        let (table, _guard) = common::util::netsim_logger::isolated_error_stats();
+
         let mut adv_data = netsim_model::AdvertiseData::default();
         adv_data.services.push(netsim_model::Service {
             uuid: "180".to_string(), // Invalid odd-length string
@@ -288,6 +291,7 @@ mod tests {
         let data = construct_data(&adv_data, None, true);
         // Invalid services should be skipped. Only Flags remain.
         assert_eq!(data, FLAGS_DATA);
+        assert_eq!(table.snapshot(), vec![(crate::err::Code::InvalidUuidLength as u32, 1)]);
     }
 
     #[test]

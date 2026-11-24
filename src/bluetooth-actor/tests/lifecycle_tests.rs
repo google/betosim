@@ -14,7 +14,7 @@
 
 use actor_framework::ActorLifecycle;
 use bytes::Bytes;
-use common::util::netsim_logger::{err_bases, isolated_error_stats};
+use common::util::netsim_logger::isolated_error_stats;
 use netsim_model::{ChipClient, ChipId};
 use netsim_packets::Reset;
 use tokio::time::Duration;
@@ -159,8 +159,8 @@ async fn test_chip_dies_on_broken_sink_map_err_without_panic() {
     world.when_stream_dropped("A");
     world.when_stream_drop_settles().await;
 
-    // Then a single Bluetooth error stat is recorded
-    World::then_error_stats_are(&table, &[(err_bases::BLUETOOTH, 1)]);
+    // Then no Bluetooth error stat is recorded for an expected BrokenPipe disconnect
+    World::then_error_stats_are(&table, &[]);
 }
 
 // Scenario: Reset re-enables chip states

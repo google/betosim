@@ -14,10 +14,13 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
-use actor_framework::{ActorService, DynContext};
-use netsim_model::{BluetoothMode, Chip, ChipCreate, ChipId, ChipUpdate, ChipVariant};
+use actor_framework::{ActorService, DynContext, FrameworkError};
+use device_actor::{DeviceClient, DeviceError};
+use netsim_model::{
+    BluetoothMode, Chip, ChipCreate, ChipId, ChipUpdate, ChipVariant, ClientError, DeviceId,
+};
 use parking_lot::Mutex;
-use tracing::{info, warn};
+use tracing::{info, instrument::WithSubscriber, warn};
 
 use crate::{
     BluetoothEvent,
@@ -152,7 +155,14 @@ impl ActorService for BluetoothActor {
 
             // Spawn the sink task which forwards packets from the channel to the sink.
             let sink_id = chip_id;
-            ctx.spawn(sink_id, Box::pin(crate::hci_callbacks::sink_loop(sink, rx, sink_id)));
+            let device_client = self.device_client.clone();
+            ctx.spawn(
+                sink_id,
+                Box::pin(
+                    crate::hci_callbacks::sink_loop(sink, rx, sink_id, device_client)
+                        .with_current_subscriber(),
+                ),
+            );
 
             if let BluetoothMode::Sniffer(_) = &mode {
                 HciCallbacks::with_ll(chip_id, tx)
@@ -395,16 +405,39 @@ impl ActorService for BluetoothActor {
     }
 }
 
+fn is_expected_sync_device_name_error(err: &ClientError, shutting_down: bool) -> bool {
+    if matches!(DeviceError::downcast_from(err), Some(DeviceError::DeviceNotFound(_))) {
+        return true;
+    }
+    shutting_down
+        && matches!(
+            err,
+            ClientError::Framework(fw)
+                if matches!(
+                    fw.downcast_ref::<FrameworkError<DeviceError>>(),
+                    Some(FrameworkError::ActorClosed(_) | FrameworkError::ActorDropped(_))
+                )
+        )
+}
+
+async fn sync_device_name_once(dc: DeviceClient, device_id: DeviceId, name: String) {
+    let update = netsim_model::DeviceUpdate { name: Some(name), ..Default::default() };
+    if let Err(error) = dc.update(device_id, update).await
+        && !is_expected_sync_device_name_error(&error, dc.is_shutting_down())
+    {
+        warn!(
+            ?error,
+            code = crate::err::Code::SyncDeviceNameFailed as u32,
+            "Failed to sync device name for device {device_id}"
+        );
+    }
+}
+
 impl BluetoothActor {
     /// Asynchronously synchronize the device name to match the chip name.
-    fn sync_device_name(&self, device_id: netsim_model::DeviceId, name: String) {
+    fn sync_device_name(&self, device_id: DeviceId, name: String) {
         let dc = self.device_client.clone();
-        tokio::spawn(async move {
-            let update = netsim_model::DeviceUpdate { name: Some(name), ..Default::default() };
-            if let Err(error) = dc.update(device_id, update).await {
-                warn!(?error, "Failed to sync device name for device {}", device_id);
-            }
-        });
+        tokio::spawn(sync_device_name_once(dc, device_id, name).with_current_subscriber());
     }
 
     /// Serializes the chip's Bluetooth controller properties and applies them to RootCanal.
@@ -426,16 +459,17 @@ impl BluetoothActor {
 
 #[cfg(test)]
 mod tests {
-    use actor_framework::ResourceClient;
-    use device_actor::client::DeviceClient;
+    use actor_framework::{ResourceClient, ResourceRequest};
+    use common::util::netsim_logger::isolated_error_stats;
     use netsim_model::{
         AdvertiseData, AdvertiseSettings, AdvertiseSettingsUpdate, BeaconParams, BleBeacon,
         BleBeaconUpdate, BluetoothUpdate, ChipClient, ChipCreate, ChipUpdate, ChipVariantUpdate,
-        DeviceId, TxPower,
+        TxPower,
     };
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::err::Code;
 
     #[tokio::test]
     async fn test_beacon_lifecycle_update_reset_delete() {
@@ -504,5 +538,69 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         client.reset(id).await.expect("reset beacon");
         client.delete(id).await.expect("delete beacon");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_sync_device_name_failed_records_error_stat() {
+        let (table, _guard) = isolated_error_stats();
+        let (device_tx, device_rx) = mpsc::channel(1);
+        drop(device_rx);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+
+        sync_device_name_once(device_client, DeviceId(1), "Beacon-1".to_string()).await;
+
+        assert_eq!(table.snapshot(), vec![(Code::SyncDeviceNameFailed as u32, 1)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_sync_device_name_device_not_found_suppressed() {
+        let (table, _guard) = isolated_error_stats();
+        let (device_tx, mut device_rx) = mpsc::channel(1);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+        tokio::spawn(async move {
+            if let Some(ResourceRequest::Update { respond_to, .. }) = device_rx.recv().await {
+                let _ = respond_to.send(Err(DeviceError::DeviceNotFound("1".to_string())));
+            }
+        });
+
+        sync_device_name_once(device_client, DeviceId(1), "Beacon-1".to_string()).await;
+
+        assert_eq!(table.snapshot(), vec![]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_sync_device_name_shutdown_actor_closed_suppressed() {
+        let (table, _guard) = isolated_error_stats();
+        let (device_tx, device_rx) = mpsc::channel(1);
+        drop(device_rx);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+        let _ = device_client.shutdown().await;
+
+        sync_device_name_once(device_client, DeviceId(1), "Beacon-1".to_string()).await;
+
+        assert_eq!(table.snapshot(), vec![]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_sync_device_name_shutdown_actor_dropped_suppressed() {
+        let (table, _guard) = isolated_error_stats();
+        let (device_tx, mut device_rx) = mpsc::channel(1);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+        tokio::spawn(async move {
+            while let Some(req) = device_rx.recv().await {
+                match req {
+                    ResourceRequest::Shutdown { respond_to } => {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                    ResourceRequest::Update { .. } => break,
+                    _ => {}
+                }
+            }
+        });
+        let _ = device_client.shutdown().await;
+
+        sync_device_name_once(device_client, DeviceId(1), "Beacon-1".to_string()).await;
+
+        assert_eq!(table.snapshot(), vec![]);
     }
 }

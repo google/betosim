@@ -129,6 +129,7 @@ mod actions;
 mod beacon;
 mod bluetooth_actor;
 mod device;
+mod err;
 mod error;
 mod hci_callbacks;
 

@@ -48,7 +48,11 @@ impl ActorLifecycle for BluetoothActor {
         _ctx: &mut DynContext<Self>,
     ) {
         if let Err(error) = self.rootcanal.receive_hci(id.0, message) {
-            error!(%error, "Receive HCI error for chip {id}");
+            error!(
+                %error,
+                code = crate::err::Code::ReceiveHciError as u32,
+                "Receive HCI error for chip {id}"
+            );
         }
     }
 
@@ -60,7 +64,11 @@ impl ActorLifecycle for BluetoothActor {
             return;
         }
         if let Err(error) = self.handle_delete(id, ctx).await {
-            error!(%error, "Failed to delete chip {id} after stream closed");
+            error!(
+                %error,
+                code = crate::err::Code::StreamClosedChipDeleteFailed as u32,
+                "Failed to delete chip {id} after stream closed"
+            );
         }
     }
 
@@ -72,7 +80,11 @@ impl ActorLifecycle for BluetoothActor {
             return;
         }
         if let Err(error) = self.handle_delete(id, ctx).await {
-            error!(%error, "Failed to delete chip {id} after sink task closed");
+            error!(
+                %error,
+                code = crate::err::Code::SinkClosedChipDeleteFailed as u32,
+                "Failed to delete chip {id} after sink task closed"
+            );
         }
     }
 
@@ -87,5 +99,87 @@ impl ActorLifecycle for BluetoothActor {
                 self.rootcanal.deliver_packet(receiver_id.0, &packet, phy, rssi);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use actor_framework::{
+        BoxStream, BoxTypedStream, Context, ResourceClient, TimerCallback, TimerKey,
+    };
+    use bytes::Bytes;
+    use common::util::netsim_logger::isolated_error_stats;
+    use device_actor::client::DeviceClient;
+    use futures::future::BoxFuture;
+    use netsim_model::{Chip, ChipId};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::err::Code;
+
+    const HCI_RESET_CMD: [u8; 4] = [0x01, 0x03, 0x0c, 0x00];
+
+    struct NoopContext;
+
+    impl Context<BluetoothActor> for NoopContext {
+        fn set_interval(&mut self, _: Duration) {}
+        fn add_stream(&mut self, _: ChipId, _: BoxStream) {}
+        fn remove_stream(&mut self, _: ChipId) {}
+        fn add_typed_stream(&mut self, _: usize, _: BoxTypedStream<BluetoothEvent>) {}
+        fn remove_typed_stream(&mut self, _: usize) {}
+        fn spawn(&mut self, _: ChipId, _: BoxFuture<'static, ChipId>) {}
+        fn abort(&mut self, _: ChipId) {}
+        fn shutdown(&mut self) {}
+        fn run_later(&mut self, _: Duration, _: TimerCallback<BluetoothActor>) -> TimerKey {
+            unreachable!("run_later is unused in lifecycle error tests")
+        }
+        fn cancel_timer(&mut self, _: TimerKey) {}
+    }
+
+    fn given_actor_with_unbacked_chip(id: ChipId) -> BluetoothActor {
+        let (device_tx, _device_rx) = mpsc::channel(1);
+        let device_client = DeviceClient::new(Box::new(ResourceClient::new(device_tx)));
+        let actor = BluetoothActor::new(device_client, false);
+        let mut chip = Chip::new_test_ble("unbacked-chip");
+        chip.id = id.0;
+        actor.chips.write().insert(id, chip);
+        actor
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_on_stream_unknown_controller_records_receive_hci_error_stat() {
+        let (table, _guard) = isolated_error_stats();
+        let id = ChipId(1);
+        let mut actor = given_actor_with_unbacked_chip(id);
+        let mut ctx = NoopContext;
+
+        ActorLifecycle::on_stream(&mut actor, id, Bytes::from_static(&HCI_RESET_CMD), &mut ctx)
+            .await;
+
+        assert_eq!(table.snapshot(), vec![(Code::ReceiveHciError as u32, 1)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_on_stream_closed_delete_failed_records_error_stat() {
+        let (table, _guard) = isolated_error_stats();
+        let id = ChipId(1);
+        let mut actor = given_actor_with_unbacked_chip(id);
+        let mut ctx = NoopContext;
+
+        ActorLifecycle::on_stream_closed(&mut actor, id, &mut ctx).await;
+
+        assert_eq!(table.snapshot(), vec![(Code::StreamClosedChipDeleteFailed as u32, 1)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_on_task_closed_delete_failed_records_error_stat() {
+        let (table, _guard) = isolated_error_stats();
+        let id = ChipId(1);
+        let mut actor = given_actor_with_unbacked_chip(id);
+        let mut ctx = NoopContext;
+
+        ActorLifecycle::on_task_closed(&mut actor, id, &mut ctx).await;
+
+        assert_eq!(table.snapshot(), vec![(Code::SinkClosedChipDeleteFailed as u32, 1)]);
     }
 }
