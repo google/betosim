@@ -127,11 +127,19 @@ impl StationState {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingHwsimAlias {
+    bssid: MacAddress,
+    hwsim_addr: MacAddress,
+}
+
 #[derive(Debug, Default)]
 struct KeyStoreState {
     secure_bssids: HashSet<MacAddress>,
     controlled_port_bssids: HashSet<MacAddress>,
     stations: HashMap<MacAddress, StationState>,
+    hwsim_aliases: HashMap<MacAddress, MacAddress>,
+    pending_hwsim_aliases: HashMap<MacAddress, PendingHwsimAlias>,
     port_authorized_tx: Option<AuthTx>,
     gtks: HashMap<MacAddress, [u8; 16]>,
     next_epoch: u64,
@@ -150,6 +158,10 @@ impl KeyStoreState {
     fn apply_bssid_mode(&mut self, bssid: MacAddress, is_secure: bool, enterprise: bool) {
         set_bssid_flag(&mut self.secure_bssids, bssid, is_secure);
         set_bssid_flag(&mut self.controlled_port_bssids, bssid, is_secure || enterprise);
+    }
+
+    fn is_managed(&self, addr: &MacAddress) -> bool {
+        self.stations.get(addr).is_some_and(|station| station.port_state.is_some())
     }
 }
 
@@ -206,13 +218,57 @@ impl SharedKeyStore {
         }
     }
 
+    /// Stages a pending `hwsim_addr -> sta_addr` alias until association completes.
+    pub fn stage_hwsim_alias(
+        &self,
+        hwsim_addr: MacAddress,
+        sta_addr: MacAddress,
+        bssid: MacAddress,
+    ) {
+        let mut state = self.state.write();
+        if hwsim_addr == sta_addr {
+            state.pending_hwsim_aliases.remove(&sta_addr);
+        } else {
+            state.pending_hwsim_aliases.insert(sta_addr, PendingHwsimAlias { bssid, hwsim_addr });
+        }
+    }
+
+    /// Records `hwsim_addr -> sta_addr` for `bssid` while protecting associated bindings.
+    pub fn set_hwsim_alias(&self, hwsim_addr: MacAddress, sta_addr: MacAddress, bssid: MacAddress) {
+        let mut state = self.state.write();
+        let sta_on_bssid =
+            state.stations.get(&sta_addr).is_some_and(|station| station.bssid == Some(bssid));
+        if !sta_on_bssid {
+            return;
+        }
+        let current_is_managed =
+            state.hwsim_aliases.get(&hwsim_addr).is_some_and(|current| state.is_managed(current));
+        if sta_addr == hwsim_addr {
+            if !current_is_managed {
+                state.hwsim_aliases.remove(&hwsim_addr);
+            }
+            return;
+        }
+        if !state.is_managed(&hwsim_addr) && (state.is_managed(&sta_addr) || !current_is_managed) {
+            state.hwsim_aliases.insert(hwsim_addr, sta_addr);
+        }
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub fn has_station(&self, addr: &MacAddress) -> bool {
         self.state.read().stations.contains_key(addr)
     }
 
-    pub fn get_station_bssid(&self, sta_addr: &MacAddress) -> Option<MacAddress> {
-        self.state.read().stations.get(sta_addr).and_then(|entry| entry.bssid)
+    #[cfg(any(test, feature = "testing"))]
+    pub fn resolve_hwsim_alias(&self, hwsim_addr: &MacAddress) -> Option<MacAddress> {
+        self.state.read().hwsim_aliases.get(hwsim_addr).copied()
+    }
+
+    /// Returns the BSSID for `addr`, giving an active `hwsim_aliases` target precedence.
+    pub fn get_station_bssid(&self, addr: &MacAddress) -> Option<MacAddress> {
+        let state = self.state.read();
+        let aliased = state.hwsim_aliases.get(addr).and_then(|target| state.stations.get(target));
+        aliased.or_else(|| state.stations.get(addr)).and_then(|entry| entry.bssid)
     }
 
     pub fn set_port_authorized_sender(&self, sender: AuthTx) {
@@ -242,6 +298,13 @@ impl SharedKeyStore {
         let port_state = Some(if requires_cp { PortState::Blocked } else { PortState::Authorized });
         let station = StationState { bssid: Some(bssid), port_state, epoch, ..Default::default() };
         state.stations.insert(sta_addr, station);
+        state.hwsim_aliases.retain(|hwsim, sta| hwsim != &sta_addr && sta != &sta_addr);
+        if let Some(pending) = state.pending_hwsim_aliases.remove(&sta_addr)
+            && pending.bssid == bssid
+            && !state.is_managed(&pending.hwsim_addr)
+        {
+            state.hwsim_aliases.insert(pending.hwsim_addr, sta_addr);
+        }
     }
 
     pub(crate) fn authorize_station(&self, sta_addr: MacAddress, bssid: MacAddress, tk: Vec<u8>) {
@@ -419,19 +482,27 @@ impl SharedKeyStore {
 
     pub(crate) fn remove_station_for_bssid(&self, sta_addr: &MacAddress, bssid: &MacAddress) {
         let mut state = self.state.write();
+        if state.pending_hwsim_aliases.get(sta_addr).is_some_and(|pending| pending.bssid == *bssid)
+        {
+            state.pending_hwsim_aliases.remove(sta_addr);
+        }
         if state.stations.get(sta_addr).is_some_and(|station| station.bssid == Some(*bssid)) {
             state.stations.remove(sta_addr);
+            state.hwsim_aliases.retain(|_, sta| sta != sta_addr);
         }
     }
 
     pub(crate) fn remove_bssid(&self, bssid: &MacAddress) {
         let mut bssids = self.bssids.write();
-        let mut state = self.state.write();
+        let mut state_guard = self.state.write();
+        let state = &mut *state_guard;
         bssids.remove(bssid);
         state.secure_bssids.remove(bssid);
         state.controlled_port_bssids.remove(bssid);
         state.gtks.remove(bssid);
         state.stations.retain(|_, station| station.bssid != Some(*bssid));
+        state.hwsim_aliases.retain(|_, sta| state.stations.contains_key(sta));
+        state.pending_hwsim_aliases.retain(|_, pending| pending.bssid != *bssid);
     }
 
     pub(crate) fn reset_with_mode(
@@ -809,6 +880,9 @@ mod tests {
     const TEST_BSSID_3: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x03]);
     const TEST_STA_MAC: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
     const TEST_STA_MAC_2: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x66]);
+    const TEST_HWSIM_MAC: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x77]);
+    const TEST_HWSIM_MAC_2: MacAddress = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x88]);
+    const TEST_UNASSOCIATED_STA: MacAddress = MacAddress::new([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x02]);
 
     fn dummy_from_ap_frame(bssid: MacAddress, dst: MacAddress, seq: u16, body: &[u8]) -> Ieee80211 {
         let eth = bytes::Bytes::from(create_dummy_ethernet(&bssid.bytes, &dst.bytes, body));
@@ -854,12 +928,16 @@ mod tests {
         // Given
         let s = associated_store();
         gate_and_expect_buffered(&s, TEST_BSSID_1, 1, b"queued");
+        s.associate_station(TEST_STA_MAC_2, TEST_BSSID_1);
+        s.set_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC, TEST_BSSID_1);
+        s.set_hwsim_alias(TEST_HWSIM_MAC_2, TEST_STA_MAC_2, TEST_BSSID_1);
 
         // When
         s.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_2);
 
         // Then
         assert_eq!(s.get_station_bssid(&TEST_STA_MAC), Some(TEST_BSSID_1));
+        assert_eq!(s.resolve_hwsim_alias(&TEST_HWSIM_MAC), Some(TEST_STA_MAC));
 
         // When
         s.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_1);
@@ -869,6 +947,8 @@ mod tests {
         assert_eq!(s.get_station_bssid(&TEST_STA_MAC), None);
         assert_eq!(s.buffered_frame_count(&TEST_STA_MAC), 0);
         assert!(matches!(gate(&s, TEST_BSSID_1, b"x"), DownlinkPortAction::Drop));
+        assert_eq!(s.resolve_hwsim_alias(&TEST_HWSIM_MAC), None);
+        assert_eq!(s.resolve_hwsim_alias(&TEST_HWSIM_MAC_2), Some(TEST_STA_MAC_2));
     }
 
     #[test]
@@ -967,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_bssid_clears_only_its_stations_and_gtk() {
+    fn test_remove_bssid_clears_stations_gtk_and_aliases() {
         // Given
         let s = SharedKeyStore::new();
         s.register_bssid(TEST_BSSID_1, false, true);
@@ -976,6 +1056,8 @@ mod tests {
         s.authorize_eap_station(TEST_STA_MAC, TEST_BSSID_2, 1);
         s.associate_station(TEST_STA_MAC_2, TEST_BSSID_1);
         s.set_gtk(TEST_BSSID_2, [0x22; 16]);
+        s.set_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC, TEST_BSSID_2);
+        s.set_hwsim_alias(TEST_HWSIM_MAC_2, TEST_STA_MAC_2, TEST_BSSID_1);
 
         // When
         s.remove_bssid(&TEST_BSSID_2);
@@ -988,6 +1070,205 @@ mod tests {
         assert!(s.has_station(&TEST_STA_MAC_2));
         assert!(s.get_gtk(&TEST_BSSID_2).is_none());
         assert!(s.take_eap_success_epoch(&TEST_STA_MAC, &TEST_BSSID_2, 1).is_none());
+        assert!(s.resolve_hwsim_alias(&TEST_HWSIM_MAC).is_none());
+        assert_eq!(s.resolve_hwsim_alias(&TEST_HWSIM_MAC_2), Some(TEST_STA_MAC_2));
+    }
+
+    fn aliased_store() -> SharedKeyStore {
+        let store = associated_store();
+        store.set_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC, TEST_BSSID_1);
+        store
+    }
+
+    fn staged_store() -> SharedKeyStore {
+        let store = bssid_store();
+        store.stage_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC, TEST_BSSID_1);
+        store
+    }
+
+    type Alias = Option<MacAddress>;
+
+    fn assoc_alias(store: &SharedKeyStore, sta: MacAddress, bssid: MacAddress) -> Alias {
+        store.associate_station(sta, bssid);
+        store.resolve_hwsim_alias(&TEST_HWSIM_MAC)
+    }
+
+    fn set_alias(store: &SharedKeyStore, sta: MacAddress, bssid: MacAddress) -> Alias {
+        store.set_hwsim_alias(TEST_HWSIM_MAC, sta, bssid);
+        store.resolve_hwsim_alias(&TEST_HWSIM_MAC)
+    }
+
+    #[test]
+    fn test_get_station_bssid_prefers_hwsim_alias_over_stale_direct_entry() {
+        let store = aliased_store();
+        store.set_station_bssid(TEST_HWSIM_MAC, TEST_BSSID_2);
+        assert_eq!(store.get_station_bssid(&TEST_HWSIM_MAC), Some(TEST_BSSID_1));
+    }
+
+    #[test]
+    fn test_associate_station_clears_stale_hwsim_alias_for_reassociated_sta() {
+        assert_eq!(assoc_alias(&aliased_store(), TEST_STA_MAC, TEST_BSSID_2), None);
+    }
+
+    #[test]
+    fn test_associate_station_clears_stale_hwsim_alias_when_hwsim_addr_associates() {
+        let store = aliased_store();
+        assert_eq!(assoc_alias(&store, TEST_HWSIM_MAC, TEST_BSSID_2), None);
+        assert_eq!(store.get_station_bssid(&TEST_HWSIM_MAC), Some(TEST_BSSID_2));
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_self_clears_stale_alias_when_unprotected() {
+        let store = SharedKeyStore::new();
+        store.set_station_bssid(TEST_STA_MAC, TEST_BSSID_1);
+        store.set_station_bssid(TEST_HWSIM_MAC, TEST_BSSID_1);
+        assert_eq!(set_alias(&store, TEST_STA_MAC, TEST_BSSID_1), Some(TEST_STA_MAC));
+        assert_eq!(set_alias(&store, TEST_HWSIM_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_ignores_self_clear_when_hwsim_not_on_bssid() {
+        let store = SharedKeyStore::new();
+        store.set_station_bssid(TEST_STA_MAC, TEST_BSSID_1);
+        store.set_station_bssid(TEST_HWSIM_MAC, TEST_BSSID_1);
+        assert_eq!(set_alias(&store, TEST_STA_MAC, TEST_BSSID_1), Some(TEST_STA_MAC));
+        assert_eq!(set_alias(&store, TEST_HWSIM_MAC, TEST_BSSID_2), Some(TEST_STA_MAC));
+    }
+
+    #[test]
+    fn test_reset_clears_hwsim_alias() {
+        let store = aliased_store();
+        store.reset_with_mode(TEST_BSSID_1, false, false);
+        assert!(store.resolve_hwsim_alias(&TEST_HWSIM_MAC).is_none());
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_ignores_unassociated_candidate_over_associated_alias() {
+        let store = aliased_store();
+        store.set_station_bssid(TEST_UNASSOCIATED_STA, TEST_BSSID_2);
+        assert_eq!(set_alias(&store, TEST_UNASSOCIATED_STA, TEST_BSSID_2), Some(TEST_STA_MAC));
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_allows_associated_peer_overwrite_on_own_bssid() {
+        let store = aliased_store();
+        store.associate_station(TEST_STA_MAC_2, TEST_BSSID_2);
+        assert_eq!(set_alias(&store, TEST_STA_MAC_2, TEST_BSSID_2), Some(TEST_STA_MAC_2));
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_ignores_station_associated_on_other_bssid() {
+        let store = aliased_store();
+        store.associate_station(TEST_STA_MAC_2, TEST_BSSID_2);
+        assert_eq!(set_alias(&store, TEST_STA_MAC_2, TEST_BSSID_1), Some(TEST_STA_MAC));
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_ignores_self_clear_when_target_managed() {
+        let store = aliased_store();
+        store.set_station_bssid(TEST_HWSIM_MAC, TEST_BSSID_1);
+        assert_eq!(set_alias(&store, TEST_HWSIM_MAC, TEST_BSSID_1), Some(TEST_STA_MAC));
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_promotes_once_and_consumes_pending() {
+        let store = staged_store();
+        assert_eq!(store.resolve_hwsim_alias(&TEST_HWSIM_MAC), None);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), Some(TEST_STA_MAC));
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_mismatched_bssid_consumes_without_promoting() {
+        let store = staged_store();
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_2), None);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_matching_peer_association_replaces_active_alias() {
+        let store = aliased_store();
+        store.stage_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC_2, TEST_BSSID_2);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC_2, TEST_BSSID_2), Some(TEST_STA_MAC_2));
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_self_stage_clears_pending() {
+        let store = staged_store();
+        store.stage_hwsim_alias(TEST_STA_MAC, TEST_STA_MAC, TEST_BSSID_1);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_blocked_when_hwsim_addr_managed() {
+        let store = staged_store();
+        store.associate_station(TEST_HWSIM_MAC, TEST_BSSID_1);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_cleared_by_remove_station_for_bssid() {
+        let store = staged_store();
+        store.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_1);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_remove_station_for_bssid_preserves_other_station_pending_alias_on_same_bssid() {
+        let store = staged_store();
+        store.stage_hwsim_alias(TEST_HWSIM_MAC_2, TEST_STA_MAC_2, TEST_BSSID_1);
+        store.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_1);
+        store.associate_station(TEST_STA_MAC_2, TEST_BSSID_1);
+        assert_eq!(store.resolve_hwsim_alias(&TEST_HWSIM_MAC_2), Some(TEST_STA_MAC_2));
+    }
+
+    #[test]
+    fn test_remove_station_for_bssid_preserves_cross_bssid_pending_alias() {
+        let store = bssid_store();
+        store.associate_station(TEST_STA_MAC, TEST_BSSID_1);
+        store.stage_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC, TEST_BSSID_2);
+        store.remove_station_for_bssid(&TEST_STA_MAC, &TEST_BSSID_1);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_2), Some(TEST_STA_MAC));
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_cleared_by_remove_bssid() {
+        let store = staged_store();
+        store.stage_hwsim_alias(TEST_HWSIM_MAC, TEST_STA_MAC_2, TEST_BSSID_2);
+        store.remove_bssid(&TEST_BSSID_1);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC_2, TEST_BSSID_2), Some(TEST_STA_MAC_2));
+    }
+
+    #[test]
+    fn test_stage_hwsim_alias_cleared_by_reset() {
+        let store = staged_store();
+        store.reset_with_mode(TEST_BSSID_1, false, false);
+        assert_eq!(assoc_alias(&store, TEST_STA_MAC, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_ignores_unknown_sta_when_unmanaged() {
+        assert_eq!(set_alias(&bssid_store(), TEST_UNASSOCIATED_STA, TEST_BSSID_1), None);
+    }
+
+    #[test]
+    fn test_set_hwsim_alias_protects_managed_hwsim_against_associated_peer() {
+        let store = bssid_store();
+        store.associate_station(TEST_HWSIM_MAC, TEST_BSSID_1);
+        store.associate_station(TEST_STA_MAC_2, TEST_BSSID_2);
+        assert_eq!(set_alias(&store, TEST_STA_MAC_2, TEST_BSSID_2), None);
+        assert_eq!(store.get_station_bssid(&TEST_HWSIM_MAC), Some(TEST_BSSID_1));
+    }
+
+    #[test]
+    fn test_remove_station_on_hwsim_addr_preserves_active_alias() {
+        let store = aliased_store();
+        store.set_station_bssid(TEST_HWSIM_MAC, TEST_BSSID_2);
+        store.remove_station_for_bssid(&TEST_HWSIM_MAC, &TEST_BSSID_2);
+        assert!(!store.has_station(&TEST_HWSIM_MAC));
+        assert_eq!(store.resolve_hwsim_alias(&TEST_HWSIM_MAC), Some(TEST_STA_MAC));
+        assert_eq!(store.get_station_bssid(&TEST_HWSIM_MAC), Some(TEST_BSSID_1));
     }
 
     #[test]
