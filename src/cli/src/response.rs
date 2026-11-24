@@ -15,13 +15,14 @@
 use std::cmp::max;
 
 use common::util::time_display::TimeDisplay;
+use netsim_model::ChipId;
 use netsim_proto::{frontend, model};
 use netsim_rest_api::CaptureInfo;
 use protobuf::MessageField;
 
 use crate::{
     args::{self, Beacon, BeaconCreate, Command, Link, OnOffState},
-    display::LinkChipIdDisplay,
+    display::{format_link_chip_id, format_optional_link_chip_id},
     grpc_client::{GrpcRequest, GrpcResponse},
 };
 
@@ -105,8 +106,8 @@ impl args::Command {
                     {
                         println!(
                             "Successfully created link (Sender: {}, Receiver: {}, Type: {:?})",
-                            LinkChipIdDisplay(match_link.sender_id),
-                            LinkChipIdDisplay(match_link.receiver_id),
+                            format_link_chip_id(ChipId(match_link.sender_id)),
+                            format_link_chip_id(ChipId(match_link.receiver_id)),
                             match_link.kind
                         );
                     }
@@ -128,8 +129,8 @@ impl args::Command {
 
                         println!(
                             "Successfully patched RSSI for link (Sender: {}, Receiver: {}, Type: {}) to {}.",
-                            LinkChipIdDisplay(sender.unwrap_or(0)),
-                            LinkChipIdDisplay(receiver.unwrap_or(0)),
+                            format_optional_link_chip_id(sender.map(ChipId)),
+                            format_optional_link_chip_id(receiver.map(ChipId)),
                             args.chip_kind,
                             rssi
                         );
@@ -149,8 +150,8 @@ impl args::Command {
 
                         println!(
                             "Successfully deleted RSSI for link (Sender: {}, Receiver: {}, Type: {}).",
-                            LinkChipIdDisplay(sender.unwrap_or(0)),
-                            LinkChipIdDisplay(receiver.unwrap_or(0)),
+                            format_optional_link_chip_id(sender.map(ChipId)),
+                            format_optional_link_chip_id(receiver.map(ChipId)),
                             args.chip_kind
                         );
                     }

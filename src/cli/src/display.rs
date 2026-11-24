@@ -15,13 +15,17 @@
 use std::{borrow::Cow, cmp::max, collections::HashMap, fmt};
 
 use netsim_model::{
-    AdvertiseData, AdvertiseSettings, BleBeacon, BluetoothMode, CallState, Chip, ChipVariant,
-    Device, Interval, Position, Radio, RegistrationStatus as ModelRegistrationStatus, TxPower,
+    AdvertiseData, AdvertiseSettings, BleBeacon, BluetoothMode, CallState, Chip, ChipId,
+    ChipVariant, Device, Interval, Position, Radio, RegistrationStatus as ModelRegistrationStatus,
+    TxPower,
 };
 use netsim_proto::cell::RegistrationStatus;
 use netsim_rest_api::{ListDeviceResponse, ListLinkResponse};
 
 const INDENT_WIDTH: usize = 2;
+const CHIP_LABEL_WIDTH: usize = 9;
+const BEACON_FIELD_WIDTH: usize = 25;
+const WILDCARD_CHIP_ID: ChipId = ChipId(0);
 
 pub(crate) fn format_registration_status(status: RegistrationStatus) -> &'static str {
     match status {
@@ -85,6 +89,14 @@ pub(crate) fn format_call_direction(
     }
 }
 
+pub(crate) fn format_link_chip_id(id: ChipId) -> Cow<'static, str> {
+    if id == WILDCARD_CHIP_ID { Cow::Borrowed("ALL") } else { Cow::Owned(id.to_string()) }
+}
+
+pub(crate) fn format_optional_link_chip_id(id: Option<ChipId>) -> Cow<'static, str> {
+    format_link_chip_id(id.unwrap_or(WILDCARD_CHIP_ID))
+}
+
 /// # Invariants
 /// Displayed values **do not** end in a newline.
 pub(crate) struct Displayer<T> {
@@ -120,14 +132,11 @@ impl fmt::Display for Displayer<&ListDeviceResponse> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
 
-        let mut devices = self.value.devices.iter().peekable();
-        while let Some(device) = devices.next() {
-            write!(f, "{:indent$}{}", "", Displayer::new(device, self.verbose))?;
-            if devices.peek().is_some() {
-                // We print the newline here instead of in the Device displayer because we don't
-                // want a newline before the very first device.
+        for (idx, device) in self.value.devices.iter().enumerate() {
+            if idx > 0 {
                 writeln!(f)?;
             }
+            write!(f, "{:indent$}{}", "", Displayer::new(device, self.verbose))?;
         }
 
         Ok(())
@@ -163,15 +172,27 @@ impl fmt::Display for Displayer<&Device> {
     }
 }
 
+impl Displayer<&Chip> {
+    fn write_radio_line(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        label: &str,
+        radio: &Radio,
+    ) -> fmt::Result {
+        let indent = self.indent;
+        writeln!(f)?;
+        write!(f, "{:indent$}{label:CHIP_LABEL_WIDTH$}{}", "", Displayer::new(radio, self.verbose))
+    }
+}
+
 impl fmt::Display for Displayer<&Chip> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
-        let width = 9;
 
         match self.value.variant.as_ref() {
             Some(ChipVariant::Bluetooth(bt)) => {
                 if let BluetoothMode::Beacon(beacon_params) = &bt.mode {
-                    let beacon_width = 16 + width;
+                    let beacon_width = 16 + CHIP_LABEL_WIDTH;
 
                     writeln!(f)?;
                     write!(
@@ -192,58 +213,22 @@ impl fmt::Display for Displayer<&Chip> {
                         )?;
                     }
                 } else {
-                    writeln!(f)?;
-                    write!(
-                        f,
-                        "{:indent$}{:width$}{}",
-                        "",
-                        "ble: ",
-                        Displayer::new(&bt.low_energy, self.verbose)
-                    )?;
-
-                    writeln!(f)?;
-                    write!(
-                        f,
-                        "{:indent$}{:width$}{}",
-                        "",
-                        "classic: ",
-                        Displayer::new(&bt.classic, self.verbose)
-                    )?;
+                    self.write_radio_line(f, "ble: ", &bt.low_energy)?;
+                    self.write_radio_line(f, "classic: ", &bt.classic)?;
                 }
             }
             Some(ChipVariant::Wifi(wifi)) => {
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:width$}{}",
-                    "",
-                    "wifi: ",
-                    Displayer::new(&wifi.radio, self.verbose)
-                )?;
+                self.write_radio_line(f, "wifi: ", &wifi.radio)?;
             }
             Some(ChipVariant::Uwb(uwb)) => {
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:width$}{}",
-                    "",
-                    "uwb: ",
-                    Displayer::new(&uwb.radio, self.verbose)
-                )?;
+                self.write_radio_line(f, "uwb: ", &uwb.radio)?;
             }
             Some(ChipVariant::Ethernet(eth)) => {
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:width$}{}",
-                    "",
-                    "ethernet: ",
-                    Displayer::new(&eth.radio, self.verbose)
-                )?;
+                self.write_radio_line(f, "ethernet: ", &eth.radio)?;
             }
             Some(ChipVariant::Cell(cell)) => {
                 writeln!(f)?;
-                write!(f, "{:indent$}{:width$}", "", "cellular: ")?;
+                write!(f, "{:indent$}{:CHIP_LABEL_WIDTH$}", "", "cellular: ")?;
                 if cell.state.is_empty() {
                     write!(f, "{}", Displayer::new(&cell.radio, self.verbose))?;
                 } else {
@@ -259,35 +244,20 @@ impl fmt::Display for Displayer<&Chip> {
                     )?;
                     if !cell.active_calls.is_empty() {
                         write!(f, " | active_calls: ")?;
-                        let mut calls = cell.active_calls.iter().peekable();
-                        while let Some(call) = calls.next() {
-                            write!(f, "{}({})", call.number, format_model_call_state(call.state))?;
-                            if calls.peek().is_some() {
+                        for (idx, call) in cell.active_calls.iter().enumerate() {
+                            if idx > 0 {
                                 write!(f, ", ")?;
                             }
+                            write!(f, "{}({})", call.number, format_model_call_state(call.state))?;
                         }
                     }
                 }
             }
             Some(ChipVariant::CellularData(cell_data)) => {
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:width$}{}",
-                    "",
-                    "cellular-data: ",
-                    Displayer::new(&cell_data.radio, self.verbose)
-                )?;
+                self.write_radio_line(f, "cellular-data: ", &cell_data.radio)?;
             }
             Some(ChipVariant::Nfc(nfc)) => {
-                writeln!(f)?;
-                write!(
-                    f,
-                    "{:indent$}{:width$}{}",
-                    "",
-                    "nfc: ",
-                    Displayer::new(&nfc.radio, self.verbose)
-                )?;
+                self.write_radio_line(f, "nfc: ", &nfc.radio)?;
             }
             None => {
                 if self.verbose {
@@ -342,11 +312,7 @@ impl fmt::Display for Displayer<&Position> {
         let indent = self.indent;
         let precision = 2;
 
-        if self.verbose
-            || (self.value.x != f32::default()
-                || self.value.y != f32::default()
-                || self.value.z != f32::default())
-        {
+        if self.verbose || *self.value != Position::default() {
             write!(
                 f,
                 "{:indent$} position: {:.precision$}, {:.precision$}, {:.precision$}",
@@ -361,7 +327,6 @@ impl fmt::Display for Displayer<&Position> {
 impl fmt::Display for Displayer<&AdvertiseSettings> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
-        let width = 25;
 
         if let Some(tx_power) = self.value.tx_power.as_ref() {
             writeln!(f)?;
@@ -375,12 +340,20 @@ impl fmt::Display for Displayer<&AdvertiseSettings> {
 
         if self.value.scannable {
             writeln!(f)?;
-            write!(f, "{:indent$}{:width$}: {}", "", "scannable", self.value.scannable)?;
+            write!(
+                f,
+                "{:indent$}{:BEACON_FIELD_WIDTH$}: {}",
+                "", "scannable", self.value.scannable
+            )?;
         }
 
-        if self.value.timeout != u64::default() {
+        if self.value.timeout != 0 {
             writeln!(f)?;
-            write!(f, "{:indent$}{:width$}: {} ms", "", "timeout", self.value.timeout)?;
+            write!(
+                f,
+                "{:indent$}{:BEACON_FIELD_WIDTH$}: {} ms",
+                "", "timeout", self.value.timeout
+            )?;
         }
 
         Ok(())
@@ -390,31 +363,30 @@ impl fmt::Display for Displayer<&AdvertiseSettings> {
 impl fmt::Display for Displayer<&AdvertiseData> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
-        let width = 25;
 
-        if self.value.include_device_name != bool::default() {
+        if self.value.include_device_name {
             writeln!(f)?;
             write!(
                 f,
-                "{:indent$}{:width$}: {}",
+                "{:indent$}{:BEACON_FIELD_WIDTH$}: {}",
                 "", "include device name", self.value.include_device_name
             )?;
         }
 
-        if self.value.include_tx_power_level != bool::default() {
+        if self.value.include_tx_power_level {
             writeln!(f)?;
             write!(
                 f,
-                "{:indent$}{:width$}: {}",
+                "{:indent$}{:BEACON_FIELD_WIDTH$}: {}",
                 "", "include tx power level", self.value.include_tx_power_level
             )?;
         }
 
-        if self.value.manufacturer_data != Vec::<u8>::default() {
+        if !self.value.manufacturer_data.is_empty() {
             writeln!(f)?;
             write!(
                 f,
-                "{:indent$}{:width$}: {}",
+                "{:indent$}{:BEACON_FIELD_WIDTH$}: {}",
                 "",
                 "manufacturer data bytes",
                 self.value.manufacturer_data.len()
@@ -428,14 +400,13 @@ impl fmt::Display for Displayer<&AdvertiseData> {
 impl fmt::Display for Displayer<&Interval> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
-        let width = 25;
 
         match self.value {
             Interval::Milliseconds(interval) => {
-                write!(f, "{:indent$}{:width$}: {} ms", "", "interval", interval)
+                write!(f, "{:indent$}{:BEACON_FIELD_WIDTH$}: {interval} ms", "", "interval")
             }
             Interval::AdvertiseMode(mode) => {
-                write!(f, "{:indent$}{:width$}: {:?}", "", "advertise mode", mode)
+                write!(f, "{:indent$}{:BEACON_FIELD_WIDTH$}: {mode:?}", "", "advertise mode")
             }
         }
     }
@@ -444,14 +415,13 @@ impl fmt::Display for Displayer<&Interval> {
 impl fmt::Display for Displayer<&TxPower> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indent = self.indent;
-        let width = 25;
 
         match self.value {
             TxPower::Dbm(dbm) => {
-                write!(f, "{:indent$}{:width$}: {} dBm", "", "tx power", dbm)
+                write!(f, "{:indent$}{:BEACON_FIELD_WIDTH$}: {dbm} dBm", "", "tx power")
             }
             TxPower::TxPowerLevel(level) => {
-                write!(f, "{:indent$}{:width$}: {:?}", "", "tx power level", level)
+                write!(f, "{:indent$}{:BEACON_FIELD_WIDTH$}: {level:?}", "", "tx power level")
             }
         }
     }
@@ -487,15 +457,6 @@ impl fmt::Display for Displayer<&bool> {
     }
 }
 
-// Helper struct to display link's chip IDs, showing "ALL" for ID 0.
-pub(crate) struct LinkChipIdDisplay(pub u32);
-
-impl fmt::Display for LinkChipIdDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 == 0 { write!(f, "ALL") } else { write!(f, "{}", self.0) }
-    }
-}
-
 pub(crate) struct LinkTable<'a> {
     pub(crate) links: &'a ListLinkResponse,
     pub(crate) devices: &'a ListDeviceResponse,
@@ -508,21 +469,18 @@ impl fmt::Display for Displayer<LinkTable<'_>> {
             return write!(f, "{:indent$}No links with properties are currently set.", "");
         }
 
-        let chip_to_device: HashMap<u32, Cow<'_, str>> = self
+        let chip_to_device: HashMap<ChipId, Cow<'_, str>> = self
             .value
             .devices
             .devices
             .iter()
             .flat_map(|device| {
                 let label = device_label(device);
-                device.chips.iter().map(move |chip| (chip.id, label.clone()))
+                device.chips.iter().map(move |chip| (ChipId(chip.id), label.clone()))
             })
             .collect();
-        let endpoint = |id: u32| -> Cow<'_, str> {
-            chip_to_device
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| Cow::Owned(LinkChipIdDisplay(id).to_string()))
+        let endpoint = |id: ChipId| -> Cow<'_, str> {
+            chip_to_device.get(&id).cloned().unwrap_or_else(|| format_link_chip_id(id))
         };
 
         let mut id_width = 4;
@@ -540,8 +498,8 @@ impl fmt::Display for Displayer<LinkTable<'_>> {
         ));
         for link in &self.value.links.links {
             let id: Cow<'_, str> = Cow::Owned(link.id.0.to_string());
-            let sender = endpoint(link.sender.0);
-            let receiver = endpoint(link.receiver.0);
+            let sender = endpoint(link.sender);
+            let receiver = endpoint(link.receiver);
             let kind: Cow<'_, str> = Cow::Owned(format!("{:?}", link.kind));
             let rssi: Cow<'_, str> = Cow::Owned(link.rssi.to_string());
             id_width = max(id_width, id.chars().count());
@@ -586,11 +544,26 @@ impl fmt::Display for Displayer<LinkTable<'_>> {
 #[cfg(test)]
 mod tests {
     use netsim_model::{
-        Call, CallDirection, CallState, Cell, CellularData, Chip, ChipVariant, Ethernet, Nfc,
-        Radio, RegistrationStatus,
+        AdvertiseMode, AdvertiseTxPower, BeaconParams, Bluetooth, Call, CallDirection, CallState,
+        Cell, CellularData, Chip, ChipVariant, Ethernet, Nfc, Radio, RegistrationStatus, Service,
+        Uwb, Wifi,
     };
 
     use super::*;
+
+    fn radio(state: bool, rx_count: u64, tx_count: u64) -> Radio {
+        Radio { state: Some(state), tx_count, rx_count, ..Default::default() }
+    }
+
+    fn format_indented_chip(chip: &Chip) -> String {
+        let mut displayer = Displayer::new(chip, false);
+        displayer.indent = INDENT_WIDTH;
+        format!("{displayer}")
+    }
+
+    fn format_variant(variant: ChipVariant) -> String {
+        format_indented_chip(&Chip { variant: Some(variant), ..Default::default() })
+    }
 
     #[test]
     fn test_display_cellular_chip_no_detail() {
@@ -897,5 +870,176 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format!("{}", Displayer::new(&device, false)), "emulator-5554 ");
+    }
+
+    #[test]
+    fn test_display_cellular_chip_joins_multiple_active_calls() {
+        let output = format_variant(ChipVariant::Cell(Cell {
+            state: "active".to_string(),
+            rssi: 15,
+            voice_registration: RegistrationStatus::RegisteredHome,
+            data_registration: RegistrationStatus::NotRegistered,
+            active_calls: vec![
+                Call {
+                    number: "12345".to_string(),
+                    state: CallState::Active,
+                    direction: CallDirection::MobileOriginated,
+                },
+                Call {
+                    number: "67890".to_string(),
+                    state: CallState::Holding,
+                    direction: CallDirection::MobileTerminated,
+                },
+            ],
+            ..Default::default()
+        }));
+
+        assert_eq!(
+            output,
+            "\n  cellular: state: active | rssi: 15 | voice: home | data: unregistered | active_calls: 12345(active), 67890(holding)"
+        );
+    }
+
+    #[test]
+    fn test_display_bluetooth_device_chip() {
+        let output = format_variant(ChipVariant::Bluetooth(Box::new(Bluetooth {
+            low_energy: radio(true, 3, 7),
+            classic: radio(false, 11, 13),
+            ..Default::default()
+        })));
+
+        let expected = concat!(
+            "\n  ble:     up       | rx_count:         3 | tx_count:         7",
+            "\n  classic: down     | rx_count:        11 | tx_count:        13",
+        );
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_display_wifi_chip() {
+        let output = format_variant(ChipVariant::Wifi(Wifi { radio: radio(true, 12, 34) }));
+
+        assert_eq!(output, "\n  wifi:    up       | rx_count:        12 | tx_count:        34");
+    }
+
+    #[test]
+    fn test_display_uwb_chip() {
+        let output = format_variant(ChipVariant::Uwb(Uwb {
+            radio: radio(true, 8, 16),
+            ..Default::default()
+        }));
+
+        assert_eq!(output, "\n  uwb:     up       | rx_count:         8 | tx_count:        16");
+    }
+
+    #[test]
+    fn test_display_bluetooth_beacon_chip() {
+        let chip = Chip {
+            name: "b1".to_string(),
+            variant: Some(ChipVariant::Bluetooth(Box::new(Bluetooth {
+                low_energy: radio(true, 4, 9),
+                mode: BluetoothMode::Beacon(Box::<BeaconParams>::default()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_indented_chip(&chip),
+            "\n  beacon-ble (b1):          up       | rx_count:         4 | tx_count:         9"
+        );
+    }
+
+    #[test]
+    fn test_display_list_device_response_separates_multiple_devices() {
+        let response = ListDeviceResponse {
+            devices: vec![
+                Device { id: 1, name: "Pixel_7".to_string(), ..Default::default() },
+                Device { id: 2, name: "Pixel_8".to_string(), ..Default::default() },
+            ],
+        };
+
+        let displayer = Displayer::new(&response, false);
+        assert_eq!(format!("{displayer}"), "Pixel_7   \nPixel_8   ");
+    }
+
+    #[test]
+    fn test_display_position_non_default_formats_coordinates() {
+        let pos = Position { x: 1.5, y: 0.0, z: -2.25 };
+        let displayer = Displayer::new(&pos, false);
+        assert_eq!(format!("{displayer}"), " position: 1.50, 0.00, -2.25");
+    }
+
+    #[test]
+    fn test_display_ble_beacon_omits_unset_settings_and_data_fields() {
+        let beacon = BleBeacon {
+            address: "02:00:00:00:00:01".to_string(),
+            settings: Some(AdvertiseSettings {
+                interval: Some(Interval::Milliseconds(250)),
+                tx_power: Some(TxPower::Dbm(-15)),
+                scannable: false,
+                timeout: 0,
+            }),
+            adv_data: Some(AdvertiseData {
+                include_device_name: false,
+                include_tx_power_level: false,
+                manufacturer_data: vec![],
+                services: vec![Service { uuid: "180D".to_string(), data: vec![] }],
+            }),
+            scan_response: None,
+        };
+
+        let displayer = Displayer::new(&beacon, true);
+        let expected = concat!(
+            "address: 02:00:00:00:00:01\n",
+            "advertise settings:\n",
+            "  tx power                 : -15 dBm\n",
+            "  interval                 : 250 ms\n",
+            "advertise packet data:",
+        );
+        assert_eq!(format!("{displayer}"), expected);
+    }
+
+    #[test]
+    fn test_display_ble_beacon_formats_populated_settings_and_data() {
+        let beacon = BleBeacon {
+            address: "02:00:00:00:00:01".to_string(),
+            settings: Some(AdvertiseSettings {
+                interval: Some(Interval::AdvertiseMode(AdvertiseMode::LowLatency)),
+                tx_power: Some(TxPower::TxPowerLevel(AdvertiseTxPower::High)),
+                scannable: true,
+                timeout: 500,
+            }),
+            adv_data: Some(AdvertiseData {
+                include_device_name: true,
+                include_tx_power_level: true,
+                manufacturer_data: vec![0xAA, 0xBB, 0xCC],
+                services: vec![],
+            }),
+            scan_response: None,
+        };
+
+        let displayer = Displayer::new(&beacon, true);
+        let expected = concat!(
+            "address: 02:00:00:00:00:01\n",
+            "advertise settings:\n",
+            "  tx power level           : High\n",
+            "  advertise mode           : LowLatency\n",
+            "  scannable                : true\n",
+            "  timeout                  : 500 ms\n",
+            "advertise packet data:\n",
+            "  include device name      : true\n",
+            "  include tx power level   : true\n",
+            "  manufacturer data bytes  : 3",
+        );
+        assert_eq!(format!("{displayer}"), expected);
+    }
+
+    #[test]
+    fn test_format_optional_link_chip_id() {
+        let cases = [(None, "ALL"), (Some(ChipId(0)), "ALL"), (Some(ChipId(7)), "7")];
+        for (input, expected) in cases {
+            assert_eq!(format_optional_link_chip_id(input), expected);
+        }
     }
 }

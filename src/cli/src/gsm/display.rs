@@ -95,8 +95,10 @@ impl fmt::Display for Displayer<&Cell> {
         } else {
             writeln!(f, "{:indent$}Active Calls:", "")?;
             let call_indent = indent + 2;
-            let mut calls = self.value.active_calls.iter().peekable();
-            while let Some(call) = calls.next() {
+            for (idx, call) in self.value.active_calls.iter().enumerate() {
+                if idx > 0 {
+                    writeln!(f)?;
+                }
                 write!(
                     f,
                     "{:call_indent$}- Number: {}, State: {}, Direction: {}",
@@ -105,9 +107,6 @@ impl fmt::Display for Displayer<&Cell> {
                     format_call_state(call.state.enum_value_or_default()),
                     format_call_direction(call.direction.enum_value_or_default())
                 )?;
-                if calls.peek().is_some() {
-                    writeln!(f)?;
-                }
             }
         }
         Ok(())
