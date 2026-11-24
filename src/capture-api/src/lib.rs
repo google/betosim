@@ -147,12 +147,6 @@ pub struct CaptureCreate {
 pub enum CaptureAction {
     /// Gets a packet sender for capture.
     GetPacketSender,
-    /// Patch a capture (e.g., enable/disable).
-    Patch { chip_id: ChipId, enabled: bool },
-    /// Create a new capture.
-    Create { chip_id: ChipId, chip_kind: ChipKind, device_name: String },
-    /// Delete a capture.
-    Delete { chip_id: ChipId },
     /// Set default capture directory.
     SetCaptureDirectory { path: PathBuf },
     /// Subscribe to a live PCAP stream of the chip's packets. Independent of
@@ -167,8 +161,6 @@ pub enum CaptureAction {
 pub enum CaptureActionResult {
     /// Action succeeded.
     Success,
-    /// The action resulted in an update and returns the new state.
-    Updated(CaptureInfo),
     /// Returns a high-throughput packet sender.
     #[serde(skip)]
     PacketSender(tokio::sync::mpsc::UnboundedSender<(std::time::SystemTime, Direction, Bytes)>),

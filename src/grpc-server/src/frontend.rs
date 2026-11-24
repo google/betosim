@@ -717,6 +717,7 @@ impl FrontendService for FrontendClient {
 #[cfg(test)]
 mod tests {
     use actor_framework::MockActorClient;
+    use capture_api::CaptureSender;
     use device_actor::DeviceActor;
     use device_api::{DeviceAction, DeviceActionResult, DeviceId};
     use link_api::{Link, LinkId, MockLinkClient};

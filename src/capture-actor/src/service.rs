@@ -254,56 +254,6 @@ impl CaptureActor {
         }
         infos
     }
-    async fn handle_entity_action(
-        &mut self,
-        entity: &mut InternalCaptureInfo,
-        action: CaptureAction,
-        ctx: &mut DynContext<Self>,
-    ) -> Result<CaptureActionResult, CaptureError> {
-        match action {
-            CaptureAction::GetPacketSender => {
-                let sender = entity
-                    .sender
-                    .get_or_insert_with(|| {
-                        let (tx, rx) = mpsc::unbounded_channel();
-
-                        ctx.add_typed_stream(
-                            entity.info.chip_id.0 as usize,
-                            Box::pin(UnboundedReceiverStream::new(rx)),
-                        );
-
-                        tx
-                    })
-                    .clone();
-                Ok(CaptureActionResult::PacketSender(sender))
-            }
-
-            CaptureAction::Patch { chip_id, enabled } => {
-                if entity.info.chip_id == chip_id {
-                    self.update_entity(entity, enabled, ctx).await?;
-                    let (records_written, bytes_written) = self.file_stats(chip_id);
-                    let mut info = entity.info.clone();
-                    info.records_written = records_written;
-                    info.bytes_written = bytes_written;
-                    Ok(CaptureActionResult::Updated(info))
-                } else {
-                    Ok(CaptureActionResult::Success)
-                }
-            }
-            CaptureAction::Delete { chip_id } => {
-                if entity.info.chip_id == chip_id {
-                    self.delete_entity(entity, ctx).await?;
-                }
-                Ok(CaptureActionResult::Success)
-            }
-            CaptureAction::SetCaptureDirectory { ref path } => {
-                self.capture_dir = Some(path.clone());
-                Ok(CaptureActionResult::Success)
-            }
-            CaptureAction::Create { .. } => Ok(CaptureActionResult::Success),
-            CaptureAction::Subscribe => Ok(CaptureActionResult::Stream(self.subscribe(entity))),
-        }
-    }
 }
 
 impl ActorService for CaptureActor {
@@ -377,31 +327,45 @@ impl ActorService for CaptureActor {
         action: Self::Action,
         ctx: &mut DynContext<Self>,
     ) -> Result<Self::ActionResult, Self::Error> {
-        let Some(id) = id else {
-            // Global action
-            match action {
-                CaptureAction::SetCaptureDirectory { path } => {
-                    self.capture_dir = Some(path);
-                    return Ok(CaptureActionResult::Success);
-                }
-                _ => {
-                    // Other actions require Entity, so they are invalid here (or no-op).
-                    return Ok(CaptureActionResult::Success);
-                }
+        match action {
+            CaptureAction::SetCaptureDirectory { path } => {
+                self.capture_dir = Some(path);
+                Ok(CaptureActionResult::Success)
             }
-        };
+            CaptureAction::GetPacketSender => {
+                let Some(id) = id else {
+                    return Ok(CaptureActionResult::Success);
+                };
+                let Some(entity) = self.entities.get_mut(&id) else {
+                    return Ok(CaptureActionResult::Success);
+                };
+                let sender = entity
+                    .sender
+                    .get_or_insert_with(|| {
+                        let (tx, rx) = mpsc::unbounded_channel();
 
-        let Some(mut entity) = self.entities.remove(&id) else {
-            if action == CaptureAction::Subscribe {
-                return Err(ChipError::ChipNotFound(id).into());
+                        ctx.add_typed_stream(
+                            entity.info.chip_id.0 as usize,
+                            Box::pin(UnboundedReceiverStream::new(rx)),
+                        );
+
+                        tx
+                    })
+                    .clone();
+                Ok(CaptureActionResult::PacketSender(sender))
             }
-            return Ok(CaptureActionResult::Success);
-        };
-
-        let result = self.handle_entity_action(&mut entity, action, ctx).await;
-
-        self.entities.insert(id, entity);
-        result
+            CaptureAction::Subscribe => {
+                let Some(id) = id else {
+                    return Ok(CaptureActionResult::Success);
+                };
+                let Some(entity) = self.entities.remove(&id) else {
+                    return Err(ChipError::ChipNotFound(id).into());
+                };
+                let stream = self.subscribe(&entity);
+                self.entities.insert(id, entity);
+                Ok(CaptureActionResult::Stream(stream))
+            }
+        }
     }
 
     async fn handle_list(

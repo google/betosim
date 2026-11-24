@@ -27,6 +27,7 @@ netsim_rust_library(
     ],
     test_deps = [
         "//src/actor-framework:testing",
+        "//src/capture-api",
         "@tempfile",
     ],
     deps = [

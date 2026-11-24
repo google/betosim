@@ -108,9 +108,9 @@ async fn test_list_and_patch_captures() {
     let nfc_cap = captures.iter().find(|c| c.chip_id == netsim_model::ChipId(12)).unwrap();
     assert!(nfc_cap.enabled);
 
-    // When: patching capture state via patch_capture
-    world.client.patch_capture(netsim_model::ChipId(11), true).await.unwrap();
-    world.client.patch_capture(netsim_model::ChipId(12), false).await.unwrap();
+    // When: updating capture state
+    world.when_update_capture(11, true).await.unwrap();
+    world.when_update_capture(12, false).await.unwrap();
 
     // Then: states are updated accordingly
     world.then_capture_is_enabled(11, true).await;

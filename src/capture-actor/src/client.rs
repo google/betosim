@@ -69,15 +69,6 @@ impl CaptureClient {
         Self { inner }
     }
 
-    /// Creates a new capture session for a chip.
-    pub async fn create_capture(
-        &self,
-        chip_id: ChipId,
-        params: CaptureCreate,
-    ) -> Result<ChipId, ClientError> {
-        self.inner.create_with_id(chip_id, params).err_into::<ClientError>().await
-    }
-
     /// Updates the capture state (enable/disable) for a chip.
     pub async fn update_capture(
         &self,
@@ -100,11 +91,6 @@ impl CaptureClient {
     /// Lists all active captures.
     pub async fn list_captures(&self) -> Result<Vec<CaptureInfo>, ClientError> {
         self.inner.list().err_into::<ClientError>().await
-    }
-
-    /// Patches a capture (alias for update_capture to match old client).
-    pub async fn patch_capture(&self, chip_id: ChipId, enabled: bool) -> Result<(), ClientError> {
-        self.update_capture(chip_id, enabled).err_into::<ClientError>().await.map(|_| ())
     }
 
     /// Subscribes to a live PCAP stream of a chip's packets.

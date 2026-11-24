@@ -1284,7 +1284,7 @@ impl World {
     /// When I patch the capture state of a chip
     pub async fn when_patch_capture(&mut self, chip_id: u32, enabled: bool) {
         self.capture_client
-            .patch_capture(netsim_model::ChipId::from(chip_id), enabled)
+            .update_capture(netsim_model::ChipId::from(chip_id), enabled)
             .await
             .expect("Failed to patch capture");
     }
