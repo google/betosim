@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use bytes::Bytes;
+use netsim_model::ChipId;
 use netsim_packets::FrameDirection;
 use tracing::info;
 
-use crate::world::{World, recv_next_tx_info_ack};
+use crate::world::{AP_BSSID, World, recv_next_tx_info_ack};
 
 // ============================================================================
 // Feature: Wi-Fi Direct (Peer-to-Peer)
@@ -1357,4 +1358,69 @@ async fn test_secure_ap_probe_responses_remain_plaintext() {
             b"TestAP",
         )
         .await;
+}
+
+// ============================================================================
+// Feature: Host mDNS Multicast Forwarding (--forward-host-mdns)
+// ============================================================================
+
+const HOST_MDNS_CHIP_ID: ChipId = ChipId(1);
+const HOST_MDNS_STA_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x41];
+const HOST_MDNS_HWSIM_ADDR: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x42];
+const HOST_MDNS_FREQ_2412: u32 = 2412;
+const HOST_MDNS_WPA2_PTK: [u8; 16] = [0x42; 16];
+
+// Scenario: Host mDNS UDP datagram reaches an open-AP station as a FromDS QoS Data frame
+#[tokio::test]
+async fn test_host_mdns_forwarded_to_open_ap_station() {
+    // Given a WifiActor with host mDNS forwarding, an open AP, and a registered station
+    let mut world = World::new_with_host_mdns_forwarder().await;
+    world.given_an_ap().await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            HOST_MDNS_CHIP_ID.0,
+            HOST_MDNS_STA_MAC,
+            HOST_MDNS_HWSIM_ADDR,
+            AP_BSSID,
+            HOST_MDNS_FREQ_2412,
+        )
+        .await;
+
+    // When the host emits an mDNS UDP datagram
+    world.when_host_emits_mdns_datagram(b"host-mdns-open-ap").await;
+
+    // Then the station receives a plaintext FromDS QoS Data frame with rewritten mDNS payload
+    world.then_raw_chip_receives_host_mdns_frame(HOST_MDNS_CHIP_ID, b"host-mdns-open-ap").await;
+    world.then_host_mdns_stats_clean().await;
+}
+
+// Scenario: Host mDNS UDP datagram is CCMP-encrypted with the station PTK on a WPA2 AP
+#[tokio::test]
+async fn test_host_mdns_forwarded_to_wpa2_station_encrypted_with_ptk() {
+    // Given a WifiActor with host mDNS forwarding, a WPA2 AP, and a station with an installed PTK
+    let mut world = World::new_with_host_mdns_forwarder().await;
+    world.given_a_secure_ap().await;
+    world
+        .given_raw_chip_registered_with_nullfunc(
+            HOST_MDNS_CHIP_ID.0,
+            HOST_MDNS_STA_MAC,
+            HOST_MDNS_HWSIM_ADDR,
+            AP_BSSID,
+            HOST_MDNS_FREQ_2412,
+        )
+        .await;
+    world.given_station_ptk(HOST_MDNS_STA_MAC, &HOST_MDNS_WPA2_PTK);
+
+    // When the host emits an mDNS UDP datagram
+    world.when_host_emits_mdns_datagram(b"host-mdns-wpa2-ap").await;
+
+    // Then the station receives a CCMP-encrypted FromDS QoS Data frame decryptable with its PTK
+    world
+        .then_raw_chip_receives_encrypted_host_mdns_frame(
+            HOST_MDNS_CHIP_ID,
+            &HOST_MDNS_WPA2_PTK,
+            b"host-mdns-wpa2-ap",
+        )
+        .await;
+    world.then_host_mdns_stats_clean().await;
 }

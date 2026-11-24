@@ -431,7 +431,7 @@ Unit and integration tests are located in `src/wifi-actor/src/` and
 | **RQ-GW-03** | `TapGateway` Single & Pool Allocation | `src/tap_gateway.rs::test_new_config_parsing`, `test_format_name`, `test_allocate_next_tap`, `test_allocate_exhausted_pool`, `test_allocate_single_mode` | `N/A` | **Full** |
 | **RQ-GW-04** | `TapGateway` `/dev/net/tun` Data Plane | `tests/veth_test.rs::test_udp_guest_to_host` (currently disabled in `tests/mod.rs`) | `bdd/performance/gateway_performance.feature` | **Gap** (Requires `CAP_NET_ADMIN` / root privileges) |
 | **RQ-MDNS-01** | Host Multicast Socket Subscription | `N/A` (Live UDP multicast socket loop in `run_mdns_forwarder`) | `bdd/network_services/forward_host_mdns.feature` | **Partial** (Covered by E2E BDD scenario) |
-| **RQ-MDNS-02** | Host mDNS Frame Synthesis & 802.11 Injection | `src/mdns_forwarder.rs::test_ipv4_header_checksum_calculation`, `test_create_mdns_frame`, `packet_routing_test.rs::test_mdns_discovery_flow` | `bdd/network_services/forward_host_mdns.feature`, `bdd/wifi/NsdManager/wifi_service_discovery.feature` | **Partial** (Frame synthesis tested; `on_typed_stream` 802.3-to-802.11 bridge has implementation gap) |
+| **RQ-MDNS-02** | Host mDNS Frame Synthesis & 802.11 Injection | `src/mdns_forwarder.rs::test_create_mdns_frame`, `test_mdns_forwarder_isolates_container_source_ip_to_slirp_gateway`, `src/lifecycle.rs::test_on_typed_stream_mdns_without_ap_drops_cleanly`, `test_on_typed_stream_mdns_malformed_packet_records_error_stat`, `packet_routing_test.rs::test_host_mdns_forwarded_to_open_ap_station`, `test_host_mdns_forwarded_to_wpa2_station_encrypted_with_ptk` | `bdd/network_services/forward_host_mdns.feature`, `bdd/wifi/NsdManager/wifi_service_discovery.feature` | **Full** |
 | **RQ-RNG-01** | IEEE 802.11mc FTM Action Frame Ranging | `ftm_test.rs::test_handle_ftm_request`, `ftm_test.rs::test_wifi_actor_ftm_request_interception`, `ftm_test.rs::test_handle_ftm_request_ignores_non_mgmt_frame_with_action_subtype` | `bdd/wifi/WifiRttManager/wifi_ranging.feature` | **Full** |
 | **RQ-RNG-02** | `mac80211_hwsim` PMSR Command Ranging | `pmsr_test.rs::test_pmsr_interception`, `src/pmsr.rs::test_handle_start_pmsr` | `bdd/wifi/WifiRttManager/wifi_ranging.feature` | **Full** |
 | **RQ-OBS-01** | Per-Chip Radio Statistics (`GetStatistics`) | `stats_test.rs::test_p2p_telemetry_in_routing`, `src/medium/core.rs::test_p2p_telemetry_counters` | `bdd/core/netsim_observables.feature`, `bdd/core/observables.feature` | **Full** |
@@ -447,13 +447,6 @@ Unit and integration tests are located in `src/wifi-actor/src/` and
   requires `CAP_NET_ADMIN` privileges unavailable in unprivileged hermetic test
   sandboxes. Only the pure configuration and pool-allocation logic in
   `tap_gateway.rs` runs in standard unit tests.
-- **RQ-MDNS-02 (Host mDNS 802.3-to-802.11 Dispatch in `on_typed_stream`)**:
-  `run_mdns_forwarder` in `src/mdns_forwarder.rs` synthesizes an IEEE 802.3
-  Ethernet frame on `MDNS_SUBSCRIPTION_ID`, but `on_typed_stream` in
-  `src/lifecycle.rs` currently dispatches both `AP_SUBSCRIPTION_ID` and
-  `MDNS_SUBSCRIPTION_ID` to `process_ap_packet`, which increments
-  `hostapd_frames_rx` and passes the raw bytes to `Medium::transmit_from_infra`
-  (expecting an IEEE 802.11 frame) instead of `Medium::process_ieee8023_response`.
 - **RQ-LIFE-02 & RQ-LIFE-04 (`WifiClient::reset` and `handle_list` Actor Round-Trip)**:
   While `Medium::reset` is unit-tested in `src/medium/core.rs`, there is no
   integration test in `lifecycle_test.rs` exercising `WifiClient::reset`

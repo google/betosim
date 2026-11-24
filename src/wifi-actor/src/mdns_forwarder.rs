@@ -39,7 +39,7 @@ fn resolve_mdns_source_ip(_src_ip: Ipv4Addr) -> Ipv4Addr {
     SLIRP_GATEWAY_IP
 }
 
-fn create_mdns_frame(packet: &[u8], ip_addr: Ipv4Addr) -> Vec<u8> {
+pub(crate) fn create_mdns_frame(packet: &[u8], ip_addr: Ipv4Addr) -> Vec<u8> {
     let src_ip = resolve_mdns_source_ip(ip_addr);
     PacketBuilder::new(MDNS_MULTICAST_MAC, MDNS_SRC_MAC, ether_type::IPV4)
         .ipv4(src_ip.octets(), MDNS_IP.octets(), IP_P_UDP)
@@ -185,6 +185,14 @@ pub(crate) async fn run_mdns_forwarder(tx: UnboundedSender<Bytes>) -> Result<(),
 
     let mut socket = to_nonblocking_tokio_udp(socket)?;
 
+    forward_mdns_loop(&mut socket, tx, RECV_ERR_RETRY_DELAY).await
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub(crate) async fn run_mdns_forwarder_on_socket(
+    mut socket: tokio::net::UdpSocket,
+    tx: UnboundedSender<Bytes>,
+) -> Result<(), String> {
     forward_mdns_loop(&mut socket, tx, RECV_ERR_RETRY_DELAY).await
 }
 

@@ -124,6 +124,7 @@ pub struct World {
     pub shared_keys: std::sync::Arc<ap_actor::SharedKeyStore>,
     pub error_stats: std::sync::Arc<ErrorStatsTable>,
     lifecycle_and_error_logs: Arc<Mutex<Vec<(tracing::Level, String)>>>,
+    host_mdns_addr: Option<std::net::SocketAddr>,
     #[cfg(target_os = "linux")]
     pub gateway_downlink_tx: Option<mpsc::UnboundedSender<Bytes>>,
 }
@@ -182,6 +183,16 @@ impl World {
         Self::new_internal_with_error_stats(None, true).await
     }
 
+    pub(crate) async fn new_with_host_mdns_forwarder() -> Self {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind loopback host mDNS socket");
+        let addr = socket.local_addr().expect("Failed to read loopback mDNS local_addr");
+        let mut world = Self::new_internal_with_options(None, false, Some(socket)).await;
+        world.host_mdns_addr = Some(addr);
+        world
+    }
+
     #[cfg(target_os = "linux")]
     pub async fn with_tap_gateway_error_stats() -> Self {
         let (harness, downlink_tx) = TapDownlinkHarness::new();
@@ -193,6 +204,14 @@ impl World {
     async fn new_internal_with_error_stats(
         gateway: Option<Box<dyn wifi_actor::GatewayTrait>>,
         record_error_stats: bool,
+    ) -> Self {
+        Self::new_internal_with_options(gateway, record_error_stats, None).await
+    }
+
+    async fn new_internal_with_options(
+        gateway: Option<Box<dyn wifi_actor::GatewayTrait>>,
+        record_error_stats: bool,
+        host_mdns_socket: Option<tokio::net::UdpSocket>,
     ) -> Self {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         // Setup dependencies
@@ -259,7 +278,7 @@ impl World {
 
         let mock_clock = std::sync::Arc::new(wifi_actor::MockClock::new());
 
-        let wifi_actor_impl = if let Some(gw) = gateway {
+        let mut wifi_actor_impl = if let Some(gw) = gateway {
             WifiActor::new_with_gateway(
                 Some(spying_ap_client_arc.clone()),
                 gw,
@@ -279,6 +298,9 @@ impl World {
                 false,
             )
         };
+        if let Some(socket) = host_mdns_socket {
+            wifi_actor_impl = wifi_actor_impl.with_host_mdns_socket(socket);
+        }
 
         let error_stats = Arc::new(ErrorStatsTable::new());
         let (wifi_runner, wifi_client) = wifi_actor::new();
@@ -333,6 +355,7 @@ impl World {
             shared_keys,
             error_stats,
             lifecycle_and_error_logs,
+            host_mdns_addr: None,
             #[cfg(target_os = "linux")]
             gateway_downlink_tx: None,
         }
@@ -2095,14 +2118,10 @@ impl World {
                     if ieee.is_data()
                         && ieee.needs_decryption()
                         && ieee.get_destination() == MacAddress::new(chip_mac)
+                        && let Some(decrypted) = decrypt_ccmp_frame(&ieee, tk)
+                        && decrypted.windows(expected_bytes.len()).any(|w| w == expected_bytes)
                     {
-                        let store = ap_actor::SharedKeyStore::new();
-                        store.add_session(ieee.get_source(), tk.to_vec());
-                        if let Some(decrypted) = store.try_decrypt(&ieee)
-                            && decrypted.windows(expected_bytes.len()).any(|w| w == expected_bytes)
-                        {
-                            return;
-                        }
+                        return;
                     }
                 }
             }
@@ -2111,9 +2130,114 @@ impl World {
             panic!("Timeout waiting for encrypted M2U frame on chip {id_val}");
         });
     }
+
+    pub(crate) async fn when_host_emits_mdns_datagram(&self, payload: &[u8]) {
+        let target = self.host_mdns_addr.expect("Host mDNS forwarder not configured");
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind host mDNS sender socket");
+        sender.send_to(payload, target).await.expect("Failed to send host mDNS UDP datagram");
+    }
+
+    async fn recv_raw_chip_data_frame(&mut self, chip_id: ChipId) -> (Ieee80211, [u8; 6]) {
+        let chip = self.raw_chips.get_mut(&chip_id.0).expect("Chip not found");
+        let chip_mac = chip.mac;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let bytes = chip.stream_rx.recv().await.expect("stream_rx closed");
+                if let Ok(hwsim_msg) = HwsimMsg::decode_full(&bytes)
+                    && hwsim_msg.hwsim_hdr.hwsim_cmd == HwsimCmd::Frame
+                    && let Ok(frame) = HwsimFrame::parse(&hwsim_msg)
+                {
+                    let ieee = frame.ieee80211;
+                    assert_eq!(
+                        ieee.get_fc() & FC_PROTOCOL_VERSION_MASK,
+                        0,
+                        "Received malformed 802.11 frame (fc={:#06x}); expected valid wireless frame",
+                        ieee.get_fc()
+                    );
+                    if ieee.is_data() {
+                        return ieee;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Timeout waiting for 802.11 Data frame on chip {}", chip_id.0));
+        (frame, chip_mac)
+    }
+
+    pub(crate) async fn then_raw_chip_receives_host_mdns_frame(
+        &mut self,
+        chip_id: ChipId,
+        expected_payload: &[u8],
+    ) {
+        let (ieee, chip_mac) = self.recv_raw_chip_data_frame(chip_id).await;
+        assert!(!ieee.needs_decryption(), "Expected plaintext frame on open AP");
+        assert_host_mdns_80211_frame(&ieee, chip_mac, AP_BSSID, expected_payload);
+    }
+
+    pub(crate) async fn then_raw_chip_receives_encrypted_host_mdns_frame(
+        &mut self,
+        chip_id: ChipId,
+        tk: &[u8; 16],
+        expected_payload: &[u8],
+    ) {
+        let (ieee, chip_mac) = self.recv_raw_chip_data_frame(chip_id).await;
+        assert!(ieee.needs_decryption(), "Expected CCMP-protected frame on WPA2 AP");
+        assert_eq!(ieee.get_bssid(), Some(MacAddress::new(AP_BSSID)));
+        assert_eq!(ieee.get_destination(), MacAddress::new(chip_mac));
+
+        let decrypted =
+            decrypt_ccmp_frame(&ieee, tk).expect("Failed to decrypt WPA2 host mDNS frame");
+        let decrypted_ieee =
+            Ieee80211::decode(&decrypted).expect("Failed to decode decrypted 802.11 frame");
+        assert_host_mdns_80211_frame(&decrypted_ieee, chip_mac, AP_BSSID, expected_payload);
+    }
+
+    pub(crate) async fn then_host_mdns_stats_clean(&self) {
+        let stats = self.wifi_client.get_global_stats_proto().await.unwrap();
+        assert_eq!(stats.other_errors(), 0);
+        assert_eq!(stats.mdns_count(), 0);
+    }
+}
+
+fn decrypt_ccmp_frame(ieee: &Ieee80211, tk: &[u8; 16]) -> Option<Vec<u8>> {
+    let store = ap_actor::SharedKeyStore::new();
+    store.add_session(ieee.get_source(), tk.to_vec());
+    store.try_decrypt(ieee)
+}
+
+fn assert_host_mdns_80211_frame(
+    ieee: &Ieee80211,
+    expected_dst: [u8; 6],
+    expected_bssid: [u8; 6],
+    expected_payload: &[u8],
+) {
+    assert_eq!(ieee.get_fc() & FC_PROTOCOL_VERSION_MASK, 0, "Expected 802.11 protocol version 0");
+    assert!(ieee.is_from_ds(), "Expected FromDS=1 on host-forwarded mDNS frame");
+    assert!(ieee.is_qos_data(), "Expected QoS Data frame, got fc={:#06x}", ieee.get_fc());
+    assert_eq!(ieee.get_bssid(), Some(MacAddress::new(expected_bssid)));
+    assert_eq!(ieee.get_destination(), MacAddress::new(expected_dst));
+    assert_eq!(ieee.get_source(), MacAddress::new(MDNS_SRC_MAC));
+
+    let eth = ieee.to_ieee8023().expect("Expected LLC/SNAP-encapsulated Ethernet payload");
+    let (_eth_hdr, ip_bytes) = EthernetFrame::parse(&eth).expect("Valid Ethernet header");
+    let (ipv4, udp_bytes) = Ipv4Header::parse(ip_bytes).expect("Valid IPv4 header");
+    assert_eq!(ipv4.source_addr, SLIRP_GATEWAY_IPV4);
+    assert_eq!(ipv4.dest_addr, MDNS_IPV4_ADDR);
+    let (udp, udp_payload) = UdpHeader::parse(udp_bytes).expect("Valid UDP header");
+    assert_eq!(udp.source_port.get(), MDNS_PORT);
+    assert_eq!(udp.dest_port.get(), MDNS_PORT);
+    assert_eq!(udp_payload, expected_payload);
 }
 
 pub(crate) const MDNS_MULTICAST_MAC: [u8; 6] = [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB];
+const MDNS_SRC_MAC: [u8; 6] = [0x02, 0x15, 0xB2, 0x00, 0x00, 0x01];
+const MDNS_IPV4_ADDR: [u8; 4] = [224, 0, 0, 251];
+const SLIRP_GATEWAY_IPV4: [u8; 4] = [10, 0, 2, 2];
+const MDNS_PORT: u16 = 5353;
+const FC_PROTOCOL_VERSION_MASK: u16 = 0x0003;
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_OP_BOOTREQUEST: u8 = 1;
 const DHCP_HTYPE_ETHERNET: u8 = 1;

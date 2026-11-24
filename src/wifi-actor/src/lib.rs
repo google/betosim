@@ -151,4 +151,35 @@ pub(crate) mod test_support {
 
         (key_store, medium, bytes::Bytes::from_static(&UNKNOWN_STATION_ETHERNET_FRAME))
     }
+
+    pub(crate) struct NoopContext;
+
+    impl actor_framework::Context<WifiActor> for NoopContext {
+        fn set_interval(&mut self, _duration: std::time::Duration) {}
+        fn add_stream(&mut self, _id: netsim_model::ChipId, _stream: actor_framework::BoxStream) {}
+        fn remove_stream(&mut self, _id: netsim_model::ChipId) {}
+        fn add_typed_stream(
+            &mut self,
+            _id: usize,
+            _stream: actor_framework::BoxTypedStream<bytes::Bytes>,
+        ) {
+        }
+        fn remove_typed_stream(&mut self, _id: usize) {}
+        fn spawn(
+            &mut self,
+            _id: netsim_model::ChipId,
+            _task: futures::future::BoxFuture<'static, netsim_model::ChipId>,
+        ) {
+        }
+        fn abort(&mut self, _id: netsim_model::ChipId) {}
+        fn shutdown(&mut self) {}
+        fn run_later(
+            &mut self,
+            _duration: std::time::Duration,
+            _f: actor_framework::TimerCallback<WifiActor>,
+        ) -> actor_framework::TimerKey {
+            unimplemented!()
+        }
+        fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {}
+    }
 }

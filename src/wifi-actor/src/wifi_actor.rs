@@ -78,6 +78,8 @@ pub struct WifiActor {
     // Gateway for Infra packets (Tap or Slirp)
     pub(crate) gateway: Box<dyn GatewayTrait>,
     pub(crate) forward_host_mdns: bool,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) test_mdns_socket: Option<tokio::net::UdpSocket>,
 }
 
 impl WifiActor {
@@ -145,7 +147,18 @@ impl WifiActor {
             to_ap: None,
             gateway,
             forward_host_mdns,
+            #[cfg(any(test, feature = "testing"))]
+            test_mdns_socket: None,
         }
+    }
+
+    /// Uses a caller-provided UDP socket for host mDNS forwarding instead of
+    /// binding the default multicast socket.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_host_mdns_socket(mut self, socket: tokio::net::UdpSocket) -> Self {
+        self.forward_host_mdns = false;
+        self.test_mdns_socket = Some(socket);
+        self
     }
 
     pub(crate) async fn handle_delete_impl(

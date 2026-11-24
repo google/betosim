@@ -271,32 +271,6 @@ mod tests {
         assert_eq!(debug_count, 1, "unknown station unicast drop should log debug");
     }
 
-    struct NoopContext;
-
-    impl actor_framework::Context<WifiActor> for NoopContext {
-        fn set_interval(&mut self, _duration: std::time::Duration) {}
-        fn add_stream(&mut self, _id: ChipId, _stream: actor_framework::BoxStream) {}
-        fn remove_stream(&mut self, _id: ChipId) {}
-        fn add_typed_stream(
-            &mut self,
-            _id: usize,
-            _stream: actor_framework::BoxTypedStream<bytes::Bytes>,
-        ) {
-        }
-        fn remove_typed_stream(&mut self, _id: usize) {}
-        fn spawn(&mut self, _id: ChipId, _task: futures::future::BoxFuture<'static, ChipId>) {}
-        fn abort(&mut self, _id: ChipId) {}
-        fn shutdown(&mut self) {}
-        fn run_later(
-            &mut self,
-            _duration: std::time::Duration,
-            _f: actor_framework::TimerCallback<WifiActor>,
-        ) -> actor_framework::TimerKey {
-            unimplemented!()
-        }
-        fn cancel_timer(&mut self, _key: actor_framework::TimerKey) {}
-    }
-
     #[tokio::test]
     async fn test_on_start_register_failed_records_error_stat() {
         let _multi_dispatch_guard = tracing::Dispatch::new(tracing_subscriber::registry());
@@ -308,7 +282,7 @@ mod tests {
         drop(slirp_runner);
 
         let mut gateway = SlirpGateway::new(Some(slirp_client));
-        let mut ctx = NoopContext;
+        let mut ctx = crate::test_support::NoopContext;
 
         tracing::instrument::WithSubscriber::with_subscriber(
             gateway.on_start(&mut ctx),
