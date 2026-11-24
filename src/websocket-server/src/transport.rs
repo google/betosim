@@ -235,7 +235,7 @@ where
 {
     #[cfg(test)]
     {
-        let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
             let _guard = tracing::dispatcher::set_default(&dispatch);
             f()
@@ -757,7 +757,9 @@ mod tests {
 
     fn send_ws(client_std: TcpStream, messages: Vec<Message>) {
         let mut ws = WebSocket::from_raw_socket(client_std, Role::Client, None);
-        messages.into_iter().for_each(|m| ws.send(m).unwrap());
+        for m in messages {
+            ws.send(m).unwrap();
+        }
         let _ = ws.send(Message::Close(None));
     }
 
@@ -796,7 +798,7 @@ mod tests {
             device.client.shutdown().await.unwrap();
         }
         run_ws(ChipKind::BLUETOOTH, Some(device), false, expected, |s| {
-            send_ws(s, vec![Message::text(r#"{"preset":"laird_bl654"}"#)])
+            send_ws(s, vec![Message::text(r#"{"preset":"laird_bl654"}"#)]);
         })
         .await;
     }

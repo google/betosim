@@ -54,7 +54,7 @@ enum HandshakeFailure {
 }
 
 pub async fn run(listener: TcpListener, device_client: DeviceClient) {
-    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let port = listener.local_addr().map_or(0, |a| a.port());
     run_with_accept(port, device_client, || async { Some(listener.accept().await) }).await;
 }
 
