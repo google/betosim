@@ -432,7 +432,11 @@ extern "C" fn send_ll_trampoline(
         let phy = match Phy::try_from(phy) {
             Ok(phy) => phy,
             Err(error) => {
-                warn!(%error, "Unknown PHY");
+                warn!(
+                    code = crate::err::Code::UnknownPhy as u32,
+                    %error,
+                    "Unknown PHY"
+                );
                 return;
             }
         };
@@ -655,5 +659,56 @@ mod tests {
         controller.receive_ll(&acl_payload_bytes, Phy::BrEdr, -80);
         assert_eq!(controller.get_stats().ble_p2p_rx_count, 1);
         assert_eq!(controller.get_stats().classic_p2p_rx_count, 1);
+    }
+
+    const TEST_CONTROLLER_ID: Id = 1;
+    const TEST_ADDRESS: &str = "01:02:03:04:05:06";
+    const UNKNOWN_PHY_TYPE: c_int = 999;
+    const DEFAULT_TX_POWER: c_int = 0;
+    const INVALID_PACKET_REASON: c_int = 0;
+
+    fn new_test_controller() -> Controller {
+        let address = Address::from_str(TEST_ADDRESS).unwrap();
+        ControllerImpl::new(
+            TEST_CONTROLLER_ID,
+            address,
+            Box::new(MockControllerCallbacks),
+            Box::new(MockBtOps),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_send_ll_trampoline_unknown_phy_records_error_stat() {
+        let controller = new_test_controller();
+        let mut weak = Arc::downgrade(&controller);
+
+        let (stats, _guard) = common::util::netsim_logger::isolated_error_stats();
+        send_ll_trampoline(
+            (&raw mut weak).cast::<c_void>(),
+            [].as_ptr(),
+            0,
+            UNKNOWN_PHY_TYPE,
+            DEFAULT_TX_POWER,
+        );
+
+        assert_eq!(stats.snapshot(), vec![(crate::err::Code::UnknownPhy as u32, 1)]);
+    }
+
+    #[test]
+    fn test_invalid_packet_trampoline_records_no_error_stats() {
+        let controller = new_test_controller();
+        let mut weak = Arc::downgrade(&controller);
+
+        let (stats, _guard) = common::util::netsim_logger::isolated_error_stats();
+        invalid_packet_trampoline(
+            (&raw mut weak).cast::<c_void>(),
+            INVALID_PACKET_REASON,
+            c"bad".as_ptr(),
+            [].as_ptr(),
+            0,
+        );
+
+        assert_eq!(stats.snapshot(), vec![]);
     }
 }

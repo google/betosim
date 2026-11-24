@@ -35,6 +35,7 @@
 use rootcanal_rs as _;
 
 pub mod controller;
+mod err;
 pub mod error;
 mod ffi;
 mod rootcanal;

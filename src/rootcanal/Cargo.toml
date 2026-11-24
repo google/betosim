@@ -37,6 +37,7 @@ thiserror = "1.0"
 tracing = "0.1"
 
 [dev-dependencies]
+common = { package = "netsim-common", path = "../common", features = ["testing"] }
 pdl-runtime = "0.4.2"
 tokio = { version = "1.32.0", features = [
   "macros",

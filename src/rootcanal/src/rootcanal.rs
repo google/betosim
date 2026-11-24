@@ -107,6 +107,14 @@ impl BtOps for BtOpsWrapper {
     }
 }
 
+// Rootcanal log levels match rootcanal::log::Verbosity:
+// 0=kDebug, 1=kInfo, 2=kWarning, 3=kError, 4=kFatal
+const LOG_LEVEL_DEBUG: std::os::raw::c_int = 0;
+const LOG_LEVEL_INFO: std::os::raw::c_int = 1;
+const LOG_LEVEL_WARNING: std::os::raw::c_int = 2;
+const LOG_LEVEL_ERROR: std::os::raw::c_int = 3;
+const LOG_LEVEL_FATAL: std::os::raw::c_int = 4;
+
 extern "C" fn rootcanal_log_callback(
     level: std::os::raw::c_int,
     _file: *const std::os::raw::c_char,
@@ -122,14 +130,26 @@ extern "C" fn rootcanal_log_callback(
         let c_str = unsafe { std::ffi::CStr::from_ptr(message) };
         let msg = c_str.to_string_lossy();
 
-        // Rootcanal log levels match rootcanal::log::Verbosity:
-        // 0=kDebug, 1=kInfo, 2=kWarning, 3=kError, 4=kFatal
         match level {
-            0 => tracing::debug!(target: "rootcanal", "{msg}"),
-            1 => tracing::info!(target: "rootcanal", "{msg}"),
-            2 => tracing::warn!(target: "rootcanal", "{msg}"),
-            3 => tracing::error!(target: "rootcanal", "{msg}"),
-            _ => tracing::error!(target: "rootcanal", "{msg}"),
+            LOG_LEVEL_DEBUG => tracing::debug!(target: "rootcanal", "{msg}"),
+            LOG_LEVEL_INFO => tracing::info!(target: "rootcanal", "{msg}"),
+            LOG_LEVEL_WARNING => tracing::warn!(target: "rootcanal", "{msg}"),
+            LOG_LEVEL_ERROR => tracing::error!(
+                target: "rootcanal",
+                code = crate::err::Code::RootcanalError as u32,
+                "{msg}"
+            ),
+            LOG_LEVEL_FATAL => tracing::error!(
+                target: "rootcanal",
+                code = crate::err::Code::RootcanalFatal as u32,
+                "{msg}"
+            ),
+            _ => tracing::error!(
+                target: "rootcanal",
+                code = crate::err::Code::UnknownLogLevel as u32,
+                level,
+                "{msg}"
+            ),
         }
     });
 }
@@ -587,5 +607,53 @@ mod tests {
             Error::AddressInUse(a) => assert_eq!(a, addr),
             _ => panic!("unexpected error type"),
         }
+    }
+
+    const LOG_LEVEL_OUT_OF_RANGE: c_int = 99;
+    const LOG_TEST_LINE: c_int = 0;
+
+    fn capture_log_callback_stats(level: c_int, message: &std::ffi::CStr) -> Vec<(u32, u32)> {
+        let (stats, _guard) = common::util::netsim_logger::isolated_error_stats();
+        rootcanal_log_callback(level, std::ptr::null(), LOG_TEST_LINE, message.as_ptr());
+        stats.snapshot()
+    }
+
+    #[test]
+    fn test_rootcanal_log_callback_debug_records_no_error_stats() {
+        assert!(capture_log_callback_stats(LOG_LEVEL_DEBUG, c"debug message").is_empty());
+    }
+
+    #[test]
+    fn test_rootcanal_log_callback_info_records_no_error_stats() {
+        assert!(capture_log_callback_stats(LOG_LEVEL_INFO, c"info message").is_empty());
+    }
+
+    #[test]
+    fn test_rootcanal_log_callback_warning_records_no_error_stats() {
+        assert!(capture_log_callback_stats(LOG_LEVEL_WARNING, c"warning message").is_empty());
+    }
+
+    #[test]
+    fn test_rootcanal_log_callback_error_records_error_stat() {
+        assert_eq!(
+            capture_log_callback_stats(LOG_LEVEL_ERROR, c"error message"),
+            vec![(crate::err::Code::RootcanalError as u32, 1)]
+        );
+    }
+
+    #[test]
+    fn test_rootcanal_log_callback_fatal_records_error_stat() {
+        assert_eq!(
+            capture_log_callback_stats(LOG_LEVEL_FATAL, c"fatal message"),
+            vec![(crate::err::Code::RootcanalFatal as u32, 1)]
+        );
+    }
+
+    #[test]
+    fn test_rootcanal_log_callback_out_of_range_records_error_stat() {
+        assert_eq!(
+            capture_log_callback_stats(LOG_LEVEL_OUT_OF_RANGE, c"unknown level message"),
+            vec![(crate::err::Code::UnknownLogLevel as u32, 1)]
+        );
     }
 }

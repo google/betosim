@@ -26,6 +26,7 @@ netsim_rust_library(
     edition = "2024",
     pedantic_clippy = True,
     test_deps = [
+        "//src/common",
         "@pdl-runtime",
         "@tokio",
         "@tracing-subscriber",
