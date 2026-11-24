@@ -352,3 +352,20 @@ async fn test_superseding_pending_task_aborts_previous_task() {
     // Then
     world.then_pending_task_was_cancelled(TASK_ID).await.then_task_closed_received(TASK_ID).await;
 }
+
+// Scenario: Slow terminal on_shutdown completes without emitting a loop-stall warning
+#[tokio::test]
+async fn test_slow_on_shutdown_does_not_emit_stall_warning() {
+    const STALL_THRESHOLD: Duration = Duration::from_millis(50);
+    const SLOW_SHUTDOWN_DELAY: Duration = Duration::from_millis(120);
+
+    // Given an actor with a 50ms stall threshold and a 120ms on_shutdown delay
+    let mut world =
+        TestWorld::with_stall_threshold_and_shutdown_delay(STALL_THRESHOLD, SLOW_SHUTDOWN_DELAY);
+
+    // When shutdown is requested through the client
+    world.when_shutdown().await;
+
+    // Then on_shutdown runs to completion, the actor task exits, and no on_shutdown stall warning is emitted
+    world.then_shutdown_received().await.then_no_on_shutdown_stall_warning_emitted().await;
+}

@@ -145,16 +145,18 @@ struct UserActor {
     timers: HashMap<u32, TimerKey>,
     byte_stream_delays: HashMap<u32, Duration>,
     event_tx: mpsc::UnboundedSender<ActorEvent>,
+    shutdown_delay: Duration,
 }
 
 impl UserActor {
-    fn new(event_tx: mpsc::UnboundedSender<ActorEvent>) -> Self {
+    fn new(event_tx: mpsc::UnboundedSender<ActorEvent>, shutdown_delay: Duration) -> Self {
         Self {
             users: HashMap::new(),
             next_id: 0,
             timers: HashMap::new(),
             byte_stream_delays: HashMap::new(),
             event_tx,
+            shutdown_delay,
         }
     }
 
@@ -215,6 +217,9 @@ impl ActorLifecycle for UserActor {
     }
 
     async fn on_shutdown(&mut self) {
+        if !self.shutdown_delay.is_zero() {
+            tokio::time::sleep(self.shutdown_delay).await;
+        }
         let _ = self.event_tx.send(ActorEvent::Shutdown);
     }
 }
@@ -410,20 +415,32 @@ impl Drop for TestWorld {
 impl TestWorld {
     pub(crate) fn new() -> Self {
         let (actor, client) = ResourceActor::new(16);
-        Self::from_actor(actor, client)
+        Self::from_actor(actor, client, Duration::ZERO)
     }
 
     pub(crate) fn with_stall_threshold(stall_threshold: Duration) -> Self {
-        let (actor, client) = ResourceActor::new(16);
-        Self::from_actor(actor.with_stall_threshold(stall_threshold), client)
+        Self::with_stall_threshold_and_shutdown_delay(stall_threshold, Duration::ZERO)
     }
 
-    fn from_actor(actor: ResourceActor<UserActor>, client: ResourceClient<UserActor>) -> Self {
+    pub(crate) fn with_stall_threshold_and_shutdown_delay(
+        stall_threshold: Duration,
+        shutdown_delay: Duration,
+    ) -> Self {
+        let (actor, client) = ResourceActor::new(16);
+        Self::from_actor(actor.with_stall_threshold(stall_threshold), client, shutdown_delay)
+    }
+
+    fn from_actor(
+        actor: ResourceActor<UserActor>,
+        client: ResourceClient<UserActor>,
+        shutdown_delay: Duration,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (warn_tx, warn_rx) = mpsc::unbounded_channel();
         let subscriber = WarningCaptureSubscriber { tx: warn_tx };
         let dispatch = tracing::Dispatch::new(subscriber);
-        let actor_task = actor.run(UserActor::new(event_tx)).with_subscriber(dispatch);
+        let actor_task =
+            actor.run(UserActor::new(event_tx, shutdown_delay)).with_subscriber(dispatch);
         let actor_handle = tokio::spawn(actor_task);
         Self {
             client,
@@ -802,6 +819,27 @@ impl TestWorld {
         assert!(
             matches!(recv_result, Err(mpsc::error::TryRecvError::Empty)),
             "expected no stall warnings, got: {recv_result:?}"
+        );
+        self
+    }
+
+    pub(crate) async fn then_no_on_shutdown_stall_warning_emitted(&mut self) -> &mut Self {
+        assert!(
+            self.actor_handle.is_finished(),
+            "actor task must exit before draining post-shutdown warnings"
+        );
+        let mut shutdown_warnings = Vec::new();
+        while let Some(warning) = timeout(EVENT_TIMEOUT, self.warn_rx.recv())
+            .await
+            .expect("warn_rx should close after actor task exits")
+        {
+            if warning.event.as_deref() == Some("on_shutdown") {
+                shutdown_warnings.push(warning);
+            }
+        }
+        assert!(
+            shutdown_warnings.is_empty(),
+            "expected no on_shutdown stall warnings, got: {shutdown_warnings:?}"
         );
         self
     }

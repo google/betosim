@@ -226,7 +226,8 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
         (actor, client)
     }
 
-    /// Sets the handler execution duration threshold above which a stall warning is logged.
+    /// Sets the handler execution duration threshold above which a stall warning is logged
+    /// (terminal `on_shutdown` is excluded).
     #[must_use]
     pub fn with_stall_threshold(mut self, stall_threshold: Duration) -> Self {
         self.stall_threshold = stall_threshold;
@@ -310,8 +311,7 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
                     }
                 }
                 _ = &mut self.shutdown_rx => {
-                    Self::run_timed(threshold, "on_shutdown", Self::handle_shutdown(&mut actor))
-                        .await;
+                    actor.on_shutdown().await;
                     break;
                 }
             }
@@ -346,10 +346,6 @@ impl<T: ActorService + ActorLifecycle> ResourceActor<T> {
 
     async fn handle_task_closed(actor: &mut T, id: T::Id, ctx: &mut DynContext<T>) {
         actor.on_task_closed(id, ctx).await;
-    }
-
-    async fn handle_shutdown(actor: &mut T) {
-        actor.on_shutdown().await;
     }
 
     async fn handle_message(actor: &mut T, msg: ResourceRequest<T>, ctx: &mut DynContext<T>) {
