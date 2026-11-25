@@ -73,6 +73,13 @@ fn is_ble_address_in_use(
             }))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct InitialChipMetadata {
+    manufacturer: String,
+    product_name: String,
+    links: Vec<(ChipId, i8)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct InternalDevice {
     device: device_api::Device,
@@ -82,6 +89,8 @@ pub(crate) struct InternalDevice {
     chip_stats: HashMap<ChipId, Arc<StreamStats>>,
     #[serde(skip)]
     last_known_stats: HashMap<ChipId, Vec<netsim_model::NetsimRadioStats>>,
+    #[serde(skip)]
+    initial_chips: HashMap<ChipId, InitialChipMetadata>,
 }
 
 impl InternalDevice {
@@ -100,6 +109,7 @@ impl InternalDevice {
             guid: None,
             chip_stats: HashMap::new(),
             last_known_stats: HashMap::new(),
+            initial_chips: HashMap::new(),
         })
     }
 }
@@ -517,6 +527,7 @@ impl DeviceActor {
                     let chip = entity.device.chips.remove(pos);
                     let stream_stats = entity.chip_stats.remove(&chip_id);
                     let cached_stats = entity.last_known_stats.remove(&chip_id);
+                    entity.initial_chips.remove(&chip_id);
                     Some((chip, stream_stats, cached_stats))
                 } else {
                     None
@@ -766,6 +777,14 @@ impl DeviceActor {
         let chip_create_params = ChipCreate { packet_stream, packet_sink, chip: chip.clone() };
 
         chip_client.create(chip_id, chip_create_params).await?;
+        entity.initial_chips.insert(
+            chip_id,
+            InitialChipMetadata {
+                manufacturer: chip.manufacturer.clone(),
+                product_name: chip.product_name.clone(),
+                links: chip.links.clone(),
+            },
+        );
         entity.device.chips.push(chip);
 
         if let Err(error) = link_client.notify_chip_added(chip_id, chip_kind).await {
@@ -995,7 +1014,13 @@ impl DeviceActor {
                 if let Some(chip_client) = self.chip_clients.get(&chip.kind) {
                     match chip_client.reset(ChipId(chip.id)).await {
                         Ok(updated_chip) => {
-                            *chip = updated_chip;
+                            if let Some(initial) = device.initial_chips.get(&ChipId(chip.id)) {
+                                chip.manufacturer.clone_from(&initial.manufacturer);
+                                chip.product_name.clone_from(&initial.product_name);
+                                chip.links.clone_from(&initial.links);
+                            }
+                            chip.enabled = updated_chip.enabled;
+                            chip.variant = updated_chip.variant;
                         }
                         Err(error) => {
                             warn!(
@@ -1267,7 +1292,10 @@ impl ActorService for DeviceActor {
                     "DeviceActor: Updating chip {} (kind {}) with {:?}",
                     chip.id, chip.kind, chip_update
                 );
-                *chip = chip_client.update(ChipId(chip.id), chip_update).await?;
+                let updated_chip = chip_client.update(ChipId(chip.id), chip_update.clone()).await?;
+                chip_update.apply(chip);
+                chip.enabled = updated_chip.enabled;
+                chip.variant = updated_chip.variant;
             }
         }
 
@@ -1464,6 +1492,7 @@ mod tests {
             guid: None,
             chip_stats: HashMap::new(),
             last_known_stats: HashMap::new(),
+            initial_chips: HashMap::new(),
         };
         let mut devices = HashMap::new();
         devices.insert(id, internal_device.clone());

@@ -18,7 +18,9 @@
 //   I want to reset the simulation state
 //   So that I can return to a known baseline for further testing
 
-use crate::world::World;
+use netsim_model::{ChipId, ChipUpdate, Pose};
+
+use crate::world::{ExpectedCellularChip, UPDATED_MANUFACTURER, UPDATED_PRODUCT_NAME, World};
 
 // Scenario: Global reset clears all active links and resets all devices
 //   Given a running Device Actor
@@ -227,4 +229,62 @@ async fn test_reset_deletes_internal_devices_and_resets_external_devices() {
 
     // And the internal device should have been deleted
     world.then_device_does_not_exist(internal_id).await;
+}
+
+// Scenario: Reset restores cellular chip creation metadata and keeps its custom name
+#[tokio::test]
+async fn test_reset_restores_cellular_chip_creation_metadata() {
+    const CHIP_NAME: &str = "reset-modem";
+    const MANUFACTURER: &str = "Reset-Vendor";
+    const PRODUCT_NAME: &str = "Reset-Phone";
+    let initial_pose = Pose {
+        position: device_api::Position { x: 11.0, y: 12.0, z: 13.0 },
+        orientation: device_api::Orientation { yaw: 1.1, pitch: 1.2, roll: 1.3 },
+    };
+    let patched_pose = Pose {
+        position: device_api::Position { x: 21.0, y: 22.0, z: 23.0 },
+        orientation: device_api::Orientation { yaw: 2.1, pitch: 2.2, roll: 2.3 },
+    };
+
+    // Given a running Device Actor whose cellular client answers with synthetic modem chips
+    let world = World::given_with_stateful_cellular_mock().await;
+    // And a device at a non-default pose with a custom-named cellular chip
+    let device_id = world
+        .given_cellular_device(
+            "cell-reset-dev",
+            CHIP_NAME,
+            MANUFACTURER,
+            PRODUCT_NAME,
+            initial_pose,
+        )
+        .await;
+    // And the device pose, chip metadata, links, and enabled state are patched
+    let chip_update = ChipUpdate {
+        name: Some(CHIP_NAME.to_string()),
+        manufacturer: Some(UPDATED_MANUFACTURER.to_string()),
+        product_name: Some(UPDATED_PRODUCT_NAME.to_string()),
+        links: Some(vec![(ChipId(99), -55)]),
+        enabled: Some(false),
+        ..Default::default()
+    };
+    world.when_patch_device_pose_with_chip_update(device_id, patched_pose, Some(chip_update)).await;
+
+    // When I call the reset RPC for the device
+    world.when_reset_device_is_called(device_id).await;
+
+    // Then get and list report the custom name with creation pose, metadata, and links
+    // And get and list report the re-enabled radio state from the cellular client
+    world
+        .then_cellular_chip_in_get_and_list_is(
+            device_id,
+            &ExpectedCellularChip {
+                name: CHIP_NAME,
+                manufacturer: MANUFACTURER,
+                product_name: PRODUCT_NAME,
+                pose: initial_pose,
+                links: &[],
+                enabled: true,
+            },
+        )
+        .await;
 }

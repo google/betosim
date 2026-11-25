@@ -55,6 +55,16 @@ impl LinkTestState {
     }
 }
 
+/// Envelope metadata, pose, and radio state expected on a device's cellular chip.
+pub struct ExpectedCellularChip<'a> {
+    pub name: &'a str,
+    pub manufacturer: &'a str,
+    pub product_name: &'a str,
+    pub pose: Pose,
+    pub links: &'a [(ChipId, i8)],
+    pub enabled: bool,
+}
+
 /// The BDD World for Device Actor tests.
 pub struct World {
     pub client: DeviceClient,
@@ -1632,6 +1642,142 @@ impl World {
         chip_clients.insert(ChipKind::BLUETOOTH, Box::new(mock_chip_client) as Box<dyn ChipClient>);
         let mock_link_client = Self::create_default_link_client();
         Self::with_clients(chip_clients, mock_link_client).await
+    }
+
+    /// BDD Constructor: Given a running Device Actor whose cellular client, like `CellActor`,
+    /// answers every call with a synthetic `modem-<id>` chip that carries only radio state.
+    pub async fn given_with_stateful_cellular_mock() -> Self {
+        let modems: Arc<std::sync::Mutex<HashMap<ChipId, bool>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut mock = MockChipClient::new();
+
+        let modems_create = modems.clone();
+        mock.expect_create().returning(move |id, params| {
+            modems_create.lock().unwrap().insert(id, params.chip.enabled);
+            Ok(())
+        });
+
+        let modems_read = modems.clone();
+        mock.expect_read()
+            .returning(move |id| Self::synthetic_modem_chip(&modems_read, id, |_| {}));
+
+        let modems_update = modems.clone();
+        mock.expect_update().returning(move |id, patch| {
+            Self::synthetic_modem_chip(&modems_update, id, |enabled| {
+                if let Some(patched) = patch.enabled {
+                    *enabled = patched;
+                }
+            })
+        });
+
+        let modems_reset = modems.clone();
+        mock.expect_reset().returning(move |id| {
+            Self::synthetic_modem_chip(&modems_reset, id, |enabled| *enabled = true)
+        });
+
+        mock.expect_read_statistics().returning(|| Ok(Box::default()));
+
+        let mut chip_clients = HashMap::new();
+        chip_clients.insert(ChipKind::CELLULAR, Box::new(mock) as Box<dyn ChipClient>);
+        Self::with_clients(chip_clients, Self::create_default_link_client()).await
+    }
+
+    fn synthetic_modem_chip(
+        modems: &std::sync::Mutex<HashMap<ChipId, bool>>,
+        id: ChipId,
+        mutate: impl FnOnce(&mut bool),
+    ) -> Result<netsim_model::Chip, ClientError> {
+        let mut modems = modems.lock().unwrap();
+        let enabled = modems
+            .get_mut(&id)
+            .ok_or(ClientError::Chip(netsim_model::ChipError::ChipNotFound(id)))?;
+        mutate(enabled);
+        Ok(netsim_model::Chip {
+            id: id.0,
+            kind: ChipKind::CELLULAR,
+            name: format!("modem-{}", id.0),
+            enabled: *enabled,
+            variant: Some(netsim_model::ChipVariant::Cell(netsim_model::Cell {
+                radio: netsim_model::Radio { state: Some(*enabled), ..Default::default() },
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+
+    /// BDD Step: Given a device created at a pose with a named cellular chip.
+    pub async fn given_cellular_device(
+        &self,
+        device_name: &str,
+        chip_name: &str,
+        manufacturer: &str,
+        product_name: &str,
+        pose: Pose,
+    ) -> DeviceId {
+        let params = DeviceCreate {
+            device_config: DeviceConfig::new(device_name.to_string(), true, pose, false),
+            chip: DeviceChipCreate {
+                name: chip_name.to_string(),
+                manufacturer: manufacturer.to_string(),
+                product_name: product_name.to_string(),
+                chip: device_api::ChipCreateVariant::Cell(Default::default()),
+            },
+        };
+        self.client.create_device(params).await.unwrap()
+    }
+
+    /// BDD Step: When I patch the device pose, optionally with a chip update.
+    pub async fn when_patch_device_pose_with_chip_update(
+        &self,
+        device_id: DeviceId,
+        pose: Pose,
+        chip_update: Option<ChipUpdate>,
+    ) {
+        let update = DeviceUpdate {
+            id: device_id.0,
+            pose: device_api::PoseUpdate {
+                position: Some(pose.position),
+                orientation: Some(pose.orientation),
+            },
+            chips: chip_update.map(|chip_update| vec![chip_update]),
+            ..Default::default()
+        };
+        self.when_update_device(device_id, update).await;
+    }
+
+    /// BDD Step: Then `get` and `list` both report the device's cellular chip with the expected
+    /// envelope metadata, pose, and radio state.
+    pub async fn then_cellular_chip_in_get_and_list_is(
+        &self,
+        device_id: DeviceId,
+        expected: &ExpectedCellularChip<'_>,
+    ) {
+        let from_get = self.client.get(device_id).await.unwrap().unwrap();
+        let from_list = self
+            .client
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|device| device.id == device_id.0)
+            .expect("device missing from list");
+        for (source, device) in [("get", from_get), ("list", from_list)] {
+            let chip = device
+                .chips
+                .iter()
+                .find(|chip| chip.kind == ChipKind::CELLULAR)
+                .expect(&format!("{source}: cellular chip missing"));
+            assert_eq!(chip.name, expected.name, "{source}: chip name");
+            assert_eq!(chip.manufacturer, expected.manufacturer, "{source}: manufacturer");
+            assert_eq!(chip.product_name, expected.product_name, "{source}: product name");
+            assert_eq!(chip.pose, expected.pose, "{source}: chip pose");
+            assert_eq!(chip.links, expected.links, "{source}: chip links");
+            assert_eq!(chip.enabled, expected.enabled, "{source}: chip enabled");
+            let Some(netsim_model::ChipVariant::Cell(cell)) = &chip.variant else {
+                panic!("{source}: expected a Cell variant, got {:?}", chip.variant);
+            };
+            assert_eq!(cell.radio.state, Some(expected.enabled), "{source}: cell radio state");
+        }
     }
 
     /// BDD Step: Given a created device.

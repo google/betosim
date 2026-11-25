@@ -22,11 +22,13 @@ use std::collections::HashMap;
 
 use device_api::DeviceUpdate;
 use netsim_model::{
-    Chip, ChipClient, ChipId, ChipKind, ChipUpdate, ChipVariantUpdate, MockChipClient, WifiUpdate,
+    Chip, ChipClient, ChipId, ChipKind, ChipUpdate, ChipVariantUpdate, MockChipClient, Pose,
+    WifiUpdate,
 };
 
 use crate::world::{
-    DEFAULT_MANUFACTURER, MATCHED_MANUFACTURER, UPDATED_MANUFACTURER, UPDATED_PRODUCT_NAME, World,
+    DEFAULT_MANUFACTURER, ExpectedCellularChip, MATCHED_MANUFACTURER, UPDATED_MANUFACTURER,
+    UPDATED_PRODUCT_NAME, World,
 };
 
 // Scenario: Update device properties propagates to chips
@@ -1214,4 +1216,95 @@ async fn test_patch_device_missing_selector_returns_send_error() {
 
     // Then the call fails with ClientError::Send
     world.then_error_is_client_send("Device ID or Name must be provided");
+}
+
+// Scenario: Patching a cellular chip keeps its custom name and merges radio state
+#[tokio::test]
+async fn test_patch_cellular_chip_preserves_name_and_merges_radio_state() {
+    const CHIP_NAME: &str = "patched-modem";
+    const PATCHED_LINKS: &[(ChipId, i8)] = &[(ChipId(99), -55)];
+    let pose = Pose {
+        position: device_api::Position { x: 4.0, y: 5.0, z: 6.0 },
+        orientation: device_api::Orientation { yaw: 0.25, pitch: 0.5, roll: 0.75 },
+    };
+
+    // Given a running Device Actor whose cellular client answers with synthetic modem chips
+    let world = World::given_with_stateful_cellular_mock().await;
+    // And a device at a non-default pose with a custom-named cellular chip
+    let device_id = world
+        .given_cellular_device("cell-patch-dev", CHIP_NAME, "Patch-Vendor", "Patch-Phone", pose)
+        .await;
+
+    // When I patch the chip manufacturer, product name, links, and enabled state
+    world
+        .when_update_device_chip(
+            device_id,
+            ChipUpdate {
+                name: Some(CHIP_NAME.to_string()),
+                manufacturer: Some(UPDATED_MANUFACTURER.to_string()),
+                product_name: Some(UPDATED_PRODUCT_NAME.to_string()),
+                links: Some(PATCHED_LINKS.to_vec()),
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    // Then get and list report the custom name, creation pose, and patched metadata and links
+    // And get and list report the disabled radio state from the cellular client
+    world
+        .then_cellular_chip_in_get_and_list_is(
+            device_id,
+            &ExpectedCellularChip {
+                name: CHIP_NAME,
+                manufacturer: UPDATED_MANUFACTURER,
+                product_name: UPDATED_PRODUCT_NAME,
+                pose,
+                links: PATCHED_LINKS,
+                enabled: false,
+            },
+        )
+        .await;
+}
+
+// Scenario: Moving a device moves its cellular chip and keeps the chip metadata
+#[tokio::test]
+async fn test_patch_device_pose_preserves_cellular_chip_metadata() {
+    const CHIP_NAME: &str = "moving-modem";
+    const MANUFACTURER: &str = "Move-Vendor";
+    const PRODUCT_NAME: &str = "Move-Phone";
+    let initial_pose = Pose {
+        position: device_api::Position { x: 1.0, y: 2.0, z: 3.0 },
+        orientation: device_api::Orientation { yaw: 0.1, pitch: 0.2, roll: 0.3 },
+    };
+    let moved_pose = Pose {
+        position: device_api::Position { x: 7.0, y: 8.0, z: 9.0 },
+        orientation: device_api::Orientation { yaw: 0.6, pitch: 0.7, roll: 0.8 },
+    };
+
+    // Given a running Device Actor whose cellular client answers with synthetic modem chips
+    let world = World::given_with_stateful_cellular_mock().await;
+    // And a device at a non-default pose with a custom-named cellular chip
+    let device_id = world
+        .given_cellular_device("cell-move-dev", CHIP_NAME, MANUFACTURER, PRODUCT_NAME, initial_pose)
+        .await;
+
+    // When I patch the device pose
+    world.when_patch_device_pose_with_chip_update(device_id, moved_pose, None).await;
+
+    // Then get and list report the new chip pose with the custom name and creation metadata
+    // And get and list report the enabled radio state from the cellular client
+    world
+        .then_cellular_chip_in_get_and_list_is(
+            device_id,
+            &ExpectedCellularChip {
+                name: CHIP_NAME,
+                manufacturer: MANUFACTURER,
+                product_name: PRODUCT_NAME,
+                pose: moved_pose,
+                links: &[],
+                enabled: true,
+            },
+        )
+        .await;
 }
