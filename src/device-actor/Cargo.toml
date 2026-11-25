@@ -52,4 +52,5 @@ device-api = { path = "../device-api", features = ["testing"] }
 link-api = { path = "../link-api", features = ["testing"] }
 mockall = "0.14.0"
 netsim-model = { path = "../model", features = ["testing"] }
+netsim-testing = { path = "../testing", features = ["testing"] }
 tokio-stream = "0.1"

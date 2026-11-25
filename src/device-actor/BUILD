@@ -25,6 +25,7 @@ netsim_rust_library(
     edition = "2024",
     pedantic_clippy = True,
     test_deps = [
+        "//src/testing",
         "@mockall",
         "@serde_json",
         "@tokio-stream",

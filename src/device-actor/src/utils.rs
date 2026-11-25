@@ -126,7 +126,7 @@ pub(crate) async fn create_capture_and_wrap_streams(
             let out_stream: PacketStream =
                 Box::new(wrapped_stream.filter_map(|item| futures::future::ready(Some(item))));
 
-            let out_sink: PacketSink = Box::pin(wrapped_sink.sink_map_err(std::io::Error::other));
+            let out_sink: PacketSink = Box::pin(wrapped_sink);
 
             (Some(out_stream), Some(out_sink), Some(stats))
         }
@@ -365,5 +365,55 @@ mod tests {
             netsim_proto::stats::invalid_packet::Reason::UNKNOWN
         );
         assert_eq!(proto_stats.invalid_packets[4].description(), "Unknown error");
+    }
+
+    #[tokio::test]
+    async fn test_create_capture_and_wrap_streams_preserves_sink_error_kind_without_panic() {
+        let (in_stream, _tx) = netsim_testing::mock_stream();
+        let in_sink: PacketSink = Box::pin(netsim_testing::DisconnectedSink);
+
+        let (_, out_sink, _) = create_capture_and_wrap_streams(
+            None,
+            ChipId(7),
+            ChipKind::WIFI,
+            "test-device".to_string(),
+            Some(in_stream),
+            Some(in_sink),
+        )
+        .await;
+        let mut out_sink = out_sink.expect("wrapped sink should be present");
+
+        let send_err = out_sink
+            .send(Bytes::from_static(b"pkt"))
+            .await
+            .expect_err("send should fail on disconnected sink");
+        assert_eq!(send_err.kind(), std::io::ErrorKind::BrokenPipe);
+
+        let close_err = out_sink.close().await.expect_err("close should fail on disconnected sink");
+        assert_eq!(close_err.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn test_create_capture_and_wrap_streams_forwards_packets_and_clean_close() {
+        let (in_stream, _tx) = netsim_testing::mock_stream();
+        let (in_sink, mut sink_rx) = netsim_testing::mock_sink();
+
+        let (_, out_sink, stats) = create_capture_and_wrap_streams(
+            None,
+            ChipId(7),
+            ChipKind::WIFI,
+            "test-device".to_string(),
+            Some(in_stream),
+            Some(in_sink),
+        )
+        .await;
+        let mut out_sink = out_sink.expect("wrapped sink should be present");
+        let stats = stats.expect("stream stats should be present");
+
+        out_sink.send(Bytes::from_static(b"hello")).await.expect("send should succeed");
+        assert_eq!(sink_rx.recv().await, Some(b"hello".to_vec()));
+        assert_eq!(stats.tx_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.tx_bytes.load(Ordering::Relaxed), 5);
+        out_sink.close().await.expect("close should succeed");
     }
 }
