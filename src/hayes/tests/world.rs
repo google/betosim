@@ -29,8 +29,8 @@ use crate::{
     steps::{
         action::{
             when_at_command_sent, when_cold_boot_init_sequence_runs, when_hex_bytes_sent,
-            when_modem_created, when_modem_removed, when_sim_status_set, when_time_advances_ms,
-            when_zoned_clock_set,
+            when_modem_created, when_modem_removed, when_reset_modem, when_sim_status_set,
+            when_time_advances_ms, when_zoned_clock_set,
         },
         check::{
             then_location_attach_urcs_are, then_no_response, then_phone_number_is, then_prompt,
@@ -165,6 +165,20 @@ impl World {
         when_zoned_clock_set(self, zoned_timestamp);
     }
 
+    /// Creates a modem with an explicit startup `phone_number`.
+    pub(crate) fn given_modem_with_phone(&mut self, name: &str, phone_number: &str) {
+        self.register_modem_with(name, Quirks::default(), |manager, id, sink| {
+            manager.new_modem_with_options(
+                id,
+                sink,
+                hayes::modem_network::ModemOptions {
+                    phone_number: Some(phone_number.to_string()),
+                    ..Default::default()
+                },
+            )
+        });
+    }
+
     /// Creates a modem with the given name and IANA timezone.
     pub fn given_modem_with_timezone(&mut self, name: &str, timezone: &str) {
         self.register_modem_with(name, Quirks::default(), |manager, id, sink| {
@@ -281,6 +295,11 @@ impl World {
     /// Creates a new default modem during a When step.
     pub fn when_modem_created(&mut self, name: &str) {
         when_modem_created(self, name);
+    }
+
+    /// Resets the modem instance from the host.
+    pub(crate) fn when_reset_modem(&mut self, name: &str) {
+        when_reset_modem(self, name);
     }
 
     // --- BDD Then (Pure Verifications / Assertions) ---

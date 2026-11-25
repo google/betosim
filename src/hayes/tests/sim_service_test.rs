@@ -2345,3 +2345,18 @@ fn test_default_msisdn_reuse_lowest_unused_index() {
     // Then phone number of "D" is "+15555211003"
     world.then_phone_number_is("D", "+15555211003");
 }
+
+// Scenario: Explicit startup phone number populates SIM MSISDN and survives modem reset
+#[test]
+fn test_explicit_startup_phone_number_persists_across_reset() {
+    let mut world = World::new();
+    // Given a modem "A" configured with startup phone number "+44 7911 123456"
+    world.given_modem_with_phone("A", "+44 7911 123456");
+    // Then phone number of "A" is "+447911123456"
+    world.then_phone_number_is("A", "+447911123456");
+
+    // When modem "A" is reset
+    world.when_reset_modem("A");
+    // Then phone number of "A" is "+447911123456"
+    world.then_phone_number_is("A", "+447911123456");
+}

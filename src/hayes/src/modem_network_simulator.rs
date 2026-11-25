@@ -154,6 +154,8 @@ impl IncomingSmsQueue {
 
 /// Maximum number of call diversions allowed for a single call (3GPP TS 24.082).
 const MAX_CALL_FORWARD_HOPS: usize = 5;
+/// Maximum digits in an international subscriber number (ITU-T E.164).
+const MAX_MSISDN_DIGITS: usize = 15;
 
 /// Manages multiple modems and simulates network interactions.
 pub struct ModemNetworkSimulator {
@@ -299,6 +301,7 @@ impl ModemNetworkSimulator {
             ModemOptions {
                 sim_type,
                 sim_profile,
+                phone_number: None,
                 timezone_override: None,
                 quirks,
                 network_configs,
@@ -363,32 +366,58 @@ impl ModemNetworkSimulator {
         profile: Option<SimProfile>,
         options: ModemOptions,
     ) -> Result<(), ModemError> {
-        let ModemOptions { sim_type, sim_profile: _, timezone_override, quirks, network_configs } =
-            options;
+        let ModemOptions {
+            sim_type,
+            sim_profile: _,
+            phone_number,
+            timezone_override,
+            quirks,
+            network_configs,
+        } = options;
         if self.modems.contains_key(&id) {
             return Err(ModemError::DuplicateModemId(id));
         }
         let profile = profile.unwrap_or_default();
-        let target_msisdn = match profile.msisdn.clone() {
-            Some(msisdn) => msisdn,
-            None => {
-                // Pick the lowest unused default MSISDN index rather than a monotonic
-                // counter so single-emulator snapshot disconnect/reconnect keeps its number.
-                let idx = (1u32..)
-                    .find(|&idx| {
-                        let candidate = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, idx);
-                        !self
-                            .modems
-                            .values()
-                            .any(|m| m.phone_number().is_some_and(|n| n.normalized() == candidate))
-                    })
-                    .expect("infinite range");
-                let candidate = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, idx);
-                PhoneNumber::try_from(candidate.as_str()).map_err(|e| {
-                    ModemError::InvalidProfile(format!(
-                        "Invalid generated phone number '{candidate}': {e}"
-                    ))
-                })?
+        let explicit_phone_number = phone_number.as_deref().map(validate_msisdn).transpose()?;
+        let has_explicit_phone_number = explicit_phone_number.is_some();
+        let target_msisdn = if let Some(parsed) = explicit_phone_number {
+            let normalized = parsed.normalized();
+            if let Some(existing_id) = self
+                .modems
+                .iter()
+                .filter(|(_, m)| m.phone_number().is_some_and(|n| n.normalized() == normalized))
+                .map(|(&other_id, _)| other_id)
+                .min()
+            {
+                warn!(
+                    modem_id = id,
+                    existing_id,
+                    phone_number = parsed.as_str(),
+                    "Duplicate phone number configured; routing uses lowest matching ModemId"
+                );
+            }
+            parsed
+        } else {
+            match profile.msisdn.clone() {
+                Some(msisdn) => msisdn,
+                None => {
+                    // Pick the lowest unused default MSISDN index rather than a monotonic
+                    // counter so single-emulator snapshot disconnect/reconnect keeps its number.
+                    let idx = (1u32..)
+                        .find(|&idx| {
+                            let candidate = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, idx);
+                            !self.modems.values().any(|m| {
+                                m.phone_number().is_some_and(|n| n.normalized() == candidate)
+                            })
+                        })
+                        .expect("infinite range");
+                    let candidate = format!("{}{:03}", DEFAULT_MSISDN_PREFIX, idx);
+                    PhoneNumber::try_from(candidate.as_str()).map_err(|e| {
+                        ModemError::InvalidProfile(format!(
+                            "Invalid generated phone number '{candidate}': {e}"
+                        ))
+                    })?
+                }
             }
         };
         let clock = match timezone_override {
@@ -408,8 +437,9 @@ impl ModemNetworkSimulator {
         let mut modem = ModemImpl::new(id, profile, quirks, clock, network_configs);
         // Override the default dummy number with a unique generated one to prevent
         // conflicts when launching multiple default emulators. Custom profiles are
-        // preserved.
-        if modem.phone_number().is_none()
+        // preserved unless an explicit phone number was provided.
+        if has_explicit_phone_number
+            || modem.phone_number().is_none()
             || modem
                 .phone_number()
                 .as_ref()
@@ -607,12 +637,13 @@ impl ModemNetworkSimulator {
         self.process_effects(effects)
     }
 
-    // Helper to find peer ID.
+    // Helper to find peer ID (picks the lowest matching ModemId so duplicate
+    // configured MSISDNs route deterministically rather than in HashMap order).
     fn find_peer_id<P>(&self, source_id: ModemId, predicate: P) -> Option<ModemId>
     where
         P: Fn(&ModemImpl) -> bool,
     {
-        self.modems.values().find(|m| m.id != source_id && predicate(m)).map(|m| m.id)
+        self.modems.values().filter(|m| m.id != source_id && predicate(m)).map(|m| m.id).min()
     }
 
     pub(crate) fn handle_command_action(
@@ -1124,6 +1155,28 @@ impl ModemNetworkSimulator {
     }
 }
 
+/// Validates and parses an MSISDN string (1 to 15 ASCII digits, optional leading `+`).
+fn validate_msisdn(raw: &str) -> Result<PhoneNumber, ModemError> {
+    let invalid_digits = || {
+        ModemError::InvalidConfig(format!(
+            "invalid phone number '{raw}': must contain 1 to {MAX_MSISDN_DIGITS} decimal digits"
+        ))
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_digits());
+    }
+    let parsed = PhoneNumber::parse_formatted(trimmed)
+        .map_err(|e| ModemError::InvalidConfig(format!("invalid phone number '{raw}': {e}")))?;
+    let normalized = parsed.normalized();
+    if !(1..=MAX_MSISDN_DIGITS).contains(&normalized.len())
+        || !normalized.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(invalid_digits());
+    }
+    Ok(parsed)
+}
+
 fn normalize_number(num: &str) -> &str {
     num.strip_prefix('+').unwrap_or(num)
 }
@@ -1595,5 +1648,127 @@ mod tests {
             )
             .expect("invalid timezone_override should fall back to default clock");
         assert!(simulator.get_sim_metadata(chip_id).is_some());
+    }
+
+    fn add_modem_with_phone(
+        sim: &mut ModemNetworkSimulator,
+        id: ModemId,
+        sim_profile: Option<&str>,
+        phone: Option<&str>,
+    ) {
+        let (_handler, sink) = MockModemHandler::new(false);
+        sim.new_modem_with_options(
+            id,
+            sink,
+            ModemOptions {
+                sim_type: None,
+                sim_profile: sim_profile.map(str::to_string),
+                phone_number: phone.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_validate_msisdn_accepts_valid_inputs() {
+        let cases = [
+            (" 7 ", "7"),
+            ("123456789012345", "123456789012345"),
+            ("+1 (650) 555-1234", "+16505551234"),
+            ("+44 7911 123456", "+447911123456"),
+        ];
+        for (raw, expected) in cases {
+            match validate_msisdn(raw) {
+                Ok(parsed) => assert_eq!(parsed.as_str(), expected, "raw='{raw}'"),
+                Err(err) => panic!("expected Ok for '{raw}', got {err:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_msisdn_rejects_invalid_inputs() {
+        for raw in ["", "   ", "+", "+1 (650) 555-1234-56789", "1555*123", "abc"] {
+            assert!(
+                matches!(validate_msisdn(raw), Err(ModemError::InvalidConfig(_))),
+                "raw='{raw}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_explicit_phone_number_overrides_custom_xml_profile() {
+        let mut sim = ModemNetworkSimulator::new(tokio::sync::mpsc::unbounded_channel().0);
+        let xml = Some(crate::profiles::PROFILE_CTS_XML);
+        add_modem_with_phone(&mut sim, 1, xml, Some("15550199999"));
+
+        assert_eq!(
+            sim.get_modem(1).unwrap().phone_number().as_ref().map(PhoneNumber::as_str),
+            Some("+15550199999")
+        );
+    }
+
+    #[test]
+    fn test_default_msisdn_skips_explicit_startup_number() {
+        let mut sim = ModemNetworkSimulator::new(tokio::sync::mpsc::unbounded_channel().0);
+        add_modem_with_phone(
+            &mut sim,
+            1,
+            Some(crate::profiles::PROFILE_CTS_XML),
+            Some("15555211001"),
+        );
+        add_modem_with_phone(&mut sim, 2, None, None);
+
+        assert_eq!(
+            sim.get_modem(2).unwrap().phone_number().as_ref().map(PhoneNumber::as_str),
+            Some("+15555211002")
+        );
+    }
+
+    #[test]
+    fn test_new_modem_rejects_invalid_startup_phone_number() {
+        let mut sim = ModemNetworkSimulator::new(tokio::sync::mpsc::unbounded_channel().0);
+        let (_handler, sink) = MockModemHandler::new(false);
+        let res = sim.new_modem_with_options(
+            1,
+            sink,
+            ModemOptions { phone_number: Some("123-abc".to_string()), ..Default::default() },
+        );
+
+        assert!(matches!(res, Err(ModemError::InvalidConfig(_))));
+        assert_eq!(sim.get_modem_count(), 0);
+        assert!(sim.get_modem(1).is_none());
+    }
+
+    #[test]
+    fn test_duplicate_startup_phone_number_allows_both_modems() {
+        let mut sim = ModemNetworkSimulator::new(tokio::sync::mpsc::unbounded_channel().0);
+        add_modem_with_phone(&mut sim, 1, None, Some("+1 555-521-1099"));
+        add_modem_with_phone(&mut sim, 2, None, Some("15555211099"));
+
+        assert_eq!(
+            sim.get_modem(1).unwrap().phone_number().as_ref().map(PhoneNumber::as_str),
+            Some("+15555211099")
+        );
+        assert_eq!(
+            sim.get_modem(2).unwrap().phone_number().as_ref().map(PhoneNumber::as_str),
+            Some("+15555211099")
+        );
+    }
+
+    #[test]
+    fn test_duplicate_startup_phone_number_routes_to_lowest_non_self_modem_id() {
+        let mut sim = ModemNetworkSimulator::new(tokio::sync::mpsc::unbounded_channel().0);
+        for id in [9, 8, 7, 6, 5, 4, 3, 2] {
+            add_modem_with_phone(&mut sim, id, None, Some("15550199999"));
+            sim.set_voice_registration(id, RegistrationStatus::RegisteredHome);
+        }
+
+        ModemNetworkInterface::send_data(&mut sim, 2, b"ATD15550199999;\r\n").unwrap();
+
+        assert!(sim.get_modem_info(3).unwrap().ringing);
+        for id in [2, 4, 5, 6, 7, 8, 9] {
+            assert!(!sim.get_modem_info(id).unwrap().ringing, "unexpected ring on modem {id}");
+        }
     }
 }

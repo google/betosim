@@ -177,6 +177,7 @@ impl ActorService for CellActor {
             hayes::modem_network::ModemOptions {
                 sim_type,
                 sim_profile,
+                phone_number: None,
                 timezone_override,
                 quirks,
                 network_configs,

@@ -23,6 +23,7 @@ use crate::types::{ModemId, ModemInfo, ModemSink};
 pub struct ModemOptions {
     pub sim_type: Option<i32>,
     pub sim_profile: Option<String>,
+    pub phone_number: Option<String>,
     pub timezone_override: Option<String>,
     pub quirks: Quirks,
     pub network_configs: Vec<CellNetworkConfig>,
